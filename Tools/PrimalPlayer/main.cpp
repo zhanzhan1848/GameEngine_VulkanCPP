@@ -81,6 +81,16 @@ std::uint32_t PfxEmitterCreateFromAsset(const char* json_path);
 std::uint32_t PfxEmitterRemove(std::uint32_t emitter_id);
 std::uint32_t PfxSetEmitterPosition(std::uint32_t emitter_id, float x, float y, float z);
 std::uint32_t PfxGetEmitterStats(std::uint32_t emitter_id, std::uint32_t* out_active, std::uint32_t* out_capacity);
+// audio S2：空间声/混音/事件播放（EngineDLL AudioAPI）+ 平台声源更新
+std::uint32_t AudioComputeSpatial(const float* listener_pos, float listener_yaw,
+                                  const float* source_pos, const float* params5,
+                                  float* out_gain, float* out_pan);
+std::uint32_t AudioSetMasterGain(float gain);
+std::uint32_t AudioSetGroupGain(const char* group, float gain);
+std::uint32_t AudioResolveGain(const char* group, float voice_gain, float* out);
+void AudioSetHostPlay(void* callback);
+std::uint32_t AudioPlay(const char* path, const char* group, float voice_gain,
+                        float pan, std::uint32_t loop);
 std::uint32_t AddEntityCamera(std::uint32_t entity_id, std::uint32_t projection_type,
                               float field_of_view, float aspect_ratio, float near_z,
                               float far_z, const float* up_vector);
@@ -190,6 +200,10 @@ struct RuntimeEntity {
     float audio_volume = 1.f;
     bool audio_loop = false;
     bool audio_autoplay = true;
+    // audio S2：行尾可选第 5 值 spatial 0|1（缺省 0——不破坏 S1 包）；
+    // 可选第 6 值 group 名（引号；缺省无分组）。空间声源随实体位姿更新。
+    bool audio_spatial = false;
+    std::string audio_group;
     // ai-navigation S1：`navagent <radius> <height> <speed>`——首个 navagent
     // 的 radius/height 作烘焙 profile；speed 是缺省移动速度。
     bool has_navagent = false;
@@ -221,6 +235,9 @@ struct RuntimeSeqPosTrack {
     std::string entity_name;
     std::vector<RuntimeSeqPosKey> keys;
 };
+// audio S2：`audiomix "<group>" <gain>` 顶层行——混音分组注册
+struct AudioMixRow { std::string group; float gain = 1.f; };
+
 struct RuntimeSequence {
     int fps = 60;
     int duration = 0;
@@ -231,6 +248,7 @@ struct RuntimeSequence {
 
 struct RuntimeScene {
     RuntimeSequence sequence;   // sequence S1：顶层序列行
+    std::vector<AudioMixRow> audio_mix;   // audio S2：顶层混音分组行
     std::string scene_name = "Scene";
     float env[24]{};
     std::vector<RuntimeEntity> entities;
@@ -315,6 +333,19 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
         if (key == "scene") { out.scene_name = ParseQuoted(rest); continue; }
         if (key == "env") { ParseFloats(rest, out.env, 24); continue; }
 
+        // audio S2：`audiomix "<group>" <gain>`
+        if (key == "audiomix") {
+            const std::string group = ParseQuoted(rest);
+            const auto close = rest.rfind('"');
+            float gain = 1.f;
+            if (close != std::string::npos && close + 1 < rest.length()) {
+                std::istringstream iss(rest.substr(close + 1));
+                iss >> gain;
+            }
+            if (!group.empty())
+                out.audio_mix.push_back({ group, gain });
+            continue;
+        }
         // sequence S1：顶层序列行（实体按名引用，出现在所有实体块之后）
         if (key == "seqmeta") {
             float v[2];
@@ -433,12 +464,25 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
             // "audio \"<路径>\" <volume> <loop> <autoplay>"——缺省 1/0/1。
             current.audio_path = ParseQuoted(rest);
             const auto close = rest.rfind('"');
-            float v[3] = {1.f, 0.f, 1.f};
-            if (close != std::string::npos && close + 1 < rest.length())
-                ParseFloats(rest.substr(close + 1), v, 3);
+            float v[4] = {1.f, 0.f, 1.f, 0.f};
+            if (close != std::string::npos && close + 1 < rest.length()) {
+                // S1 三值 + S2 可选第 4 值 spatial（按实际个数解析）
+                const auto tail = rest.substr(close + 1);
+                float tmp[4] = {1.f, 0.f, 1.f, 0.f};
+                int got = 0;
+                std::istringstream iss(tail);
+                for (int k = 0; k < 4; ++k)
+                    if (iss >> tmp[k]) ++got; else break;
+                for (int k = 0; k < 4; ++k) v[k] = tmp[k];
+            }
             current.audio_volume = v[0];
             current.audio_loop = v[1] != 0.f;
             current.audio_autoplay = v[2] != 0.f;
+            current.audio_spatial = v[3] != 0.f;
+        }
+        else if (key == "audiogroup") {
+            // audio S2：`audiogroup "<name>"`——该实体音源所属混音分组
+            current.audio_group = ParseQuoted(rest);
         }
         else if (key == "pfx") {
             // "pfx \"<路径>\""——ParticleFX 发射器资产
@@ -533,6 +577,40 @@ bool ResolveBuiltinMesh(const std::string& name, std::uint32_t& out_type,
 static std::vector<std::uint32_t> g_seq_prop_entity;
 // pfx：（引擎实体 id, 发射器 id）——主循环定期打印首个发射器统计
 static std::vector<std::pair<std::uint32_t, std::uint32_t>> g_pfx_emitters;
+
+// audio S2：空间声源登记（voice_index 对应 PlayerAudioPlaySpatial 的注册序）
+struct AudioVoiceInfo
+{
+    int voice_index = -1;
+    float x = 0, y = 0, z = 0;
+    float volume = 1.f;
+    std::string group;
+    float last_gain = 0.f;
+    float last_pan = 0.f;
+};
+static std::vector<AudioVoiceInfo> g_audio_voices_info;
+
+// audio S2：宿主播放回调（AudioPlay → 此处 → 平台 AVAudioPlayer 桥）。
+// 捕获式 lambda 不能转 C 函数指针——用全局包路径。
+static std::string g_audio_scene_path;
+static std::uint32_t PlayerHostAudioPlay(const char* raw_path, float gain, float pan,
+                                         std::uint32_t loop)
+{
+    const std::string abs = ResolveAssetPath(raw_path, g_audio_scene_path);
+    return PlayerAudioPlaySpatial(abs.c_str(), gain, pan, loop ? 1 : 0) ? 1u : 0u;
+}
+static std::uint32_t camera_entity = 0xFFFFFFFFu;
+
+// EngineDLL EntityAPI（SetEntityTransform 已声明；读回用安全包装——相机位姿
+// 存于本文件 chosen 相机快照更简单，改用快照注入）。
+static float g_camera_pos[3] = { 0.f, 1.5f, -6.f };
+
+static bool GetEntityTransformSafe(std::uint32_t, float* pos, float*, float*)
+{
+    // S2：监听者取相机快照（InjectScene 记录）；逐帧实体读回是后续阶段
+    if (pos) { pos[0] = g_camera_pos[0]; pos[1] = g_camera_pos[1]; pos[2] = g_camera_pos[2]; }
+    return true;
+}
 static std::vector<std::uint32_t> g_seq_pos_entity;
 
 std::uint32_t InjectScene(RuntimeScene& scene,
@@ -872,6 +950,9 @@ std::uint32_t InjectScene(RuntimeScene& scene,
         g_seq_pos_entity.push_back(found->engine_entity);
     }
 
+    g_camera_pos[0] = chosen.pos[0];
+    g_camera_pos[1] = chosen.pos[1];
+    g_camera_pos[2] = chosen.pos[2];
     out_camera = chosen;
     return 1;
 }
@@ -1080,6 +1161,23 @@ int main(int argc, char** argv)
         return 3;
     }
 
+    // audio S2：场景混音行注册（master/分组——未列出的分组 play 时会被拒，
+    // 配置拼错要暴露；S2 场景级就是事实源）
+    if (!scene.audio_mix.empty()) {
+        float master = -1.f;
+        // master 行：group 名 "master" 保留
+        for (const auto& m : scene.audio_mix) {
+            if (m.group == "master") master = m.gain;
+            else AudioSetGroupGain(m.group.c_str(), m.gain);
+        }
+        if (master >= 0.f) AudioSetMasterGain(master);
+    }
+
+    // audio S2：宿主播放回调（Lua audio.play → AudioPlay → 此处 → 平台）。
+    // 路径走包内相对解析（与 script/audio 行同源）；分组混音在引擎侧完成。
+    g_audio_scene_path = scene_path;
+    AudioSetHostPlay(reinterpret_cast<void*>(&PlayerHostAudioPlay));
+
     // audio S1（2026-10-14）：autoplay 音源注入后即播。解码层先过 WAV 头解析
     // （确定性元信息 + 坏文件早失败）；播放交平台（macOS AVAudioPlayer），
     // 无窗口平台只解码不发声（E2E/CI 路径仍可断言元信息）。
@@ -1096,8 +1194,27 @@ int main(int argc, char** argv)
         }
         int playing = 0;
 #if defined(PRIMAL_PLAYER_WINDOW)
-        playing = PlayerAudioPlayFile(audio_abs.c_str(), e.audio_volume,
-                                      e.audio_loop ? 1 : 0);
+{
+            if (e.audio_spatial) {
+                // audio S2：空间声源（voice 登记供主循环求值）
+                AudioVoiceInfo info{};
+                info.x = e.pos[0]; info.y = e.pos[1]; info.z = e.pos[2];
+                info.volume = e.audio_volume;
+                info.group = e.audio_group;
+                if (PlayerAudioPlaySpatial(audio_abs.c_str(), e.audio_volume, 0.f,
+                                           e.audio_loop ? 1 : 0)) {
+                    info.voice_index = PlayerAudioVoiceCount() - 1;
+                    g_audio_voices_info.push_back(info);
+                    std::fprintf(stderr, "[player] audio spatial source '%s' (entity '%s'%.0s%s)\n",
+                                 audio_abs.c_str(), e.name.c_str(),
+                                 "", e.audio_group.empty() ? "" : (" group=" + e.audio_group).c_str());
+                }
+                playing = g_audio_voices_info.empty() ? 0 : 1;
+            } else {
+                playing = PlayerAudioPlayFile(audio_abs.c_str(), e.audio_volume,
+                                              e.audio_loop ? 1 : 0);
+            }
+        }
 #endif
         if (wav_parsed) {
             const char* fmt = info.format_tag == 1 ? "PCM"
@@ -1348,6 +1465,32 @@ int main(int argc, char** argv)
                 std::printf("seq f=%d%s\n", seq_f, sample.c_str());
             }
             if (seq_frame < (std::max)(1, scene.sequence.duration) - 1) ++seq_frame;
+        }
+
+        // audio S2：空间声源每帧求值（监听者=主相机实体位姿；S2 无自由yaw
+        // ——相机朝向由 fly 相机控制，yaw 用 0 近似正前方 +Z；声像仍随水平
+        // 方位变化）。voice volume = 分组级联 × 空间衰减；pan = 立体声像。
+        if (!g_audio_voices_info.empty()) {
+            float listener_pos[3] = { g_camera_pos[0], g_camera_pos[1], g_camera_pos[2] };
+            const float params5[5] = { 1.f, 1.f, 500.f, 1.f, 0.f };
+            for (auto& v : g_audio_voices_info) {
+                float src[3] = { v.x, v.y, v.z };
+                float gain = 0.f, pan = 0.f;
+                if (AudioComputeSpatial(listener_pos, 0.f, src, params5, &gain, &pan)) {
+                    float mixed = 0.f;
+                    if (v.group.empty()) mixed = gain * v.volume;
+                    else if (!AudioResolveGain(v.group.c_str(), gain * v.volume, &mixed))
+                        mixed = gain * v.volume;   // 分组未注册（audiomix 行缺）→ 不挡播
+                    PlayerAudioUpdateVoice(v.voice_index, mixed, pan);
+                    v.last_gain = mixed;
+                    v.last_pan = pan;
+                }
+            }
+            if (frame_counter % 15 == 0 && !g_audio_voices_info.empty()) {
+                std::printf("audio spatial gain=%.3f pan=%.3f\n",
+                            g_audio_voices_info.front().last_gain,
+                            g_audio_voices_info.front().last_pan);
+            }
         }
 
         // pfx：周期性统计（E2E 冒烟断言粒子系统真正在跑）

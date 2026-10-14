@@ -22,6 +22,14 @@
 #include "../Engine/Scripting/InputState.h"
 #include "../Engine/Scripting/InputLua.h"
 #include "../Engine/Scripting/NavLua.h"
+#include "../Engine/Scripting/AudioLua.h"
+
+// audio S2：EngineDLL AudioAPI 导出（同 dylib 内直链——extern "C" 转换单元可见）
+extern "C" {
+unsigned AudioPlay(const char* path, const char* group, float voice_gain, float pan, unsigned loop);
+unsigned AudioSetGroupGain(const char* group, float gain);
+unsigned AudioSetMasterGain(float gain);
+}
 #include "../Engine/Components/Entity.h"
 #include "../Engine/Components/Transform.h"
 
@@ -196,6 +204,11 @@ void register_script_globals(void* lua_state)
     primal::scripting::register_input_table(L);
     // ai-navigation S1：脚本侧导航任务表（同一运行态，宿主/脚本共用）
     primal::scripting::register_nav_table(L);
+    // audio S2：脚本侧音频事件表（播放经宿主回调——引擎不持设备）
+    primal::scripting::g_audio_bridge.play = &AudioPlay;
+    primal::scripting::g_audio_bridge.set_group = &AudioSetGroupGain;
+    primal::scripting::g_audio_bridge.set_master = &AudioSetMasterGain;
+    primal::scripting::register_audio_table(L);
 }
 
 // ---------------------------------------------------------------------------

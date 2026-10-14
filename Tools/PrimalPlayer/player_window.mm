@@ -205,7 +205,44 @@ void PlayerWindowDestroy(void)
 // ---- audio S1（2026-10-14）：AVAudioPlayer 播放 --------------------------
 #import <AVFoundation/AVFoundation.h>
 
+// audio S2（2026-10-15）：带声像播放 + 活动声源更新（volume/pan 每帧写）。
 static NSMutableArray* g_audio_players = nil;
+static NSMutableArray* g_audio_voices = nil;   // 与 g_audio_players 并存：带声像源
+
+int PlayerAudioPlaySpatial(const char* path, float volume, float pan, int loop)
+{
+    if (!path || !*path) return 0;
+    @autoreleasepool {
+        NSURL* url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]
+                                isDirectory:NO];
+        NSError* error = nil;
+        AVAudioPlayer* player = [[AVAudioPlayer alloc] initWithContentsOfURL:url
+                                                                       error:&error];
+        if (!player || error) return 0;
+        player.volume = volume < 0.f ? 0.f : (volume > 1.f ? 1.f : volume);
+        player.pan = pan < -1.f ? -1.f : (pan > 1.f ? 1.f : pan);
+        player.numberOfLoops = loop ? -1 : 0;
+        if (![player play]) return 0;
+        if (!g_audio_voices) g_audio_voices = [[NSMutableArray alloc] init];
+        [g_audio_voices addObject:player];
+        if (!g_audio_players) g_audio_players = [[NSMutableArray alloc] init];
+        [g_audio_players addObject:player];   // stop-all 共管
+        return 1;
+    }
+}
+
+int PlayerAudioVoiceCount(void) { return g_audio_voices ? (int)g_audio_voices.count : 0; }
+
+void PlayerAudioUpdateVoice(int index, float volume, float pan)
+{
+    if (!g_audio_voices || index < 0 || index >= (int)g_audio_voices.count) return;
+    AVAudioPlayer* p = g_audio_voices[index];
+    p.volume = volume < 0.f ? 0.f : (volume > 1.f ? 1.f : volume);
+    p.pan = pan < -1.f ? -1.f : (pan > 1.f ? 1.f : pan);
+}
+
+
+
 
 int PlayerAudioPlayFile(const char* path, float volume, int loop)
 {
@@ -222,6 +259,7 @@ int PlayerAudioPlayFile(const char* path, float volume, int loop)
             return 0;
         }
         player.volume = volume < 0.f ? 0.f : (volume > 1.f ? 1.f : volume);
+        player.pan = 0.f;   // audio S2：声像由宿主每帧更新（见 UpdateAudioVoice）
         player.numberOfLoops = loop ? -1 : 0;   // -1 = 循环到 stop
         player.enableRate = NO;
         if (![player play]) {

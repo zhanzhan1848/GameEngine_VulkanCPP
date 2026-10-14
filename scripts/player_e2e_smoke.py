@@ -58,7 +58,8 @@ def build_package(pkg_dir: Path) -> Path:
         "function M:update(dt)\n"
         "    if not M.started then\n"
         "        M.started = true\n"
-        "        nav.move_to(3, 4, 3, 3)\n"
+        "        nav.move_to(3, 4, 3, 3)\n"        "        local ok = audio.play('_assets/beep.wav', 'sfx', 0.5, 0)\n"
+        "        print('audio-play ok=' .. tostring(ok))\n"
         "    end\n"
         "    M.n = M.n + 1\n"
         "    if M.n % 15 == 0 then\n"
@@ -77,6 +78,8 @@ def build_package(pkg_dir: Path) -> Path:
         '"init":[{"module":"SetLifetime","min":1,"max":2}]}}',
         encoding="utf-8",
     )
+    # audio S2 E2E：walk.lua 首帧触发 audio.play（事件播放经宿主回调）+
+    # 打印结果；ground 音源改为空间声（camera@z=-6, 声源@z=0 → 增益<1 且 pan<0 偏左后）。
     # input-camera E2E：自定义映射文件（重绑定路径——MoveForward 同时绑 W/Up）。
     (pkg_dir / "input.bindings").write_text(
         "# primal-input-bindings v1\n"
@@ -121,7 +124,8 @@ def build_package(pkg_dir: Path) -> Path:
         "builtin plane\n"
         "collider 0 5 5 5 0 0 0 0 0\n"
         'pfx "_assets/e2e.pfx_emitter"\n'
-        'audio "_assets/beep.wav" 0.8 0 1\n'
+        'audio "_assets/beep.wav" 0.8 0 1 1\n'
+        'audiogroup "ambient"\n'
         "end\n"
         "entity\n"
         'name "spinner"\n'
@@ -150,6 +154,10 @@ def build_package(pkg_dir: Path) -> Path:
         "camera 0 60 0.1 500 1\n"
         "end\n"
         # sequence S1 E2E：sun.intensity 1→8 线性（属性轨）+ mover y 4→1（变换轨）
+        # audio S2：混音分组注册（sfx=1.0；ambient=0.6——ground 空间声源）
+        'audiomix "sfx" 1.0\n'
+        'audiomix "ambient" 0.6\n'
+        'audiomix "master" 1.0\n'
         "seqmeta 60 60\n"
         'seqprop "sun" light intensity 2\n'
         "seqkey 0 1 0\n"
@@ -246,6 +254,14 @@ def main() -> int:
             len(seq_intensity) >= 3
             and all(seq_intensity[i + 1] > seq_intensity[i] for i in range(len(seq_intensity) - 1))
             and 6.0 <= seq_intensity[-1] <= 8.5)
+        # audio S2：事件触发播放（Lua audio.play）+ 空间声增益/声像采样
+        audio_play_ok = "audio-play ok=true" in proc.stdout
+        spatial_gains = [float(m) for m in
+                         __import__("re").findall(r"audio spatial gain=([\d.]+)", proc.stdout)]
+        checks["Audio 事件播放（Lua audio.play）"] = audio_play_ok
+        checks["Audio 空间声采样"] = len(spatial_gains) >= 2
+        checks["Audio 空间声增益<1（衰减生效）"] = (
+            len(spatial_gains) >= 2 and 0.01 <= max(spatial_gains) < 0.99)
         # pfx：发射器创建日志 + 粒子统计非零（系统在跑）
         pfx_active = [int(m) for m in __import__("re").findall(r"pfx active=(\d+)", proc.stdout)]
         checks["PFX 发射器创建"] = "pfx emitter" in log and "created" in log

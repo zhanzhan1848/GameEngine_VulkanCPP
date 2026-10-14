@@ -55,6 +55,10 @@ void PlayerWindowPollInput(PlayerInputState* out);
 // 不支持——stderr 留痕）。多次调用叠加（多音源）；PlayerWindowDestroy
 // 停止全部。非 Apple 构建不链接本符号——调用方按平台守卫。
 int PlayerAudioPlayFile(const char* path, float volume, int loop);
+// audio S2：空间声源（带声像）+ 活动声源每帧 volume/pan 更新
+int PlayerAudioPlaySpatial(const char* path, float volume, float pan, int loop);
+int PlayerAudioVoiceCount(void);
+void PlayerAudioUpdateVoice(int index, float volume, float pan);
 
 // Tears the window down. Call before ShutdownEngine.
 void PlayerWindowDestroy(void);
