@@ -35,6 +35,8 @@ namespace PrimalEditor_Avalonia.Content;
 ///     解析出的世界纹理三元组（与编辑器视口绑定同一条链），槽位空洞省行。
 ///   - 新增 builtin 行：BuiltinMesh 内置几何实体（MeshGuid 为空）不落资产，
 ///     player 端 ProceduralMeshCreate 同参数生成（2026-10-14，release S1）。
+///   - 新增 navagent 行（2026-10-15，ai-navigation S1）：导航代理实体声明；
+///     player 从静态 collider 几何惰性烘焙导航网格，Lua nav 表驱动移动。
 ///   - 路径优先项目相对（'/' 分隔，相对项目根）；越出项目根的回退绝对路径。
 ///     player 按包位置（&lt;project&gt;/.Primal/runtime/）反推项目根解析相对路径。
 ///   - portable=true：所有被引用文件复制进包目录 _assets/，行内路径改写为
@@ -101,6 +103,7 @@ public static class RuntimeSceneExporter
             AppendScript(sb, ctx, entity);
             AppendPhysics(sb, entity);
             AppendAudio(sb, ctx, entity);
+            AppendNavigation(sb, entity);
             foreach (var light in entity.Components.OfType<LightComponent>())
             {
                 // type/intensity/rgb/range/umbra/penumbra/enabled — the same
@@ -365,6 +368,26 @@ public static class RuntimeSceneExporter
     }
 
     private static string Fmt(float v) => v.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// ai-navigation S1（2026-10-15）：`navagent &lt;radius&gt; &lt;height&gt; &lt;speed&gt;`
+    /// ——Player 见到任一 navagent 即从静态 collider 几何惰性烘焙导航网格
+    /// （首个 navagent 的 radius/height 作烘焙 profile；S1 单 profile），
+    /// 脚本经 Lua nav 表（nav.move_to/stop/state）驱动移动。约束：navagent
+    /// 实体不要再挂 dynamic rigidbody（双驱动源冲突）。
+    /// </summary>
+    private static void AppendNavigation(StringBuilder sb, GameEntity entity)
+    {
+        var nav = entity.GetComponent<NavAgentComponent>();
+        if (nav == null) return;
+        if (nav.Radius <= 0f || nav.Height <= 0f)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning(
+                $"[Run] navagent radius/height invalid, entity '{entity.Name}' skipped");
+            return;
+        }
+        sb.AppendLine($"navagent {Fmt(nav.Radius)} {Fmt(nav.Height)} {Fmt(nav.Speed)}");
+    }
 
     /// <summary>单次导出状态：普通导出只拼行；portable 导出同时收集要复制进
     /// 包目录的资产（abs → 包相对，去重）。</summary>

@@ -49,6 +49,26 @@ def build_package(pkg_dir: Path) -> Path:
         "return M\n",
         encoding="utf-8",
     )
+    # ai-navigation E2E：首帧 nav.move_to(3,4,3)（速度 3）——地面盒顶 y=4，
+    # walker 出生 (-2,4,-2)（避开 spinner 动态碰撞体脚印；烘焙只取静态碰撞），
+    # 每 15 帧采样位置（"nav x=…"），断言递增 + 距出生点位移 ≥2m + y 恒 4。
+    (assets / "walk.lua").write_text(
+        "local M = {}\n"
+        "function M:begin_play() M.started = false M.n = 0 end\n"
+        "function M:update(dt)\n"
+        "    if not M.started then\n"
+        "        M.started = true\n"
+        "        nav.move_to(3, 4, 3, 3)\n"
+        "    end\n"
+        "    M.n = M.n + 1\n"
+        "    if M.n % 15 == 0 then\n"
+        "        local x, y, z = entity.position()\n"
+        "        print(string.format('nav x=%.3f y=%.3f z=%.3f', x, y, z))\n"
+        "    end\n"
+        "end\n"
+        "return M\n",
+        encoding="utf-8",
+    )
     # input-camera E2E：自定义映射文件（重绑定路径——MoveForward 同时绑 W/Up）。
     (pkg_dir / "input.bindings").write_text(
         "# primal-input-bindings v1\n"
@@ -102,6 +122,13 @@ def build_package(pkg_dir: Path) -> Path:
         'param speed "2.0"\n'
         "collider 0 0.5 0.5 0.5 0 0 0 0 0\n"
         "rigidbody 1 1 0.1 0.5 0 0 0\n"
+        "end\n"
+        "entity\n"
+        'name "walker"\n'
+        "pos -2 4 -2\nrot 0 0 0\nscl 1 1 1\n"
+        "builtin box\n"
+        'script "_assets/walk.lua"\n'
+        "navagent 0.4 1.8 3\n"
         "end\n"
         "entity\n"
         'name "cam"\n'
@@ -166,6 +193,27 @@ def main() -> int:
         checks["音频播放（WAV 解析+平台播放）"] = (
             "audio playing" in log and "PCM 44100Hz 2ch 0.50s" in log
             and "vol=0.80" in log)
+        # ai-navigation：烘焙日志 + walker 沿路径推进（x/z 递增、贴地 y=4、位移≥2m）
+        nav_samples = [(float(a), float(b), float(c)) for a, b, c in
+                       __import__("re").findall(r"nav x=([-\d.]+) y=([-\d.]+) z=([-\d.]+)", proc.stdout)]
+        checks["导航烘焙日志"] = "navigation baked" in log
+        checks["导航采样数"] = len(nav_samples) >= 3
+        if nav_samples:
+            xs = [q[0] for q in nav_samples]
+            zs = [q[2] for q in nav_samples]
+            ys = [q[1] for q in nav_samples]
+            # 到达后样本持平（3.000, 3.000…）——判"不减 + 净前进"而非严格递增
+            checks["导航推进（x/z 前进）"] = (
+                all(xs[i + 1] >= xs[i] for i in range(len(xs) - 1))
+                and all(zs[i + 1] >= zs[i] for i in range(len(zs) - 1))
+                and xs[-1] > xs[0] and zs[-1] > zs[0])
+            checks["导航贴地（y≈4）"] = all(abs(y - 4.0) < 0.26 for y in ys)
+            disp = ((nav_samples[-1][0] + 2) ** 2 + (nav_samples[-1][2] + 2) ** 2) ** 0.5
+            checks["导航位移（%.2fm≥2m）" % disp] = disp >= 2.0
+        else:
+            checks["导航推进（x/z 递增）"] = False
+            checks["导航贴地（y≈4）"] = False
+            checks["导航位移（≥2m）"] = False
         ok = True
         for name, passed in checks.items():
             print(f"{'PASS' if passed else 'FAIL'}: {name}")

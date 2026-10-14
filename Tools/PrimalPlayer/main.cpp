@@ -106,6 +106,11 @@ std::uint32_t AddEntityRigidBody(std::uint32_t entity_id, std::uint32_t mode, fl
                                  float restitution, float friction, const float* velocity);
 std::uint32_t PhysicsInitialize(const void* settings_pod);
 std::uint32_t PhysicsSetRunning(std::uint32_t running);
+// ai-navigation S1：EngineDLL NavigationAPI（烘焙三角汤 → 内存资产；移动由
+// Lua nav 表经同一运行态驱动，Player 只负责惰性烘焙）。
+std::uint32_t NavigationBake(const float* positions, std::uint32_t position_count,
+                             const std::uint32_t* indices, std::uint32_t index_count,
+                             const float* profile4);
 std::uint32_t AudioParseWavHeader(const void* data, std::uint64_t size, PlayerWavInfo* out);
 
 std::uint64_t CreateRenderTarget(std::uint32_t width, std::uint32_t height, std::uint32_t format);
@@ -176,6 +181,10 @@ struct RuntimeEntity {
     float audio_volume = 1.f;
     bool audio_loop = false;
     bool audio_autoplay = true;
+    // ai-navigation S1：`navagent <radius> <height> <speed>`——首个 navagent
+    // 的 radius/height 作烘焙 profile；speed 是缺省移动速度。
+    bool has_navagent = false;
+    float nav_radius = 0.4f, nav_height = 1.8f, nav_speed = 2.f;
 };
 
 // 渲染相机最终选择：主相机 > 第一个场景相机 > 默认机位。
@@ -337,6 +346,16 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
             current.audio_volume = v[0];
             current.audio_loop = v[1] != 0.f;
             current.audio_autoplay = v[2] != 0.f;
+        }
+        else if (key == "navagent") {
+            // ai-navigation S1："navagent <radius> <height> <speed>"
+            float v[3];
+            if (ParseFloats(rest, v, 3) && v[0] > 0.f && v[1] > 0.f) {
+                current.has_navagent = true;
+                current.nav_radius = v[0];
+                current.nav_height = v[1];
+                current.nav_speed = v[2] > 0.f ? v[2] : 2.f;
+            }
         }
         else if (key == "light") {
             float v[9];
@@ -636,6 +655,62 @@ std::uint32_t InjectScene(RuntimeScene& scene,
     if (any_rigidbody) {
         const std::uint32_t running = PhysicsSetRunning(1);
         std::fprintf(stderr, "[player] physics running=%u (scene has rigid bodies)\n", running);
+    }
+
+    // ai-navigation S1：场景含 navagent → 从静态 collider 几何惰性烘焙导航网格。
+    // 三角源 = 非 trigger、且自身不是 navagent 的实体 collider（盒/球按盒近似，
+    // 用 half 外接盒）；首个 navagent 的 radius/height 作烘焙 profile（S1 单
+    // profile，多代理尺寸是后续阶段）。nav 段在 PipelineTick 内推进，脚本经
+    // Lua nav 表建任务——Player 本身不再有逐帧导航代码。
+    bool any_navagent = false;
+    for (const auto& e : scene.entities)
+        any_navagent = any_navagent || e.has_navagent;
+    if (any_navagent) {
+        std::vector<float> nav_pos;
+        std::vector<std::uint32_t> nav_idx;
+        const auto add_box = [&](const float c[3], const float h[3]) {
+            const float v[8][3] = {
+                {c[0]-h[0], c[1]-h[1], c[2]-h[2]}, {c[0]+h[0], c[1]-h[1], c[2]-h[2]},
+                {c[0]+h[0], c[1]-h[1], c[2]+h[2]}, {c[0]-h[0], c[1]-h[1], c[2]+h[2]},
+                {c[0]-h[0], c[1]+h[1], c[2]-h[2]}, {c[0]+h[0], c[1]+h[1], c[2]-h[2]},
+                {c[0]+h[0], c[1]+h[1], c[2]+h[2]}, {c[0]-h[0], c[1]+h[1], c[2]+h[2]},
+            };
+            static const std::uint32_t faces[6][4] = {
+                {0,1,2,3}, {5,4,7,6}, {4,0,3,7}, {1,5,6,2}, {4,5,1,0}, {3,2,6,7},
+            };
+            for (const auto& f : faces) {
+                const std::uint32_t base = static_cast<std::uint32_t>(nav_pos.size() / 3);
+                for (const std::uint32_t vi : f) {
+                    nav_pos.push_back(v[vi][0]);
+                    nav_pos.push_back(v[vi][1]);
+                    nav_pos.push_back(v[vi][2]);
+                }
+                nav_idx.push_back(base);     nav_idx.push_back(base + 1); nav_idx.push_back(base + 2);
+                nav_idx.push_back(base);     nav_idx.push_back(base + 2); nav_idx.push_back(base + 3);
+            }
+        };
+        for (const auto& e : scene.entities) {
+            // 只烘静态碰撞几何：带 rigidbody 的实体（dynamic/kinematic）会移动，
+            // 一次性烘焙会把它们的瞬时脚印焊死进网格（动态障碍策略是 S2）。
+            if (!e.has_collider || e.collider_trigger || e.has_navagent || e.has_rigidbody) continue;
+            float half[3] = { e.collider_half[0], e.collider_half[1], e.collider_half[2] };
+            if (e.collider_shape == 1)   // Sphere：half[0]=半径 → 外接立方
+                half[0] = half[1] = half[2] = e.collider_half[0];
+            add_box(e.pos, half);
+        }
+        float profile[4] = { 0.4f, 1.8f, 45.f, 0.35f };
+        for (const auto& e : scene.entities) {
+            if (e.has_navagent) {
+                profile[0] = e.nav_radius;
+                profile[1] = e.nav_height;
+                break;
+            }
+        }
+        const std::uint32_t nav_err = NavigationBake(
+            nav_pos.data(), static_cast<std::uint32_t>(nav_pos.size() / 3),
+            nav_idx.data(), static_cast<std::uint32_t>(nav_idx.size()), profile);
+        std::fprintf(stderr, "[player] navigation baked from %zu tris, err=%u "
+                             "(scene has nav agents)\n", nav_idx.size() / 3, nav_err);
     }
 
     out_camera = chosen;

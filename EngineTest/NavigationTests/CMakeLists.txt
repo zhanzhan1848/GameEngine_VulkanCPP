@@ -3,7 +3,8 @@
 foreach(nav_test
     TestNavigationBake
     TestNavigationPath
-    TestNavigationSerialize)
+    TestNavigationSerialize
+    TestNavigationRuntime)
     add_executable(${nav_test} ${nav_test}.cpp)
     target_include_directories(${nav_test} PRIVATE
         ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)

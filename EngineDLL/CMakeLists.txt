@@ -35,6 +35,7 @@ set(SOURCE_FILES
     "LightAPI.cpp"
     "CameraAPI.cpp"
     "PhysicsAPI.cpp"
+    "NavigationAPI.cpp"
     "ProceduralMeshAPI.cpp"
     "HeadlessRender.cpp"
     "${CMAKE_SOURCE_DIR}/Engine/Graphics/EditorShaderManager.cpp"

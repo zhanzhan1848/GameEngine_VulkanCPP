@@ -21,6 +21,7 @@
 #include "../Engine/Scripting/LuaBackend.h"
 #include "../Engine/Scripting/InputState.h"
 #include "../Engine/Scripting/InputLua.h"
+#include "../Engine/Scripting/NavLua.h"
 #include "../Engine/Components/Entity.h"
 #include "../Engine/Components/Transform.h"
 
@@ -193,6 +194,8 @@ void register_script_globals(void* lua_state)
     lua_pushcfunction(L, self_set_scale);     lua_setfield(L, -2, "set_scale");
     lua_setglobal(L, "entity");
     primal::scripting::register_input_table(L);
+    // ai-navigation S1：脚本侧导航任务表（同一运行态，宿主/脚本共用）
+    primal::scripting::register_nav_table(L);
 }
 
 // ---------------------------------------------------------------------------
