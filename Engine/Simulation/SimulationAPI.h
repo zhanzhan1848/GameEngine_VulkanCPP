@@ -120,6 +120,34 @@ u32  drain_contacts(contact_event* out, u32 max);
 // 凸包：points 为 count 个世界空间点（xyz 连续），由 Jolt 生成凸包壳
 // 三角网：仅支持静态体（Jolt MeshShape 不可动）；顶点 + 三角索引
 u64  body_create_convex(const body_desc& d, const math::v3* points, u32 count);
+
+// ---- 关节（physics S2，2026-10-15：铰链 + 限位 + 驱动）----
+struct joint_desc
+{
+    enum class kind : u32 { hinge = 0 };
+
+    kind       k{ kind::hinge };
+    u64        body_a{};              // 引擎 body id（body_create 返回；0=世界固定）
+    u64        body_b{};              // 从动体（动态）
+    math::v3   world_anchor{};        // 世界空间锚点（米）
+    math::v3   axis{};                // 旋转轴（世界空间，自动归一化）
+    f32        limit_min_deg{};       // 限位（度；min>=max = 不限位）
+    f32        limit_max_deg{};
+    bool       motor{};               // 驱动（角速度目标）
+    f32        motor_speed_deg_sec{}; // 目标角速度
+    f32        motor_torque{};        // 最大扭矩（N·m；0 = 无驱动效果）
+};
+
+/// <summary>创建关节。返回引擎关节 id（1 起；0=失败——未初始化/刚体不存在/
+/// 轴退化）。限位语义：limit_min_deg < limit_max_deg 才启用；motor 需要
+/// torque > 0。</summary>
+u64  joint_create(const joint_desc& d);
+bool joint_remove(u64 joint_id);
+
+/// <summary>关节状态查询（诊断/验收）：out_angle_deg = 相对初始位形的角度；
+/// out_anchor_separation = 两锚点世界距离（米——约束误差的直接度量）。
+/// 返回 false = 关节不存在。</summary>
+bool joint_get_state(u64 joint_id, f32& out_angle_deg, f32& out_anchor_separation);
 u64  body_create_mesh(const body_desc& d, const math::v3* vertices, u32 vcount,
                       const u32* indices, u32 icount);
 

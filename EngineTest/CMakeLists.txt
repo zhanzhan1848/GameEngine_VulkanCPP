@@ -20,6 +20,7 @@ set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS"
 add_subdirectory(UnitTests)
 add_subdirectory(NavigationTests)
 add_subdirectory(AudioTests)
+add_subdirectory(PhysicsTests)
 add_subdirectory(IntegrationTests)
 # Lua backend test requires third_party/lua submodule sources. Skip if missing
 # (e.g. offline environments where submodule cannot be cloned).

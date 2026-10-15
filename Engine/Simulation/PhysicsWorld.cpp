@@ -20,6 +20,7 @@
 #include <Jolt/Core/JobSystemThreadPool.h>
 #include <Jolt/Physics/Collision/NarrowPhaseQuery.h>
 #include <Jolt/Physics/Collision/RayCast.h>
+#include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/Collision/CastResult.h>
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Collision/Shape/ConvexHullShape.h>
@@ -77,6 +78,17 @@ struct world_state
     std::unique_ptr<simulation_debug_renderer>      debug_renderer;
 #endif
     body_entity_map                                 bodies;
+    // physics S2：关节表（引擎关节 id → Jolt ConstraintID + 端点 body id；
+    // body_remove 时连带销毁防悬垂）
+    struct joint_record
+    {
+        JPH::Constraint* cid;
+        u64 a; u64 b;
+        JPH::Vec3 local_a;   // 锚点在两 body 本地空间（创建时算）——误差度量用
+        JPH::Vec3 local_b;
+    };
+    std::unordered_map<u64, joint_record>        joints;
+    u64                                          next_joint_id{ 1 };
 };
 
 world_state& state()
@@ -372,6 +384,19 @@ u64 body_create(const body_desc& d)
 
 bool body_remove(u64 id)
 {
+    // physics S2：刚体删除前先销毁其参与关节（Jolt 约束持有 body 引用）
+    {
+        world_state& ws = state();
+        std::vector<u64> doomed;
+        for (const auto& [jid, rec] : ws.joints)
+            if (rec.a == id || rec.b == id) doomed.push_back(jid);
+        for (u64 jid : doomed)
+        {
+            ws.system->RemoveConstraint(ws.joints[jid].cid);
+            ws.joints.erase(jid);
+        }
+    }
+
     world_state& ws = state();
     if (!ws.initialized) return false;
 
@@ -619,4 +644,110 @@ u64 debug_lines_forwarded()
 #endif
 }
 
-} // namespace primal::simulation
+
+// ---- 关节（physics S2）------------------------------------------------------
+
+u64 joint_create(const joint_desc& d)
+{
+    world_state& ws = state();
+    if (!ws.initialized) return 0;
+
+    JPH::Vec3 axis{ d.axis.x, d.axis.y, d.axis.z };
+    const f32 axis_len = axis.Length();
+    if (axis_len < 1e-6f) return 0;
+    axis = axis / axis_len;
+
+    // S2 合同如实：hinge 需要两个真实 body（body_a=0 世界固定端不支持）
+    if (d.body_a == 0 || d.body_b == 0) return 0;
+
+    JPH::BodyID jid_a{}, jid_b{};
+    game_entity::entity owner_a{}, owner_b{};
+    if (!ws.bodies.get(d.body_a, jid_a, owner_a)) return 0;
+    if (!ws.bodies.get(d.body_b, jid_b, owner_b)) return 0;
+
+    JPH::TwoBodyConstraint* c = nullptr;
+    JPH::Vec3 local_a{}, local_b{};
+    {
+        // 锁只包住 Create/锚点计算：AddConstraint 内部自取锁（再持有=锁序断言）
+        JPH::BodyLockWrite lock_a(ws.system->GetBodyLockInterfaceNoLock(), jid_a);
+        JPH::BodyLockWrite lock_b(ws.system->GetBodyLockInterfaceNoLock(), jid_b);
+        if (!lock_a.Succeeded() || !lock_b.Succeeded()) return 0;
+        JPH::Body& body_a = lock_a.GetBody();
+        JPH::Body& body_b = lock_b.GetBody();
+
+        JPH::HingeConstraintSettings settings;
+        settings.mSpace = JPH::EConstraintSpace::WorldSpace;
+        settings.mPoint1 = JPH::RVec3{ d.world_anchor.x, d.world_anchor.y, d.world_anchor.z };
+        settings.mPoint2 = settings.mPoint1;
+        settings.mHingeAxis1 = settings.mHingeAxis2 = axis;
+        JPH::Vec3 helper = std::fabs(axis.GetY()) < 0.9f ? JPH::Vec3::sAxisY() : JPH::Vec3::sAxisX();
+        JPH::Vec3 normal = axis.Cross(helper).Normalized();
+        settings.mNormalAxis1 = settings.mNormalAxis2 = normal;
+        if (d.limit_min_deg < d.limit_max_deg)
+        {
+            settings.mLimitsMin = d.limit_min_deg * (f32)M_PI / 180.f;
+            settings.mLimitsMax = d.limit_max_deg * (f32)M_PI / 180.f;
+        }
+        settings.mMotorSettings.SetTorqueLimit(d.motor_torque);
+        c = settings.Create(body_a, body_b);
+        if (d.motor && d.motor_torque > 0.f)
+        {
+            auto* hinge = static_cast<JPH::HingeConstraint*>(c);
+            hinge->SetMotorState(JPH::EMotorState::Velocity);
+            hinge->SetTargetAngularVelocity(d.motor_speed_deg_sec * (f32)M_PI / 180.f);
+            // 驱动关节保持动态端点清醒（否则 Jolt 休眠判据会把恒扭矩小运动体
+            // 睡掉；静态体断言拒绝 SetAllowSleeping——先判 IsStatic）
+            if (!body_a.IsStatic()) body_a.SetAllowSleeping(false);
+            if (!body_b.IsStatic()) body_b.SetAllowSleeping(false);
+        }
+
+        // 局部锚点：世界锚点经创建时逆变换入各 body 本地（误差度量的正确基准）
+        const JPH::RVec3 anchor{ d.world_anchor.x, d.world_anchor.y, d.world_anchor.z };
+        local_a = body_a.GetWorldTransform().Inversed3x3() * JPH::Vec3(anchor - body_a.GetPosition());
+        local_b = body_b.GetWorldTransform().Inversed3x3() * JPH::Vec3(anchor - body_b.GetPosition());
+    }
+
+    ws.system->AddConstraint(c);
+    const u64 id = ws.next_joint_id++;
+    ws.joints[id] = world_state::joint_record{ c, d.body_a, d.body_b, local_a, local_b };
+    return id;
+}
+
+bool joint_remove(u64 joint_id)
+{
+    world_state& ws = state();
+    const auto it = ws.joints.find(joint_id);
+    if (it == ws.joints.end()) return false;
+    ws.system->RemoveConstraint(it->second.cid);
+    ws.joints.erase(it);
+    return true;
+}
+
+bool joint_get_state(u64 joint_id, f32& out_angle_deg, f32& out_anchor_separation)
+{
+    world_state& ws = state();
+    const auto it = ws.joints.find(joint_id);
+    if (it == ws.joints.end()) return false;
+
+    JPH::BodyID jid_a{}, jid_b{};
+    game_entity::entity owner_a{}, owner_b{};
+    if (!ws.bodies.get(it->second.a, jid_a, owner_a)) return false;
+    if (!ws.bodies.get(it->second.b, jid_b, owner_b)) return false;
+
+    JPH::BodyLockRead lock_a(ws.system->GetBodyLockInterfaceNoLock(), jid_a);
+    JPH::BodyLockRead lock_b(ws.system->GetBodyLockInterfaceNoLock(), jid_b);
+    if (!lock_a.Succeeded() || !lock_b.Succeeded()) return false;
+
+    auto* hinge = static_cast<JPH::HingeConstraint*>(it->second.cid);
+    if (hinge == nullptr) return false;
+    out_angle_deg = hinge->GetCurrentAngle() * 180.f / (f32)M_PI;
+
+    // 约束误差：锚点经两 body 当前变换回到世界后的距离（局部锚点在创建时算）
+    const JPH::RVec3 wa1 = lock_a.GetBody().GetCenterOfMassTransform() * it->second.local_a;
+    const JPH::RVec3 wa2 = lock_b.GetBody().GetCenterOfMassTransform() * it->second.local_b;
+    const JPH::RVec3 delta = wa1 - wa2;
+    out_anchor_separation = std::sqrt(delta.LengthSq());
+    return true;
+}
+
+} // namespace
