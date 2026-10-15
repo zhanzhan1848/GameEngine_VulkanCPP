@@ -148,6 +148,34 @@ bool joint_remove(u64 joint_id);
 /// out_anchor_separation = 两锚点世界距离（米——约束误差的直接度量）。
 /// 返回 false = 关节不存在。</summary>
 bool joint_get_state(u64 joint_id, f32& out_angle_deg, f32& out_anchor_separation);
+
+// ---- 基础角色移动（physics S2，2026-10-15）----
+// 动态盒体角色（半径×高×半径）+ 意图驱动（每步把水平速度设为意图×速度，
+// 垂直速度保留——重力/跳跃语义不被覆盖）+ 诊断（grounded / 水平速率 /
+// 卡住检测：意图非零但采样位移持续低于期望的 30%）。
+struct character_desc
+{
+    math::v3 position{};      // 胶囊中心（脚底 + height/2 由调用方换算或直给中心）
+    f32      radius{ 0.4f };
+    f32      height{ 1.8f };
+    f32      walk_speed{ 4.f };   // 米/秒
+    f32      mass{ 80.f };
+};
+
+struct character_state
+{
+    math::v3 position{};
+    bool     grounded{ false };     // 脚底向下 raycast 命中（radius 内）
+    f32      horizontal_speed{};    // 米/秒
+    bool     stuck{ false };        // 意图非零但 0.5s 窗口位移 < 期望 30%
+    math::v3 intent{};              // 当前意图（归一化后）
+};
+
+u64  character_create(const character_desc& d);
+bool character_remove(u64 id);
+/// <summary>设置移动意图（世界空间 XZ 方向；零向量=停止）。自动归一化。</summary>
+bool character_move_intent(u64 id, f32 dir_x, f32 dir_z);
+bool character_get_state(u64 id, character_state& out);
 u64  body_create_mesh(const body_desc& d, const math::v3* vertices, u32 vcount,
                       const u32* indices, u32 icount);
 

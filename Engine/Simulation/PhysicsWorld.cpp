@@ -89,6 +89,19 @@ struct world_state
     };
     std::unordered_map<u64, joint_record>        joints;
     u64                                          next_joint_id{ 1 };
+    // physics S2：角色表（意图驱动 + 卡住诊断）
+    struct character_record
+    {
+        u64        body{};
+        f32        speed{ 4.f };
+        f32        half_height{ 0.9f };
+        math::v3   intent{};            // 归一化意图（0=停）
+        math::v3   last_probe_pos{};    // 卡住检测采样点
+        f32        probe_timer{ 0.f };  // 距上次采样秒数
+        bool       stuck{ false };
+    };
+    std::unordered_map<u64, character_record>   characters;
+    u64                                          next_character_id{ 1 };
 };
 
 world_state& state()
@@ -299,6 +312,44 @@ bool running() { return state().running; }
 // 步进
 // ---------------------------------------------------------------------------
 
+// 角色意图应用（step 的 physics 子步前）：水平速度=意图×速度、垂直保留
+static void characters_apply_intents(world_state& ws)
+{
+    for (auto& [id, ch] : ws.characters)
+    {
+        JPH::BodyID jid{};
+        game_entity::entity owner{};
+        if (!ws.bodies.get(ch.body, jid, owner)) continue;
+        JPH::BodyInterface& bi = ws.system->GetBodyInterface();
+        const JPH::Vec3 vel = bi.GetLinearVelocity(jid);
+        const JPH::Vec3 target{
+            ch.intent.x * ch.speed, vel.GetY(), ch.intent.z * ch.speed };
+        bi.SetLinearVelocity(jid, target);
+    }
+}
+
+// 卡住探测：意图非零时每 0.5s 采样位移；< 期望 30% → stuck（清零意图不改——
+// 诊断语义，策略归上层）
+static void characters_probe_stuck(world_state& ws, f32 sub_dt)
+{
+    for (auto& [id, ch] : ws.characters)
+    {
+        if (ch.probe_timer < 0.5f) { ch.probe_timer += sub_dt; continue; }
+        ch.probe_timer = 0.f;
+        if (ch.intent.x == 0.f && ch.intent.z == 0.f) { ch.stuck = false; continue; }
+        JPH::BodyID jid{};
+        game_entity::entity owner{};
+        if (!ws.bodies.get(ch.body, jid, owner)) continue;
+        const JPH::RVec3 pos = ws.system->GetBodyInterface().GetPosition(jid);
+        const f32 dx = (f32)pos.GetX() - ch.last_probe_pos.x;
+        const f32 dz = (f32)pos.GetZ() - ch.last_probe_pos.z;
+        const f32 moved = sqrtf(dx * dx + dz * dz);
+        const f32 expected = ch.speed * 0.5f;
+        ch.stuck = moved < expected * 0.3f;
+        ch.last_probe_pos = math::v3{ (f32)pos.GetX(), (f32)pos.GetY(), (f32)pos.GetZ() };
+    }
+}
+
 void step(f32 host_dt)
 {
     world_state& ws = state();
@@ -306,7 +357,9 @@ void step(f32 host_dt)
 
     const u32 n = ws.accumulator.advance(host_dt);
     for (u32 i = 0; i < n; ++i) {
+        characters_apply_intents(ws);   // physics S2：角色意图 → 速度（子步前）
         ws.system->Update(ws.cfg.fixed_dt, 1, ws.temp.get(), ws.jobs);
+        characters_probe_stuck(ws, ws.cfg.fixed_dt);
     }
     sync_bound_transforms();
 }
@@ -747,6 +800,101 @@ bool joint_get_state(u64 joint_id, f32& out_angle_deg, f32& out_anchor_separatio
     const JPH::RVec3 wa2 = lock_b.GetBody().GetCenterOfMassTransform() * it->second.local_b;
     const JPH::RVec3 delta = wa1 - wa2;
     out_anchor_separation = std::sqrt(delta.LengthSq());
+    return true;
+}
+
+
+// ---- 基础角色移动（physics S2）----------------------------------------------
+
+u64 character_create(const character_desc& d)
+{
+    world_state& ws = state();
+    if (!ws.initialized) return 0;
+    if (d.radius <= 0 || d.height <= 0 || d.walk_speed <= 0 || d.mass <= 0) return 0;
+
+    body_desc bd{};
+    bd.s = body_desc::shape::box;
+    bd.m = body_desc::mode::dynamic;
+    bd.half_extents = math::v3{ d.radius, d.height * 0.5f, d.radius };
+    bd.position = d.position;
+    bd.mass = d.mass;
+    bd.friction = 0.2f;           // 低摩擦：意图驱动不被地面阻力吃掉
+    const u64 body = body_create(bd);
+    if (body == 0) return 0;
+
+    world_state::character_record rec{};
+    rec.body = body;
+    rec.speed = d.walk_speed;
+    rec.half_height = d.height * 0.5f;
+    rec.last_probe_pos = d.position;
+    const u64 id = ws.next_character_id++;
+    ws.characters[id] = rec;
+    return id;
+}
+
+bool character_remove(u64 id)
+{
+    world_state& ws = state();
+    const auto it = ws.characters.find(id);
+    if (it == ws.characters.end()) return false;
+    const bool ok = body_remove(it->second.body);
+    ws.characters.erase(it);
+    return ok;
+}
+
+bool character_move_intent(u64 id, f32 dir_x, f32 dir_z)
+{
+    world_state& ws = state();
+    const auto it = ws.characters.find(id);
+    if (it == ws.characters.end()) return false;
+    const f32 len = sqrtf(dir_x * dir_x + dir_z * dir_z);
+    if (len < 1e-6f)
+    {
+        it->second.intent = math::v3{ 0, 0, 0 };
+        return true;
+    }
+    it->second.intent = math::v3{ dir_x / len, 0, dir_z / len };
+    return true;
+}
+
+bool character_get_state(u64 id, character_state& out)
+{
+    world_state& ws = state();
+    const auto it = ws.characters.find(id);
+    if (it == ws.characters.end()) return false;
+    const world_state::character_record& ch = it->second;
+
+    JPH::BodyID jid{};
+    game_entity::entity owner{};
+    if (!ws.bodies.get(ch.body, jid, owner)) return false;
+    const JPH::BodyInterface& bi = ws.system->GetBodyInterfaceNoLock();
+    const JPH::RVec3 pos = bi.GetPosition(jid);
+    const JPH::Vec3 vel = bi.GetLinearVelocity(jid);
+
+    out.position = math::v3{ (f32)pos.GetX(), (f32)pos.GetY(), (f32)pos.GetZ() };
+    out.horizontal_speed = sqrtf(vel.GetX() * vel.GetX() + vel.GetZ() * vel.GetZ());
+    out.stuck = ch.stuck;
+    out.intent = ch.intent;
+
+    // grounded：体心向下短 ray，自体用 BodyFilter 显式排除（自盒 fraction 0
+    // 会吃掉单命中 cast——不排除时永远命中自己）
+    struct ignore_self final : JPH::BodyFilter
+    {
+        JPH::BodyID skip;
+        bool ShouldCollide(const JPH::BodyID& inBodyID) const override
+        {
+            return inBodyID != skip;
+        }
+    };
+    out.grounded = false;
+    const f32 down = ch.half_height * 1.15f;
+    const JPH::RRayCast ray{ pos, JPH::RVec3(0, -down, 0) };
+    JPH::RayCastResult hit;
+    ignore_self filter{};
+    filter.skip = jid;
+    if (ws.system->GetNarrowPhaseQueryNoLock().CastRay(ray, hit,
+            JPH::BroadPhaseLayerFilter(), JPH::ObjectLayerFilter(), filter))
+        out.grounded = true;
     return true;
 }
 
