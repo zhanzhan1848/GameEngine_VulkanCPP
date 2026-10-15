@@ -160,6 +160,7 @@ struct character_desc
     f32      height{ 1.8f };
     f32      walk_speed{ 4.f };   // 米/秒
     f32      mass{ 80.f };
+    game_entity::entity owner{};  // 绑定实体（step 自动回写 transform；可空）
 };
 
 struct character_state

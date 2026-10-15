@@ -819,6 +819,7 @@ u64 character_create(const character_desc& d)
     bd.position = d.position;
     bd.mass = d.mass;
     bd.friction = 0.2f;           // 低摩擦：意图驱动不被地面阻力吃掉
+    bd.owner = d.owner;           // 绑定实体 → step 自动回写 transform
     const u64 body = body_create(bd);
     if (body == 0) return 0;
 

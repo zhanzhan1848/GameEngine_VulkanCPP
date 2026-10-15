@@ -23,10 +23,22 @@
 #include "../Engine/Scripting/InputLua.h"
 #include "../Engine/Scripting/NavLua.h"
 #include "../Engine/Scripting/AudioLua.h"
+#include "../Engine/Scripting/CharacterLua.h"
 
 // audio S2：EngineDLL AudioAPI 导出（同 dylib 内直链——extern "C" 转换单元可见）
 extern "C" {
 unsigned AudioPlay(const char* path, const char* group, float voice_gain, float pan, unsigned loop);
+// physics S2 收尾：角色移动（PhysicsAPI 导出；桥接包装 u64→u32 句柄）
+unsigned PhysicsCharacterMoveEntity(unsigned int entity, float dir_x, float dir_z);
+unsigned PhysicsCharacterGetEntityState(unsigned int entity, float* out_state);
+static unsigned CharacterMoveBridge(unsigned long long entity, float x, float z)
+{
+    return PhysicsCharacterMoveEntity((unsigned int)entity, x, z);
+}
+static unsigned CharacterStateBridge(unsigned long long entity, float* out8)
+{
+    return PhysicsCharacterGetEntityState((unsigned int)entity, out8);
+}
 unsigned AudioSetGroupGain(const char* group, float gain);
 unsigned AudioSetMasterGain(float gain);
 }
@@ -204,6 +216,10 @@ void register_script_globals(void* lua_state)
     primal::scripting::register_input_table(L);
     // ai-navigation S1：脚本侧导航任务表（同一运行态，宿主/脚本共用）
     primal::scripting::register_nav_table(L);
+    // physics S2：脚本侧角色移动表（同一实体绑定运行态）
+    primal::scripting::g_character_bridge.move = &CharacterMoveBridge;
+    primal::scripting::g_character_bridge.state = &CharacterStateBridge;
+    primal::scripting::register_character_table(L);
     // audio S2：脚本侧音频事件表（播放经宿主回调——引擎不持设备）
     primal::scripting::g_audio_bridge.play = &AudioPlay;
     primal::scripting::g_audio_bridge.set_group = &AudioSetGroupGain;

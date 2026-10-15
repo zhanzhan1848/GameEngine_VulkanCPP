@@ -80,6 +80,25 @@ def build_package(pkg_dir: Path) -> Path:
     )
     # audio S2 E2E：walk.lua 首帧触发 audio.play（事件播放经宿主回调）+
     # 打印结果；ground 音源改为空间声（camera@z=-6, 声源@z=0 → 增益<1 且 pan<0 偏左后）。
+    # physics S2 E2E：角色移动（character.move 意图驱动 + 状态采样）
+    (assets / "trooper.lua").write_text(
+        "local M = {}\n"
+        "function M:begin_play() M.started = false M.n = 0 end\n"
+        "function M:update(dt)\n"
+        "    if not M.started then\n"
+        "        M.started = true\n"
+        "        character.move(1, 0)\n"
+        "        print('character-move ok=' .. tostring(character.state()))\n"
+        "    end\n"
+        "    M.n = M.n + 1\n"
+        "    if M.n % 15 == 0 then\n"
+        "        local x, y, z = entity.position()\n"
+        "        print(string.format('chr x=%.3f state=%s', x, character.state()))\n"
+        "    end\n"
+        "end\n"
+        "return M\n",
+        encoding="utf-8",
+    )
     # input-camera E2E：自定义映射文件（重绑定路径——MoveForward 同时绑 W/Up）。
     (pkg_dir / "input.bindings").write_text(
         "# primal-input-bindings v1\n"
@@ -155,6 +174,13 @@ def build_package(pkg_dir: Path) -> Path:
         "builtin box\n"
         "collider 0 0.5 0.25 0.25 0 0 0 0 0\n"
         "rigidbody 1 1 0.05 0.5 0 0 0\n"
+        "end\n"
+        "entity\n"
+        'name "trooper"\n'
+        "pos -4 4.9 -4\nrot 0 0 0\nscl 1 1 1\n"
+        "builtin box\n"
+        'script "_assets/trooper.lua"\n'
+        "character 0.4 1.8 4 80\n"
         "end\n"
         "entity\n"
         'name "mover"\n'
@@ -281,6 +307,14 @@ def main() -> int:
         checks["Audio 空间声采样"] = len(spatial_gains) >= 2
         checks["Audio 空间声增益<1（衰减生效）"] = (
             len(spatial_gains) >= 2 and 0.01 <= max(spatial_gains) < 0.99)
+        # physics S2：角色移动（意图驱动 x 递增 + 状态 moving）
+        chr_x = [float(m) for m in __import__("re").findall(r"chr x=([\d.-]+)", proc.stdout)]
+        chr_states = __import__("re").findall(r"chr x=[\d.-]+ state=(\w+)", proc.stdout)
+        checks["Character 创建日志"] = "character created" in log
+        checks["Character 移动采样"] = len(chr_x) >= 3
+        checks["Character x 递增"] = (
+            len(chr_x) >= 3 and all(chr_x[i + 1] > chr_x[i] for i in range(len(chr_x) - 1)))
+        checks["Character 状态 moving"] = len(chr_states) >= 2 and "moving" in chr_states
         # sequence S2：事件恰一次（各事件出现次数==1）
         evt_halfway = proc.stdout.count("seq event mover-halfway@10")
         evt_low = proc.stdout.count("seq event mover-low@30")

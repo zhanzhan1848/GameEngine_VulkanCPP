@@ -219,6 +219,73 @@ EDITOR_INTERFACE u64 PhysicsBodyCreate(const PhysicsBodyDescPod* in_desc)
     return simulation::body_create(to_body_desc(in_desc));
 }
 
+// --- 基础角色移动（physics S2 收尾，2026-10-16）：实体绑定 + Lua 接线 --------
+// characterParams 8 浮数：[posX, posY, posZ, radius, height, walkSpeed, mass, pad]。
+// 创建时把 owner 实体绑进 body（step 自动回写 transform——同 collider/rigid
+// body 路径）；实体→角色映射由本层持有（Lua 的 character 表按当前实体解析）。
+
+namespace {
+std::unordered_map<id::id_type, u64> g_entity_characters;
+
+simulation::character_desc to_character_desc(id::id_type entity_id, const f32* p)
+{
+    simulation::character_desc d{};
+    d.position = math::v3{ p[0], p[1], p[2] };
+    d.radius = p[3];
+    d.height = p[4];
+    d.walk_speed = p[5];
+    d.mass = p[6];
+    d.owner = game_entity::entity{ game_entity::entity_id{ entity_id } };
+    return d;
+}
+} // anonymous namespace
+
+EDITOR_INTERFACE u64 PhysicsCharacterCreateEntity(id::id_type entity_id, const f32* characterParams)
+{
+    if (!characterParams || !primal::id::is_valid(entity_id)) return 0;
+    if (!simulation::is_initialized()) return 0;
+    game_entity::entity e{ game_entity::entity_id{ entity_id } };
+    if (!e.is_valid()) return 0;
+    if (g_entity_characters.count(id::index(entity_id))) return 0;   // 已有角色（重复拒绝）
+
+    auto d = to_character_desc(entity_id, characterParams);
+    const u64 cid = simulation::character_create(d);
+    if (cid == 0) return 0;
+    g_entity_characters[id::index(entity_id)] = cid;
+    return cid;
+}
+
+EDITOR_INTERFACE u32 PhysicsCharacterMoveEntity(id::id_type entity_id, f32 dir_x, f32 dir_z)
+{
+    const auto it = g_entity_characters.find(id::index(entity_id));
+    if (it == g_entity_characters.end()) return 0;
+    return simulation::character_move_intent(it->second, dir_x, dir_z) ? 1u : 0u;
+}
+
+// outState 8 浮数：[posX, posY, posZ, grounded(0/1), hSpeed, stuck(0/1), intentX, intentZ]
+EDITOR_INTERFACE u32 PhysicsCharacterGetEntityState(id::id_type entity_id, f32* outState)
+{
+    if (!outState) return 0;
+    const auto it = g_entity_characters.find(id::index(entity_id));
+    if (it == g_entity_characters.end()) return 0;
+    simulation::character_state st{};
+    if (!simulation::character_get_state(it->second, st)) return 0;
+    outState[0] = st.position.x; outState[1] = st.position.y; outState[2] = st.position.z;
+    outState[3] = st.grounded ? 1.f : 0.f;
+    outState[4] = st.horizontal_speed;
+    outState[5] = st.stuck ? 1.f : 0.f;
+    outState[6] = st.intent.x; outState[7] = st.intent.z;
+    return 1u;
+}
+
+EDITOR_INTERFACE void PhysicsCharacterRemoveEntity(id::id_type entity_id)
+{
+    const auto it = g_entity_characters.find(id::index(entity_id));
+    if (it == g_entity_characters.end()) return;
+    simulation::character_remove(it->second);
+    g_entity_characters.erase(it);
+}
+
 // --- 关节（physics S2，2026-10-15）：实体对铰链 ----------------------------
 // jointParams 11 浮数：[anchor_xyz, axis_xyz, limitMin_deg, limitMax_deg,
 // motor(0/1 用非零浮), motorSpeed_deg_s, motorTorque, pad0, pad1]——字段序即

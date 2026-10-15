@@ -96,6 +96,10 @@ std::uint64_t PhysicsJointCreateEntities(std::uint32_t entity_a, std::uint32_t e
                                          const float* joint_params);
 std::uint32_t PhysicsJointRemove(std::uint64_t joint_id);
 std::uint32_t PhysicsJointGetState(std::uint64_t joint_id, float* out2);
+// physics S2 收尾：角色移动（参数 8 浮数见 PhysicsAPI 注释）
+std::uint64_t PhysicsCharacterCreateEntity(std::uint32_t entity, const float* params);
+std::uint32_t PhysicsCharacterMoveEntity(std::uint32_t entity, float x, float z);
+std::uint32_t PhysicsCharacterGetEntityState(std::uint32_t entity, float* out8);
 std::uint32_t AddEntityCamera(std::uint32_t entity_id, std::uint32_t projection_type,
                               float field_of_view, float aspect_ratio, float near_z,
                               float far_z, const float* up_vector);
@@ -215,6 +219,9 @@ struct RuntimeEntity {
     float nav_radius = 0.4f, nav_height = 1.8f, nav_speed = 2.f;
     // pfx：`pfx "<.pfx_emitter json>"`（与 script/audio 同一包内相对解析）。
     std::string pfx_path;
+    // physics S2：`character <radius> <height> <speed> <mass>`——Lua character 表驱动
+    bool has_character = false;
+    float char_radius = 0.4f, char_height = 1.8f, char_speed = 4.f, char_mass = 80.f;
 };
 
 // 渲染相机最终选择：主相机 > 第一个场景相机 > 默认机位。
@@ -544,6 +551,15 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
         else if (key == "pfx") {
             // "pfx \"<路径>\""——ParticleFX 发射器资产
             current.pfx_path = ParseQuoted(rest);
+        }
+        else if (key == "character") {
+            // "character <radius> <height> <speed> <mass>"（缺省质量 80）
+            float v[4];
+            if (ParseFloats(rest, v, 4)) {
+                current.has_character = v[0] > 0.f && v[1] > 0.f && v[2] > 0.f && v[3] > 0.f;
+                current.char_radius = v[0]; current.char_height = v[1];
+                current.char_speed = v[2]; current.char_mass = v[3];
+            }
         }
         else if (key == "navagent") {
             // ai-navigation S1："navagent <radius> <height> <speed>"
@@ -978,6 +994,22 @@ std::uint32_t InjectScene(RuntimeScene& scene,
                              emitter, e.name.c_str());
             }
         }
+    }
+
+    // physics S2 收尾：角色创建（Lua character 表驱动；owner 绑实体→
+    // step 自动回写 transform）
+    for (const auto& e : scene.entities) {
+        if (!e.has_character || e.engine_entity == 0xFFFFFFFFu) continue;
+        const float params[8] = {
+            e.pos[0], e.pos[1], e.pos[2],
+            e.char_radius, e.char_height, e.char_speed, e.char_mass, 0.f,
+        };
+        if (PhysicsCharacterCreateEntity(e.engine_entity, params) == 0)
+            std::fprintf(stderr, "[player] character create failed (entity '%s')\n",
+                         e.name.c_str());
+        else
+            std::fprintf(stderr, "[player] character created (entity '%s', speed %.1f)\n",
+                         e.name.c_str(), e.char_speed);
     }
 
     // physics S2：关节注入（实体对按名解析引擎实体；物化 body 表驱动）
