@@ -254,11 +254,15 @@ struct RuntimeJointRow
 // audio S2：`audiomix "<group>" <gain>` 顶层行——混音分组注册
 struct AudioMixRow { std::string group; float gain = 1.f; };
 
+// sequence S2：事件轨（frame, name）
+struct RuntimeSeqEvent { int frame = 0; std::string name; };
+
 struct RuntimeSequence {
     int fps = 60;
     int duration = 0;
     std::vector<RuntimeSeqPropTrack> props;
     std::vector<RuntimeSeqPosTrack> positions;
+    std::vector<RuntimeSeqEvent> events;   // 帧序升序（按到达序即可——派发排序）
     bool empty() const { return props.empty() && positions.empty(); }
 };
 
@@ -415,6 +419,21 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
                 if (ParseFloats(rest, v, 3))
                     out.sequence.props.back().keys.push_back(
                         RuntimeSeqKey{ static_cast<int>(v[0]), v[1], static_cast<int>(v[2]) });
+            }
+            continue;
+        }
+        if (key == "seqevent") {
+            // sequence S2：`seqevent <count>`——事件轨计数（键随后续 seqeventkey 行）
+            continue;
+        }
+        if (key == "seqeventkey") {
+            // "seqeventkey <frame> \"<事件名>\""
+            float v[1];
+            if (ParseFloats(rest, v, 1)) {
+                const auto name = ParseQuoted(rest.substr(rest.find('"')));
+                if (!name.empty())
+                    out.sequence.events.push_back(
+                        RuntimeSeqEvent{ static_cast<int>(v[0]), name });
             }
             continue;
         }
@@ -1473,6 +1492,14 @@ int main(int argc, char** argv)
         // 序列驱动的实体不应再挂 navagent/dynamic rigidbody（单写者纪律）。
         if (!scene.sequence.empty()) {
             const int seq_f = seq_frame;
+            // sequence S2：事件恰一次派发——(prev, cur] 帧区间事件发一次并打印；
+            // 推进即播放（Player 无 seek——编辑器 seek 语义在调度器 C# 侧已锁）
+            if (!scene.sequence.events.empty() && seq_frame > 0) {
+                for (const auto& ev : scene.sequence.events) {
+                    if (ev.frame > seq_frame - 1 && ev.frame <= seq_frame)
+                        std::printf("seq event %s@%d\n", ev.name.c_str(), ev.frame);
+                }
+            }
             const auto eval_scalar = [seq_f](const std::vector<RuntimeSeqKey>& keys) -> float {
                 if (keys.empty()) return 0.f;
                 std::size_t lo = 0;

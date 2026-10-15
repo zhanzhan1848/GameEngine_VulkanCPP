@@ -48,6 +48,14 @@ public static class SequenceRows
                         lines.Add($"seqkey {k.Frame} {Fmt(k.Value)} {(int)k.Interpolation}");
                     break;
                 }
+                case EventTrack et when et.Keys.Count > 0:
+                {
+                    // sequence S2：事件轨（seqevent <count> + 逐键 seqeventkey <frame> "<名>"）
+                    lines.Add($"seqevent {et.Keys.Count}");
+                    foreach (var k in et.Keys)
+                        lines.Add($"seqeventkey {k.Frame} \"{k.Event.Replace("\"", "'")}\"");
+                    break;
+                }
                 case TransformTrack tt when tt.Keys.Count > 0:
                 {
                     var name = nameOf(tt.EntityGuid);

@@ -178,6 +178,10 @@ def build_package(pkg_dir: Path) -> Path:
         'seqpos "mover" 2\n'
         "seqposkey 0 0 4 0 0 0 0 1 1 1 0\n"
         "seqposkey 59 0 1 0 0 0 0 1 1 1 0\n"
+        # sequence S2 E2E：事件轨（帧 10/30 各一——恰一次断言）
+        "seqevent 2\n"
+        "seqeventkey 10 \"mover-halfway\"\n"
+        "seqeventkey 30 \"mover-low\"\n"
         # physics S2 E2E：门板铰链（重力下摆被限位钳制；角度采样断言）
         'joint "post" "door" 0 0 1 2 6 2 -80 80 0 0 0\n',
         encoding="utf-8",
@@ -277,6 +281,11 @@ def main() -> int:
         checks["Audio 空间声采样"] = len(spatial_gains) >= 2
         checks["Audio 空间声增益<1（衰减生效）"] = (
             len(spatial_gains) >= 2 and 0.01 <= max(spatial_gains) < 0.99)
+        # sequence S2：事件恰一次（各事件出现次数==1）
+        evt_halfway = proc.stdout.count("seq event mover-halfway@10")
+        evt_low = proc.stdout.count("seq event mover-low@30")
+        checks["序列事件 mover-halfway 恰一次"] = evt_halfway == 1
+        checks["序列事件 mover-low 恰一次"] = evt_low == 1
         # physics S2：关节创建日志 + 角度采样（门板在重力下摆动被限位钳制）
         joint_angles = [float(m) for m in
                         __import__("re").findall(r"joint post-door angle=([\d.-]+)", proc.stdout)]

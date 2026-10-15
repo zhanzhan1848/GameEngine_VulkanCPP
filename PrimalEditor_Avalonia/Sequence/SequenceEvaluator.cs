@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using PrimalEditor_Avalonia.Common;
 
 namespace PrimalEditor_Avalonia.Sequence;
@@ -92,6 +93,26 @@ public static class SequenceEvaluator
         if (right.Frame == left.Frame) return left.Value;
         var t = (frame - left.Frame) / (float)(right.Frame - left.Frame);
         return left.Value + (right.Value - left.Value) * t;
+    }
+
+    /// <summary>
+    /// 事件轨在 (fromFrame, toFrame] 区间内应触发的事件（sequence S2）。
+    /// 播放推进专用——调度器保证每个事件在播放生命周期内恰一次；
+    /// seek 跳帧不走此口（合同"seek 不误触业务事件"）。
+    /// 区间左开右含：from 帧的事件已在上一步触发过，to 帧的在本步触发。
+    /// 返回按 (Frame, Event) Ordinal 排序（确定性）。
+    /// </summary>
+    public static List<EventKey> EventsBetween(SequenceDocument doc, int fromFrame, int toFrame)
+    {
+        var result = new List<EventKey>();
+        if (toFrame <= fromFrame) return result;   // 不后退（回绕由调度器显式处理）
+        foreach (var track in doc.Tracks.OfType<EventTrack>())
+            foreach (var key in track.Keys)
+                if (key.Frame > fromFrame && key.Frame <= toFrame)
+                    result.Add(key);
+        result.Sort((a, b) => a.Frame != b.Frame ? a.Frame.CompareTo(b.Frame)
+                                                : string.CompareOrdinal(a.Event, b.Event));
+        return result;
     }
 
     /// <summary>半开区间 [StartFrame, EndFrame) 查找 shot；越界/无效 shot 跳过。</summary>

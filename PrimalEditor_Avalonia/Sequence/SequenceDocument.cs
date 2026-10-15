@@ -23,6 +23,7 @@ namespace PrimalEditor_Avalonia.Sequence;
 [JsonDerivedType(typeof(TransformTrack), "transform")]
 [JsonDerivedType(typeof(CameraCutTrack), "cameraCut")]
 [JsonDerivedType(typeof(PropertyTrack), "property")]
+[JsonDerivedType(typeof(EventTrack), "event")]
 public abstract class SequenceTrack
 {
     /// <summary>轨道在时间轴面板上的显示名（如 "Camera" / 实体名）。</summary>
@@ -129,6 +130,25 @@ public sealed class PropertyTrack : SequenceTrack
     public List<PropertyKey> Keys { get; set; } = new();
 }
 
+/// <summary>事件轨关键帧（sequence S2，2026-10-15）：帧号 + 事件名。</summary>
+public sealed class EventKey
+{
+    /// <summary>触发帧（该帧被播放经过时触发——含）。</summary>
+    public int Frame { get; set; }
+
+    /// <summary>事件名（宿主语义——如 "play-sfx"、"open-door"）。</summary>
+    public string Event { get; set; } = "";
+}
+
+/// <summary>
+/// 事件轨：帧轴上的离散事件。求值语义（S2 合同）：事件触发次数精确——
+/// 播放推进跨过触发帧时恰一次；seek 跳帧不触发（业务事件不被 scrub 误触）。
+/// </summary>
+public sealed class EventTrack : SequenceTrack
+{
+    public List<EventKey> Keys { get; set; } = new();
+}
+
 public sealed class SequenceDocument
 {
     public const int CurrentVersion = 1;
@@ -152,6 +172,9 @@ public sealed class SequenceDocument
 
     public TransformTrack? FindTransformTrack(Guid entityGuid) =>
         Tracks.OfType<TransformTrack>().FirstOrDefault(t => t.EntityGuid == entityGuid);
+
+    public EventTrack? FindEventTrack() =>
+        Tracks.OfType<EventTrack>().FirstOrDefault();
 
     public PropertyTrack? FindPropertyTrack(Guid entityGuid, string component, string property) =>
         Tracks.OfType<PropertyTrack>().FirstOrDefault(
