@@ -219,6 +219,43 @@ EDITOR_INTERFACE u64 PhysicsBodyCreate(const PhysicsBodyDescPod* in_desc)
     return simulation::body_create(to_body_desc(in_desc));
 }
 
+// --- 关节（physics S2，2026-10-15）：实体对铰链 ----------------------------
+// jointParams 11 浮数：[anchor_xyz, axis_xyz, limitMin_deg, limitMax_deg,
+// motor(0/1 用非零浮), motorSpeed_deg_s, motorTorque, pad0, pad1]——字段序即
+// ABI 契约（Player/编辑器两端镜像同布局）。
+// 返回引擎关节 id（1 起；0=失败——未初始化/实体无 body/轴退化/世界固定端）。
+EDITOR_INTERFACE u64 PhysicsJointCreateEntities(u32 entity_a, u32 entity_b, const f32* jointParams)
+{
+    if (!jointParams || !simulation::is_initialized()) return 0;
+    const auto find_a = g_materialized_bodies.find(id::index(entity_a));
+    const auto find_b = g_materialized_bodies.find(id::index(entity_b));
+    if (find_a == g_materialized_bodies.end() || find_b == g_materialized_bodies.end()) return 0;
+
+    simulation::joint_desc d{};
+    d.body_a = find_a->second;
+    d.body_b = find_b->second;
+    d.world_anchor = math::v3{ jointParams[0], jointParams[1], jointParams[2] };
+    d.axis = math::v3{ jointParams[3], jointParams[4], jointParams[5] };
+    d.limit_min_deg = jointParams[6];
+    d.limit_max_deg = jointParams[7];
+    d.motor = jointParams[8] != 0.f;
+    d.motor_speed_deg_sec = jointParams[9];
+    d.motor_torque = jointParams[10];
+    return simulation::joint_create(d);
+}
+
+EDITOR_INTERFACE u32 PhysicsJointRemove(u64 joint_id)
+{
+    return simulation::joint_remove(joint_id) ? 1u : 0u;
+}
+
+// 状态查询：out[0]=角度（度），out[1]=锚点分离（米）。关节不存在返回 0。
+EDITOR_INTERFACE u32 PhysicsJointGetState(u64 joint_id, f32* out2)
+{
+    if (!out2) return 0;
+    return simulation::joint_get_state(joint_id, out2[0], out2[1]) ? 1u : 0u;
+}
+
 EDITOR_INTERFACE u32 PhysicsBodyRemove(u64 body_id)
 {
     return simulation::body_remove(body_id) ? 1u : 0u;

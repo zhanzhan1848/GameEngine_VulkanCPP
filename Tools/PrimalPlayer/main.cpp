@@ -91,6 +91,11 @@ std::uint32_t AudioResolveGain(const char* group, float voice_gain, float* out);
 void AudioSetHostPlay(void* callback);
 std::uint32_t AudioPlay(const char* path, const char* group, float voice_gain,
                         float pan, std::uint32_t loop);
+// physics S2：实体对铰链（EngineDLL PhysicsAPI——参数 11 浮数镜像见导出注释）
+std::uint64_t PhysicsJointCreateEntities(std::uint32_t entity_a, std::uint32_t entity_b,
+                                         const float* joint_params);
+std::uint32_t PhysicsJointRemove(std::uint64_t joint_id);
+std::uint32_t PhysicsJointGetState(std::uint64_t joint_id, float* out2);
 std::uint32_t AddEntityCamera(std::uint32_t entity_id, std::uint32_t projection_type,
                               float field_of_view, float aspect_ratio, float near_z,
                               float far_z, const float* up_vector);
@@ -235,6 +240,17 @@ struct RuntimeSeqPosTrack {
     std::string entity_name;
     std::vector<RuntimeSeqPosKey> keys;
 };
+// physics S2：`joint "A" "B" <axis xyz> <anchor xyz> <limMin> <limMax>
+// <motor> <motorSpeed> <motorTorque>` 顶层行——实体对按名引用
+struct RuntimeJointRow
+{
+    std::string entity_a, entity_b;
+    float axis[3]{0, 1, 0};
+    float anchor[3]{0, 0, 0};
+    float limit_min = 0, limit_max = 0;
+    float motor = 0, motor_speed = 0, motor_torque = 0;
+};
+
 // audio S2：`audiomix "<group>" <gain>` 顶层行——混音分组注册
 struct AudioMixRow { std::string group; float gain = 1.f; };
 
@@ -249,6 +265,7 @@ struct RuntimeSequence {
 struct RuntimeScene {
     RuntimeSequence sequence;   // sequence S1：顶层序列行
     std::vector<AudioMixRow> audio_mix;   // audio S2：顶层混音分组行
+    std::vector<RuntimeJointRow> joints;  // physics S2：顶层关节行
     std::string scene_name = "Scene";
     float env[24]{};
     std::vector<RuntimeEntity> entities;
@@ -333,6 +350,27 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
         if (key == "scene") { out.scene_name = ParseQuoted(rest); continue; }
         if (key == "env") { ParseFloats(rest, out.env, 24); continue; }
 
+        // physics S2：`joint "A" "B" <axis...> <anchor...> <limits> <motor>`
+        if (key == "joint") {
+            RuntimeJointRow jr;
+            const auto a = ParseQuoted(rest);
+            const auto closeA = rest.find('"', 1);
+            const auto afterA = rest.substr(closeA + 1);
+            jr.entity_b = ParseQuoted(afterA);
+            jr.entity_a = a;
+            const auto closeB = afterA.rfind('"');   // 闭引号（find(,1) 会命中开引号——数值错位坑）
+            if (closeB != std::string::npos) {
+                float v[11];
+                if (ParseFloats(afterA.substr(closeB + 1), v, 11)) {
+                    jr.axis[0] = v[0]; jr.axis[1] = v[1]; jr.axis[2] = v[2];
+                    jr.anchor[0] = v[3]; jr.anchor[1] = v[4]; jr.anchor[2] = v[5];
+                    jr.limit_min = v[6]; jr.limit_max = v[7];
+                    jr.motor = v[8]; jr.motor_speed = v[9]; jr.motor_torque = v[10];
+                    out.joints.push_back(jr);
+                }
+            }
+            continue;
+        }
         // audio S2：`audiomix "<group>" <gain>`
         if (key == "audiomix") {
             const std::string group = ParseQuoted(rest);
@@ -577,6 +615,9 @@ bool ResolveBuiltinMesh(const std::string& name, std::uint32_t& out_type,
 static std::vector<std::uint32_t> g_seq_prop_entity;
 // pfx：（引擎实体 id, 发射器 id）——主循环定期打印首个发射器统计
 static std::vector<std::pair<std::uint32_t, std::uint32_t>> g_pfx_emitters;
+
+// physics S2：活动关节（id + 显示名）——主循环定期打印状态（E2E 断言用）
+static std::vector<std::pair<std::uint64_t, std::string>> g_scene_joints;
 
 // audio S2：空间声源登记（voice_index 对应 PlayerAudioPlaySpatial 的注册序）
 struct AudioVoiceInfo
@@ -918,6 +959,38 @@ std::uint32_t InjectScene(RuntimeScene& scene,
                              emitter, e.name.c_str());
             }
         }
+    }
+
+    // physics S2：关节注入（实体对按名解析引擎实体；物化 body 表驱动）
+    g_scene_joints.clear();
+    for (const auto& jr : scene.joints) {
+        const RuntimeEntity* ea = nullptr;
+        const RuntimeEntity* eb = nullptr;
+        for (const auto& e : scene.entities) {
+            if (e.name == jr.entity_a) ea = &e;
+            if (e.name == jr.entity_b) eb = &e;
+        }
+        if (!ea || !eb || ea->engine_entity == 0xFFFFFFFFu || eb->engine_entity == 0xFFFFFFFFu) {
+            std::fprintf(stderr, "[player] joint '%s'-'%s' target not found — skipped\n",
+                         jr.entity_a.c_str(), jr.entity_b.c_str());
+            continue;
+        }
+        // PhysicsAPI 契约字段序：[anchor_xyz, axis_xyz, limits, motor, speed, torque]
+        float params[11] = {
+            jr.anchor[0], jr.anchor[1], jr.anchor[2],
+            jr.axis[0], jr.axis[1], jr.axis[2],
+            jr.limit_min, jr.limit_max, jr.motor, jr.motor_speed, jr.motor_torque,
+        };
+        const std::uint64_t jid = PhysicsJointCreateEntities(
+            ea->engine_entity, eb->engine_entity, params);
+        if (jid == 0) {
+            std::fprintf(stderr, "[player] joint '%s'-'%s' create failed\n",
+                         jr.entity_a.c_str(), jr.entity_b.c_str());
+            continue;
+        }
+        g_scene_joints.push_back({ jid, jr.entity_a + "-" + jr.entity_b });
+        std::fprintf(stderr, "[player] joint %llu created ('%s'-'%s')\n",
+                     (unsigned long long)jid, jr.entity_a.c_str(), jr.entity_b.c_str());
     }
 
     // sequence S1：序列轨按实体名绑定引擎实体（目标不在场景 → 跳过并记日志）。
@@ -1498,6 +1571,14 @@ int main(int argc, char** argv)
             std::uint32_t active = 0, capacity = 0;
             if (PfxGetEmitterStats(g_pfx_emitters.front().second, &active, &capacity))
                 std::printf("pfx active=%u capacity=%u\n", active, capacity);
+        }
+        // physics S2：关节状态采样（每 15 帧）
+        if (!g_scene_joints.empty() && frame_counter % 15 == 0) {
+            for (const auto& [jid, name] : g_scene_joints) {
+                float st[2] = { 0.f, 0.f };
+                if (PhysicsJointGetState(jid, st))
+                    std::printf("joint %s angle=%.2f sep=%.4f\n", name.c_str(), st[0], st[1]);
+            }
         }
         ++frame_counter;
 

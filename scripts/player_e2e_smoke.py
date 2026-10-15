@@ -144,6 +144,19 @@ def build_package(pkg_dir: Path) -> Path:
         "navagent 0.4 1.8 3\n"
         "end\n"
         "entity\n"
+        'name "post"\n'
+        "pos 2 6 2\nrot 0 0 0\nscl 1 1 1\n"
+        "builtin box\n"
+        "collider 0 0.25 1 0.25 0 0 0 0 0\n"
+        "end\n"
+        "entity\n"
+        'name "door"\n'
+        "pos 3 6 2\nrot 0 0 0\nscl 1 1 1\n"
+        "builtin box\n"
+        "collider 0 0.5 0.25 0.25 0 0 0 0 0\n"
+        "rigidbody 1 1 0.05 0.5 0 0 0\n"
+        "end\n"
+        "entity\n"
         'name "mover"\n'
         "pos 0 4 0\nrot 0 0 0\nscl 1 1 1\n"
         "builtin box\n"
@@ -164,7 +177,9 @@ def build_package(pkg_dir: Path) -> Path:
         "seqkey 59 8 0\n"
         'seqpos "mover" 2\n'
         "seqposkey 0 0 4 0 0 0 0 1 1 1 0\n"
-        "seqposkey 59 0 1 0 0 0 0 1 1 1 0\n",
+        "seqposkey 59 0 1 0 0 0 0 1 1 1 0\n"
+        # physics S2 E2E：门板铰链（重力下摆被限位钳制；角度采样断言）
+        'joint "post" "door" 0 0 1 2 6 2 -80 80 0 0 0\n',
         encoding="utf-8",
     )
     return pkg
@@ -262,6 +277,15 @@ def main() -> int:
         checks["Audio 空间声采样"] = len(spatial_gains) >= 2
         checks["Audio 空间声增益<1（衰减生效）"] = (
             len(spatial_gains) >= 2 and 0.01 <= max(spatial_gains) < 0.99)
+        # physics S2：关节创建日志 + 角度采样（门板在重力下摆动被限位钳制）
+        joint_angles = [float(m) for m in
+                        __import__("re").findall(r"joint post-door angle=([\d.-]+)", proc.stdout)]
+        checks["Joint 关节创建"] = "joint" in log and "created" in log
+        checks["Joint 角度采样"] = len(joint_angles) >= 2
+        checks["Joint 门板摆动（|角度|>5°）"] = (
+            len(joint_angles) >= 2 and max(abs(a) for a in joint_angles) > 5.0)
+        checks["Joint 限位钳制（|角度|≤85°）"] = (
+            len(joint_angles) >= 2 and max(abs(a) for a in joint_angles) <= 85.0)
         # pfx：发射器创建日志 + 粒子统计非零（系统在跑）
         pfx_active = [int(m) for m in __import__("re").findall(r"pfx active=(\d+)", proc.stdout)]
         checks["PFX 发射器创建"] = "pfx emitter" in log and "created" in log

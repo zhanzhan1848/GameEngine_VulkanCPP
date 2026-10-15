@@ -46,8 +46,23 @@ namespace PrimalEditor_Avalonia.Content;
 /// The editor is the single source of truth for the schema (文档模型优先) —
 /// the player never reads .primal/scene JSON or the migration logic.
 /// </summary>
+/// <summary>physics S2：待导出关节描述（编辑器命令/UI 填充；导出后清空）。</summary>
+public sealed class PendingJointRow
+{
+    public string EntityA = "";
+    public string EntityB = "";
+    public float AxisX, AxisY, AxisZ;
+    public float AnchorX, AnchorY, AnchorZ;
+    public float LimitMinDeg, LimitMaxDeg;
+    public bool Motor;
+    public float MotorSpeedDegSec, MotorTorque;
+}
+
 public static class RuntimeSceneExporter
 {
+    /// <summary>physics S2：joint 行注入队列（run.export 消费后清空）。</summary>
+    public static readonly System.Collections.Generic.List<PendingJointRow> PendingJointRows = new();
+
     public const string FormatHeader = "# primal-runtime-scene v2";
 
     /// <summary>portable 模式资产落地子目录（包文件旁）。</summary>
