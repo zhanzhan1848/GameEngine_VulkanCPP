@@ -49,7 +49,7 @@ endif()
 # ContentTools 提供 cook-mesh 等资产离线 verb；contenttools_pipeline 提供
 # A9 PR2 的产物读回（SceneBlobReader WalkSceneBlob）。
 find_package(ZLIB REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE EngineDLL ContentTools contenttools_pipeline ZLIB::ZLIB)
+target_link_libraries(${PROJECT_NAME} PRIVATE EngineDLL Engine ContentTools contenttools_pipeline ZLIB::ZLIB)
 
 # Offline command surface has its own snapshot (the editor attribute registry
 # snapshot does not include these one-shot verbs). No GPU or running editor.

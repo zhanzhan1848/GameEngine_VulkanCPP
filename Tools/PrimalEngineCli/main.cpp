@@ -27,6 +27,7 @@
 #include "common/CardBake.h"
 // sc-bake-surface: per-card 真实表面页烘焙（SC per-mesh 计划 P1）
 #include "common/CardSurfaceBake.h"
+#include "Graphics/Baking/LightmapBaker.h"
 #include <stb_image.h>
 
 #include <cstdint>
@@ -2157,6 +2158,7 @@ int VerbSchema()
         "{\"name\":\"--quality\",\"type\":\"integer\",\"required\":false}],\"returns\":\"object\"},"
         "{\"verb\":\"build-shaders\",\"description\":\"重建引擎着色器 metallib（cmake --target BuildEngineShaderBlob）\",\"params\":["
         "{\"name\":\"--build-dir\",\"type\":\"string\",\"required\":false}],\"returns\":\"object\"},"
+        "{\"verb\":\"bake-lightmaps\",\"description\":\".model 容器离线 lightmap 烘焙（CPU BVH 积分；带 UVLM 的 mesh 进烘焙，其余作遮挡）\",\"params\":[\"--in\",\"--out\"],\"returns\":\"object\"},"
         "{\"verb\":\"bake-gi\",\"description\":\"静态 GI 探针烘焙（需活管线场景；离线持久化通道未接，当前结构化拒绝）\",\"params\":[],\"returns\":\"object\"}"
         "]}";
     PrintOk(table);
@@ -2463,6 +2465,133 @@ int VerbBuildShaders(int argc, char** argv)
     return kExitOk;
 }
 
+// --- bake-lightmaps（2026-10-19 lightmap 计划 M6）：.model 容器离线烘焙 ---
+// 容器重放骨架（同 VerbBakeSdf/CountMeshStats）+ CPU BVH 积分器直喂
+//（Graphics/Baking/LightmapBaker）。带 UVLM 段的 mesh 进烘焙，其余 trace-only
+//（BVH 遮挡）。灯光/天空为 CLI 参数（方向光默认对齐引擎 SunContract 姿态）；
+// 场景级灯光烘焙走编辑器 scene.bake_lightmaps。
+int VerbBakeLightmaps(int argc, char** argv)
+{
+    const char* inPath = nullptr;
+    const char* outDir = nullptr;
+    u32 atlas = 2048, spp = 64, bounces = 3;
+    f32 density = 16.f, sunIntensity = 3.f, skyIntensity = 1.f;
+    bool denoise = true;
+    f32 sunDir[3] = {0.548821f, -0.768350f, 0.329293f};
+    f32 sunColor[3] = {1.f, 1.f, 1.f};
+
+    for (int i = 0; i < argc; ++i) {
+        if (!std::strcmp(argv[i], "--in") && i + 1 < argc) inPath = argv[++i];
+        else if (!std::strcmp(argv[i], "--out") && i + 1 < argc) outDir = argv[++i];
+        else if (!std::strcmp(argv[i], "--atlas") && i + 1 < argc) atlas = (u32)std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--spp") && i + 1 < argc) spp = (u32)std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--bounces") && i + 1 < argc) bounces = (u32)std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--density") && i + 1 < argc) density = (f32)std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--sun") && i + 1 < argc) {
+            if (std::sscanf(argv[++i], "%f,%f,%f", &sunDir[0], &sunDir[1], &sunDir[2]) != 3) {
+                PrintError("INVALID_PARAMS", "--sun 需要 x,y,z", "例：--sun 0.55,-0.77,0.33");
+                return kExitUsage;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--sun-color") && i + 1 < argc) {
+            if (std::sscanf(argv[++i], "%f,%f,%f", &sunColor[0], &sunColor[1], &sunColor[2]) != 3) {
+                PrintError("INVALID_PARAMS", "--sun-color 需要 r,g,b", "例：--sun-color 1,0.95,0.9");
+                return kExitUsage;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--sun-intensity") && i + 1 < argc) sunIntensity = (f32)std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--sky") && i + 1 < argc) skyIntensity = (f32)std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--no-denoise")) denoise = false;
+        else {
+            PrintError("INVALID_PARAMS", "未知参数", argv[i]);
+            return kExitUsage;
+        }
+    }
+    if (!inPath || !outDir) {
+        PrintError("INVALID_PARAMS", "需要 --in <scene.model> 与 --out <dir>",
+                   "示例: primal-engine bake-lightmaps --in Sponza.model --out Content/Bakes/sponza --density 0.05");
+        return kExitUsage;
+    }
+
+    FILE* f = std::fopen(inPath, "rb");
+    if (!f) { PrintError("NOT_FOUND", "打开输入失败", inPath); return kExitUsage; }
+    std::fseek(f, 0, SEEK_END);
+    long size = std::ftell(f);
+    std::fseek(f, 0, SEEK_SET);
+    std::vector<u8> bytes(size > 0 ? (size_t)size : 1);
+    const size_t got = std::fread(bytes.data(), 1, bytes.size(), f);
+    std::fclose(f);
+    if (got != bytes.size()) { PrintError("IO_ERROR", "读取输入失败", inPath); return kExitEngine; }
+
+    primal::tools::scene_data sd{};
+    sd.buffer = bytes.data();
+    sd.buffer_size = static_cast<u32>(bytes.size());
+
+    primal::graphics::baking::BakeScene scene;
+    std::vector<std::vector<u32>> ownedIndices;  // 16 位索引升位持有
+    primal::utl::vector<primal::tools::ErrorReport> errs;
+    u32 bakeable = 0, traceOnly = 0;
+    primal::tools::pipeline::WalkSceneBlob(
+        sd,
+        [&](u32, const primal::tools::pipeline::PackedMeshView& view) {
+            if (view.num_vertices == 0 || view.num_indices < 3) return;
+            primal::graphics::baking::BakeMesh m{};
+            m.positions = reinterpret_cast<const float*>(view.position_buffer);
+            m.indices = nullptr;
+            m.lightmap_uvs = (view.lightmap_uv_count >= view.num_vertices)
+                                 ? view.lightmap_uvs : nullptr;
+            m.vertex_count = view.num_vertices;
+            m.index_count = view.num_indices;
+            if (view.index_size == 4) {
+                m.indices = reinterpret_cast<const u32*>(view.index_buffer);
+            } else {
+                ownedIndices.emplace_back(view.num_indices);
+                auto& dst = ownedIndices.back();
+                const auto* src = reinterpret_cast<const u16*>(view.index_buffer);
+                for (u32 i = 0; i < view.num_indices; ++i) dst[i] = src[i];
+                m.indices = dst.data();
+            }
+            m.name = view.name;
+            scene.meshes.push_back(m);
+            if (m.lightmap_uvs) ++bakeable; else ++traceOnly;
+        },
+        errs);
+    if (scene.meshes.empty()) {
+        PrintError("INVALID_INPUT", "容器内没有可烘焙网格", inPath);
+        return kExitEngine;
+    }
+
+    primal::graphics::baking::BakeLight light;
+    light.type = primal::graphics::baking::BakeLight::Type::Directional;
+    light.intensity = sunIntensity;
+    light.color[0] = sunColor[0]; light.color[1] = sunColor[1]; light.color[2] = sunColor[2];
+    light.direction[0] = sunDir[0]; light.direction[1] = sunDir[1]; light.direction[2] = sunDir[2];
+    scene.lights.push_back(light);
+    scene.sky.intensity = skyIntensity;
+
+    auto settings = primal::graphics::baking::DefaultLightmapBakeSettings();
+    settings.atlas_size = atlas;
+    settings.samples_per_texel = spp;
+    settings.bounces = bounces;
+    settings.texel_density = density;
+    settings.denoise = denoise ? 1 : 0;
+    std::snprintf(settings.output_dir, sizeof(settings.output_dir), "%s", outDir);
+
+    const auto r = primal::graphics::baking::BakeLightmaps(scene, settings, nullptr, nullptr);
+    if (!r.ok) {
+        PrintError("ENGINE_ERROR", "烘焙失败", r.error.c_str());
+        return kExitEngine;
+    }
+    char okJson[1024];
+    std::snprintf(okJson, sizeof(okJson),
+                  "{\"path\":\"%s\",\"atlas\":[%u,%u],\"entries\":%zu,"
+                  "\"bakeable_meshes\":%u,\"trace_only\":%u}",
+                  r.output_path.c_str(), r.atlas_width, r.atlas_height,
+                  r.entries.size(), bakeable, traceOnly);
+    PrintOk(okJson);
+    return kExitOk;
+}
+
 int VerbBakeGi()
 {
     // GIBakeStaticProbes 挂在已初始化的标准管线上（编辑器"烘焙"按钮路径），
@@ -2642,6 +2771,7 @@ int Run(int argc, char** argv)
     if (verb == "import-texture") return VerbImportTexture(argc - 2, argv + 2);
     if (verb == "bake-vt") return VerbBakeVt(argc - 2, argv + 2);
     if (verb == "build-shaders") return VerbBuildShaders(argc - 2, argv + 2);
+    if (verb == "bake-lightmaps") return VerbBakeLightmaps(argc - 2, argv + 2);
     if (verb == "bake-gi") return VerbBakeGi();
     if (verb == "selftest") return VerbSelftestEvents();
     if (verb == "schema") return VerbSchema();
