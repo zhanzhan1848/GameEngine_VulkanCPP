@@ -82,6 +82,34 @@
 | `PRIMAL_LIGHTMAP_DEBUG=2` | composite 全屏纯洋红（消费链诊断档） |
 | `PRIMAL_LIGHTMAP_BAKE=1` | Sponza 测试内帧 20 烘焙（密度自适应） |
 
+## 5.5 v2 架构轮（2026-10-20 用户定调：独立渲染 + 路径追踪 64spp）
+
+**需求变更**：lightmap 渲染与 Lumen 动态 GI 解耦（不再做 fusion 间接信号
+置换）；烘焙必须是离线路径追踪且达 64spp。
+
+**烘焙（LightmapBaker v2）**：积分核改逐纹素路径追踪——顶点 NEE（太阳/
+点/聚光含阴影射线）+ 自发光命中 + 天空 miss + 余弦半球 BSDF 采样，
+depth≥2 俄罗斯轮盘；产物 = 表面完整出射辐亮度（直射+多弹间接）；
+samples_per_texel 默认 64。新增 TestBakerSkyDirect 天空直照回归。
+
+**运行时独立消费**：FusionCompositeModule 钩子全撤（文件还原基线，Lumen
+侧零改动、fluid 冲突面消除）；独立 composite 移至 fusion 最终输出之后、
+后处理之前（两渲染图站点镜像），lightmap 覆盖像素整像素替换；
+FrameInputs.indirect_tex → scene_color_tex。
+
+**本轮新坑（黑图第三根因）**：演示地板 OBJ 绕序反 → cooker 法线朝下 →
+半球射线全朝地下、天空/太阳零贡献。判别手段 = PRIMAL_LIGHTMAP_TRACE_TEXEL
+单纹素分解（E0/miss 统计/sky 值）+ 样本逐分解。另：Vulkan deferred 实际
+支持点光（旧记忆"仅单太阳"过时）。
+
+**e2e 证据**（SPGI_CAM=0,6.5,-3,-42,0，30m 白地板+中庭点光，64spp）：
+LMAP 均值 0.34/点光池峰 3.9；off/on 66.2% 像素显著差（max=520）；ON=
+暖光池+径向衰减+柱基遮挡阴影（analyze_image 复核通过）；
+/tmp/mini_lightmap/final2_*.png。单测 13 项全绿。
+
+**v2 已知边界**：独立替换会覆盖 lightmap 像素的镜面/SSGI（漫反射表面
+无感；后续可加 specular 透传项）；Dawn 无 fusion 链维持降级。
+
 ## 6. 遗留与后续轮新增证据（2026-10-19 深夜轮）
 
 **§6.1 三根因修复轮（3f98ee5c）——真实视觉差异达成**：前轮"79% 变化"实为
