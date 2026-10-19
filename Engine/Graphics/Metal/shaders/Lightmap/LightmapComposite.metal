@@ -1,9 +1,9 @@
 // Lightmap composite — Metal 移植（2026-10-19 计划，M5）。
 // 语义与 Vulkan shaders/Lightmap/LightmapComposite.frag 完全一致：
-// fusion 间接信号的旁路改写级（见该文件头注释）。
+// 独立消费级（fusion 最终输出之后整像素替换烘焙完整光照，见该文件头）。
 //
 // 绑定（与 LightmapModule 描述符集一致，Metal 纹理按 set 序）：
-//   texture(0) = indirectIn（FusionIndirect 本帧输出）
+//   texture(0) = indirectIn（场景最终 HDR 颜色，底图）
 //   texture(1) = lightmapTex（RGBA16F 烘焙页）
 //   texture(2) = lightmapUV（UV pre-pass RT；z=0 无 lightmap）
 // push 常量（MetalCommandBuffer::PushConstants → setFragmentBytes @ buffer(2)）：

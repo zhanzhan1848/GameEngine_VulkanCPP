@@ -2374,10 +2374,20 @@ void TestVulkanSponzaRenderGraph::Run() {
                     std::cerr << "[Lightmap][e2e] FloorUVLM.model missing" << std::endl;
                 }
             }
+            // 烘焙演示光源：中庭内一盏暖点光。Vulkan deferred 实时链只支持
+            // 太阳（已知缺口）——OFF 地板近黑，ON 为烘焙出的暖光池 + 柱列
+            // 投影，直观展示"独立离线烘焙 vs 动态 GI"的差异面。
+            RenderLight lmDemoLight{};
+            lmDemoLight.type = LightType::Point;
+            lmDemoLight.position = v3{0.0f, 3.2f, 0.0f};
+            lmDemoLight.color = v3{1.0f, 0.85f, 0.6f};
+            lmDemoLight.intensity = 80.0f;
+            lmDemoLight.range = 40.0f;
+            scene_.AddLight(lmDemoLight);
             auto lmSettings = primal::graphics::baking::DefaultLightmapBakeSettings();
             lmSettings.atlas_size = 1024;
-            lmSettings.samples_per_texel = 32;
-            lmSettings.bounces = 2;
+            lmSettings.samples_per_texel = 64;  // 用户基线 spp
+            lmSettings.bounces = 3;
             // DLSS Sponza 为厘米级源网格（世界面积巨大）——密度自适应减半
             // 直到装进图集（验证消费链路而非画质）。
             std::snprintf(lmSettings.output_dir, sizeof(lmSettings.output_dir), "%s",

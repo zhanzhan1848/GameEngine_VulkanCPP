@@ -1509,15 +1509,14 @@ void StandardRenderPipeline::InitializeSubsystems() {
                                    fusion_composite_ps_, render_width_, render_height_);
     }
 
-    // Lightmap 旁路（2026-10-19 计划）：独立改写级，模块自装 shader；非
-    // Vulkan 平台或 spv 未部署时 Initialize 返回 false、模块不存在——
-    // 渲染图与既有路径零差异。仅在 fusion 存在时有意义（改写其间接信号）。
+    // Lightmap 独立消费级（2026-10-20 用户定调：与 Lumen 动态 GI 解耦）：
+    // 模块自装 shader；非 Vulkan/Metal 平台或 shader 未部署时 Initialize
+    // 返回 false、模块不存在——渲染图与既有路径零差异。仅在 fusion 存在
+    // 时有意义（在其最终输出之后整像素替换烘焙结果）。
     if (fusion_module_) {
         lightmap_module_ = std::make_unique<LightmapModule>();
         if (!lightmap_module_->Initialize(device_, blit_vs_, render_width_, render_height_)) {
             lightmap_module_.reset();
-        } else {
-            fusion_module_->SetLightmapHook(lightmap_module_.get());
         }
     }
 
@@ -4411,6 +4410,19 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         fusionOut = fusion_module_->AddPasses(graph, fusionIn);
     }
 
+    // Lightmap 独立消费级（2026-10-20）：fusion 最终输出之后、后处理之前，
+    // lightmap 覆盖像素（UV RT z>0.5）整像素替换为烘焙完整光照（直射+
+    // 间接，离线路径追踪）。未烘焙/未激活时零 pass、后处理输入原样。
+    RGResourceHandle lightmapOutRG;
+    if (lightmap_module_ && fusionOut.output_tex != handles::INVALID_RESOURCE) {
+        LightmapModule::FrameInputs lmComp;
+        lmComp.frame_index = static_cast<u32>(frameCount_);
+        lmComp.render_width = render_width_;
+        lmComp.render_height = render_height_;
+        lmComp.scene_color_tex = fusionOut.output_tex;
+        lightmapOutRG = lightmap_module_->AddCompositePass(graph, lmComp, fusionOut.output_rg);
+    }
+
     // ========================================================================
     // Step 10.5: PostProcess — TAA + Bloom + ToneMapping
     // ========================================================================
@@ -4420,7 +4432,9 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // converts HDR→LDR (ACES) and composites Bloom + AO + SSGI.
     // Order: TAA (on jittered HDR) → Bloom → ToneMapping.
     RGResourceHandle postProcessInputRG;
-    if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
+    if (lightmapOutRG.IsValid()) {
+        postProcessInputRG = lightmapOutRG;
+    } else if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
         postProcessInputRG = fusionOut.output_rg;
     } else if (deferredOut.deferred_output_rg.IsValid()) {
         postProcessInputRG = deferredOut.deferred_output_rg;
@@ -6121,11 +6135,24 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             fusionOut = fusion_module_->AddPasses(graph, fusionIn);
         }
 
+        // Lightmap 独立消费级（与 BuildRenderGraph 站点镜像，见彼处注释）。
+        RGResourceHandle lightmapOutRG;
+        if (lightmap_module_ && fusionOut.output_tex != handles::INVALID_RESOURCE) {
+            LightmapModule::FrameInputs lmComp;
+            lmComp.frame_index = static_cast<u32>(frameCount_);
+            lmComp.render_width = render_width_;
+            lmComp.render_height = render_height_;
+            lmComp.scene_color_tex = fusionOut.output_tex;
+            lightmapOutRG = lightmap_module_->AddCompositePass(graph, lmComp, fusionOut.output_rg);
+        }
+
         // --- PostProcess: TAA → Bloom → ToneMapping ---
         // Mirrors BuildRenderGraph Step 10.5. TAA resolves the sub-pixel jitter
         // injected by GPUDrivenDraw (jitter gate is enabled below when TAA runs).
         RGResourceHandle ppInputRG;
-        if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
+        if (lightmapOutRG.IsValid()) {
+            ppInputRG = lightmapOutRG;
+        } else if (fusionOut.output_tex != handles::INVALID_RESOURCE) {
             ppInputRG = fusionOut.output_rg;
         } else if (deferredOut.deferred_output_rg.IsValid()) {
             ppInputRG = deferredOut.deferred_output_rg;

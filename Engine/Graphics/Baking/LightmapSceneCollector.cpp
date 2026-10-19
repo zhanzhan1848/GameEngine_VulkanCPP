@@ -5,6 +5,7 @@
 #include "CommonHeaders.h"
 #include "Content/ContentToEngine.h"
 #include "Graphics/RenderScene.h"
+#include "Engine/Common/CoreLogStream.h"  // PRIMAL_LOG_STREAM
 
 #include <cmath>
 #include <cstring>
@@ -110,6 +111,17 @@ bool CollectBakeScene(const RenderScene& renderScene, CollectedBakeScene& out,
         out.scene.lights.push_back(bl);
     }
 
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[Lightmap][collect] meshes=" << out.scene.meshes.size()
+        << " lights=" << out.scene.lights.size();
+    if (!out.scene.lights.empty()) {
+        const auto& l0 = out.scene.lights[0];
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[Lightmap][collect] light0 type=" << (int)l0.type
+            << " intensity=" << l0.intensity
+            << " dir=(" << l0.direction[0] << "," << l0.direction[1]
+            << "," << l0.direction[2] << ")";
+    }
     if (out.scene.meshes.empty()) {
         err = failedAssets ? "no proxies resolved (asset lookups failed)"
                            : "scene has no render proxies";

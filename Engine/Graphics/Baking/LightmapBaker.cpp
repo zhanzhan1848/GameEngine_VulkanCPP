@@ -22,6 +22,7 @@
 #include "CommonHeaders.h"
 #include "Graphics/Utilities/BVH.hpp"
 #include "JobSystem/JobSystem.h"
+#include "Engine/Common/CoreLogStream.h"
 
 #include <algorithm>
 #include <cmath>
@@ -35,7 +36,7 @@ namespace primal::graphics::baking {
 LightmapBakeSettings DefaultLightmapBakeSettings() {
     LightmapBakeSettings s{};
     s.atlas_size = 2048;
-    s.samples_per_texel = 256;
+    s.samples_per_texel = 64;   // spp 基线（用户定调：路径追踪 64spp）
     s.bounces = 3;
     s.texel_density = 16.0f;
     s.denoise = 1;
@@ -55,6 +56,7 @@ struct Vec3 {
 inline Vec3 Add(const Vec3& a, const Vec3& b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 inline Vec3 Sub(const Vec3& a, const Vec3& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 inline Vec3 Scale(const Vec3& a, float s) { return {a.x * s, a.y * s, a.z * s}; }
+inline Vec3 Mul(const Vec3& a, const Vec3& b) { return {a.x * b.x, a.y * b.y, a.z * b.z}; }
 inline float Dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 inline Vec3 Cross(const Vec3& a, const Vec3& b) {
     return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
@@ -346,8 +348,8 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
     // ---- 3 build：全场景 BVH + 三角形→mesh 映射 ----
     utl::vector<math::v3> bvhVerts;
     utl::vector<u32> bvhIndices;
-    // mesh = allMeshes 索引；bakeIdx = bakeable 内索引（trace-only 为无效值，
-    // gather 命中做一阶直射着色，见 samplePrev）。
+    // mesh = allMeshes 索引；bakeIdx = bakeable 内索引（v2 路径追踪不再区分：
+    // 所有命中面都按其材质（albedo/emissive）参与路径）。
     struct TriRef { std::uint32_t mesh, v0, v1, v2, bakeIdx; };
     constexpr std::uint32_t kNoBake = 0xFFFFFFFFu;
     std::vector<TriRef> triRefs;
@@ -371,130 +373,135 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
     bvh.Build(bvhVerts, bvhIndices);
     progress.Report(2, 1, 1);  // build 完成并入 trace 阶段上报
 
-    // ---- 4/5：radiosity 迭代 ----
+    // ---- 4/5：路径追踪积分（v2，2026-10-20 用户定调）----
+    // 每纹素 spp 条完整路径：顶点 NEE（太阳/点/聚光含阴影射线）+ 自发光
+    // 命中 + 天空 miss + 余弦半球 BSDF 采样，depth≥2 俄罗斯轮盘。产物 =
+    // 表面完整出射辐亮度（直射+多弹间接），运行时独立消费、不依赖动态 GI。
     const std::uint32_t texelCount = atlasW * atlasH;
-    const std::uint32_t bounces = std::max(1u, settings.bounces);
-    std::vector<Vec3> outgoing(texelCount);       // 当前阶出射（gather 源）
-    std::vector<Vec3> accum(texelCount);          // 最终间接（≥1 阶累计）
+    const std::uint32_t maxDepth = std::max(1u, settings.bounces);  // 散射事件数
+    const std::uint32_t spp = std::max(1u, settings.samples_per_texel);
+    std::vector<Vec3> accum(texelCount);
 
-    // bounce 0：直射 + 自发光（仅作源）。
+    // 命中面属性（重心位置/法线插值 + 双面翻转）——路径任意顶点复用。
+    auto hitSurface = [](const BakeMesh* m, std::uint32_t v0, std::uint32_t v1,
+                         std::uint32_t v2, float u, float v, const Vec3& rayDir,
+                         Vec3& hp, Vec3& hn) {
+        const Vec3 pa{m->positions[v0 * 3], m->positions[v0 * 3 + 1], m->positions[v0 * 3 + 2]};
+        const Vec3 pb{m->positions[v1 * 3], m->positions[v1 * 3 + 1], m->positions[v1 * 3 + 2]};
+        const Vec3 pc{m->positions[v2 * 3], m->positions[v2 * 3 + 1], m->positions[v2 * 3 + 2]};
+        const float w0 = 1.0f - u - v;
+        hp = Add(Add(Scale(pa, w0), Scale(pb, u)), Scale(pc, v));
+        if (m->normals) {
+            const Vec3 n0{m->normals[v0 * 3], m->normals[v0 * 3 + 1], m->normals[v0 * 3 + 2]};
+            const Vec3 n1{m->normals[v1 * 3], m->normals[v1 * 3 + 1], m->normals[v1 * 3 + 2]};
+            const Vec3 n2{m->normals[v2 * 3], m->normals[v2 * 3 + 1], m->normals[v2 * 3 + 2]};
+            hn = Norm(Add(Add(Scale(n0, w0), Scale(n1, u)), Scale(n2, v)));
+        } else {
+            hn = Norm(Cross(Sub(pb, pa), Sub(pc, pa)));
+        }
+        if (Dot(hn, rayDir) > 0.0f) hn = Scale(hn, -1.0f);  // 薄板/双面几何
+    };
+
     {
         const std::uint32_t blocks = 64;
         const std::uint32_t per = (texelCount + blocks - 1) / blocks;
         ParallelBlocks(blocks, [&](std::uint32_t b) {
-            const std::uint32_t s = b * per;
-            const std::uint32_t e = std::min(texelCount, s + per);
-            for (std::uint32_t i = s; i < e; ++i) {
-                const TexelSample& ts = texels[i];
-                if (!ts.valid) continue;
-                const Vec3 pos = Add(ts.pos, Scale(ts.normal, 1e-3f));
-                const Vec3 eDirect = DirectIrradiance(scene, bvh, pos, ts.normal);
-                const BakeMesh& m = *allMeshes[ts.mesh_index];
-                const float invPi = 1.0f / 3.14159265f;
-                outgoing[i] = Vec3{
-                    ts.albedo[0] * invPi * eDirect.x + m.emissive[0],
-                    ts.albedo[1] * invPi * eDirect.y + m.emissive[1],
-                    ts.albedo[2] * invPi * eDirect.z + m.emissive[2]};
-            }
-            progress.Report(2, b + 1, blocks + bounces * blocks);
-        });
-    }
-
-    // gather：命中三角形 → 插值 lightmap UV → atlas 纹素 → 上一阶值。
-    auto samplePrev = [&](const utl::BVH::HitInfo& hit, const Vec3& rayDir,
-                          const std::vector<Vec3>& prev) -> Vec3 {
-        if (!hit.hit || hit.triangle_index >= triRefs.size()) return {0, 0, 0};
-        const TriRef& ref = triRefs[hit.triangle_index];
-        if (ref.bakeIdx == kNoBake) {
-            // trace-only 命中的一阶直射着色（v1.1）：albedo/π×(太阳可见性 + 天空
-            // 环境近似)。旧"黑体吸收"语义会让多数网格无 UVLM 仅作遮挡的场景
-            // （如 Sponza 载体：墙体全部 trace-only）可烘焙面间接恒 0——墙面
-            // 反弹正是间接光的主体，不能丢。
-            const BakeMesh& bm = *allMeshes[ref.mesh];
-            const Vec3 pa{bm.positions[ref.v0 * 3], bm.positions[ref.v0 * 3 + 1],
-                          bm.positions[ref.v0 * 3 + 2]};
-            const Vec3 pb{bm.positions[ref.v1 * 3], bm.positions[ref.v1 * 3 + 1],
-                          bm.positions[ref.v1 * 3 + 2]};
-            const Vec3 pc{bm.positions[ref.v2 * 3], bm.positions[ref.v2 * 3 + 1],
-                          bm.positions[ref.v2 * 3 + 2]};
-            const float wb = 1.0f - hit.u - hit.v;
-            const Vec3 hp = Add(Add(Scale(pa, wb), Scale(pb, hit.u)), Scale(pc, hit.v));
-            Vec3 hn{0, 1, 0};
-            if (bm.normals) {
-                const Vec3 n0{bm.normals[ref.v0 * 3], bm.normals[ref.v0 * 3 + 1],
-                              bm.normals[ref.v0 * 3 + 2]};
-                const Vec3 n1{bm.normals[ref.v1 * 3], bm.normals[ref.v1 * 3 + 1],
-                              bm.normals[ref.v1 * 3 + 2]};
-                const Vec3 n2{bm.normals[ref.v2 * 3], bm.normals[ref.v2 * 3 + 1],
-                              bm.normals[ref.v2 * 3 + 2]};
-                hn = Norm(Add(Add(Scale(n0, wb), Scale(n1, hit.u)), Scale(n2, hit.v)));
-            } else {
-                hn = Norm(Cross(Sub(pb, pa), Sub(pc, pa)));
-            }
-            // 薄板/双面几何：命中的是背面时把法线翻向来向侧。
-            if (Dot(hn, rayDir) > 0.0f) hn = Scale(hn, -1.0f);
-            const Vec3 eDir = DirectIrradiance(scene, bvh, Add(hp, Scale(hn, 1e-3f)), hn);
-            // 天空环境近似：半球辐照 ≈ π·L(法线方向梯度值)；地平线下为 0。
-            const Vec3 eSky = Scale(SkyRadiance(scene.sky, hn), 3.14159265f);
+            const std::uint32_t s0 = b * per;
+            const std::uint32_t e = std::min(texelCount, s0 + per);
             const float invPi = 1.0f / 3.14159265f;
-            const Vec3 e = Add(eDir, eSky);
-            return {bm.albedo[0] * invPi * e.x, bm.albedo[1] * invPi * e.y,
-                    bm.albedo[2] * invPi * e.z};
-        }
-        const BakeMesh& m = *allMeshes[ref.mesh];
-        // Möller–Trumbore 重心：P = (1-u-v)V0 + u·V1 + v·V2。
-        const float w0 = 1.0f - hit.u - hit.v;
-        const float u = w0 * m.lightmap_uvs[ref.v0 * 2] + hit.u * m.lightmap_uvs[ref.v1 * 2] +
-                        hit.v * m.lightmap_uvs[ref.v2 * 2];
-        const float v = w0 * m.lightmap_uvs[ref.v0 * 2 + 1] + hit.u * m.lightmap_uvs[ref.v1 * 2 + 1] +
-                        hit.v * m.lightmap_uvs[ref.v2 * 2 + 1];
-        const MeshRect& r = rects[ref.bakeIdx];
-        const float fu = u * (float)r.w + (float)r.x + 0.5f;
-        const float fv = v * (float)r.h + (float)r.y + 0.5f;
-        const std::int32_t tx = std::min<std::int32_t>((std::int32_t)atlasW - 1, std::max(0, (std::int32_t)fu));
-        const std::int32_t ty = std::min<std::int32_t>((std::int32_t)atlasH - 1, std::max(0, (std::int32_t)fv));
-        return prev[(std::uint32_t)ty * atlasW + (std::uint32_t)tx];
-    };
-
-    for (std::uint32_t bounce = 1; bounce <= bounces; ++bounce) {
-        std::vector<Vec3> next(texelCount);
-        const std::uint32_t blocks = 64;
-        const std::uint32_t per = (texelCount + blocks - 1) / blocks;
-        ParallelBlocks(blocks, [&](std::uint32_t b) {
-            const std::uint32_t s = b * per;
-            const std::uint32_t e = std::min(texelCount, s + per);
-            for (std::uint32_t i = s; i < e; ++i) {
+            for (std::uint32_t i = s0; i < e; ++i) {
                 const TexelSample& ts = texels[i];
                 if (!ts.valid) continue;
-                Rng rng(HashTexel(i, bounce));
-                Vec3 t, bi;
-                Onb(ts.normal, t, bi);
+                const BakeMesh& self = *allMeshes[ts.mesh_index];
                 Vec3 sum{0, 0, 0};
-                for (std::uint32_t s2 = 0; s2 < settings.samples_per_texel; ++s2) {
-                    const Vec3 local = CosineHemisphere(rng);
-                    const Vec3 dir = Norm(Add(Add(Scale(t, local.x), Scale(bi, local.y)),
-                                              Scale(ts.normal, local.z)));
-                    const Vec3 origin = Add(ts.pos, Scale(ts.normal, 1e-3f));
-                    utl::BVH::Ray ray(ToV3(origin), ToV3(dir));
-                    ray.t_min = 1e-3f;
-                    utl::BVH::HitInfo hit;
-                    const bool hitScene = bvh.Intersect(ray, hit);
-                    Vec3 L = hitScene ? samplePrev(hit, dir, outgoing) : SkyRadiance(scene.sky, dir);
-                    sum = Add(sum, L);
+                for (std::uint32_t s = 0; s < spp; ++s) {
+                    Rng rng(HashTexel(i, s + 1));
+                    Vec3 beta{1, 1, 1};
+                    // 顶点 0 = 纹素自身：自发光即表面出射的一部分。
+                    Vec3 col{self.emissive[0], self.emissive[1], self.emissive[2]};
+                    Vec3 o = ts.pos, n = ts.normal;
+                    Vec3 alb{ts.albedo[0], ts.albedo[1], ts.albedo[2]};
+                    for (std::uint32_t depth = 0; depth <= maxDepth; ++depth) {
+                        // 顶点 NEE：f·E = albedo/π × 直射辐照（含阴影射线）。
+                        const Vec3 E = DirectIrradiance(scene, bvh, Add(o, Scale(n, 1e-3f)), n);
+                        col = Add(col, Mul(beta, Scale(Mul(alb, E), invPi)));
+                        if (depth == maxDepth) break;  // 末顶点只收 NEE 不再延伸
+                        // 俄罗斯轮盘（depth≥2）：吞吐量低的路径提前终止。
+                        if (depth >= 2) {
+                            const float q = std::max(alb.x, std::max(alb.y, alb.z));
+                            const float pCont = std::min(0.95f, std::max(0.05f, q));
+                            if (rng.NextF() >= pCont) break;
+                            beta = Scale(beta, 1.0f / pCont);
+                        }
+                        // 余弦半球 BSDF 采样；漫反射权重 f·cos/pdf = albedo。
+                        beta = Mul(beta, alb);
+                        Vec3 t, bi2;
+                        Onb(n, t, bi2);
+                        const Vec3 local = CosineHemisphere(rng);
+                        const Vec3 d = Norm(Add(Add(Scale(t, local.x), Scale(bi2, local.y)),
+                                                Scale(n, local.z)));
+                        utl::BVH::Ray ray(ToV3(Add(o, Scale(n, 1e-3f))), ToV3(d));
+                        ray.t_min = 1e-3f;
+                        utl::BVH::HitInfo hit;
+                        if (!bvh.Intersect(ray, hit)) {
+                            col = Add(col, Mul(beta, SkyRadiance(scene.sky, d)));
+                            break;
+                        }
+                        if (hit.triangle_index >= triRefs.size()) break;
+                        const TriRef& ref = triRefs[hit.triangle_index];
+                        const BakeMesh* hm = allMeshes[ref.mesh];
+                        Vec3 hp, hn;
+                        hitSurface(hm, ref.v0, ref.v1, ref.v2, hit.u, hit.v, d, hp, hn);
+                        col = Add(col, Mul(beta, Vec3{hm->emissive[0], hm->emissive[1],
+                                                      hm->emissive[2]}));
+                        o = hp; n = hn;
+                        alb = Vec3{hm->albedo[0], hm->albedo[1], hm->albedo[2]};
+                    }
+                    sum = Add(sum, col);
                 }
-                // 余弦加权 pdf = cosθ/π → E = π/N × ΣL。
-                const float scale = 3.14159265f / (float)settings.samples_per_texel;
-                const Vec3 eBounce = Scale(sum, scale);
-                Vec3 outK{ts.albedo[0] / 3.14159265f * eBounce.x,
-                          ts.albedo[1] / 3.14159265f * eBounce.y,
-                          ts.albedo[2] / 3.14159265f * eBounce.z};
-                next[i] = outK;
-                accum[i] = Add(accum[i], outK);
+                accum[i] = Scale(sum, 1.0f / (float)spp);
+                // [DIAG] PRIMAL_LIGHTMAP_TRACE_TEXEL=<idx>：单纹素分解。
+                if (const char* te = std::getenv("PRIMAL_LIGHTMAP_TRACE_TEXEL")) {
+                    const std::uint32_t ti = (std::uint32_t)std::atoi(te);
+                    if (i == ti && ts.valid) {
+                        Vec3 e0 = DirectIrradiance(scene, bvh, Add(ts.pos, Scale(ts.normal, 1e-3f)), ts.normal);
+                        std::uint32_t miss = 0, hits = 0, neeHit = 0;
+                        const BakeMesh& dm = *allMeshes[ts.mesh_index];
+                        for (int k = 0; k < 64; ++k) {
+                            Rng rng(HashTexel(i, k + 1));
+                            Vec3 t2, b2; Onb(ts.normal, t2, b2);
+                            const Vec3 lc = CosineHemisphere(rng);
+                            const Vec3 d2 = Norm(Add(Add(Scale(t2, lc.x), Scale(b2, lc.y)), Scale(ts.normal, lc.z)));
+                            utl::BVH::Ray r2(ToV3(Add(ts.pos, Scale(ts.normal, 1e-3f))), ToV3(d2));
+                            r2.t_min = 1e-3f;
+                            utl::BVH::HitInfo h2;
+                            if (!bvh.Intersect(r2, h2)) { miss++; continue; }
+                            hits++;
+                            if (h2.triangle_index < triRefs.size()) {
+                                const TriRef& rf = triRefs[h2.triangle_index];
+                                const BakeMesh* m2 = allMeshes[rf.mesh];
+                                Vec3 hp2, hn2;
+                                hitSurface(m2, rf.v0, rf.v1, rf.v2, h2.u, h2.v, d2, hp2, hn2);
+                                if (DirectIrradiance(scene, bvh, Add(hp2, Scale(hn2, 1e-3f)), hn2).x > 0.001f) neeHit++;
+                            }
+                        }
+                        PRIMAL_LOG_STREAM(Error, "Render")
+                            << "[Lightmap][DIAG] texel=" << i << " pos=(" << ts.pos.x << ","
+                            << ts.pos.y << "," << ts.pos.z << ") alb=(" << ts.albedo[0]
+                            << "," << ts.albedo[1] << "," << ts.albedo[2] << ") meshAlb=("
+                            << dm.albedo[0] << "," << dm.albedo[1] << "," << dm.albedo[2]
+                            << ") E0=(" << e0.x << "," << e0.y << "," << e0.z
+                            << ") accum=" << accum[i].x
+                            << " sky(intensity=" << scene.sky.intensity
+                            << " zen=" << scene.sky.zenith[0] << "," << scene.sky.zenith[1]
+                            << "," << scene.sky.zenith[2] << ")"
+                            << " 64ray: miss=" << miss
+                            << " hit=" << hits << " hitNEE>0=" << neeHit << std::endl;
+                    }
+                }
             }
-            progress.Report(2, blocks + (bounce - 1) * blocks + b + 1,
-                            (bounces + 1) * blocks);
+            progress.Report(2, b + 1, blocks);
         });
-        outgoing = std::move(next);
     }
 
     // ---- 6 filter：5×5 联合双边（可选） ----

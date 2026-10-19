@@ -647,7 +647,7 @@ void LightmapModule::AddUVPrePass(rendergraph::RenderGraph& graph, const FrameIn
 
 rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
     rendergraph::RenderGraph& graph, const FrameInputs& inputs,
-    rendergraph::RGResourceHandle indirect_rg) {
+    rendergraph::RGResourceHandle scene_color_rg) {
     if (!LightmapEnabledByEnv()) return rendergraph::RGResourceHandle{};
 
     // 尺寸变更（窗口 resize / 超采样档切换）→ 重建中间纹理。渲染图每帧
@@ -680,9 +680,9 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
     graph.AddPass<CompositeData>("LightmapComposite",
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::PostProcess,
-        [indirect_rg, outRG, uvReadRG, uvValid](CompositeData& data, rendergraph::RenderGraphBuilder& builder) {
+        [scene_color_rg, outRG, uvReadRG, uvValid](CompositeData& data, rendergraph::RenderGraphBuilder& builder) {
             builder.SideEffect();
-            builder.Read(indirect_rg, ResourceState::ShaderResource);
+            builder.Read(scene_color_rg, ResourceState::ShaderResource);
             if (uvValid) builder.Read(uvReadRG, ResourceState::ShaderResource);
             data.output = builder.Write(outRG, ResourceState::RenderTarget);
 
@@ -711,7 +711,7 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             // 无实体时绑 z=0 占位页（全像素走原路径/debug 分支）。
             const ResourceHandle uvTex = HasEntities() ? uv_rt_ : uv_black_tex_;
             DescData params[4] = {
-                {0, DescriptorType::SampledImage, inputs.indirect_tex},
+                {0, DescriptorType::SampledImage, inputs.scene_color_tex},
                 {1, DescriptorType::SampledImage, lightmap_tex_},
                 {2, DescriptorType::SampledImage, uvTex},
                 {3, DescriptorType::Sampler, static_cast<ResourceHandle>(sampler_)},

@@ -3,13 +3,13 @@
 // Docs/2026-10-19-lightmap-baking-and-rendering-architecture-plan.md
 // Entry point: lightmap_composite
 //
-// 该 pass 位于 FusionIndirect 与 FusionComposite 之间：读取 FusionIndirect
-// 输出（post-albedo 出射辐亮度 Lo，量纲见 FusionCompositeModule.h 注释），
-// 对持有 lightmap 的像素以烘焙页采样值替换，其余像素原样透传。FusionComposite
-// 随后按原逻辑消费改写后的纹理——Lumen 侧 shader 零改动。
+// 该 pass 位于 fusion 最终输出与后处理之间（独立消费级，2026-10-20 用户
+// 定调：与 Lumen 动态 GI 解耦）：读取场景最终 HDR 颜色，对持有 lightmap
+// 的像素整像素替换为烘焙完整光照（直射+间接，离线路径追踪产物），其余
+// 像素原样透传。Lumen 侧 shader 零改动、零感知。
 //
 // Flat descriptor bindings（Vulkan 需显式 sampler；Metal M5 移植用隐式）：
-//   binding 0 = SampledImage  indirectIn   （FusionIndirect 本帧输出）
+//   binding 0 = SampledImage  indirectIn   （场景最终 HDR 颜色，底图）
 //   binding 1 = SampledImage  lightmapTex  （RGBA16F 烘焙页）
 //   binding 2 = SampledImage  lightmapUV   （UV pre-pass RT；z=0 无 lightmap）
 //   binding 3 = Sampler       defaultSampler

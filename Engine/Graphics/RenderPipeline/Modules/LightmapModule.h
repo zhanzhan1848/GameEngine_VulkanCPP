@@ -27,17 +27,19 @@ class RenderScene;
 //                              为命中实体构建世界空间顶点/UV/索引缓冲
 //   AddUVPrePass(graph, in) —— 静态几何按实体直绘（深度 LessEqual 只读），
 //                              输出逐像素 atlas UV RT
-//   AddCompositePass(...)   —— fusion 插针：UV RT 有效像素以烘焙页替换
-//                              间接信号，无效像素透传
+//   AddCompositePass(...)   —— 独立消费级（fusion 最终输出之后）：UV RT
+//                              有效像素整像素替换为烘焙完整光照（直射+间接，
+//                              离线路径追踪产物），无效像素透传。与 Lumen
+//                              动态 GI 零耦合（2026-10-20 用户定调）。
 class LightmapModule {
 public:
     struct FrameInputs {
         u32 frame_index = 0;
         u32 render_width = 0;
         u32 render_height = 0;
-        // FusionIndirect 本帧输出的物理句柄（FusionCompositeModule 侧
-        // indirect_output_[cbIdx]），composite binding 0 直连。
-        rhi::ResourceHandle indirect_tex{rhi::handles::INVALID_RESOURCE};
+        // fusion 最终输出（FusionComposite 输出）的物理句柄，
+        // composite binding 0 直连（整像素替换的底图）。
+        rhi::ResourceHandle scene_color_tex{rhi::handles::INVALID_RESOURCE};
         // UV pre-pass 帧输入。
         math::m4x4 view_projection{};
         rendergraph::RGResourceHandle gbuffer_depth_rg{};
@@ -71,13 +73,13 @@ public:
     // 后按实体直绘。无实体时不加 pass（composite 绑 z=0 占位页）。
     void AddUVPrePass(rendergraph::RenderGraph& graph, const FrameInputs& inputs);
 
-    // 由 FusionCompositeModule::AddPasses 在两个 fusion pass 之间调用。
-    // 返回改写后间接信号的 RG 句柄；未激活（无页/环境关闭）返回无效句柄。
+    // 由 StandardRenderPipeline 在 fusion 输出之后、后处理之前调用。
+    // 返回替换后场景颜色的 RG 句柄；未激活（无页/环境关闭）返回无效句柄。
     rendergraph::RGResourceHandle AddCompositePass(rendergraph::RenderGraph& graph,
                                                    const FrameInputs& inputs,
-                                                   rendergraph::RGResourceHandle indirect_rg);
+                                                   rendergraph::RGResourceHandle scene_color_rg);
 
-    // Pass 2 绑定切换用的物理句柄（与 AddCompositePass 输出同源）。
+    // 后处理输入切换用的物理句柄（与 AddCompositePass 输出同源）。
     rhi::ResourceHandle GetOutputTexture() const { return output_tex_; }
 
     // 测试/工具旁路：显式 scale/bias 直登记（绕开场景匹配；见管线同名注）。

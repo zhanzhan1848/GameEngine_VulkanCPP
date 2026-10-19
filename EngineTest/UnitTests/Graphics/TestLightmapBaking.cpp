@@ -205,7 +205,8 @@ void TestContractSizes() {
     CHECK(sizeof(LightmapBakeSettings) == 280, "settings ABI size 280");
     CHECK(sizeof(LightmapMeshEntry) == 104, "mesh entry size 104");
     const auto def = DefaultLightmapBakeSettings();
-    CHECK(def.atlas_size == 2048 && def.samples_per_texel == 256 && def.bounces == 3 &&
+    // v2 路径追踪：spp 默认 64（用户基线）。
+    CHECK(def.atlas_size == 2048 && def.samples_per_texel == 64 && def.bounces == 3 &&
               def.texel_density == 16.0f && def.denoise == 1 && def.dilation_px == 8,
           "default settings values");
 }
@@ -317,7 +318,7 @@ void TestBakerAnalytic() {
     CHECK(std::abs(got - 0.41558f) < 0.02f,
           "analytic bounce-1 center value (got " + std::to_string(got) + ", want 0.41558)");
 
-    // 天花板自身间接 = 0（albedo 0，向下射线只能打到地板的 0 阶=0）。
+    // v2 完整光照：天花板存储自身 Le（≈1）+ 间接（albedo 0 → ≈0）。
     const LightmapMeshEntry* ceilEntry = nullptr;
     for (const auto& e : c.entries)
         if (e.GetName() == "ceiling") ceilEntry = &e;
@@ -325,7 +326,8 @@ void TestBakerAnalytic() {
         const std::uint32_t kx = ceilEntry->rect_x + ceilEntry->rect_w / 2;
         const std::uint32_t ky = ceilEntry->rect_y + ceilEntry->rect_h / 2;
         const float ceilGot = HalfToFloat(page.texels_rgba16f[(ky * page.width + kx) * 4 + 1]);
-        CHECK(ceilGot < 0.01f, "ceiling indirect ~0 (got " + std::to_string(ceilGot) + ")");
+        CHECK(ceilGot > 0.95f && ceilGot < 1.05f,
+              "ceiling stores own emissive (got " + std::to_string(ceilGot) + ")");
     }
 }
 
@@ -438,6 +440,36 @@ void TestBakerTraceOnly() {
     CHECK(got < 0.01f, "occluded floor indirect ~0 (got " + std::to_string(got) + ")");
 }
 
+// v2 PT：天空直照回归——无灯、无遮挡，地板 = alb×L̄（余弦加权天空）。
+// 期望 ≈ 0.8×Mix(horizon,zenith,2/3)_g ≈ 0.40。
+void TestBakerSkyDirect() {
+    const float albedo[3] = {0.8f, 0.8f, 0.8f};
+    const float emissive0[3] = {0, 0, 0};
+    BakeScene scene;
+    scene.meshes.push_back(MakeQuad("floor", 0, 0, 0, 1.0f, +1, true, albedo, emissive0));
+    // 无 lights；sky 用 BakeSky 默认（intensity=1）。
+    LightmapBakeSettings s = DefaultLightmapBakeSettings();
+    s.atlas_size = 64;
+    s.samples_per_texel = 256;
+    s.bounces = 1;
+    s.texel_density = 8.0f;
+    s.denoise = 0;
+    s.dilation_px = 0;
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_skydirect");
+    const auto r = BakeLightmaps(scene, s);
+    CHECK(r.ok, "sky direct bake ok" + (r.ok ? "" : " err=" + r.error));
+    if (!r.ok) return;
+    LightmapContainer c;
+    CHECK(LoadLightmapContainer(r.output_path, c), "load");
+    const auto& e = c.entries[0];
+    const auto& page = c.pages[0];
+    const std::uint32_t cx = e.rect_x + e.rect_w / 2;
+    const std::uint32_t cy = e.rect_y + e.rect_h / 2;
+    const float got = HalfToFloat(page.texels_rgba16f[(cy * page.width + cx) * 4 + 1]);
+    CHECK(got > 0.25f && got < 0.6f,
+          "sky-lit floor ~0.4 (got " + std::to_string(got) + ")");
+}
+
 // v1.1：trace-only 遮挡面一阶直射反弹。同解析测试几何（F=0.83112），
 // 板朝下、方向光自下而上照亮板底 → 地板收到板反弹的间接光。
 // 期望 ≈ 0.5/π×(0.5/π×5)×0.83112 ≈ 0.105。
@@ -493,6 +525,7 @@ int main() {
     TestBakerDilation();
     TestBakerTraceOnly();
     TestBakerBlockerBounce();
+    TestBakerSkyDirect();
     if (g_failures == 0) {
         std::cout << "[TestLightmapBaking] ALL PASSED" << std::endl;
         return 0;
