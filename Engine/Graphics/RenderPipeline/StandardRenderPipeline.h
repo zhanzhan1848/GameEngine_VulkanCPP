@@ -40,6 +40,7 @@
 #include "Graphics/RenderPipeline/Modules/DebugProbeSphereModule.h"
 #include "Graphics/RenderPipeline/Modules/GIGatherModule.h"
 #include "Graphics/RenderPipeline/Modules/FusionCompositeModule.h"
+#include "Graphics/RenderPipeline/Modules/LightmapModule.h"
 #include "Graphics/RenderPipeline/Modules/SCDDGIIntegrationModule.h"
 #include "Graphics/Nanite/DepthHistoryManager.h"
 #include "Graphics/Nanite/ColorHistoryManager.h"
@@ -220,6 +221,12 @@ public:
     FusionCompositeModule* GetFusionCompositeModule() const {
         return fusion_module_ ? fusion_module_.get() : nullptr;
     }
+
+    // Lightmap 旁路（2026-10-19 计划）——M0 骨架入口：注册过程生成的渐变
+    // 测试页并激活 fusion 插针（PRIMAL_LIGHTMAP=0 可整体压回零影响态）。
+    // M3 起由 EngineDLL LightmapAPI 的真实注册面（atlas/scale-bias/LMAP 路径）
+    // 替代。模块未初始化（非 Vulkan/未装配 spv）时安全空操作。
+    void RegisterDebugLightmap();
 
     // Debug/testing: primary DDGI volume access.
     // Default-off Vulkan source-distance candidate. CPU geometry survives the
@@ -687,6 +694,10 @@ private:
     // 旗标（UpdateLightingSettings 置位，BuildRenderGraph 帧起点消费）。
     bool gi_history_dirty_ = false;
     std::unique_ptr<FusionCompositeModule> fusion_module_;
+    // Lightmap 旁路（2026-10-19 计划）：fusion 钩子注入的独立改写级。模块
+    // 自装 shader（Metal 移植前 Vulkan-only，装配失败即不存在）；场景未
+    // 注册 lightmap 页时零 pass 执行。
+    std::unique_ptr<LightmapModule> lightmap_module_;
     std::unique_ptr<SCDDGIIntegrationModule> sc_ddgi_module_;
     std::unique_ptr<SDFVisualizationModule> sdf_viz_module_;
     // M0 神经渲染 debug 链路：PRIMAL_NEURAL_DEBUG=1 时激活（模块自加载字节码

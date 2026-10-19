@@ -375,6 +375,14 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
         return false;
     }
 
+    // Lightmap 旁路 M0 骨架（2026-10-19 计划）：PRIMAL_LIGHTMAP_DEBUG=1 注册
+    // 渐变测试页并激活 fusion 插针（全屏 debug 替换）；不设 env 时渲染图与
+    // 基线零差异。PRIMAL_LIGHTMAP=0 可强制压回零影响态（回归 A/B 旋钮）。
+    if (std::getenv("PRIMAL_LIGHTMAP_DEBUG")) {
+        pipeline_->RegisterDebugLightmap();
+        std::cerr << "[Lightmap] debug gradient page registered via PRIMAL_LIGHTMAP_DEBUG" << std::endl;
+    }
+
     // SPIR-V loader: try project-root path first (matches UnitTests cwd),
     // then walk up from the binary's cwd (Darwin/Debug) until found.
     auto loadSpv = [](const char* relpath) -> std::vector<u8> {

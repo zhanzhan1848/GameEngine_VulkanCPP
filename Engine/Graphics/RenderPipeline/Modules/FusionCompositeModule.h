@@ -7,6 +7,7 @@
 namespace primal::graphics {
 namespace rendergraph { class RenderGraph; }
 namespace lumen { class ScreenProbeGIPass; }
+class LightmapModule;
 
 struct FusionInputs {
     // Scene color (deferred output or raw albedo)
@@ -100,6 +101,12 @@ public:
 
     FusionOutputs AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& inputs);
 
+    // Lightmap 旁路（2026-10-19 计划）：注入改写级模块。非空且场景注册了
+    // lightmap 页时，AddPasses 在 FusionIndirect 与 FusionComposite 之间
+    // 追加该模块的改写 pass，并将 Pass 2 的 indirect 绑定切到其输出；
+    // 未注册时零额外 pass、绑定原样——既有路径零差异。
+    void SetLightmapHook(LightmapModule* m) { lightmap_hook_ = m; }
+
 private:
     static constexpr u32 kRoiAuditSourceCount = 13;
     static constexpr u32 kRoiAuditCompositeBindingCount = 9;
@@ -156,6 +163,10 @@ private:
     rhi::RHIDeviceBase* device_ = nullptr;
     u32 render_width_ = 0;
     u32 render_height_ = 0;
+
+    // Lightmap 旁路（2026-10-19 计划）：不拥有生命周期，由
+    // StandardRenderPipeline 持有并注入。
+    LightmapModule* lightmap_hook_ = nullptr;
 
     // Pass 1: FusionIndirect (half-res, 5 textures)
     rhi::PipelineHandle indirect_pipeline_{rhi::handles::INVALID_PIPELINE};

@@ -1508,6 +1508,18 @@ void StandardRenderPipeline::InitializeSubsystems() {
                                    fusion_composite_ps_, render_width_, render_height_);
     }
 
+    // Lightmap 旁路（2026-10-19 计划）：独立改写级，模块自装 shader；非
+    // Vulkan 平台或 spv 未部署时 Initialize 返回 false、模块不存在——
+    // 渲染图与既有路径零差异。仅在 fusion 存在时有意义（改写其间接信号）。
+    if (fusion_module_) {
+        lightmap_module_ = std::make_unique<LightmapModule>();
+        if (!lightmap_module_->Initialize(device_, blit_vs_, render_width_, render_height_)) {
+            lightmap_module_.reset();
+        } else {
+            fusion_module_->SetLightmapHook(lightmap_module_.get());
+        }
+    }
+
     if (settings_.quality.enable_surface_cache && settings_.quality.enable_ddgi) {
         sc_ddgi_module_ = std::make_unique<SCDDGIIntegrationModule>();
         sc_ddgi_module_->Initialize(device_, sc_card_radiance_shader_,
@@ -1536,6 +1548,7 @@ void StandardRenderPipeline::ShutdownSubsystems() {
     if (pcg_sdf_readback_initialized_) { pcg_sdf_readback_.Shutdown(); pcg_sdf_readback_initialized_ = false; }
 
     if (sc_ddgi_module_) { sc_ddgi_module_->Shutdown(); sc_ddgi_module_.reset(); }
+    if (lightmap_module_) { lightmap_module_->Shutdown(); lightmap_module_.reset(); }
     if (fusion_module_) { fusion_module_->Shutdown(); fusion_module_.reset(); }
     if (gi_gather_module_) { gi_gather_module_->Shutdown(); gi_gather_module_.reset(); }
     if (final_blit_module_) { final_blit_module_->Shutdown(); final_blit_module_.reset(); }
@@ -1567,6 +1580,13 @@ void StandardRenderPipeline::ShutdownSubsystems() {
     if (gpuDraw.IsInitialized()) { gpuDraw.Shutdown(); }
 
     subsystems_initialized_ = false;
+}
+
+void StandardRenderPipeline::RegisterDebugLightmap() {
+    // M0 骨架入口（见 StandardRenderPipeline.h 注释）：安全空操作条件齐全——
+    // 模块不存在（非 Vulkan/spv 未部署）或已注册（幂等）。
+    if (!lightmap_module_) return;
+    lightmap_module_->RegisterDebugLightmap();
 }
 
 // ============================================================================

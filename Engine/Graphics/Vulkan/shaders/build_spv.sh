@@ -625,6 +625,11 @@ LUMEN_GLSL_STAGES+=( "comp" )
 LUMEN_GLSL_NAMES+=( "Lumen/DDGIFirstPrimaryRasterWitness" )
 LUMEN_GLSL_ENTRIES+=( "main" )
 LUMEN_GLSL_STAGES+=( "frag" )
+# Lightmap 旁路（2026-10-19 计划）：独立 Lightmap/ 目录，自定义 entry，
+# 不与 Lumen shader 混排。UV pre-pass（vert+frag 对，entry main）M3 起加。
+LUMEN_GLSL_NAMES+=( "Lightmap/LightmapComposite" )
+LUMEN_GLSL_ENTRIES+=( "lightmap_composite" )
+LUMEN_GLSL_STAGES+=( "frag" )
 
 for i in "${!LUMEN_GLSL_NAMES[@]}"; do
     pair="${LUMEN_GLSL_NAMES[$i]}"
