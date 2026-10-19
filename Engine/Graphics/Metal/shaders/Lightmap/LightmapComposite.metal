@@ -37,13 +37,18 @@ fragment float4 lightmap_composite_fragment(
     float3 result = base;
 
     const float4 uvMarker = lightmapUV.sample(s, in.uv);
-    if (uvMarker.z > 0.5) {
-        float3 lm = lightmapTex.sample(s, uvMarker.xy).rgb;
-        result = lm * params.indirectGain;
+    // 诊断档先于替换分支判断（与 Vulkan 版同坑：z>0.5 会吞掉诊断路径）。
+    if (params.debugMode > 2.5) {
+        // 诊断档 3：UV RT 直视——绿=有 lightmap 像素，红=无。
+        result = uvMarker.z > 0.5 ? float3(0.0, 1.0, 0.0) : float3(0.6, 0.05, 0.05);
     } else if (params.debugMode > 1.5) {
         result = float3(1.0, 0.0, 1.0);  // 诊断档 2：纯洋红
     } else if (params.debugMode > 0.5) {
         float3 lm = lightmapTex.sample(s, in.uv).rgb;  // 诊断档 1：采样测试页
+        result = lm * params.indirectGain;
+    } else if (uvMarker.z > 0.5) {
+        // 纯模式：有 lightmap 的像素以烘焙页采样值替换间接漫反射。
+        float3 lm = lightmapTex.sample(s, uvMarker.xy).rgb;
         result = lm * params.indirectGain;
     }
     return float4(result, 1.0);

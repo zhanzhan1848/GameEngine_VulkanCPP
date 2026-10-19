@@ -39,15 +39,22 @@ void lightmap_composite() {
     vec3 result = base;
 
     const vec4 uvMarker = texture(sampler2D(lightmapUV, defaultSampler), inUv);
-    if (uvMarker.z > 0.5) {
-        vec3 lm = texture(sampler2D(lightmapTex, defaultSampler), uvMarker.xy).rgb;
-        result = lm * params.indirectGain;
+    // 诊断档必须先于替换分支判断：否则 z>0.5 像素永远进不了诊断路径
+    // （实测把档 3 变成死代码、绿色不可达的坑）。
+    if (params.debugMode > 2.5) {
+        // 诊断档 3：UV RT 直视——z>0.5（有 lightmap）绿色，否则红色。
+        // 用于回答"UV pre-pass 到底写没写进可见像素"。
+        result = uvMarker.z > 0.5 ? vec3(0.0, 1.0, 0.0) : vec3(0.6, 0.05, 0.05);
     } else if (params.debugMode > 1.5) {
         // 诊断档 2：纯色常量——只验证参数到达与消费链，不涉采样。
         result = vec3(1.0, 0.0, 1.0);
     } else if (params.debugMode > 0.5) {
-        // 诊断档 1：屏幕 UV 直接采样测试页。
+        // 诊断档 1：屏幕 UV 直接采样测试页（上传/采样链路判别）。
         vec3 lm = texture(sampler2D(lightmapTex, defaultSampler), inUv).rgb;
+        result = lm * params.indirectGain;
+    } else if (uvMarker.z > 0.5) {
+        // 纯模式：有 lightmap 的像素以烘焙页采样值替换间接漫反射。
+        vec3 lm = texture(sampler2D(lightmapTex, defaultSampler), uvMarker.xy).rgb;
         result = lm * params.indirectGain;
     }
     outColor = vec4(result, 1.0);

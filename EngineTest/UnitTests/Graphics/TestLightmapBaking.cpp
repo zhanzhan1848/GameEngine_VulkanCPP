@@ -438,6 +438,47 @@ void TestBakerTraceOnly() {
     CHECK(got < 0.01f, "occluded floor indirect ~0 (got " + std::to_string(got) + ")");
 }
 
+// v1.1：trace-only 遮挡面一阶直射反弹。同解析测试几何（F=0.83112），
+// 板朝下、方向光自下而上照亮板底 → 地板收到板反弹的间接光。
+// 期望 ≈ 0.5/π×(0.5/π×5)×0.83112 ≈ 0.105。
+void TestBakerBlockerBounce() {
+    const float albedo[3] = {0.5f, 0.5f, 0.5f};
+    const float emissive0[3] = {0, 0, 0};
+    BakeScene scene;
+    scene.meshes.push_back(MakeQuad("floor", 0, 0, 0, 0.5f, +1, true, albedo, emissive0));
+    // 板朝下（trace-only，无 UV 不占 atlas）；光从下方来 → 板底被照亮。
+    scene.meshes.push_back(MakeQuad("blocker", 0, 1, 0, 2.0f, -1, false, albedo, emissive0));
+    BakeLight light;
+    light.type = BakeLight::Type::Directional;
+    light.intensity = 5.0f;
+    light.direction[0] = 0; light.direction[1] = 1; light.direction[2] = 0;
+    scene.lights.push_back(light);
+    scene.sky.intensity = 0.0f;
+
+    LightmapBakeSettings s = DefaultLightmapBakeSettings();
+    s.atlas_size = 128;
+    s.samples_per_texel = 256;
+    s.bounces = 1;
+    s.texel_density = 16.0f;
+    s.denoise = 0;
+    s.dilation_px = 0;
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_blockerbounce");
+    const auto r = BakeLightmaps(scene, s);
+    CHECK(r.ok, "blocker bounce bake ok" + (r.ok ? "" : " err=" + r.error));
+    if (!r.ok) return;
+    CHECK(r.entries.size() == 1, "only floor gets an entry");
+
+    LightmapContainer c;
+    CHECK(LoadLightmapContainer(r.output_path, c), "load");
+    const auto& e = c.entries[0];
+    const auto& page = c.pages[0];
+    const std::uint32_t cx = e.rect_x + e.rect_w / 2;
+    const std::uint32_t cy = e.rect_y + e.rect_h / 2;
+    const float got = HalfToFloat(page.texels_rgba16f[(cy * page.width + cx) * 4 + 1]);
+    CHECK(got > 0.05f, "bounced floor indirect present (got " + std::to_string(got) + ")");
+    CHECK(got < 0.25f, "bounced floor indirect bounded (got " + std::to_string(got) + ")");
+}
+
 } // namespace
 
 int main() {
@@ -451,6 +492,7 @@ int main() {
     TestBakerDeterministic();
     TestBakerDilation();
     TestBakerTraceOnly();
+    TestBakerBlockerBounce();
     if (g_failures == 0) {
         std::cout << "[TestLightmapBaking] ALL PASSED" << std::endl;
         return 0;

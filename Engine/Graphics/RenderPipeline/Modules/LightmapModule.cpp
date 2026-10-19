@@ -619,6 +619,12 @@ void LightmapModule::AddUVPrePass(rendergraph::RenderGraph& graph, const FrameIn
             builder.DeclareRenderPass(rpDesc);
         },
         [this, inputs](const UvData&, rendergraph::RenderGraphContext& context) {
+            static std::uint64_t s_execCount = 0;
+            if ((s_execCount++ % 120) == 0) {
+                PRIMAL_LOG_STREAM(Info, "Render")
+                    << "[Lightmap][DIAG] UV pass exec #" << s_execCount << " entities="
+                    << entities_.size() << std::endl;
+            }
             auto cmd = context.cmdBuffer;
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
@@ -700,6 +706,7 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             if (const char* d = std::getenv("PRIMAL_LIGHTMAP_DEBUG")) {
                 if (d[0] == '1') debugMode = 1.0f;
                 else if (d[0] == '2') debugMode = 2.0f;
+                else if (d[0] == '3') debugMode = 3.0f;
             }
             // 无实体时绑 z=0 占位页（全像素走原路径/debug 分支）。
             const ResourceHandle uvTex = HasEntities() ? uv_rt_ : uv_black_tex_;

@@ -6,7 +6,8 @@
 //   buffer(0) = positions（float4 xyz+pad，世界空间）
 //   buffer(1) = lightmapUVs（float2）
 // push 常量（setVertexBytes @ buffer(2)，与 MetalCommandBuffer 约定一致）：
-//   { float4x4 view_proj; uint position_offset; uint uv_offset; float4 scale_bias; }
+//   { float4x4 view_proj; uint position_offset; uint uv_offset;
+//     float2 scale; float2 bias; }   // = C++ scale_bias[4]，见下面对齐注释
 
 #include <metal_stdlib>
 using namespace metal;
@@ -15,7 +16,11 @@ struct LightmapUvPush {
     float4x4 view_proj;
     uint position_offset;
     uint uv_offset;
-    float4 scale_bias;
+    // 对应 C++ UvPushConstants::scale_bias[4]（float[4] @72）。必须拆成
+    // 两个 float2（72/80）：合并 float4 会被 16B 对齐推到 80 与 C++ 错位
+    // 8B——所有像素采到图集纹素 (0,0)（Vulkan 侧实测黑图根因）。
+    float2 scale;  // scale_bias[0..1]
+    float2 bias;   // scale_bias[2..3]
 };
 
 struct LightmapUvVertexOut {
@@ -33,7 +38,7 @@ vertex LightmapUvVertexOut lightmap_uv_vertex(
     const float3 worldPos = positions[push.position_offset + vertexID].xyz;
     out.position = push.view_proj * float4(worldPos, 1.0);
     const float2 lmUv = lightmapUvs[push.uv_offset + vertexID];
-    out.atlasUV = lmUv * push.scale_bias.xy + push.scale_bias.zw;
+    out.atlasUV = lmUv * push.scale + push.bias;
     return out;
 }
 

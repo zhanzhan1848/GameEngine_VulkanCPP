@@ -347,7 +347,7 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
     utl::vector<math::v3> bvhVerts;
     utl::vector<u32> bvhIndices;
     // mesh = allMeshes 索引；bakeIdx = bakeable 内索引（trace-only 为无效值，
-    // gather 语义 = 黑体吸收）。
+    // gather 命中做一阶直射着色，见 samplePrev）。
     struct TriRef { std::uint32_t mesh, v0, v1, v2, bakeIdx; };
     constexpr std::uint32_t kNoBake = 0xFFFFFFFFu;
     std::vector<TriRef> triRefs;
@@ -401,10 +401,46 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
     }
 
     // gather：命中三角形 → 插值 lightmap UV → atlas 纹素 → 上一阶值。
-    auto samplePrev = [&](const utl::BVH::HitInfo& hit, const std::vector<Vec3>& prev) -> Vec3 {
+    auto samplePrev = [&](const utl::BVH::HitInfo& hit, const Vec3& rayDir,
+                          const std::vector<Vec3>& prev) -> Vec3 {
         if (!hit.hit || hit.triangle_index >= triRefs.size()) return {0, 0, 0};
         const TriRef& ref = triRefs[hit.triangle_index];
-        if (ref.bakeIdx == kNoBake) return {0, 0, 0};  // trace-only 遮挡物
+        if (ref.bakeIdx == kNoBake) {
+            // trace-only 命中的一阶直射着色（v1.1）：albedo/π×(太阳可见性 + 天空
+            // 环境近似)。旧"黑体吸收"语义会让多数网格无 UVLM 仅作遮挡的场景
+            // （如 Sponza 载体：墙体全部 trace-only）可烘焙面间接恒 0——墙面
+            // 反弹正是间接光的主体，不能丢。
+            const BakeMesh& bm = *allMeshes[ref.mesh];
+            const Vec3 pa{bm.positions[ref.v0 * 3], bm.positions[ref.v0 * 3 + 1],
+                          bm.positions[ref.v0 * 3 + 2]};
+            const Vec3 pb{bm.positions[ref.v1 * 3], bm.positions[ref.v1 * 3 + 1],
+                          bm.positions[ref.v1 * 3 + 2]};
+            const Vec3 pc{bm.positions[ref.v2 * 3], bm.positions[ref.v2 * 3 + 1],
+                          bm.positions[ref.v2 * 3 + 2]};
+            const float wb = 1.0f - hit.u - hit.v;
+            const Vec3 hp = Add(Add(Scale(pa, wb), Scale(pb, hit.u)), Scale(pc, hit.v));
+            Vec3 hn{0, 1, 0};
+            if (bm.normals) {
+                const Vec3 n0{bm.normals[ref.v0 * 3], bm.normals[ref.v0 * 3 + 1],
+                              bm.normals[ref.v0 * 3 + 2]};
+                const Vec3 n1{bm.normals[ref.v1 * 3], bm.normals[ref.v1 * 3 + 1],
+                              bm.normals[ref.v1 * 3 + 2]};
+                const Vec3 n2{bm.normals[ref.v2 * 3], bm.normals[ref.v2 * 3 + 1],
+                              bm.normals[ref.v2 * 3 + 2]};
+                hn = Norm(Add(Add(Scale(n0, wb), Scale(n1, hit.u)), Scale(n2, hit.v)));
+            } else {
+                hn = Norm(Cross(Sub(pb, pa), Sub(pc, pa)));
+            }
+            // 薄板/双面几何：命中的是背面时把法线翻向来向侧。
+            if (Dot(hn, rayDir) > 0.0f) hn = Scale(hn, -1.0f);
+            const Vec3 eDir = DirectIrradiance(scene, bvh, Add(hp, Scale(hn, 1e-3f)), hn);
+            // 天空环境近似：半球辐照 ≈ π·L(法线方向梯度值)；地平线下为 0。
+            const Vec3 eSky = Scale(SkyRadiance(scene.sky, hn), 3.14159265f);
+            const float invPi = 1.0f / 3.14159265f;
+            const Vec3 e = Add(eDir, eSky);
+            return {bm.albedo[0] * invPi * e.x, bm.albedo[1] * invPi * e.y,
+                    bm.albedo[2] * invPi * e.z};
+        }
         const BakeMesh& m = *allMeshes[ref.mesh];
         // Möller–Trumbore 重心：P = (1-u-v)V0 + u·V1 + v·V2。
         const float w0 = 1.0f - hit.u - hit.v;
@@ -443,7 +479,7 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                     ray.t_min = 1e-3f;
                     utl::BVH::HitInfo hit;
                     const bool hitScene = bvh.Intersect(ray, hit);
-                    Vec3 L = hitScene ? samplePrev(hit, outgoing) : SkyRadiance(scene.sky, dir);
+                    Vec3 L = hitScene ? samplePrev(hit, dir, outgoing) : SkyRadiance(scene.sky, dir);
                     sum = Add(sum, L);
                 }
                 // 余弦加权 pdf = cosθ/π → E = π/N × ΣL。
