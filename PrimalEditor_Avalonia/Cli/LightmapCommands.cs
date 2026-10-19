@@ -115,6 +115,15 @@ public class LightmapCommands
                 //（BakeSceneLightmaps 内部 LoadLightmap），无需二次推送。
                 TaskRegistry.AddArtifact(task, lmapPath, "lightmap");
                 TaskRegistry.Complete(task, true);
+                // 场景级持久化：UI 线程写文档模型（ViewModelBase 通知 +
+                // IsDirty）；页面本身已在引擎侧加载，场景重载时由
+                // WorldEditorViewModel 恢复。
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                {
+                    var current = EditorServices.ActiveScene;
+                    if (current == scene)
+                        scene.LightmapPage = lmapPath;
+                });
             }
             catch (Exception ex)
             {

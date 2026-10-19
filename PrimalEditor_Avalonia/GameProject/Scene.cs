@@ -48,6 +48,28 @@ public class Scene : ViewModelBase, IDirtyTrackable
     [JsonPropertyName("Entities")]
     public ObservableCollection<GameEntity> Entities { get; set; } = new();
 
+    /// <summary>
+    /// Lightmap 页路径（2026-10-19 计划 M4c）：场景级单一事实源。烘焙成功
+    /// 后写入，随 .scene 持久化；场景激活同步时推给引擎（运行时按
+    /// mesh_&lt;contentId&gt;_e&lt;entityId&gt; 命名约定自动匹配实体）。
+    /// null = 无烘焙。
+    /// </summary>
+    private string? _lightmapPage;
+    [JsonPropertyName("LightmapPage")]
+    public string? LightmapPage
+    {
+        get => _lightmapPage;
+        set
+        {
+            if (_lightmapPage != value)
+            {
+                _lightmapPage = value;
+                OnPropertyChanged(nameof(LightmapPage));
+                IsDirty = true;
+            }
+        }
+    }
+
     [JsonIgnore]
     public SceneEnvironment Environment { get; } = new SceneEnvironment();
 

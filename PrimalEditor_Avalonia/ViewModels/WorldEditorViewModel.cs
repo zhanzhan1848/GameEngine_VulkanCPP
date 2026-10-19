@@ -551,6 +551,14 @@ public class WorldEditorViewModel : Document, ISceneEntityContext, IDeferredCont
                     if (NativeEngineBridge.IsLoaded)
                     {
                         SceneSynchronizer.Sync(_activeScene);
+                        // Lightmap 页（2026-10-19 计划 M4c）：场景激活即恢复
+                        //（引擎侧按 LMAP 清单自动匹配实体；失败仅记录——
+                        // 缺页不阻塞场景本身）。显式清除：页面被删但场景
+                        // 仍引用时兜底。
+                        if (!string.IsNullOrEmpty(_activeScene.LightmapPage))
+                            NativeEngineBridge.PipelineSetLightmapPage(_activeScene.LightmapPage);
+                        else
+                            NativeEngineBridge.PipelineClearLightmap();
                     }
                     SceneEnvironmentViewModel.Attach(_activeScene.Environment);
                 }

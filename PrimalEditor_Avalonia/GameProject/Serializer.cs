@@ -174,6 +174,7 @@ public static class Serializer
                 foreach (var entity in loaded.Entities)
                     scene.Entities.Add(entity);
                 CopyEnvironment(loaded.Environment, scene.Environment);
+            scene.LightmapPage = loaded.LightmapPage;
                 scene.EditorCamera.CopyFrom(loaded.EditorCamera);
             }
             catch (Exception ex)
@@ -195,6 +196,7 @@ public static class Serializer
             Name = scene.Name,
             Entities = entities,
             Environment = ToEnvironmentDocument(scene.Environment),
+            LightmapPage = scene.LightmapPage,
             EditorCamera = ToEditorCameraDocument(scene.EditorCamera),
         };
     }

@@ -35,6 +35,13 @@ public sealed class SceneDocument
     [JsonPropertyName("EditorCamera")]
     public EditorCameraDocument EditorCamera { get; set; } = new();
 
+    /// <summary>
+    /// Lightmap 页路径（2026-10-19 计划）。可选字段——旧 v2 场景缺失时为
+    /// null，IsValid 不检查（与 Environment 同策略，schema 版本不变）。
+    /// </summary>
+    [JsonPropertyName("LightmapPage")]
+    public string? LightmapPage { get; set; }
+
     [JsonIgnore]
     public bool IsValid =>
         SchemaVersion == CurrentSchemaVersion &&
