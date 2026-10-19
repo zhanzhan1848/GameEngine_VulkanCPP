@@ -17,6 +17,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
@@ -140,32 +141,54 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
     full_screen_vs_ = full_screen_vs;
 
     // --- shader 自装（正确 entry 名；管线 SelfLoad 的 Vulkan 分支不适用）---
-    if (device->GetPlatform() != RHIPlatform::Vulkan) {
-        // M5 Metal 移植前的降级：非 Vulkan 平台模块不存在（Dawn 边界已在
-        // Parity Matrix 登记为不支持 lightmap 消费）。
+    // Vulkan：spv；Metal（M5）：MSL 源文本。Dawn：不支持（Parity Matrix
+    // 登记降级边界）——模块不存在。
+    const RHIPlatform platform = device->GetPlatform();
+    bool shadersOk = false;
+    if (platform == RHIPlatform::Vulkan) {
+        auto loadSpv = [&](const char* rel, ShaderStage stage, const char* entry,
+                           ShaderHandle& out) {
+            const std::string path = utils::ShaderRegistry::ResolveShaderPath(rel);
+            std::ifstream f(path, std::ios::binary | std::ios::ate);
+            if (!f.is_open()) return false;
+            const std::streamsize size = f.tellg();
+            f.seekg(0);
+            std::vector<u8> bytes(static_cast<size_t>(size));
+            if (!f.read(reinterpret_cast<char*>(bytes.data()), size)) return false;
+            out = device->CreateShader(bytes.data(), bytes.size(), stage, entry);
+            return out != handles::INVALID_SHADER;
+        };
+        shadersOk =
+            loadSpv("Engine/Graphics/Vulkan/shaders/Lightmap/LightmapComposite.frag.spv",
+                    ShaderStage::Pixel, "lightmap_composite", composite_ps_) &&
+            loadSpv("Engine/Graphics/Vulkan/shaders/Lightmap/LightmapUVPass.vert.spv",
+                    ShaderStage::Vertex, "main", uv_vs_) &&
+            loadSpv("Engine/Graphics/Vulkan/shaders/Lightmap/LightmapUVPass.frag.spv",
+                    ShaderStage::Pixel, "main", uv_fs_);
+    } else if (platform == RHIPlatform::Metal) {
+        auto loadMsl = [&](const char* rel, ShaderStage stage, const char* entry,
+                           ShaderHandle& out) {
+            const std::string path = utils::ShaderRegistry::ResolveShaderPath(rel);
+            std::ifstream f(path);
+            if (!f.is_open()) return false;
+            std::string src((std::istreambuf_iterator<char>(f)),
+                            std::istreambuf_iterator<char>());
+            if (src.empty()) return false;
+            out = device->CreateShader(src.data(), src.size(), stage, entry);
+            return out != handles::INVALID_SHADER;
+        };
+        shadersOk =
+            loadMsl("Engine/Graphics/Metal/shaders/Lightmap/LightmapComposite.metal",
+                    ShaderStage::Pixel, "lightmap_composite_fragment", composite_ps_) &&
+            loadMsl("Engine/Graphics/Metal/shaders/Lightmap/LightmapUVPass.metal",
+                    ShaderStage::Vertex, "lightmap_uv_vertex", uv_vs_) &&
+            loadMsl("Engine/Graphics/Metal/shaders/Lightmap/LightmapUVPass.metal",
+                    ShaderStage::Pixel, "lightmap_uv_fragment", uv_fs_);
+    } else {
         PRIMAL_LOG_STREAM(Info, "Render")
-            << "[Lightmap] platform not Vulkan — module inert (M5 pending)" << std::endl;
+            << "[Lightmap] platform unsupported (Dawn) — module inert" << std::endl;
         return false;
     }
-    auto loadSpv = [&](const char* rel, ShaderStage stage, const char* entry,
-                       ShaderHandle& out) {
-        const std::string path = utils::ShaderRegistry::ResolveShaderPath(rel);
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
-        if (!f.is_open()) return false;
-        const std::streamsize size = f.tellg();
-        f.seekg(0);
-        std::vector<u8> bytes(static_cast<size_t>(size));
-        if (!f.read(reinterpret_cast<char*>(bytes.data()), size)) return false;
-        out = device->CreateShader(bytes.data(), bytes.size(), stage, entry);
-        return out != handles::INVALID_SHADER;
-    };
-    const bool shadersOk =
-        loadSpv("Engine/Graphics/Vulkan/shaders/Lightmap/LightmapComposite.frag.spv",
-                ShaderStage::Pixel, "lightmap_composite", composite_ps_) &&
-        loadSpv("Engine/Graphics/Vulkan/shaders/Lightmap/LightmapUVPass.vert.spv",
-                ShaderStage::Vertex, "main", uv_vs_) &&
-        loadSpv("Engine/Graphics/Vulkan/shaders/Lightmap/LightmapUVPass.frag.spv",
-                ShaderStage::Pixel, "main", uv_fs_);
     if (!shadersOk) {
         PRIMAL_LOG_STREAM(Info, "Render")
             << "[Lightmap] spv not deployed (module inert; run build_spv.sh)" << std::endl;
@@ -281,6 +304,12 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
     const bool ok = composite_pipeline_ != handles::INVALID_PIPELINE &&
                     uv_pipeline_ != handles::INVALID_PIPELINE &&
                     output_tex_ != handles::INVALID_RESOURCE;
+    if (ok) {
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[Lightmap] module initialized ("
+            << (platform == RHIPlatform::Vulkan ? "Vulkan" : "Metal") << ", "
+            << render_width_ << "x" << render_height_ << ")" << std::endl;
+    }
     if (!ok) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[Lightmap] pipeline/rt init failed" << std::endl;
         Shutdown();
