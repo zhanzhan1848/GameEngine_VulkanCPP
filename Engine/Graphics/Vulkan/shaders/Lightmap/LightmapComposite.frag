@@ -11,13 +11,14 @@
 // Flat descriptor bindings（Vulkan 需显式 sampler；Metal M5 移植用隐式）：
 //   binding 0 = SampledImage  indirectIn   （FusionIndirect 本帧输出）
 //   binding 1 = SampledImage  lightmapTex  （RGBA16F 烘焙页）
-//   binding 2 = Sampler       defaultSampler
-//   binding 3 = UniformBuffer params        （gain/debugMode）
+//   binding 2 = SampledImage  lightmapUV   （UV pre-pass RT；z=0 无 lightmap）
+//   binding 3 = Sampler       defaultSampler
+// push constants（8B，像素阶段）:
+//   float indirectGain  —— 与 FusionIndirect 同源增益（PRIMAL_GI_INDIRECT_GAIN）
+//   float debugMode     —— 0=正常；1=全屏采样测试页；2=纯洋红（消费链诊断）
 //
-// M0 骨架阶段（本文件当前形态）：仅 debugMode 全屏替换路径，用于验证
-// pass 插针、纹理绑定、增益与 RG 纹理交接。M3 起接入 LightmapUV pre-pass
-// 产出的逐像素 UV/index RT 与逐实体 scale/bias，替换条件随之改为
-// "该像素 UV RT 有效"。
+// 参数走 push 而非 UBO：全屏单绘制的小常量，且规避描述符池/在飞重写
+// 的整类时序问题。
 
 layout(location = 0) in vec2 inUv;
 
@@ -25,23 +26,29 @@ layout(location = 0) out vec4 outColor;
 
 layout(set = 0, binding = 0) uniform texture2D indirectIn;
 layout(set = 0, binding = 1) uniform texture2D lightmapTex;
-layout(set = 0, binding = 2) uniform sampler defaultSampler;
+layout(set = 0, binding = 2) uniform texture2D lightmapUV;
+layout(set = 0, binding = 3) uniform sampler defaultSampler;
 
-// 与 FusionIndirect.frag 的 GiGainUBO 同源增益（PRIMAL_GI_INDIRECT_GAIN，
-// 默认 1.0 物理恒等）——lightmap 分支乘同一增益，保证 A/B 开关切换时
-// 间接光标尺一致。debugMode：0=纯透传，1=全屏 debug 替换（M0 骨架）。
-layout(set = 0, binding = 3) uniform LightmapParamsUBO {
+layout(push_constant) uniform LightmapParams {
     float indirectGain;
     float debugMode;
-};
+} params;
 
 void lightmap_composite() {
     vec3 base = texture(sampler2D(indirectIn, defaultSampler), inUv).rgb;
     vec3 result = base;
-    if (debugMode > 0.5) {
-        // M0 debug 映射：屏幕 UV 直接当 lightmap UV（测试页为渐变图）。
+
+    const vec4 uvMarker = texture(sampler2D(lightmapUV, defaultSampler), inUv);
+    if (uvMarker.z > 0.5) {
+        vec3 lm = texture(sampler2D(lightmapTex, defaultSampler), uvMarker.xy).rgb;
+        result = lm * params.indirectGain;
+    } else if (params.debugMode > 1.5) {
+        // 诊断档 2：纯色常量——只验证参数到达与消费链，不涉采样。
+        result = vec3(1.0, 0.0, 1.0);
+    } else if (params.debugMode > 0.5) {
+        // 诊断档 1：屏幕 UV 直接采样测试页。
         vec3 lm = texture(sampler2D(lightmapTex, defaultSampler), inUv).rgb;
-        result = lm * indirectGain;
+        result = lm * params.indirectGain;
     }
     outColor = vec4(result, 1.0);
 }

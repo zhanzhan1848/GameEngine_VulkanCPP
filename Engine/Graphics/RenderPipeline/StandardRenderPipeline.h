@@ -41,6 +41,7 @@
 #include "Graphics/RenderPipeline/Modules/GIGatherModule.h"
 #include "Graphics/RenderPipeline/Modules/FusionCompositeModule.h"
 #include "Graphics/RenderPipeline/Modules/LightmapModule.h"
+#include "Graphics/Baking/LightmapBaker.h"
 #include "Graphics/RenderPipeline/Modules/SCDDGIIntegrationModule.h"
 #include "Graphics/Nanite/DepthHistoryManager.h"
 #include "Graphics/Nanite/ColorHistoryManager.h"
@@ -227,6 +228,12 @@ public:
     // M3 起由 EngineDLL LightmapAPI 的真实注册面（atlas/scale-bias/LMAP 路径）
     // 替代。模块未初始化（非 Vulkan/未装配 spv）时安全空操作。
     void RegisterDebugLightmap();
+
+    // M3+ 引擎侧烘焙入口（EngineDLL LightmapBake 与测试共用）：收集当前
+    // 场景 → CPU 积分 → LMAP 落盘 → 加载并开始逐帧点亮匹配实体。
+    // 同步阻塞（分钟级）；进度经 settings 无——回调面在 EngineDLL 层包装。
+    bool BakeSceneLightmaps(const baking::LightmapBakeSettings& settings,
+                            std::string* out_path = nullptr, std::string* out_err = nullptr);
 
     // Debug/testing: primary DDGI volume access.
     // Default-off Vulkan source-distance candidate. CPU geometry survives the

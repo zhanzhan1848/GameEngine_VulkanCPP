@@ -1,13 +1,19 @@
-// Lightmap 旁路消费模块（2026-10-19 计划，M0 骨架形态）。
+// Lightmap 旁路消费模块（2026-10-19 计划，M3 形态）。
 // 隔离契约见 LightmapModule.h 头注释。本文件不 include 任何 Lumen 头，
-// 不读写任何 DDGI/SPGI/SSGI/SC 资源。
+// 不读写任何 DDGI/SPGI/SSGI/SC 资源；实体几何数据自管缓冲，与
+// GPUDrivenDrawPipeline 全局缓冲零耦合。
 
 #include "LightmapModule.h"
+#include "Graphics/Baking/LightmapContainer.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RHI/Core/RHICommand.h"
+#include "Graphics/RenderScene.h"
 #include "Graphics/Utils/ShaderRegistry.h"
-#include <vector>
+#include "Content/ContentToEngine.h"
+
+#include <algorithm>
+#include <array>
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
@@ -44,6 +50,11 @@ static void UpdateDesc(RHIDeviceBase* device, DescriptorSetHandle set, const Des
             bufferInfos[i].offset = 0;
             bufferInfos[i].range = 16;
             writes[i].bufferInfo = &bufferInfos[i];
+        } else if (params[i].type == DescriptorType::StorageBuffer) {
+            bufferInfos[i].buffer = params[i].resource;
+            bufferInfos[i].offset = 0;
+            bufferInfos[i].range = 0;  // VK_WHOLE_SIZE
+            writes[i].bufferInfo = &bufferInfos[i];
         } else {
             imageInfos[i].imageView = params[i].resource;
             imageInfos[i].imageLayout = ResourceState::ShaderResource;
@@ -53,7 +64,7 @@ static void UpdateDesc(RHIDeviceBase* device, DescriptorSetHandle set, const Des
     device->UpdateDescriptorSets(count, writes.data());
 }
 
-// f32 → f16 位级转换（与 TestVulkanSponzaRenderGraph.cpp 的 f32_to_f16 同式）。
+// f32 → f16（位级）。
 static u16 FloatToHalf(f32 f) {
     u32 x;
     std::memcpy(&x, &f, sizeof(x));
@@ -66,10 +77,57 @@ static u16 FloatToHalf(f32 f) {
 }
 
 // 激活开关：PRIMAL_LIGHTMAP=0 强制关闭（零影响回归的 A/B 旋钮）。
-static bool LightmapEnabledByEnvChecked() {
+static bool LightmapEnabledByEnv() {
     const char* e = std::getenv("PRIMAL_LIGHTMAP");
     return !(e && e[0] == '0' && e[1] == '\0');
 }
+
+// staging 上传 RGBA16F 页（LMAP 页宽为 2 的幂 → 行宽×8B 天然 256 对齐）。
+static bool UploadRGBA16F(RHIDeviceBase* device, ResourceHandle tex,
+                          const std::vector<u16>& texels, u32 w, u32 h) {
+    BufferDesc sbDesc{};
+    sbDesc.size = (u64)w * h * 8;
+    sbDesc.usage = GPUMemoryUsage::Staging;
+    sbDesc.memoryUsage = GPUMemoryUsage::Staging;
+    ResourceHandle staging = device->CreateBuffer(sbDesc);
+    if (staging == handles::INVALID_RESOURCE) return false;
+    void* mapped = device->MapBuffer(staging);
+    if (!mapped) {
+        device->DestroyBuffer(staging);
+        return false;
+    }
+    std::memcpy(mapped, texels.data(), texels.size() * sizeof(u16));
+    device->UnmapBuffer(staging);
+
+    SyncHandle fence = device->CreateSync();
+    auto cmdHandle = device->CreateCommandBuffer(CommandQueueType::Graphics);
+    auto* cmd = GetCommandBuffer(cmdHandle);
+    cmd->Begin();
+    BufferTextureCopyRegion region{};
+    region.bufferOffset = 0;
+    region.imageSubresource = {0, 0, 1};
+    region.imageOffset = {0, 0, 0};
+    region.imageExtent = {w, h, 1};
+    cmd->CopyBufferToTexture(staging, tex, &region, 1);
+    cmd->End();
+    QueueSubmitInfo submit{};
+    submit.cmdBuffer = cmdHandle;
+    submit.signalFence = fence;
+    device->Submit(submit);
+    device->WaitForSync(fence, UINT32_MAX);
+    device->DestroySync(fence);
+    device->DestroyCommandBuffer(cmdHandle);
+    device->DestroyBuffer(staging);
+    return true;
+}
+
+// UV pre-pass push 常量布局（与 LightmapUVPass.vert 一致）。
+struct UvPushConstants {
+    math::m4x4 view_proj;
+    std::uint32_t position_offset;
+    std::uint32_t uv_offset;
+    float scale_bias[4];
+};
 
 } // namespace
 
@@ -82,69 +140,62 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
     full_screen_vs_ = full_screen_vs;
 
     // --- shader 自装（正确 entry 名；管线 SelfLoad 的 Vulkan 分支不适用）---
-    if (device->GetPlatform() == RHIPlatform::Vulkan) {
-        const std::string path = utils::ShaderRegistry::ResolveShaderPath(
-            "Engine/Graphics/Vulkan/shaders/Lightmap/LightmapComposite.frag.spv");
-        std::ifstream f(path, std::ios::binary | std::ios::ate);
-        if (!f.is_open()) {
-            // 未部署 spv（未跑 build_spv.sh）——按"模块不存在"处理。
-            PRIMAL_LOG_STREAM(Info, "Render")
-                << "[Lightmap] composite spv not found (module inert): " << path << std::endl;
-            return false;
-        }
-        const std::streamsize size = f.tellg();
-        f.seekg(0);
-        std::vector<u8> bytes(static_cast<size_t>(size));
-        if (!f.read(reinterpret_cast<char*>(bytes.data()), size)) return false;
-        composite_ps_ = device->CreateShader(bytes.data(), bytes.size(),
-                                             ShaderStage::Pixel, "lightmap_composite");
-        if (composite_ps_ == handles::INVALID_SHADER) {
-            PRIMAL_LOG_STREAM(Error, "Render") << "[Lightmap] CreateShader failed" << std::endl;
-            return false;
-        }
-    } else {
+    if (device->GetPlatform() != RHIPlatform::Vulkan) {
         // M5 Metal 移植前的降级：非 Vulkan 平台模块不存在（Dawn 边界已在
         // Parity Matrix 登记为不支持 lightmap 消费）。
         PRIMAL_LOG_STREAM(Info, "Render")
             << "[Lightmap] platform not Vulkan — module inert (M5 pending)" << std::endl;
         return false;
     }
+    auto loadSpv = [&](const char* rel, ShaderStage stage, const char* entry,
+                       ShaderHandle& out) {
+        const std::string path = utils::ShaderRegistry::ResolveShaderPath(rel);
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f.is_open()) return false;
+        const std::streamsize size = f.tellg();
+        f.seekg(0);
+        std::vector<u8> bytes(static_cast<size_t>(size));
+        if (!f.read(reinterpret_cast<char*>(bytes.data()), size)) return false;
+        out = device->CreateShader(bytes.data(), bytes.size(), stage, entry);
+        return out != handles::INVALID_SHADER;
+    };
+    const bool shadersOk =
+        loadSpv("Engine/Graphics/Vulkan/shaders/Lightmap/LightmapComposite.frag.spv",
+                ShaderStage::Pixel, "lightmap_composite", composite_ps_) &&
+        loadSpv("Engine/Graphics/Vulkan/shaders/Lightmap/LightmapUVPass.vert.spv",
+                ShaderStage::Vertex, "main", uv_vs_) &&
+        loadSpv("Engine/Graphics/Vulkan/shaders/Lightmap/LightmapUVPass.frag.spv",
+                ShaderStage::Pixel, "main", uv_fs_);
+    if (!shadersOk) {
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[Lightmap] spv not deployed (module inert; run build_spv.sh)" << std::endl;
+        return false;
+    }
 
-    // --- 描述符/管线/资源（镜像 FusionCompositeModule 全屏 pass 形态）---
-    const u32 bindingCount = 4;
-    DescriptorSetLayoutBinding bindings[4];
-    bindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // indirectIn
-    bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // lightmapTex
-    bindings[2] = {2, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr};       // sampler
-    bindings[3] = {3, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel, nullptr}; // params
-    composite_set_layout_ = device->CreateDescriptorSetLayout({bindingCount, bindings});
-    composite_layout_ = device->CreatePipelineLayout({1, &composite_set_layout_});
-    composite_ds_ = device->CreateDescriptorSet({composite_set_layout_});
+    // --- composite 全屏管线（0 indirect / 1 lightmap / 2 uvRT / 3 sampler；
+    //     gain/debug 走 push 常量，见 shader 头注释）---
+    {
+        DescriptorSetLayoutBinding bindings[4];
+        bindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};
+        bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};
+        bindings[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};
+        bindings[3] = {3, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr};
+        composite_set_layout_ = device->CreateDescriptorSetLayout({4, bindings});
 
-    {
-        BufferDesc cb{};
-        cb.size = 16;
-        cb.type = BufferType::Constant;
-        cb.memoryUsage = GPUMemoryUsage::Dynamic;
-        params_cb_ = device->CreateBuffer(cb);
-    }
-    {
-        SamplerDesc sDesc{};  // 线性过滤 + clamp——烘焙页采样语义
-        sDesc.minFilter = FilterMode::Linear;
-        sDesc.magFilter = FilterMode::Linear;
-        sDesc.addressU = TextureAddressMode::Clamp;
-        sDesc.addressV = TextureAddressMode::Clamp;
-        sDesc.addressW = TextureAddressMode::Clamp;
-        sampler_ = device->CreateSampler(sDesc);
-    }
-    {
-        TextureDesc outDesc{};
-        outDesc.size = {render_width_, render_height_, 1};
-        outDesc.format = DataFormat::RGBA16_Float;
-        outDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
-        output_tex_ = device->CreateTexture(outDesc);
-    }
-    {
+        PipelineLayoutDesc plDesc{};
+        PushConstantRange pcRange{};
+        pcRange.stageFlags = ShaderStage::Pixel;
+        pcRange.offset = 0;
+        pcRange.size = 8;  // float gain + float debugMode
+        plDesc.pushConstantRangeCount = 1;
+        plDesc.pushConstantRanges = &pcRange;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &composite_set_layout_;
+        composite_layout_ = device->CreatePipelineLayout(plDesc);
+        // 三槽轮转（与 fusion cbIdx 语义对齐：帧号 %3——DDGISlotMap 当前恒等）。
+        for (int i = 0; i < 3; ++i)
+            composite_ds_[i] = device->CreateDescriptorSet({composite_set_layout_});
+
         GraphicsPipelineDesc pd{};
         pd.layout = composite_layout_;
         pd.vertexShader = full_screen_vs_;
@@ -160,10 +211,78 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
         composite_pipeline_ = device->CreateGraphicsPipeline(pd);
     }
 
+    // --- UV pre-pass 管线（binding 0/1 = 顶点阶段 SSBO；push 常量）---
+    {
+        DescriptorSetLayoutBinding bindings[2];
+        bindings[0] = {0, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex, nullptr};
+        bindings[1] = {1, DescriptorType::StorageBuffer, 1, ShaderStage::Vertex, nullptr};
+        uv_set_layout_ = device->CreateDescriptorSetLayout({2, bindings});
+
+        PipelineLayoutDesc plDesc{};
+        PushConstantRange pcRange{};
+        pcRange.stageFlags = ShaderStage::Vertex;
+        pcRange.offset = 0;
+        pcRange.size = sizeof(UvPushConstants);
+        plDesc.pushConstantRangeCount = 1;
+        plDesc.pushConstantRanges = &pcRange;
+        plDesc.setLayoutCount = 1;
+        plDesc.setLayouts = &uv_set_layout_;
+        uv_layout_ = device->CreatePipelineLayout(plDesc);
+        uv_ds_ = device->CreateDescriptorSet({uv_set_layout_});
+
+        GraphicsPipelineDesc pd{};
+        pd.layout = uv_layout_;
+        pd.vertexShader = uv_vs_;
+        pd.pixelShader = uv_fs_;
+        pd.renderTargetFormats[0] = DataFormat::RGBA16_Float;
+        pd.renderTargetCount = 1;
+        pd.depthStencilFormat = DataFormat::D32_Float;
+        pd.enableDepthTest = true;
+        pd.enableDepthWrite = false;
+        pd.depthFunc = ComparisonFunc::LessEqual;  // 与 GBuffer 同深度 → 等值通过
+        pd.cullMode = CullMode::None;              // 烘焙面双面
+        pd.topology = PrimitiveTopology::TriangleList;
+        pd.vertexAttributes.clear();               // 顶点拉取
+        pd.vertexBindings.clear();
+        uv_pipeline_ = device->CreateGraphicsPipeline(pd);
+    }
+
+    // --- 公共资源 ---
+    {
+        SamplerDesc sDesc{};
+        sDesc.minFilter = FilterMode::Linear;
+        sDesc.magFilter = FilterMode::Linear;
+        sDesc.addressU = TextureAddressMode::Clamp;
+        sDesc.addressV = TextureAddressMode::Clamp;
+        sDesc.addressW = TextureAddressMode::Clamp;
+        sampler_ = device->CreateSampler(sDesc);
+    }
+    {
+        TextureDesc rtDesc{};
+        rtDesc.size = {render_width_, render_height_, 1};
+        rtDesc.format = DataFormat::RGBA16_Float;
+        rtDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
+        output_tex_ = device->CreateTexture(rtDesc);
+        uv_rt_ = device->CreateTexture(rtDesc);
+    }
+    {
+        // 1×1 z=0 UV 占位（无实体时 composite 读它 → 全像素走原路径）。
+        TextureDesc d{};
+        d.size = {1, 1, 1};
+        d.format = DataFormat::RGBA16_Float;
+        d.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+        uv_black_tex_ = device->CreateTexture(d);
+        if (uv_black_tex_ != handles::INVALID_RESOURCE) {
+            const std::vector<u16> zero{0, 0, 0, 0};
+            UploadRGBA16F(device_, uv_black_tex_, zero, 1, 1);
+        }
+    }
+
     const bool ok = composite_pipeline_ != handles::INVALID_PIPELINE &&
+                    uv_pipeline_ != handles::INVALID_PIPELINE &&
                     output_tex_ != handles::INVALID_RESOURCE;
     if (!ok) {
-        PRIMAL_LOG_STREAM(Error, "Render") << "[Lightmap] pipeline/output init failed" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Lightmap] pipeline/rt init failed" << std::endl;
         Shutdown();
     }
     return ok;
@@ -173,22 +292,36 @@ void LightmapModule::Shutdown() {
     if (!device_) return;
     if (lightmap_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(lightmap_tex_);
     if (output_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(output_tex_);
-    if (params_cb_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(params_cb_);
+    if (uv_rt_ != handles::INVALID_RESOURCE) device_->DestroyTexture(uv_rt_);
+    if (uv_black_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(uv_black_tex_);
+    if (positions_sb_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(positions_sb_);
+    if (uvs_sb_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(uvs_sb_);
+    if (indices_ib_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(indices_ib_);
     if (sampler_ != handles::INVALID_SAMPLER) device_->DestroySampler(sampler_);
-    if (composite_ds_ != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(composite_ds_);
+    for (int i = 0; i < 3; ++i)
+        if (composite_ds_[i] != handles::INVALID_DESCRIPTOR_SET)
+            device_->DestroyDescriptorSet(composite_ds_[i]);
+    if (uv_ds_ != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(uv_ds_);
     if (composite_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT)
         device_->DestroyDescriptorSetLayout(composite_set_layout_);
+    if (uv_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT)
+        device_->DestroyDescriptorSetLayout(uv_set_layout_);
     if (composite_layout_ != handles::INVALID_PIPELINE_LAYOUT)
         device_->DestroyPipelineLayout(composite_layout_);
+    if (uv_layout_ != handles::INVALID_PIPELINE_LAYOUT) device_->DestroyPipelineLayout(uv_layout_);
     if (composite_pipeline_ != handles::INVALID_PIPELINE) device_->DestroyPipeline(composite_pipeline_);
-    lightmap_tex_ = output_tex_ = params_cb_ = handles::INVALID_RESOURCE;
+    if (uv_pipeline_ != handles::INVALID_PIPELINE) device_->DestroyPipeline(uv_pipeline_);
+    lightmap_tex_ = output_tex_ = uv_rt_ = uv_black_tex_ = handles::INVALID_RESOURCE;
+    positions_sb_ = uvs_sb_ = indices_ib_ = handles::INVALID_RESOURCE;
     sampler_ = handles::INVALID_SAMPLER;
-    composite_pipeline_ = handles::INVALID_PIPELINE;
+    composite_pipeline_ = uv_pipeline_ = handles::INVALID_PIPELINE;
+    entities_.clear();
+    entryScaleBias_.clear();
+    matchedEntities_.clear();
     device_ = nullptr;
 }
 
 rhi::ResourceHandle LightmapModule::CreateGradientLightmapTexture(u32 size) {
-    // 过程生成渐变页：R=x, G=y, B=0.25, A=1（RGBA16F）。
     TextureDesc desc{};
     desc.size = {size, size, 1};
     desc.format = DataFormat::RGBA16_Float;
@@ -196,9 +329,8 @@ rhi::ResourceHandle LightmapModule::CreateGradientLightmapTexture(u32 size) {
     ResourceHandle tex = device_->CreateTexture(desc);
     if (tex == handles::INVALID_RESOURCE) return tex;
 
-    const u32 rowBytes = size * 8;  // RGBA16F = 8B/px；256px 行 = 2048B，天然 256 对齐
     std::vector<u16> half(static_cast<size_t>(size) * size * 4);
-    for (u32 y = 0; y < size; ++y) {
+    for (u32 y = 0; y < size; ++y)
         for (u32 x = 0; x < size; ++x) {
             const size_t i = (static_cast<size_t>(y) * size + x) * 4;
             half[i + 0] = FloatToHalf(static_cast<f32>(x) / static_cast<f32>(size - 1));
@@ -206,42 +338,10 @@ rhi::ResourceHandle LightmapModule::CreateGradientLightmapTexture(u32 size) {
             half[i + 2] = FloatToHalf(0.25f);
             half[i + 3] = FloatToHalf(1.0f);
         }
-    }
-
-    BufferDesc sbDesc{};
-    sbDesc.size = static_cast<u64>(rowBytes) * size;
-    sbDesc.usage = GPUMemoryUsage::Staging;
-    sbDesc.memoryUsage = GPUMemoryUsage::Staging;
-    ResourceHandle staging = device_->CreateBuffer(sbDesc);
-    if (staging == handles::INVALID_RESOURCE) {
+    if (!UploadRGBA16F(device_, tex, half, size, size)) {
         device_->DestroyTexture(tex);
         return handles::INVALID_RESOURCE;
     }
-    void* mapped = device_->MapBuffer(staging);
-    if (mapped) {
-        std::memcpy(mapped, half.data(), half.size() * sizeof(u16));
-        device_->UnmapBuffer(staging);
-    }
-
-    SyncHandle fence = device_->CreateSync();
-    auto cmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
-    auto* cmd = GetCommandBuffer(cmdHandle);
-    cmd->Begin();
-    BufferTextureCopyRegion region{};
-    region.bufferOffset = 0;
-    region.imageSubresource = {0, 0, 1};
-    region.imageOffset = {0, 0, 0};
-    region.imageExtent = {size, size, 1};
-    cmd->CopyBufferToTexture(staging, tex, &region, 1);
-    cmd->End();
-    QueueSubmitInfo submit{};
-    submit.cmdBuffer = cmdHandle;
-    submit.signalFence = fence;
-    device_->Submit(submit);
-    device_->WaitForSync(fence, UINT32_MAX);
-    device_->DestroySync(fence);
-    device_->DestroyCommandBuffer(cmdHandle);
-    device_->DestroyBuffer(staging);
     return tex;
 }
 
@@ -260,16 +360,242 @@ void LightmapModule::ClearLightmap() {
     if (device_ && lightmap_tex_ != handles::INVALID_RESOURCE)
         device_->DestroyTexture(lightmap_tex_);
     lightmap_tex_ = handles::INVALID_RESOURCE;
+    entities_.clear();
+    entryScaleBias_.clear();
+    matchedEntities_.clear();
+}
+
+bool LightmapModule::LoadLightmap(const std::string& path) {
+    if (!device_) return false;
+    baking::LightmapContainer c;
+    if (!baking::LoadLightmapContainer(path, c) || c.pages.empty()) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Lightmap] load failed: " << path << std::endl;
+        return false;
+    }
+    const auto& page = c.pages[0];
+
+    if (lightmap_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(lightmap_tex_);
+    TextureDesc desc{};
+    desc.size = {page.width, page.height, 1};
+    desc.format = DataFormat::RGBA16_Float;
+    desc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+    lightmap_tex_ = device_->CreateTexture(desc);
+    if (lightmap_tex_ == handles::INVALID_RESOURCE) return false;
+    if (!UploadRGBA16F(device_, lightmap_tex_, page.texels_rgba16f, page.width, page.height)) {
+        device_->DestroyTexture(lightmap_tex_);
+        lightmap_tex_ = handles::INVALID_RESOURCE;
+        return false;
+    }
+
+    entryScaleBias_.clear();
+    entities_.clear();
+    matchedEntities_.clear();
+    for (const auto& e : c.entries) {
+        entryScaleBias_[e.GetName()] = {e.scale_x, e.scale_y, e.bias_x, e.bias_y};
+    }
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[Lightmap] loaded " << path << " (" << page.width << "x" << page.height
+        << ", " << c.entries.size() << " entries)" << std::endl;
+    return true;
+}
+
+void LightmapModule::UpdateFrame(const RenderScene& scene) {
+    if (!device_ || entryScaleBias_.empty()) return;
+
+    bool added = false;
+    for (const auto& proxy : scene.GetProxies()) {
+        const std::uint64_t key =
+            ((std::uint64_t)proxy.meshId << 32) | (std::uint32_t)proxy.entityId;
+        if (std::find(matchedEntities_.begin(), matchedEntities_.end(), key) !=
+            matchedEntities_.end())
+            continue;
+        // 收集器命名约定（LightmapSceneCollector）：mesh_<contentId>_e<entityId>。
+        const std::string name = "mesh_" + std::to_string(proxy.meshId) + "_e" +
+                                 std::to_string(proxy.entityId);
+        if (entryScaleBias_.find(name) == entryScaleBias_.end()) continue;
+        matchedEntities_.push_back(key);
+        added = true;
+    }
+    if (added) RebuildEntityBuffers(scene);
+}
+
+void LightmapModule::RebuildEntityBuffers(const RenderScene& scene) {
+    // 全量重建（实体集变化不频繁；烘焙为离线动作）。
+    entities_.clear();
+    std::vector<float> cpuPositions;  // vec4
+    std::vector<float> cpuUvs;        // vec2
+    std::vector<std::uint32_t> cpuIndices;
+
+    for (const auto& proxy : scene.GetProxies()) {
+        const std::uint64_t key =
+            ((std::uint64_t)proxy.meshId << 32) | (std::uint32_t)proxy.entityId;
+        if (std::find(matchedEntities_.begin(), matchedEntities_.end(), key) ==
+            matchedEntities_.end())
+            continue;
+        const std::string name = "mesh_" + std::to_string(proxy.meshId) + "_e" +
+                                 std::to_string(proxy.entityId);
+        const auto it = entryScaleBias_.find(name);
+        if (it == entryScaleBias_.end()) continue;
+
+        rhi::RHIMeshAsset asset;
+        if (!content::get_rhi_mesh_asset(proxy.meshId, asset)) continue;
+        if (asset.num_vertices == 0 || asset.num_indices < 3) continue;
+        if (asset.lightmap_uv_buffer.size() < (size_t)asset.num_vertices * 8) continue;
+
+        EntityRecord rec{};
+        rec.index_count = asset.num_indices;
+        rec.first_index = (u32)cpuIndices.size();
+        rec.position_offset = (u32)(cpuPositions.size() / 4);
+        rec.uv_offset = (u32)(cpuUvs.size() / 2);
+        rec.scale_bias[0] = it->second[0];
+        rec.scale_bias[1] = it->second[1];
+        rec.scale_bias[2] = it->second[2];
+        rec.scale_bias[3] = it->second[3];
+
+        // 世界空间位置（M × 列向量，约定同 LightmapSceneCollector）。
+        const auto& m = proxy.transform;
+        const auto* positions = reinterpret_cast<const float*>(asset.position_buffer.data());
+        for (u32 v = 0; v < asset.num_vertices; ++v) {
+            const float x = positions[v * 3], y = positions[v * 3 + 1], z = positions[v * 3 + 2];
+            cpuPositions.push_back(m.columns[0].x * x + m.columns[1].x * y + m.columns[2].x * z + m.columns[3].x);
+            cpuPositions.push_back(m.columns[0].y * x + m.columns[1].y * y + m.columns[2].y * z + m.columns[3].y);
+            cpuPositions.push_back(m.columns[0].z * x + m.columns[1].z * y + m.columns[2].z * z + m.columns[3].z);
+            cpuPositions.push_back(0.0f);
+        }
+        const auto* uvs = reinterpret_cast<const float*>(asset.lightmap_uv_buffer.data());
+        cpuUvs.insert(cpuUvs.end(), uvs, uvs + (size_t)asset.num_vertices * 2);
+
+        if (asset.index_size == 4) {
+            const auto* idx = reinterpret_cast<const std::uint32_t*>(asset.index_buffer.data());
+            cpuIndices.insert(cpuIndices.end(), idx, idx + asset.num_indices);
+        } else {
+            const auto* idx = reinterpret_cast<const std::uint16_t*>(asset.index_buffer.data());
+            for (u32 i = 0; i < asset.num_indices; ++i) cpuIndices.push_back(idx[i]);
+        }
+        entities_.push_back(rec);
+    }
+
+    // GPU 缓冲重建。
+    auto rebuild = [](RHIDeviceBase* dev, ResourceHandle& handle, const void* data,
+                      u64 bytes, u32 bindFlags) {
+        if (handle != handles::INVALID_RESOURCE) dev->DestroyBuffer(handle);
+        BufferDesc desc{};
+        desc.size = std::max<u64>(bytes, 16);
+        // Static = unmappable in this RHI（见 DebugProbeSphereModule 同注）。
+        desc.usage = GPUMemoryUsage::Dynamic;
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        desc.bindFlags = bindFlags;
+        handle = dev->CreateBuffer(desc);
+        if (handle == handles::INVALID_RESOURCE) return false;
+        void* mapped = dev->MapBuffer(handle);
+        if (!mapped) return false;
+        std::memcpy(mapped, data, bytes);
+        dev->UnmapBuffer(handle);
+        return true;
+    };
+    const u32 storageFlags = static_cast<u32>(BufferUsageFlags::Storage);
+    if (!entities_.empty()) {
+        if (!rebuild(device_, positions_sb_, cpuPositions.data(),
+                     cpuPositions.size() * sizeof(float), storageFlags) ||
+            !rebuild(device_, uvs_sb_, cpuUvs.data(), cpuUvs.size() * sizeof(float),
+                     storageFlags) ||
+            !rebuild(device_, indices_ib_, cpuIndices.data(),
+                     cpuIndices.size() * sizeof(std::uint32_t),
+                     static_cast<u32>(BufferUsageFlags::Index))) {
+            entities_.clear();  // 上传失败 → 本轮无实体（composite 走占位页）
+            PRIMAL_LOG_STREAM(Error, "Render") << "[Lightmap] entity buffer upload failed" << std::endl;
+            return;
+        }
+        // SSBO 描述符只在此刻写（帧内只读——避免 in-flight 重写失效）。
+        DescData ssbos[2] = {
+            {0, DescriptorType::StorageBuffer, positions_sb_},
+            {1, DescriptorType::StorageBuffer, uvs_sb_},
+        };
+        UpdateDesc(device_, uv_ds_, ssbos, 2);
+    }
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[Lightmap] entities rebuilt: " << entities_.size() << std::endl;
+}
+
+void LightmapModule::AddUVPrePass(rendergraph::RenderGraph& graph, const FrameInputs& inputs) {
+    if (!LightmapEnabledByEnv() || !HasActiveLightmap() || entities_.empty()) return;
+    if (!inputs.gbuffer_depth_rg.IsValid()) return;
+
+    uv_rt_rg_ = graph.ImportResource("LightmapUV_RT", uv_rt_);
+    auto uvRG = uv_rt_rg_;
+    auto depthRG = inputs.gbuffer_depth_rg;
+
+    struct UvData {
+        rendergraph::RGResourceHandle output;
+    };
+    graph.AddPass<UvData>("LightmapUV",
+        rendergraph::RGPassType::Graphics,
+        rendergraph::RGPassCategory::PostProcess,
+        [uvRG, depthRG](UvData& data, rendergraph::RenderGraphBuilder& builder) {
+            builder.SideEffect();
+            builder.Read(depthRG, ResourceState::DepthStencilReadOnly);
+            data.output = builder.Write(uvRG, ResourceState::RenderTarget);
+
+            rendergraph::RGRenderPassDesc rpDesc;
+            rpDesc.colors.push_back({.texture = data.output, .loadOp = LoadAction::Clear,
+                                     .storeOp = StoreAction::Store,
+                                     .clearColor = {math::v4{0, 0, 0, 0}}});
+            rpDesc.depthStencil.texture = depthRG;
+            rpDesc.depthStencil.loadOp = LoadAction::Load;         // 保留场景深度
+            rpDesc.depthStencil.storeOp = StoreAction::DontCare;   // 只读——不回写
+            rpDesc.depthStencil.depthLoadOp = LoadAction::Load;
+            rpDesc.depthStencil.depthStoreOp = StoreAction::DontCare;
+            builder.DeclareRenderPass(rpDesc);
+        },
+        [this, inputs](const UvData&, rendergraph::RenderGraphContext& context) {
+            auto cmd = context.cmdBuffer;
+            cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
+            cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
+
+            cmd->BindGraphicsPipeline(uv_pipeline_);
+            const DescriptorSetHandle sets[] = {uv_ds_};
+            cmd->BindDescriptorSets(PipelineBindPoint::Graphics, uv_layout_, 0, 1, sets, 0, nullptr);
+            cmd->BindIndexBuffer(indices_ib_, DataFormat::R32_UInt, 0);
+            for (const auto& e : entities_) {
+                UvPushConstants push{};
+                push.view_proj = inputs.view_projection;
+                push.position_offset = e.position_offset;
+                push.uv_offset = e.uv_offset;
+                std::memcpy(push.scale_bias, e.scale_bias, sizeof(push.scale_bias));
+                cmd->PushConstants(uv_layout_, ShaderStage::Vertex, 0, sizeof(push), &push);
+                cmd->DrawIndexed(e.index_count, e.first_index, 0, 1, 0);
+            }
+        });
 }
 
 rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
     rendergraph::RenderGraph& graph, const FrameInputs& inputs,
     rendergraph::RGResourceHandle indirect_rg) {
-    using rendergraph::RenderGraphBuilder;
+    if (!LightmapEnabledByEnv()) return rendergraph::RGResourceHandle{};
 
-    if (!LightmapEnabledByEnvChecked()) return rendergraph::RGResourceHandle{};
+    // 尺寸变更（窗口 resize / 超采样档切换）→ 重建中间纹理。渲染图每帧
+    // 重新导入，无跨帧身份问题。
+    if (inputs.render_width != render_width_ || inputs.render_height != render_height_) {
+        render_width_ = inputs.render_width;
+        render_height_ = inputs.render_height;
+        TextureDesc rtDesc{};
+        rtDesc.size = {render_width_, render_height_, 1};
+        rtDesc.format = DataFormat::RGBA16_Float;
+        rtDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
+        if (output_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(output_tex_);
+        if (uv_rt_ != handles::INVALID_RESOURCE) device_->DestroyTexture(uv_rt_);
+        output_tex_ = device_->CreateTexture(rtDesc);
+        uv_rt_ = device_->CreateTexture(rtDesc);
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[Lightmap] rt resized -> " << render_width_ << "x" << render_height_ << std::endl;
+    }
 
     auto outRG = graph.ImportResource("LightmapCompositeOut", output_tex_);
+    // UV RT 的 RG 依赖：AddUVPrePass 已在本帧导入（写）——这里声明读，
+    // RG 才会插 COLOR_ATTACHMENT→SHADER_READ 屏障。无实体的帧 UV RG
+    // 无效（pre-pass 未加），composite 绑占位页。
+    const rendergraph::RGResourceHandle uvReadRG = uv_rt_rg_;
+    const bool uvValid = HasEntities() && uvReadRG.IsValid();
 
     struct CompositeData {
         rendergraph::RGResourceHandle output;
@@ -277,9 +603,10 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
     graph.AddPass<CompositeData>("LightmapComposite",
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::PostProcess,
-        [indirect_rg, outRG](CompositeData& data, RenderGraphBuilder& builder) {
+        [indirect_rg, outRG, uvReadRG, uvValid](CompositeData& data, rendergraph::RenderGraphBuilder& builder) {
             builder.SideEffect();
             builder.Read(indirect_rg, ResourceState::ShaderResource);
+            if (uvValid) builder.Read(uvReadRG, ResourceState::ShaderResource);
             data.output = builder.Write(outRG, ResourceState::RenderTarget);
 
             rendergraph::RGRenderPassDesc rpDesc;
@@ -293,32 +620,32 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
-            // 与 FusionIndirect 同源增益（默认 1.0，物理恒等）。
             float gain = 1.0f;
             if (const char* g = std::getenv("PRIMAL_GI_INDIRECT_GAIN")) {
                 const float v = static_cast<float>(std::atof(g));
                 if (v >= 0.0f && v <= 8.0f) gain = v;
             }
-            // M0 debug 开关：PRIMAL_LIGHTMAP_DEBUG=1 时全屏替换为渐变页采样。
             float debugMode = 0.0f;
             if (const char* d = std::getenv("PRIMAL_LIGHTMAP_DEBUG")) {
                 if (d[0] == '1') debugMode = 1.0f;
+                else if (d[0] == '2') debugMode = 2.0f;
             }
-            if (params_cb_ != handles::INVALID_RESOURCE) {
-                const float ubo[2] = {gain, debugMode};
-                device_->UpdateBufferData(params_cb_, ubo, sizeof(ubo), 0);
-            }
-
+            // 无实体时绑 z=0 占位页（全像素走原路径/debug 分支）。
+            const ResourceHandle uvTex = HasEntities() ? uv_rt_ : uv_black_tex_;
             DescData params[4] = {
                 {0, DescriptorType::SampledImage, inputs.indirect_tex},
                 {1, DescriptorType::SampledImage, lightmap_tex_},
-                {2, DescriptorType::Sampler, static_cast<ResourceHandle>(sampler_)},
-                {3, DescriptorType::UniformBuffer, params_cb_},
+                {2, DescriptorType::SampledImage, uvTex},
+                {3, DescriptorType::Sampler, static_cast<ResourceHandle>(sampler_)},
             };
-            UpdateDesc(device_, composite_ds_, params, 4);
+            const u32 slot = inputs.frame_index % 3;
+            UpdateDesc(device_, composite_ds_[slot], params, 4);
             cmd->BindGraphicsPipeline(composite_pipeline_);
-            const DescriptorSetHandle sets[] = {composite_ds_};
+            const DescriptorSetHandle sets[] = {composite_ds_[slot]};
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, composite_layout_, 0, 1, sets, 0, nullptr);
+            const float pushParams[2] = {gain, debugMode};
+            cmd->PushConstants(composite_layout_, ShaderStage::Pixel, 0, sizeof(pushParams),
+                               pushParams);
             cmd->Draw(3, 0, 1, 0);
         });
 

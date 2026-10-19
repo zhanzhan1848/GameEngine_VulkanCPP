@@ -389,7 +389,8 @@ echo "==> Hand-written GLSL (glslangValidator) ===="
 # helpers. inline_includes (awk-based) inlines those headers before passing to
 # glslangValidator. Headers themselves are not compiled standalone.
 GLSL_NAMES=( "Particle/Particle" "Forward/Line" "Forward/DeferredLighting"
-             "Debug/MeshletDebug" "Debug/SDFDebug" "Debug/VectorFieldDebug" "Debug/VoxelDebug" )
+             "Debug/MeshletDebug" "Debug/SDFDebug" "Debug/VectorFieldDebug" "Debug/VoxelDebug"
+             "Lightmap/LightmapUVPass" )
 for pair in "${GLSL_NAMES[@]}"; do
     src_dir="$(dirname "$pair")"
     src_name="$(basename "$pair")"
@@ -625,8 +626,9 @@ LUMEN_GLSL_STAGES+=( "comp" )
 LUMEN_GLSL_NAMES+=( "Lumen/DDGIFirstPrimaryRasterWitness" )
 LUMEN_GLSL_ENTRIES+=( "main" )
 LUMEN_GLSL_STAGES+=( "frag" )
-# Lightmap 旁路（2026-10-19 计划）：独立 Lightmap/ 目录，自定义 entry，
-# 不与 Lumen shader 混排。UV pre-pass（vert+frag 对，entry main）M3 起加。
+# Lightmap 旁路（2026-10-19 计划）：独立 Lightmap/ 目录，不与 Lumen shader
+# 混排。composite 自定义 entry；UV pre-pass 是 vert+frag 对（GLSL_NAMES
+# 循环按对编译，entry main）。
 LUMEN_GLSL_NAMES+=( "Lightmap/LightmapComposite" )
 LUMEN_GLSL_ENTRIES+=( "lightmap_composite" )
 LUMEN_GLSL_STAGES+=( "frag" )

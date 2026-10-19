@@ -375,14 +375,6 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
         return false;
     }
 
-    // Lightmap 旁路 M0 骨架（2026-10-19 计划）：PRIMAL_LIGHTMAP_DEBUG=1 注册
-    // 渐变测试页并激活 fusion 插针（全屏 debug 替换）；不设 env 时渲染图与
-    // 基线零差异。PRIMAL_LIGHTMAP=0 可强制压回零影响态（回归 A/B 旋钮）。
-    if (std::getenv("PRIMAL_LIGHTMAP_DEBUG")) {
-        pipeline_->RegisterDebugLightmap();
-        std::cerr << "[Lightmap] debug gradient page registered via PRIMAL_LIGHTMAP_DEBUG" << std::endl;
-    }
-
     // SPIR-V loader: try project-root path first (matches UnitTests cwd),
     // then walk up from the binary's cwd (Darwin/Debug) until found.
     auto loadSpv = [](const char* relpath) -> std::vector<u8> {
@@ -2326,6 +2318,43 @@ void TestVulkanSponzaRenderGraph::Run() {
     SyncHandle signalFence;
     if (!renderSystem_.BeginFrame(backBuffer, signalFence)) {
         return;
+    }
+
+    // Lightmap 旁路（2026-10-19 计划）。子系统（含 LightmapModule）在首个
+    // 渲染帧才初始化——注册/烘焙统一延迟到第 20 帧：
+    //   PRIMAL_LIGHTMAP_BAKE=1 —— 真烘焙端到端（低 spp 验证消费链路）；
+    //   PRIMAL_LIGHTMAP_DEBUG=1（无 BAKE）—— 渐变 debug 页全屏替换；
+    //   两者皆无 —— 渲染图与基线零差异。PRIMAL_LIGHTMAP=0 总开关。
+    {
+        static bool lmBakeDone = false;
+        if (!lmBakeDone && frameCount_ == 20 && pipeline_) {
+            if (std::getenv("PRIMAL_LIGHTMAP_BAKE")) {
+            lmBakeDone = true;
+            auto lmSettings = primal::graphics::baking::DefaultLightmapBakeSettings();
+            lmSettings.atlas_size = 1024;
+            lmSettings.samples_per_texel = 32;
+            lmSettings.bounces = 2;
+            // DLSS Sponza 为厘米级源网格（世界面积巨大）——密度自适应减半
+            // 直到装进图集（验证消费链路而非画质）。
+            std::snprintf(lmSettings.output_dir, sizeof(lmSettings.output_dir), "%s",
+                          "/tmp/lm_e2e_bake");
+            bool lmOk = false;
+            std::string lmErr;
+            for (float density : {1.0f, 0.5f, 0.25f, 0.1f, 0.05f, 0.02f}) {
+                lmSettings.texel_density = density;
+                lmErr.clear();
+                lmOk = pipeline_->BakeSceneLightmaps(lmSettings, nullptr, &lmErr);
+                std::cerr << "[Lightmap][e2e] density=" << density << " -> "
+                          << (lmOk ? "OK" : lmErr) << std::endl;
+                if (lmOk) break;
+            }
+            } else if (std::getenv("PRIMAL_LIGHTMAP_DEBUG")) {
+                lmBakeDone = true;
+                pipeline_->RegisterDebugLightmap();
+                std::cerr << "[Lightmap] debug gradient page registered via PRIMAL_LIGHTMAP_DEBUG"
+                          << std::endl;
+            }
+        }
     }
 
     auto cmd = renderSystem_.GetCurrentCommandBuffer();

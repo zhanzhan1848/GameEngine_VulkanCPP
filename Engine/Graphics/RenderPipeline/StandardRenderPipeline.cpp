@@ -25,6 +25,7 @@
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/PCG/GPU/GPUMesher.h"
 #include "Graphics/Scene/RenderSceneSnapshot.h"
+#include "Graphics/Baking/LightmapSceneCollector.h"
 #include "Graphics/Scene/CameraSyncSystem.h"
 #include "Content/ContentToEngine.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
@@ -1583,10 +1584,43 @@ void StandardRenderPipeline::ShutdownSubsystems() {
 }
 
 void StandardRenderPipeline::RegisterDebugLightmap() {
-    // M0 骨架入口（见 StandardRenderPipeline.h 注释）：安全空操作条件齐全——
-    // 模块不存在（非 Vulkan/spv 未部署）或已注册（幂等）。
     if (!lightmap_module_) return;
     lightmap_module_->RegisterDebugLightmap();
+}
+
+bool StandardRenderPipeline::BakeSceneLightmaps(const baking::LightmapBakeSettings& settings,
+                                                std::string* out_path, std::string* out_err) {
+    if (!lightmap_module_) {
+        if (out_err) *out_err = "lightmap module unavailable (non-Vulkan or spv missing)";
+        return false;
+    }
+    const RenderScene* scene = current_scene_ ? current_scene_ : &default_scene_;
+    if (!scene) {
+        if (out_err) *out_err = "no active scene";
+        return false;
+    }
+
+    baking::CollectedBakeScene collected;
+    std::string err;
+    if (!baking::CollectBakeScene(*scene, collected, err)) {
+        if (out_err) *out_err = "collect: " + err;
+        return false;
+    }
+    const baking::LightmapBakeResult r =
+        baking::BakeLightmaps(collected.scene, settings, nullptr, nullptr);
+    if (!r.ok) {
+        if (out_err) *out_err = "bake: " + r.error;
+        return false;
+    }
+    if (!lightmap_module_->LoadLightmap(r.output_path)) {
+        if (out_err) *out_err = "load: " + r.output_path;
+        return false;
+    }
+    if (out_path) *out_path = r.output_path;
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[Lightmap] scene baked -> " << r.output_path << " (" << r.entries.size()
+        << " entries, " << r.atlas_width << "x" << r.atlas_height << ")" << std::endl;
+    return true;
 }
 
 // ============================================================================
@@ -4289,6 +4323,20 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 static_cast<u32>(frameCount_));
         }
 
+        // Lightmap 旁路（2026-10-19 计划，M3）：帧注册 + UV pre-pass，在融合
+        // 链内部（fusion AddPasses 的两 pass 之间由插针追加 composite）。
+        // fusion 未激活时 lightmap 一并休眠——它改写的是 fusion 的间接信号。
+        if (lightmap_module_) {
+            if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
+            LightmapModule::FrameInputs lmFrame;
+            lmFrame.frame_index = static_cast<u32>(frameCount_);
+            lmFrame.render_width = render_width_;
+            lmFrame.render_height = render_height_;
+            lmFrame.view_projection = proj_matrix_ * view_matrix_;
+            lmFrame.gbuffer_depth_rg = gbufferDepthRG;
+            lightmap_module_->AddUVPrePass(graph, lmFrame);
+        }
+
         fusionOut = fusion_module_->AddPasses(graph, fusionIn);
     }
 
@@ -5982,6 +6030,21 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     graph, reflIn, static_cast<u32>(frameCount_));
                 fusionIn.refl_specular_tex = refl_specular_pass_->GetOutputTex(
                     static_cast<u32>(frameCount_));
+            }
+
+            // Lightmap 旁路（RenderWithCommandBuffer 站点，与 BuildRenderGraph
+            // 站点镜像——见另一处同注释；深度在此站点按需导入，RG 同物理
+            // 资源自动合并身份）。
+            if (lightmap_module_) {
+                if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
+                LightmapModule::FrameInputs lmFrame;
+                lmFrame.frame_index = static_cast<u32>(frameCount_);
+                lmFrame.render_width = render_width_;
+                lmFrame.render_height = render_height_;
+                lmFrame.view_projection = proj_matrix_ * view_matrix_;
+                lmFrame.gbuffer_depth_rg =
+                    graph.ImportResource("GBufferDepth_LM", gpuDraw.GetGBufferDepthSampleable());
+                lightmap_module_->AddUVPrePass(graph, lmFrame);
             }
 
             fusionOut = fusion_module_->AddPasses(graph, fusionIn);
