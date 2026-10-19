@@ -231,9 +231,17 @@ public:
 
     // M3+ 引擎侧烘焙入口（EngineDLL LightmapBake 与测试共用）：收集当前
     // 场景 → CPU 积分 → LMAP 落盘 → 加载并开始逐帧点亮匹配实体。
-    // 同步阻塞（分钟级）；进度经 settings 无——回调面在 EngineDLL 层包装。
+    // 同步阻塞（分钟级）；进度回调可能来自 worker 线程（调用方自行 marshal）。
+    // out_entries：per-mesh 矩形/scale-bias（编辑器持久化用）。
+    // 页面级加载/清除（场景加载与烘焙完成后调用；实体匹配自动进行）。
+    bool SetLightmapPage(const std::string& path);
+    void ClearLightmapPage();
+
     bool BakeSceneLightmaps(const baking::LightmapBakeSettings& settings,
-                            std::string* out_path = nullptr, std::string* out_err = nullptr);
+                            std::string* out_path = nullptr, std::string* out_err = nullptr,
+                            std::vector<baking::LightmapMeshEntry>* out_entries = nullptr,
+                            baking::LightmapProgressCallback progress = nullptr,
+                            void* progress_user = nullptr);
 
     // Debug/testing: primary DDGI volume access.
     // Default-off Vulkan source-distance candidate. CPU geometry survives the

@@ -1588,8 +1588,20 @@ void StandardRenderPipeline::RegisterDebugLightmap() {
     lightmap_module_->RegisterDebugLightmap();
 }
 
+bool StandardRenderPipeline::SetLightmapPage(const std::string& path) {
+    if (!lightmap_module_) return false;
+    return lightmap_module_->LoadLightmap(path);
+}
+
+void StandardRenderPipeline::ClearLightmapPage() {
+    if (lightmap_module_) lightmap_module_->ClearLightmap();
+}
+
 bool StandardRenderPipeline::BakeSceneLightmaps(const baking::LightmapBakeSettings& settings,
-                                                std::string* out_path, std::string* out_err) {
+                                                std::string* out_path, std::string* out_err,
+                                                std::vector<baking::LightmapMeshEntry>* out_entries,
+                                                baking::LightmapProgressCallback progress,
+                                                void* progress_user) {
     if (!lightmap_module_) {
         if (out_err) *out_err = "lightmap module unavailable (non-Vulkan or spv missing)";
         return false;
@@ -1607,7 +1619,7 @@ bool StandardRenderPipeline::BakeSceneLightmaps(const baking::LightmapBakeSettin
         return false;
     }
     const baking::LightmapBakeResult r =
-        baking::BakeLightmaps(collected.scene, settings, nullptr, nullptr);
+        baking::BakeLightmaps(collected.scene, settings, progress, progress_user);
     if (!r.ok) {
         if (out_err) *out_err = "bake: " + r.error;
         return false;
@@ -1617,6 +1629,7 @@ bool StandardRenderPipeline::BakeSceneLightmaps(const baking::LightmapBakeSettin
         return false;
     }
     if (out_path) *out_path = r.output_path;
+    if (out_entries) *out_entries = r.entries;
     PRIMAL_LOG_STREAM(Info, "Render")
         << "[Lightmap] scene baked -> " << r.output_path << " (" << r.entries.size()
         << " entries, " << r.atlas_width << "x" << r.atlas_height << ")" << std::endl;
