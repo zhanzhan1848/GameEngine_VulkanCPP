@@ -48,6 +48,20 @@ set_target_properties(TestNeuralWeights PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 
+# Lightmap M1 契约（2026-10-19 计划）：MaxRects 装箱 + LMAP 容器往返
+#（自包含，零 GPU/Engine-lib 依赖；烘焙器积分单测在 M2 扩入本 target）。
+add_executable(TestLightmapBaking
+    Graphics/TestLightmapBaking.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Baking/LightmapAtlasPacker.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Baking/LightmapContainer.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Baking/LightmapBaker.cpp
+)
+target_include_directories(TestLightmapBaking PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME TestLightmapBaking COMMAND TestLightmapBaking)
+set_target_properties(TestLightmapBaking PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
 # M1-a MLX 后端对拍门禁：shim 缺失 SKIP，库存在而对拍失败 FAIL。
 # 依赖 Tools/NeuralMLXShim 的构建产物（dylib + mlx.metallib），见
 # scripts/build_neural_mlx_metallib.sh 与 Docs/2026-09-15-neural-mlx-backend-plan.md。
