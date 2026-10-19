@@ -82,16 +82,28 @@
 | `PRIMAL_LIGHTMAP_DEBUG=2` | composite 全屏纯洋红（消费链诊断档） |
 | `PRIMAL_LIGHTMAP_BAKE=1` | Sponza 测试内帧 20 烘焙（密度自适应） |
 
-## 6. 遗留（合并前必做）
+## 6. 遗留与后续轮新增证据（2026-10-19 深夜轮）
 
-1. **视觉终验收**（原方案 §7 的完整形态）：需要一个 UVLM 网格的项目场景——
-   `primal-engine cook-mesh --in <obj> --out <model> --uvatlas-lightmap` 产出 → 导入项目 →
-   编辑器 File→Bake Lightmaps → 视口对比 `PRIMAL_LIGHTMAP=0` 两态（动态物体 DDGI 不变）。
-   当前 TestProject 网格无 UVLM，bake 走优雅失败路径（已验证）。
-2. **rebase 后重跑零影响证明**（fluid 线合入后，`FusionCompositeModule.cpp`/`StandardRenderPipeline.cpp`
-   预计冲突 ~25 行）。
-3. Metal 端视觉验收（模块已初始化，随 §1 一并做）。
-4. xatlas 对大 mesh 失败率高（Sponza 6 网格仅 1 成功）——后续按 mesh 拆分再展开。
+**真实数据链视觉证实已达成（b3c5e242）**：默认 Sponza + 旁路注册的 UVLM 地板，
+全链零崩溃（烘焙→LMAP→直登记→entities rebuilt）；叠 debug 档对比 79% 画面变化，
+地板像素 (17,14,11)→(21,22,21) 为孤立平面天空反弹的真实烘焙值（与 debug 渐变
+色调可分辨），其余像素走 debug 分支——UV RT 逐像素选择性与真实数据替换双证实。
+证据：/tmp/mini_lightmap/{off,e2e7,e2e8}.ppm。
+
+**本轮发现并修复的两个生产 bug**：
+1. 收集器/模块对 proxy.meshId 单步解析在真实场景全数失败（hierarchy id 需
+   get_rhi_mesh_id 两步解析）——编辑器 "no proxies resolved" 的根因；
+2. 测试注入实体号触发 transform 组件表越界（需真实 game-entity 号）。
+
+**仍遗留（合并前）**：
+1. 编辑器内 UVLM 资产导入后的完整 UI 终验收（无 CLI 导入命令，需手工导入；
+   两步解析修复后编辑器烘焙收集对真实体已可用）；
+2. rebase 后重跑零影响证明（fluid 线合入后）；
+3. Metal 端视觉验收；
+4. **上游 bug 移交**：ContentTools 多网格 OBJ 导入把 mesh[1..] 变全场景三角汤
+   （Sponza cook 1/6 UVLM 的根因）——影响 fluid 线资产，独立立项修复；
+5. 测试旁路 API（AddLightmapBakeMeshOverride/RegisterEntityDirect）仅供终验，
+   生产路径仍是场景同步。
 
 ## 7. 集成协议
 
