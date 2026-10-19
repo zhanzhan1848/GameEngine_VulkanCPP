@@ -84,11 +84,31 @@
 
 ## 6. 遗留与后续轮新增证据（2026-10-19 深夜轮）
 
+**§6.1 三根因修复轮（3f98ee5c）——真实视觉差异达成**：前轮"79% 变化"实为
+debug 渐变分支，纯数据替换当时不可见。本轮逐实验定位并修复：
+1. **烘焙产物全黑**：trace-only（无 UVLM）遮挡物 gather 命中按黑体吸收，
+   Sponza 墙体全部 trace-only → 可烘焙面间接数学上恒 0。改为命中时一阶直射
+   着色（太阳可见性×albedo/π + 天空 π·L(n) 近似）；新增单测
+   TestBakerBlockerBounce（解析几何 F=0.83112，期望≈0.105 实测过）。
+2. **UV pre-pass 采样恒指纹素 (0,0)**（该纹素恰为黑 → 替换不可见）：
+   GLSL vec4 scale_bias 被 std430 对齐推到偏移 80，与 C++ float[4]@72 错位
+   8B；拆 vec2 scale/bias（72/80），Metal 同步修。
+3. **composite 诊断阶梯 z>0.5 分支在前 → debug 档死代码**；重排诊断优先，
+   Metal 补档 3。
+判别实验手段（复用价值）：DEBUG=1 屏幕采样页证上传/采样；UV RT z 清 1 证
+pass 执行+RT 读回；深度临时 Always 证画出区域；通道优势法（g>r+25）检
+fusion 消费后的暗绿（饱和绿阈值会漏检——绿经 FusionComposite 变暗）。
+**最终证据**（SPGI_CAM=0,6.5,-3,-42,0 俯视 30m 白地板 frame 360）：
+图集均值 0.35/0.45/0.64；生产 off/on 显著差 7.9%（72,926px，max=248，
+带 gain=3 放大对比）；debug3 绿覆盖带与差异带重合；视觉复核=地板间接光由
+暖调 DDGI 反弹变为更亮冷调天空主导。/tmp/mini_lightmap/final_*.png。
+
 **真实数据链视觉证实已达成（b3c5e242）**：默认 Sponza + 旁路注册的 UVLM 地板，
 全链零崩溃（烘焙→LMAP→直登记→entities rebuilt）；叠 debug 档对比 79% 画面变化，
 地板像素 (17,14,11)→(21,22,21) 为孤立平面天空反弹的真实烘焙值（与 debug 渐变
 色调可分辨），其余像素走 debug 分支——UV RT 逐像素选择性与真实数据替换双证实。
 证据：/tmp/mini_lightmap/{off,e2e7,e2e8}.ppm。
+（§6.1 勘误：本段"79% 变化"的主因是 debug 渐变分支，见上。）
 
 **本轮发现并修复的两个生产 bug**：
 1. 收集器/模块对 proxy.meshId 单步解析在真实场景全数失败（hierarchy id 需
@@ -103,7 +123,9 @@
 4. **上游 bug 移交**：ContentTools 多网格 OBJ 导入把 mesh[1..] 变全场景三角汤
    （Sponza cook 1/6 UVLM 的根因）——影响 fluid 线资产，独立立项修复；
 5. 测试旁路 API（AddLightmapBakeMeshOverride/RegisterEntityDirect）仅供终验，
-   生产路径仍是场景同步。
+   生产路径仍是场景同步；
+6. 测试 hook 的资产绝对路径指向主树 EngineTest/assets（worktree 内改动不生效，
+   本轮踩过：12m 旧地板被反复加载）。
 
 ## 7. 集成协议
 
