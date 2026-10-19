@@ -210,6 +210,234 @@ void TestContractSizes() {
           "default settings values");
 }
 
+// ---------- M2：烘焙器 ----------
+
+std::uint16_t HalfFromBits(std::uint16_t h) { return h; }
+float HalfToFloat(std::uint16_t h) {
+    const std::uint32_t sign = (h & 0x8000u) << 16;
+    const std::uint32_t exp = (h >> 10) & 0x1Fu;
+    const std::uint32_t mant = h & 0x3FFu;
+    std::uint32_t out;
+    if (exp == 0) out = sign;
+    else if (exp == 31) out = sign | 0x7F800000u | (mant << 13);
+    else out = sign | ((exp - 15 + 127) << 23) | (mant << 13);
+    float f;
+    std::memcpy(&f, &out, 4);
+    return f;
+}
+
+// 轴对齐水平四边形（2 三角形）。normalY = +1 朝上 / -1 朝下（绕序随之）。
+// UV 恒等映射（u=x 归一, v=z 归一）。
+BakeMesh MakeQuad(const std::string& name, float cx, float cy, float cz, float half,
+                  float normalY, bool withUv, const float (&albedo)[3],
+                  const float (&emissive)[3]) {
+    // 测试寿命内持有；一次性预留大容量——后续 push 不得 realloc，
+    // 否则早先 BakeMesh 里的裸指针悬空。
+    static std::vector<float> posPool, uvPool;
+    static std::vector<std::uint32_t> idxPool;
+    static bool reserved = false;
+    if (!reserved) {
+        posPool.reserve(8192); uvPool.reserve(8192); idxPool.reserve(8192);
+        reserved = true;
+    }
+    BakeMesh m;
+    m.name = name;
+    const std::uint32_t base = (std::uint32_t)(posPool.size() / 3);      // 顶点窗起点
+    const std::uint32_t idxBase = (std::uint32_t)(idxPool.size() / 6);   // quad 索引窗起点
+    const float xs[4] = {cx - half, cx - half, cx + half, cx + half};
+    const float zs[4] = {cz - half, cz + half, cz + half, cz - half};
+    const float us[4] = {0, 0, 1, 1};
+    const float vs[4] = {0, 1, 1, 0};
+    for (int i = 0; i < 4; ++i) {
+        posPool.push_back(xs[i]); posPool.push_back(cy); posPool.push_back(zs[i]);
+        uvPool.push_back(us[i]); uvPool.push_back(vs[i]);
+    }
+    // 朝上：0,1,2 / 0,2,3；朝下反转绕序。
+    // 索引用网格内相对值（0..3）——BakeMesh 契约：indices 相对自身顶点窗。
+    if (normalY > 0) {
+        const std::uint32_t t[6] = {0, 1, 2, 0, 2, 3};
+        for (std::uint32_t i : t) idxPool.push_back(i);
+    } else {
+        const std::uint32_t t[6] = {0, 2, 1, 0, 3, 2};
+        for (std::uint32_t i : t) idxPool.push_back(i);
+    }
+    m.positions = posPool.data() + base * 3;
+    m.lightmap_uvs = withUv ? uvPool.data() + base * 2 : nullptr;
+    m.indices = idxPool.data() + idxBase * 6;
+    m.vertex_count = 4;
+    m.index_count = 6;
+    m.albedo[0] = albedo[0]; m.albedo[1] = albedo[1]; m.albedo[2] = albedo[2];
+    m.emissive[0] = emissive[0]; m.emissive[1] = emissive[1]; m.emissive[2] = emissive[2];
+    return m;
+}
+
+// 解析解场景：地板 1×1（albedo 0.5）+ 天花板 4×4@y=1（emissive 1.0，朝下）。
+// 地板中心 bounce-1 出射 = ρ/π × E；E = πL·F，F = 4×(1/2π)[W/√(1+W²)·atan(T/√(1+W²))
+// + T/√(1+T²)·atan(W/√(1+T²))]（点源正对矩形中心，四象限各延展 w=t=2、
+// h=1 → W=T=2 → F=0.83112 → E=2.6108 → 期望 ρE/π = 0.41558；
+// 与径向数值积分 ∫2πr/(1+r²)² 下限 2.513 + 角落增量交叉验证）。
+void TestBakerAnalytic() {
+    const float floorAlbedo[3] = {0.5f, 0.5f, 0.5f};
+    const float ceilingAlbedo[3] = {0.0f, 0.0f, 0.0f};
+    const float emissive1[3] = {1.0f, 1.0f, 1.0f};
+    const float emissive0[3] = {0.0f, 0.0f, 0.0f};
+
+    BakeScene scene;
+    scene.meshes.push_back(MakeQuad("floor", 0, 0, 0, 0.5f, +1, true, floorAlbedo, emissive0));
+    scene.meshes.push_back(MakeQuad("ceiling", 0, 1, 0, 2.0f, -1, true, ceilingAlbedo, emissive1));
+    scene.sky.intensity = 0.0f;
+
+    LightmapBakeSettings s = DefaultLightmapBakeSettings();
+    s.atlas_size = 128;
+    s.samples_per_texel = 1024;
+    s.bounces = 1;
+    s.texel_density = 16.0f;
+    s.denoise = 0;
+    s.dilation_px = 0;
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_bake_test");
+
+    const auto r = BakeLightmaps(scene, s);
+    CHECK(r.ok, "bake ok" + (r.ok ? "" : " err=" + r.error));
+    if (!r.ok) return;
+    CHECK(r.entries.size() == 2, "two baked entries");
+
+    LightmapContainer c;
+    CHECK(LoadLightmapContainer(r.output_path, c), "reload baked container");
+
+    // 找 floor 条目，取其 rect 中心纹素。
+    const LightmapMeshEntry* floorEntry = nullptr;
+    for (const auto& e : c.entries)
+        if (e.GetName() == "floor") floorEntry = &e;
+    CHECK(floorEntry != nullptr, "floor entry exists");
+    if (!floorEntry) return;
+    const auto& page = c.pages[0];
+    const std::uint32_t cx = floorEntry->rect_x + floorEntry->rect_w / 2;
+    const std::uint32_t cy = floorEntry->rect_y + floorEntry->rect_h / 2;
+    const float got = HalfToFloat(page.texels_rgba16f[(cy * page.width + cx) * 4 + 1]);
+    CHECK(std::abs(got - 0.41558f) < 0.02f,
+          "analytic bounce-1 center value (got " + std::to_string(got) + ", want 0.41558)");
+
+    // 天花板自身间接 = 0（albedo 0，向下射线只能打到地板的 0 阶=0）。
+    const LightmapMeshEntry* ceilEntry = nullptr;
+    for (const auto& e : c.entries)
+        if (e.GetName() == "ceiling") ceilEntry = &e;
+    if (ceilEntry) {
+        const std::uint32_t kx = ceilEntry->rect_x + ceilEntry->rect_w / 2;
+        const std::uint32_t ky = ceilEntry->rect_y + ceilEntry->rect_h / 2;
+        const float ceilGot = HalfToFloat(page.texels_rgba16f[(ky * page.width + kx) * 4 + 1]);
+        CHECK(ceilGot < 0.01f, "ceiling indirect ~0 (got " + std::to_string(ceilGot) + ")");
+    }
+}
+
+// 确定性：同场景两次烘焙逐位一致。
+void TestBakerDeterministic() {
+    const float albedo[3] = {0.7f, 0.5f, 0.3f};
+    const float emissive0[3] = {0, 0, 0};
+    BakeScene scene;
+    scene.meshes.push_back(MakeQuad("floor", 0, 0, 0, 0.5f, +1, true, albedo, emissive0));
+    scene.meshes.push_back(MakeQuad("ceiling", 0, 1, 0, 2.0f, -1, true, albedo, {0.6f, 0.6f, 0.6f}));
+    scene.sky.intensity = 0.5f;
+
+    LightmapBakeSettings s = DefaultLightmapBakeSettings();
+    s.atlas_size = 128;
+    s.samples_per_texel = 64;
+    s.bounces = 2;
+    s.texel_density = 12.0f;
+    s.denoise = 0;
+    s.dilation_px = 0;
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_det_a");
+    const auto a = BakeLightmaps(scene, s);
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_det_b");
+    const auto b = BakeLightmaps(scene, s);
+    CHECK(a.ok && b.ok, "both bakes ok");
+    if (!(a.ok && b.ok)) return;
+    LightmapContainer ca, cb;
+    CHECK(LoadLightmapContainer(a.output_path, ca), "load a");
+    CHECK(LoadLightmapContainer(b.output_path, cb), "load b");
+    CHECK(ca.pages[0].texels_rgba16f == cb.pages[0].texels_rgba16f, "deterministic texels");
+}
+
+// 扩张：rect 外圈（margin 区）在 dilation 后非零。
+void TestBakerDilation() {
+    const float albedo[3] = {0.8f, 0.8f, 0.8f};
+    const float emissive0[3] = {0, 0, 0};
+    const float emissive1[3] = {1, 1, 1};
+    BakeScene scene;
+    scene.meshes.push_back(MakeQuad("floor", 0, 0, 0, 0.5f, +1, true, albedo, emissive0));
+    scene.meshes.push_back(MakeQuad("ceiling", 0, 1, 0, 2.0f, -1, true, {0, 0, 0}, emissive1));
+    scene.sky.intensity = 0.0f;
+
+    LightmapBakeSettings s = DefaultLightmapBakeSettings();
+    s.atlas_size = 128;
+    s.samples_per_texel = 64;
+    s.bounces = 1;
+    s.texel_density = 16.0f;
+    s.denoise = 0;
+    s.dilation_px = 3;
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_dilate");
+    const auto r = BakeLightmaps(scene, s);
+    CHECK(r.ok, "dilate bake ok");
+    if (!r.ok) return;
+    LightmapContainer c;
+    CHECK(LoadLightmapContainer(r.output_path, c), "load");
+    const LightmapMeshEntry* floorEntry = nullptr;
+    for (const auto& e : c.entries)
+        if (e.GetName() == "floor") floorEntry = &e;
+    if (!floorEntry) { CHECK(false, "floor entry"); return; }
+    // rect 内中心必须非零；rect 外 2px（margin 区）必须已被扩张填充。
+    const auto& page = c.pages[0];
+    const std::uint32_t cx = floorEntry->rect_x + floorEntry->rect_w / 2;
+    const std::uint32_t cy = floorEntry->rect_y + floorEntry->rect_h / 2;
+    CHECK(HalfToFloat(page.texels_rgba16f[(cy * page.width + cx) * 4 + 1]) > 0.1f,
+          "floor interior nonzero");
+    if (floorEntry->rect_x >= 2 && floorEntry->rect_y >= 2) {
+        const std::uint32_t ox = floorEntry->rect_x - 2;
+        const std::uint32_t oy = floorEntry->rect_y - 2;
+        CHECK(HalfToFloat(page.texels_rgba16f[(oy * page.width + ox) * 4 + 1]) > 0.01f,
+              "dilation ring nonzero at rect corner -2px");
+    }
+}
+
+// trace-only：无 UV mesh 不占 atlas、可被命中遮挡。
+void TestBakerTraceOnly() {
+    const float albedo[3] = {0.5f, 0.5f, 0.5f};
+    const float emissive0[3] = {0, 0, 0};
+    BakeScene scene;
+    scene.meshes.push_back(MakeQuad("floor", 0, 0, 0, 0.5f, +1, true, albedo, emissive0));
+    // 遮挡板：带 UV 但设 trace-only（置空 UV 模拟未展开网格）。
+    scene.meshes.push_back(MakeQuad("blocker", 0, 0.5f, 0, 2.0f, -1, false, {0, 0, 0}, emissive0));
+    // 方向光自上而下——被 blocker 完全遮挡 → 地板直射=0、反弹=0。
+    BakeLight light;
+    light.type = BakeLight::Type::Directional;
+    light.intensity = 5.0f;
+    light.direction[0] = 0; light.direction[1] = -1; light.direction[2] = 0;
+    scene.lights.push_back(light);
+    scene.sky.intensity = 0.0f;
+
+    LightmapBakeSettings s = DefaultLightmapBakeSettings();
+    s.atlas_size = 128;
+    s.samples_per_texel = 64;
+    s.bounces = 1;
+    s.texel_density = 16.0f;
+    s.denoise = 0;
+    s.dilation_px = 0;
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_traceonly");
+    const auto r = BakeLightmaps(scene, s);
+    CHECK(r.ok, "trace-only bake ok" + (r.ok ? "" : " err=" + r.error));
+    if (!r.ok) return;
+    CHECK(r.entries.size() == 1, "only floor gets an entry");
+    CHECK(r.entries[0].GetName() == "floor", "entry is floor");
+
+    LightmapContainer c;
+    CHECK(LoadLightmapContainer(r.output_path, c), "load");
+    const auto& e = c.entries[0];
+    const auto& page = c.pages[0];
+    const std::uint32_t cx = e.rect_x + e.rect_w / 2;
+    const std::uint32_t cy = e.rect_y + e.rect_h / 2;
+    const float got = HalfToFloat(page.texels_rgba16f[(cy * page.width + cx) * 4 + 1]);
+    CHECK(got < 0.01f, "occluded floor indirect ~0 (got " + std::to_string(got) + ")");
+}
+
 } // namespace
 
 int main() {
@@ -219,6 +447,10 @@ int main() {
     TestContainerRoundtrip();
     TestContainerRejects();
     TestContractSizes();
+    TestBakerAnalytic();
+    TestBakerDeterministic();
+    TestBakerDilation();
+    TestBakerTraceOnly();
     if (g_failures == 0) {
         std::cout << "[TestLightmapBaking] ALL PASSED" << std::endl;
         return 0;

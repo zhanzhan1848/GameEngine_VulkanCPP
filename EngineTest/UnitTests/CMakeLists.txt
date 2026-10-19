@@ -48,13 +48,18 @@ set_target_properties(TestNeuralWeights PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 
-# Lightmap M1 契约（2026-10-19 计划）：MaxRects 装箱 + LMAP 容器往返
-#（自包含，零 GPU/Engine-lib 依赖；烘焙器积分单测在 M2 扩入本 target）。
+# Lightmap M1 契约 + M2 烘焙器（2026-10-19 计划）：MaxRects 装箱 + LMAP 容器
+# 往返 + CPU BVH 积分解析解/确定性/扩张/trace-only（自包含，零 GPU/
+# Engine-lib 依赖；JobSystem 未初始化时烘焙器自动串行回退）。
 add_executable(TestLightmapBaking
     Graphics/TestLightmapBaking.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/Baking/LightmapAtlasPacker.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/Baking/LightmapContainer.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/Baking/LightmapBaker.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Utilities/BVH.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/JobSystem/JobSystem.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/JobSystem/JobScheduler.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/JobSystem/WorkStealingQueue.cpp
 )
 target_include_directories(TestLightmapBaking PRIVATE ${CMAKE_SOURCE_DIR})
 add_test(NAME TestLightmapBaking COMMAND TestLightmapBaking)
