@@ -40,6 +40,11 @@
                     <Separator/>
                     <MenuItem Header="_Import _Asset..." Click="OnImportAssetClick"
                               InputGesture="Ctrl+I"/>
+                    <Separator/>
+                    <MenuItem Header="Bake Li_ghtmaps..." Click="OnBakeLightmapsClick"
+                              ToolTip.Tip="烘焙当前场景静态间接光（CPU 路径追踪；进度见 Logger，完成后视口自动应用）"/>
+                    <MenuItem Header="_Clear Lightmaps" Click="OnClearLightmapsClick"
+                              ToolTip.Tip="清除当前场景的 lightmap（PRIMAL_LIGHTMAP=0 亦可临时整体关闭）"/>
                     <MenuItem Header="_New Script..." Click="OnNewScriptClick"
                               IsEnabled="False" ToolTip.Tip="VS integration skipped per user request"/>
                     <Separator/>

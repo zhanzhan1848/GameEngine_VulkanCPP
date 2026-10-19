@@ -238,6 +238,57 @@ public partial class MainWindow : Window
         }
     }
 
+    // ---- Lightmap（2026-10-19 计划 M4d）----
+    // 走 CLI 命令同一路径（单一事实源：LightmapCommands.BakeLightmaps）。
+    // 进度经 TaskRegistry 轮询泵到 Logger；完成即视口自动应用。
+    private async void OnBakeLightmapsClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        try
+        {
+            var result = new PrimalEditor_Avalonia.Cli.LightmapCommands().BakeLightmaps();
+            var taskId = (string)result.GetType().GetProperty("task")!.GetValue(result)!;
+            PrimalEditor_Avalonia.Common.Logger.Info(
+                $"[Lightmap] bake started (task {taskId}) — progress in Logger; task.status queryable via CLI");
+            // 轮询进度（1s；trace 阶段分钟级——粗粒度足够）。
+            while (true)
+            {
+                await System.Threading.Tasks.Task.Delay(1000);
+                var t = PrimalEditor_Avalonia.Cli.TaskRegistry.Find(taskId);
+                if (t == null) break;
+                if (t.State == PrimalEditor_Avalonia.Cli.TaskRegistry.TaskState.Running)
+                {
+                    PrimalEditor_Avalonia.Common.Logger.Info(
+                        $"[Lightmap] {t.ProgressLabel ?? "running"} ({t.Progress?.ToString("P0") ?? "?"})");
+                }
+                else
+                {
+                    PrimalEditor_Avalonia.Common.Logger.Info(
+                        t.State == PrimalEditor_Avalonia.Cli.TaskRegistry.TaskState.Succeeded
+                            ? $"[Lightmap] bake done -> {(t.Artifacts.Count > 0 ? t.Artifacts[0].Path : "?")}"
+                            : $"[Lightmap] bake FAILED: {t.Error}");
+                    break;
+                }
+            }
+        }
+        catch (System.Exception ex)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Error("Bake Lightmaps failed", ex);
+        }
+    }
+
+    private void OnClearLightmapsClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        var scene = PrimalEditor_Avalonia.Cli.EditorServices.ActiveScene;
+        if (scene == null)
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning("Clear Lightmaps: no active scene");
+            return;
+        }
+        scene.LightmapPage = null;
+        PrimalEditor_Avalonia.Native.NativeEngineBridge.PipelineClearLightmap();
+        PrimalEditor_Avalonia.Common.Logger.Info("[Lightmap] cleared (scene flag removed; save to persist)");
+    }
+
     private async void OnNewScriptClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
         if (DataContext is not ViewModels.MainWindowViewModel vm) return;
