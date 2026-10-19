@@ -17,8 +17,10 @@ bool CollectBakeScene(const RenderScene& renderScene, CollectedBakeScene& out,
     std::uint32_t failedAssets = 0;
 
     for (const auto& proxy : renderScene.GetProxies()) {
+        // proxy.meshId 是 hierarchy ID——两步解析（RenderSceneSnapshot.cpp:110
+        // 同注）。
         rhi::RHIMeshAsset asset;
-        if (!content::get_rhi_mesh_asset(proxy.meshId, asset)) {
+        if (!content::get_rhi_mesh_asset(content::get_rhi_mesh_id(proxy.meshId), asset)) {
             ++failedAssets;
             continue;
         }

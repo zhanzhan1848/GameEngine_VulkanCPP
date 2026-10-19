@@ -237,6 +237,13 @@ public:
     bool SetLightmapPage(const std::string& path);
     void ClearLightmapPage();
 
+    // 测试/工具旁路（2026-10-19 计划 §6 终验）：向烘焙场景补一个网格
+    //（不经 RenderScene 代理——避免 game-entity 号约束），与直登记一个
+    // 消费实体（带显式 scale/bias，绕开场景匹配）。生产路径走场景同步。
+    void AddLightmapBakeMeshOverride(id::id_type mesh_content_id, const math::m4x4& transform);
+    bool RegisterLightmapEntityDirect(id::id_type mesh_content_id, u32 entity_id,
+                                      const float scale_bias[4]);
+
     bool BakeSceneLightmaps(const baking::LightmapBakeSettings& settings,
                             std::string* out_path = nullptr, std::string* out_err = nullptr,
                             std::vector<baking::LightmapMeshEntry>* out_entries = nullptr,
@@ -709,6 +716,9 @@ private:
     // 旗标（UpdateLightingSettings 置位，BuildRenderGraph 帧起点消费）。
     bool gi_history_dirty_ = false;
     std::unique_ptr<FusionCompositeModule> fusion_module_;
+    // 测试/工具旁路登记（见 AddLightmapBakeMeshOverride）。
+    std::vector<std::pair<id::id_type, math::m4x4>> lightmapBakeOverrides_;
+
     // Lightmap 旁路（2026-10-19 计划）：fusion 钩子注入的独立改写级。模块
     // 自装 shader（Metal 移植前 Vulkan-only，装配失败即不存在）；场景未
     // 注册 lightmap 页时零 pass 执行。

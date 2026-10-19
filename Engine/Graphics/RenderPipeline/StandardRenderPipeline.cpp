@@ -1588,6 +1588,18 @@ void StandardRenderPipeline::RegisterDebugLightmap() {
     lightmap_module_->RegisterDebugLightmap();
 }
 
+void StandardRenderPipeline::AddLightmapBakeMeshOverride(id::id_type mesh_content_id,
+                                                          const math::m4x4& transform) {
+    lightmapBakeOverrides_.push_back({mesh_content_id, transform});
+}
+
+bool StandardRenderPipeline::RegisterLightmapEntityDirect(id::id_type mesh_content_id,
+                                                          u32 entity_id,
+                                                          const float scale_bias[4]) {
+    if (!lightmap_module_) return false;
+    return lightmap_module_->RegisterEntityDirect(mesh_content_id, entity_id, scale_bias);
+}
+
 bool StandardRenderPipeline::SetLightmapPage(const std::string& path) {
     if (!lightmap_module_) return false;
     return lightmap_module_->LoadLightmap(path);
@@ -1618,6 +1630,52 @@ bool StandardRenderPipeline::BakeSceneLightmaps(const baking::LightmapBakeSettin
         if (out_err) *out_err = "collect: " + err;
         return false;
     }
+    // 测试/工具覆写网格并入（世界坐标直拷；见 AddLightmapBakeMeshOverride 注）。
+    for (const auto& ov : lightmapBakeOverrides_) {
+        rhi::RHIMeshAsset asset;
+        if (!content::get_rhi_mesh_asset(content::get_rhi_mesh_id(ov.first), asset)) continue;
+        if (asset.lightmap_uv_buffer.size() < (size_t)asset.num_vertices * 8) continue;
+        baking::BakeMesh m{};
+        // 恒等变换下的世界拷贝（覆写路径约定：资产即世界坐标）。
+        const auto* src = reinterpret_cast<const float*>(asset.position_buffer.data());
+        auto& pos = collected.ownedPositions.emplace_back();
+        pos.resize((size_t)asset.num_vertices * 3);
+        for (u32 v = 0; v < asset.num_vertices; ++v) {
+            pos[v * 3 + 0] = src[v * 3 + 0] * ov.second.columns[0].x +
+                             src[v * 3 + 1] * ov.second.columns[1].x +
+                             src[v * 3 + 2] * ov.second.columns[2].x +
+                             ov.second.columns[3].x;
+            pos[v * 3 + 1] = src[v * 3 + 0] * ov.second.columns[0].y +
+                             src[v * 3 + 1] * ov.second.columns[1].y +
+                             src[v * 3 + 2] * ov.second.columns[2].y +
+                             ov.second.columns[3].y;
+            pos[v * 3 + 2] = src[v * 3 + 0] * ov.second.columns[0].z +
+                             src[v * 3 + 1] * ov.second.columns[1].z +
+                             src[v * 3 + 2] * ov.second.columns[2].z +
+                             ov.second.columns[3].z;
+        }
+        auto& uv = collected.ownedUvs.emplace_back();
+        uv.assign(reinterpret_cast<const float*>(asset.lightmap_uv_buffer.data()),
+                  reinterpret_cast<const float*>(asset.lightmap_uv_buffer.data()) +
+                      (size_t)asset.num_vertices * 2);
+        auto& idx = collected.ownedIndices.emplace_back();
+        idx.resize(asset.num_indices);
+        if (asset.index_size == 4) {
+            std::memcpy(idx.data(), asset.index_buffer.data(),
+                        (size_t)asset.num_indices * 4);
+        } else {
+            const auto* src16 = reinterpret_cast<const u16*>(asset.index_buffer.data());
+            for (u32 i = 0; i < asset.num_indices; ++i) idx[i] = src16[i];
+        }
+        m.positions = pos.data();
+        m.lightmap_uvs = uv.data();
+        m.indices = idx.data();
+        m.vertex_count = asset.num_vertices;
+        m.index_count = asset.num_indices;
+        m.name = "mesh_" + std::to_string(ov.first) + "_e700";
+        collected.scene.meshes.push_back(m);
+    }
+
     const baking::LightmapBakeResult r =
         baking::BakeLightmaps(collected.scene, settings, progress, progress_user);
     if (!r.ok) {

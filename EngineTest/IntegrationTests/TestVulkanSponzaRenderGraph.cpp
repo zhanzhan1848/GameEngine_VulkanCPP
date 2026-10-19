@@ -33,6 +33,8 @@
 // The Engine target propagates its own include path transitively via
 // target_link_libraries(... Engine ContentTools) in setup_test_target.
 #include "Engine/Content/ContentToEngine.h"
+#include "Engine/Graphics/SceneDataAdapter.h"
+#include "Engine/Graphics/Baking/LightmapContainer.h"
 #include "Engine/Content/AsyncResourceLoader.h"
 #include "Engine/Graphics/Nanite/OfflineSDFMerger.h"
 #include "Engine/Graphics/Nanite/GPUDrivenDrawPipeline.h"
@@ -2327,9 +2329,51 @@ void TestVulkanSponzaRenderGraph::Run() {
     //   两者皆无 —— 渲染图与基线零差异。PRIMAL_LIGHTMAP=0 总开关。
     {
         static bool lmBakeDone = false;
+        static primal::id::id_type lmOverrideMeshId_ = 0;
         if (!lmBakeDone && frameCount_ == 20 && pipeline_) {
             if (std::getenv("PRIMAL_LIGHTMAP_BAKE")) {
             lmBakeDone = true;
+
+            // 终验载体（2026-10-19 计划 §6）：默认 Sponza（已证消费 fusion 呈现
+            // 链）+ 经 LoadRenderItemData 正规注册的 UVLM 地板，走管线旁路
+            //（AddLightmapBakeMeshOverride/RegisterEntityDirect——场景代理路
+            // 径要求真实 game-entity 号，测试注入必越界 transform 组件表）。
+            {
+                const std::string lmModelPath =
+                    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/FloorUVLM.model";
+                std::ifstream lmFile(lmModelPath, std::ios::binary | std::ios::ate);
+                if (lmFile.is_open()) {
+                    const std::streamsize lmSize = lmFile.tellg();
+                    lmFile.seekg(0);
+                    std::vector<char> lmBytes(static_cast<size_t>(lmSize));
+                    lmFile.read(lmBytes.data(), lmSize);
+                    SceneDataAdapter lmAdapter;
+                    const auto lmMeshes =
+                        lmAdapter.LoadRenderItemData(device_, lmBytes.data(), (u32)lmBytes.size());
+                    primal::id::id_type lmMesh = 0;
+                    for (const auto& mi : lmMeshes) {
+                        rhi::RHIMeshAsset probe{};
+                        if (mi.meshEntityId &&
+                            primal::content::get_rhi_mesh_asset(
+                                primal::content::get_rhi_mesh_id(mi.meshEntityId), probe) &&
+                            probe.lightmap_uv_buffer.size() >= (size_t)probe.num_vertices * 8) {
+                            lmMesh = mi.meshEntityId;
+                            break;
+                        }
+                    }
+                    if (lmMesh) {
+                        lmOverrideMeshId_ = lmMesh;
+                        auto lmT = rhimath::MatrixIdentity();
+                        pipeline_->AddLightmapBakeMeshOverride(lmMesh, lmT);
+                        std::cerr << "[Lightmap][e2e] bake override added: mesh=" << lmMesh
+                                  << std::endl;
+                    } else {
+                        std::cerr << "[Lightmap][e2e] no UVLM mesh in FloorUVLM.model" << std::endl;
+                    }
+                } else {
+                    std::cerr << "[Lightmap][e2e] FloorUVLM.model missing" << std::endl;
+                }
+            }
             auto lmSettings = primal::graphics::baking::DefaultLightmapBakeSettings();
             lmSettings.atlas_size = 1024;
             lmSettings.samples_per_texel = 32;
@@ -2346,7 +2390,25 @@ void TestVulkanSponzaRenderGraph::Run() {
                 lmOk = pipeline_->BakeSceneLightmaps(lmSettings, nullptr, &lmErr);
                 std::cerr << "[Lightmap][e2e] density=" << density << " -> "
                           << (lmOk ? "OK" : lmErr) << std::endl;
-                if (lmOk) break;
+                if (lmOk) {
+                    // 旁路直登记：覆写网格条目名 = mesh_<id>_e700（管线约定）。
+                    // 取清单条目 scale/bias 注册消费实体。
+                    if (baking::LightmapContainer lmC;
+                        baking::LoadLightmapContainer("/tmp/lm_e2e_bake/lightmap.lmap", lmC)) {
+                        for (const auto& e : lmC.entries) {
+                            const std::string expect =
+                                "mesh_" + std::to_string(lmOverrideMeshId_) + "_e700";
+                            if (e.GetName() == expect) {
+                                const float sb[4] = {e.scale_x, e.scale_y, e.bias_x, e.bias_y};
+                                pipeline_->RegisterLightmapEntityDirect(lmOverrideMeshId_, 700, sb);
+                                std::cerr << "[Lightmap][e2e] direct entity registered: "
+                                          << expect << std::endl;
+                                break;
+                            }
+                        }
+                    }
+                    break;
+                }
             }
             } else if (std::getenv("PRIMAL_LIGHTMAP_DEBUG")) {
                 lmBakeDone = true;

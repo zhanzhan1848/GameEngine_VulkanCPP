@@ -7,6 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "Common/Id.h"
+
 namespace primal::graphics {
 namespace rendergraph { class RenderGraph; }
 class RenderScene;
@@ -78,9 +80,20 @@ public:
     // Pass 2 绑定切换用的物理句柄（与 AddCompositePass 输出同源）。
     rhi::ResourceHandle GetOutputTexture() const { return output_tex_; }
 
+    // 测试/工具旁路：显式 scale/bias 直登记（绕开场景匹配；见管线同名注）。
+    bool RegisterEntityDirect(id::id_type mesh_content_id, u32 entity_id,
+                              const float scale_bias[4]);
+
 private:
     rhi::ResourceHandle CreateGradientLightmapTexture(u32 size);
-    void RebuildEntityBuffers(const RenderScene& scene);
+    struct EntitySpec {
+        id::id_type mesh = 0;   // hierarchy id（两步解析）
+        u32 entity = 0;
+        float scale_bias[4] = {1, 1, 0, 0};
+        math::m4x4 transform{};  // 世界变换（直登记 = 恒等）
+    };
+    void RebuildEntityBuffers(const std::vector<EntitySpec>& specs);
+    std::vector<EntitySpec> directEntities_;  // 旁路登记（长期存在）
 
     struct EntityRecord {
         std::uint32_t index_count = 0;

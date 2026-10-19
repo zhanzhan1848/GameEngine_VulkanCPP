@@ -445,29 +445,71 @@ void LightmapModule::UpdateFrame(const RenderScene& scene) {
         matchedEntities_.push_back(key);
         added = true;
     }
-    if (added) RebuildEntityBuffers(scene);
+    if (added) {
+        std::vector<EntitySpec> specs;
+        for (const auto& proxy : scene.GetProxies()) {
+            const std::uint64_t key =
+                ((std::uint64_t)proxy.meshId << 32) | (std::uint32_t)proxy.entityId;
+            if (std::find(matchedEntities_.begin(), matchedEntities_.end(), key) ==
+                matchedEntities_.end())
+                continue;
+            const std::string name = "mesh_" + std::to_string(proxy.meshId) + "_e" +
+                                     std::to_string(proxy.entityId);
+            const auto it = entryScaleBias_.find(name);
+            if (it == entryScaleBias_.end()) continue;
+            EntitySpec spec;
+            spec.mesh = proxy.meshId;
+            spec.entity = (u32)proxy.entityId;
+            spec.transform = proxy.transform;
+            std::memcpy(spec.scale_bias, it->second.data(), sizeof(spec.scale_bias));
+            specs.push_back(spec);
+        }
+        for (const auto& d : directEntities_) specs.push_back(d);
+        RebuildEntityBuffers(specs);
+    }
 }
 
-void LightmapModule::RebuildEntityBuffers(const RenderScene& scene) {
+bool LightmapModule::RegisterEntityDirect(id::id_type mesh_content_id, u32 entity_id,
+                                          const float scale_bias[4]) {
+    if (!device_) return false;
+    // 幂等替换。
+    for (auto& d : directEntities_) {
+        if (d.entity == entity_id) {
+            d.mesh = mesh_content_id;
+            std::memcpy(d.scale_bias, scale_bias, sizeof(d.scale_bias));
+            return true;
+        }
+    }
+    EntitySpec spec;
+    spec.mesh = mesh_content_id;
+    spec.entity = entity_id;
+    spec.transform = math::m4x4{};  // 恒等（列零初始化 + [3][3] 补 1）
+    spec.transform.columns[0].x = 1.f;
+    spec.transform.columns[1].y = 1.f;
+    spec.transform.columns[2].z = 1.f;
+    spec.transform.columns[3].w = 1.f;
+    std::memcpy(spec.scale_bias, scale_bias, sizeof(spec.scale_bias));
+    directEntities_.push_back(spec);
+
+    std::vector<EntitySpec> specs;
+    // 场景匹配部分（已有 matchedEntities_ 时重建 specs 的路径与 UpdateFrame 相同）。
+    for (const auto& d : directEntities_) specs.push_back(d);
+    RebuildEntityBuffers(specs);
+    return true;
+}
+
+void LightmapModule::RebuildEntityBuffers(const std::vector<EntitySpec>& specs) {
     // 全量重建（实体集变化不频繁；烘焙为离线动作）。
     entities_.clear();
     std::vector<float> cpuPositions;  // vec4
     std::vector<float> cpuUvs;        // vec2
     std::vector<std::uint32_t> cpuIndices;
 
-    for (const auto& proxy : scene.GetProxies()) {
-        const std::uint64_t key =
-            ((std::uint64_t)proxy.meshId << 32) | (std::uint32_t)proxy.entityId;
-        if (std::find(matchedEntities_.begin(), matchedEntities_.end(), key) ==
-            matchedEntities_.end())
-            continue;
-        const std::string name = "mesh_" + std::to_string(proxy.meshId) + "_e" +
-                                 std::to_string(proxy.entityId);
-        const auto it = entryScaleBias_.find(name);
-        if (it == entryScaleBias_.end()) continue;
-
+    for (const auto& spec : specs) {
+        // 两步解析（hierarchy → 资产 id，同收集器注）。
         rhi::RHIMeshAsset asset;
-        if (!content::get_rhi_mesh_asset(proxy.meshId, asset)) continue;
+        if (!content::get_rhi_mesh_asset(content::get_rhi_mesh_id(spec.mesh), asset))
+            continue;
         if (asset.num_vertices == 0 || asset.num_indices < 3) continue;
         if (asset.lightmap_uv_buffer.size() < (size_t)asset.num_vertices * 8) continue;
 
@@ -476,13 +518,13 @@ void LightmapModule::RebuildEntityBuffers(const RenderScene& scene) {
         rec.first_index = (u32)cpuIndices.size();
         rec.position_offset = (u32)(cpuPositions.size() / 4);
         rec.uv_offset = (u32)(cpuUvs.size() / 2);
-        rec.scale_bias[0] = it->second[0];
-        rec.scale_bias[1] = it->second[1];
-        rec.scale_bias[2] = it->second[2];
-        rec.scale_bias[3] = it->second[3];
+        rec.scale_bias[0] = spec.scale_bias[0];
+        rec.scale_bias[1] = spec.scale_bias[1];
+        rec.scale_bias[2] = spec.scale_bias[2];
+        rec.scale_bias[3] = spec.scale_bias[3];
 
-        // 世界空间位置（M × 列向量，约定同 LightmapSceneCollector）。
-        const auto& m = proxy.transform;
+        // 世界空间位置（M × 列向量；spec 变换来自代理或直登记恒等）。
+        const auto& m = spec.transform;
         const auto* positions = reinterpret_cast<const float*>(asset.position_buffer.data());
         for (u32 v = 0; v < asset.num_vertices; ++v) {
             const float x = positions[v * 3], y = positions[v * 3 + 1], z = positions[v * 3 + 2];
