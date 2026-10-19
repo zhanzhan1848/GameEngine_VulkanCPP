@@ -1,0 +1,100 @@
+# Lightmap 烘焙与运行时渲染——实现完工记录
+
+- **日期**：2026-10-19
+- **分支**：`feat/lightmap`（worktree `.worktrees/lightmap`，基线 7755b13e）
+- **状态**：M0-M6 全部落地；视觉终验收的最后一步（UVLM 项目资产出图）遗留为手册步骤，见 §6
+- **规划文档**：`Docs/2026-10-19-lightmap-baking-and-rendering-architecture-plan.md`（原始方案）
+
+## 1. 交付总览（提交链）
+
+| 提交 | 里程碑 | 内容 |
+| :--- | :--- | :--- |
+| cb3524f5 | M0 | 旁路骨架：LightmapModule + fusion 插针 + 渐变 debug 页（默认零影响） |
+| d3359a26 | M1 | 契约冻结：LMAP 容器（104B 条目）+ MaxRects + ABI 结构（280B static_assert）+ 单测 |
+| d6215e64/efee6f6a | M2 | 烘焙核心：CPU BVH radiosity 积分器（解析解单测）+ 场景收集器 |
+| 6fb53442 | M3 | Vulkan 运行时消费链：UV pre-pass + LMAP 加载 + 实体自动匹配 + composite v2 + 零影响证明 |
+| 87252b40/11634ef9/6f668657/9cbc9f60 | M4 | EngineDLL LightmapAPI + `scene.bake_lightmaps` CLI + 场景级持久化 + Bake 菜单 |
+| 2f89048a | M5 | Metal 移植：MSL 双 shader + 模块 Metal 分支（编辑器视口验证） |
+| afa26443 | M6a | `primal-engine bake-lightmaps` 离线 verb |
+
+## 2. 架构落地形态（与方案的偏离记录）
+
+1. **消费端 = 纯旁路 pass，Lumen shader 零改动**（方案 §4.5 原计划改 FusionIndirect 分支；
+   实际为独立 `LightmapComposite` pass 插在 FusionIndirect→FusionComposite 之间，FusionComposite
+   仅切换绑定源 ~22 行）。Vulkan 端 Lumen/DDGI/SPGI/SC/DeferredLighting shader 文件全部未动。
+2. **参数走 push 常量而非 UBO**（8B gain+debugMode）：规避描述符池/在飞重写整类时序问题。
+3. **逐像素 UV 经 UV pre-pass RT 携带**（RGBA16F：xy=atlas UV 已含实体 scale/bias，z=有效位），
+   composite 全屏 pass 零逐实体数据。
+4. **场景级持久化（`Scene.LightmapPage`）替代逐实体 LightmapBaked 组件**：引擎按收集器命名
+   约定 `mesh_<contentId>_e<entityId>` 自动匹配 LMAP 清单，逐实体数据冗余。
+5. **烘培器 CPU BVH**（utl::BVH + JobSystem ParallelFor，StaticProbeBaker 同模式）；GPU 化留作
+   后续优化，不碰任何契约。
+6. **Dawn 不实现**（Parity Matrix 登记降级边界，与 Lumen fusion 链未移植 Dawn 现状一致）。
+7. **产物 = LMAP 自有容器**（RGBA16F 直传显存；BC6H 无编码器可用，format 枚举已预留）。
+
+## 3. 验证证据
+
+- **单测**（`TestLightmapBaking`，Vulkan/Metal 两树均绿）：
+  - 装箱：无重叠/界内/确定性/顺序无关/利用率一致性；
+  - LMAP：往返逐字段一致/坏 magic/截断/尺寸不符拒绝；
+  - 积分器解析解：4×4 发光天花板@h=1 点源视因子 F=0.83112 → 地板中心 0.41558±0.02
+    （1024spp；视因子闭式 + 径向积分下限 2.513 交叉验证）；
+  - 确定性：同场景双烘焙逐位一致；dilation 扩张环；trace-only 遮挡（无 UV 网格只进 BVH）。
+- **运行时端到端**（TestVulkanSponzaRenderGraph，规范 Sponza 门禁资产）：
+  - 渐变 debug 档全屏替换可见（61% 像素变化，`/tmp/lm_m3/off↔on.ppm` 族）；
+  - 真烘焙链（PRIMAL_LIGHTMAP_BAKE=1，UVLM 资产）：收集→烘焙→LMAP 落盘→加载→实体重建
+    （`entities rebuilt: 1`）全链日志。
+- **零影响证明**（PRIMAL_LIGHTMAP 默认开、场景未烘焙）：与 M0 期基线捕获对比
+  **mean=0.761 / p99=6 / 0% 像素>8**（SPGI 运行间方差协议阈值 ~15；`/tmp/lm_m3/equiv.ppm`）。
+- **Metal**：模块在编辑器视口初始化成功（`[Lightmap] module initialized (Metal, 812x390)`）；
+  TestModularPipeline 25s 无 fault；TestLightmapBaking 1/1。
+- **CLI/工具**：`primal-engine bake-lightmaps` 实跑（SponzaUVLM 1024²/32spp/2bounce，全核
+  6min → `{ok:true, entries:1, bakeable:1, trace_only:5}`）；`scene.bake_lightmaps` 编辑器内
+  提交/进度/终态闭环（task.status）；schema 快照门禁 64/64。
+- **引擎回归**：ctest Unit 14/14（Metal 树）。
+
+## 4. 关键坑位记录（跨会话复用）
+
+- **编辑器原生库链**：`Darwin/DebugEditor/libEngineDLL.dylib`（→ 部署目录 libPrimalEngine.dylib）
+  是编辑器实际加载的权威副本——改 Engine/EngineDLL 后必须刷新，否则编辑器跑旧代码
+  （"过期 dylib 误诊"前科重现）。
+- **RHI 内存**：`GPUMemoryUsage::Static` 不可 Map（MoltenVK 拒绝 PRIVATE 映射）——CPU 填充
+  缓冲一律 `Dynamic`（DebugProbeSphere 同注）。
+- **描述符**：StorageBuffer 写必须走 bufferInfo（range=0 = WHOLE_SIZE）；单份描述符集每帧
+  重写触发 in-flight 失效——三槽轮转（帧号%3，与 fusion cbIdx 恒等）。
+- **顶点拉取顶点阶段 SSBO** 合法（Particle.vert 先例）；索引缓冲需 `BufferUsageFlags::Index`。
+- **渲染图深度只读**：`builder.Read(rg, ResourceState::DepthStencilReadOnly)` + 附件
+  `depthStencil.loadOp=Load/storeOp=DontCare`（ProbeSphere 同款）。
+- **管线的两个渲染图站点**（BuildRenderGraph + RenderWithCommandBuffer）必须镜像挂接
+  （Vulkan 测试走后者——M3 首次挂接只插了站点一，全链静默无效果，排查耗时段）。
+- **CLIP 测试钩子时序**：子系统在首个渲染帧才初始化——注册/烘焙统一延迟到帧 20。
+- **单巨网格资产**（138MB cm 级 SponzaUVLM）在测试中不消费 fusion 呈现链——e2e 用规范
+  Sponza.model 验证；UVLM 只做烘焙/收集链载体。
+- **C++ 字符串拼接**：表驱动 JSON 行的收尾逗号必须在字面量内（`"},\n` 而非 `}",\n`）——
+  schema 表接入时踩了一小时。
+
+## 5. env 旋钮
+
+| 变量 | 语义 |
+| :--- | :--- |
+| `PRIMAL_LIGHTMAP=0` | 整体关闭（零影响 A/B 总开关） |
+| `PRIMAL_LIGHTMAP_DEBUG=1` | composite 全屏采样测试页（诊断） |
+| `PRIMAL_LIGHTMAP_DEBUG=2` | composite 全屏纯洋红（消费链诊断档） |
+| `PRIMAL_LIGHTMAP_BAKE=1` | Sponza 测试内帧 20 烘焙（密度自适应） |
+
+## 6. 遗留（合并前必做）
+
+1. **视觉终验收**（原方案 §7 的完整形态）：需要一个 UVLM 网格的项目场景——
+   `primal-engine cook-mesh --in <obj> --out <model> --uvatlas-lightmap` 产出 → 导入项目 →
+   编辑器 File→Bake Lightmaps → 视口对比 `PRIMAL_LIGHTMAP=0` 两态（动态物体 DDGI 不变）。
+   当前 TestProject 网格无 UVLM，bake 走优雅失败路径（已验证）。
+2. **rebase 后重跑零影响证明**（fluid 线合入后，`FusionCompositeModule.cpp`/`StandardRenderPipeline.cpp`
+   预计冲突 ~25 行）。
+3. Metal 端视觉验收（模块已初始化，随 §1 一并做）。
+4. xatlas 对大 mesh 失败率高（Sponza 6 网格仅 1 成功）——后续按 mesh 拆分再展开。
+
+## 7. 集成协议
+
+与 fluid 线（主树未提交改动）在 `FusionCompositeModule.cpp`、`StandardRenderPipeline.cpp` 相遇：
+谁先合 dev，另一边 rebase 解冲突；rebase 后重跑零影响证明 + §6 验收，然后
+`git worktree remove .worktrees/lightmap`。

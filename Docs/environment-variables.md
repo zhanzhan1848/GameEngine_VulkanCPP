@@ -149,3 +149,7 @@
 2. **运行时分支**（shader 内 uniform 分支）：仅限单次 dispatch 级别的低成本开关
    （如 `RaySampleMode`）；高频内层循环禁止。
 3. **文件替换**（`*Parity.metal` 模式）：仅用于对齐迁移期，迁移完成后删除。
+
+| `PRIMAL_LIGHTMAP` | 每帧 | `=0` 整体关闭 lightmap 旁路（零影响 A/B 总开关；默认开但需场景烘焙页激活） | lightmap 消费链 |
+| `PRIMAL_LIGHTMAP_DEBUG` | 每帧 | `=1` composite 全屏采样测试页；`=2` 纯洋红诊断档 | lightmap 消费链 |
+| `PRIMAL_LIGHTMAP_BAKE` | 一次性 | `=1` Sponza 测试内第 20 帧烘焙当前场景（密度自适应） | TestVulkanSponzaRenderGraph |

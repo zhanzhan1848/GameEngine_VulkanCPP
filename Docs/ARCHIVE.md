@@ -988,3 +988,5 @@ flowchart TD
 - 2026-10-05 [SC诊断磁盘占用与第二次清理](completed/2026-10-05-sc-diagnostic-storage-cleanup.md)：474阶段后归档无损去重、按SHA清理已归档旧临时raw/bin，避开运行中近期数据；逐文件结果在reports/sc-handoff-2026-10-05/cleanup-second-result.json。
 
 - 2026-10-06 [SC诊断磁盘第三次清理](completed/2026-10-06-sc-diagnostic-storage-cleanup.md)：新增199阶段后的旧raw/bin、重复PNG及归档无损去重，实测释放12.39GiB；运行中近期数据与唯一证据保留，清单在reports/sc-handoff-2026-10-05/cleanup-third-*.json。
+
+- 2026-10-19 [Lightmap 烘焙与运行时渲染实现完工](completed/2026-10-19-lightmap-baking-and-rendering-implementation.md)：feat/lightmap 分支（worktree）M0-M6 全落地——CPU BVH 积分器+LMAP 容器+Vulkan/Metal 双端旁路消费链（Lumen shader 零改动）+EngineDLL ABI+编辑器 CLI/菜单+primal-engine 离线 verb；零影响证明 mean 0.76/p99 6；解析解/确定性单测全绿；视觉终验收（UVLM 项目资产出图）与 rebase 后回归为合并前遗留。

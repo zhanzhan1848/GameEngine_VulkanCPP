@@ -183,3 +183,9 @@
 2026-10-03 BVH非零方向分类：Vulkan可选PRIMAL_SC_BVH_NONZERO_AXIS=1默认关闭，仅既有trace params reserved w mask0x1（bit0）；方向有限/非零才用等价逐轴AABB数学，零/非有限保持原路径，64栈/三角形/identity顺序不变。无新descriptor、C ABI、PBVH/SCS1或barrier/readback/wait。Debug同binary/SPIR-V ABBA收益见实现记录，非Release认证；GPU13解析/回归查询两路径逐位一致，surface112/112、Metal65秒共享代码回归通过，其他API无新增GPU路径能力。SC阶段PASS不能替代最早P0/全覆盖。
 
 2026-10-03 原源点支持/共享预算：BoundaryMaxLightPoints=131072统一点pack、mixed index、current cache与Vulkan radiosity准备，原16K三处与pack上限不一致已修复，group8192/index4M words/32ray每点/越界事务失败不变。输入未扩充时不增加分配；独立SCB1实验不改默认资产。无新descriptor/C ABI/SCB1/SCS1/barrier/普通readback/WaitIdle，三槽实际fence仍同路。新110979点/3551328射线数值及2048首命中抽查、GPU112＋13、Metal65秒通过；source350/480 SC阶段PASS/P0FAIL。源扩充单对慢104.270%，不是优化或Release认证；其他API无新增补点GPU消费能力。
+
+## 补充：Lightmap 旁路消费链（2026-10-19）
+
+| 能力 | Vulkan | Metal | Dawn/WebGPU | 说明 |
+| :-- | :-- | :-- | :-- | :-- |
+| Lightmap UV pre-pass / composite 替换间接光 | ✅ | ✅ | ❌ 降级（模块 inert，渲染图零变化） | 与 Lumen fusion 链未移植 Dawn 的现状一致；PRIMAL_LIGHTMAP=0 三端统一零影响开关 |
