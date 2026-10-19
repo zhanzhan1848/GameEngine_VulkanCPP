@@ -1,5 +1,5 @@
 {
-  "$version": "6f4ab4b62e65750d",
+  "$version": "96d852e7db334146",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -841,6 +841,45 @@
       "description": "结束运行：surface 模式的 runtime 预览先于外部进程——预览激活时退出预览并恢复编辑器渲染路径（PipelineSetEditorMode(true) + 编辑器相机 + 叠层）；否则停止 window/fixed 模式启动的 PrimalPlayer 进程（若有）。幂等：两者都不活跃时返回 stopped=false 而非错误。",
       "example": "{}",
       "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "scene.bake_lightmaps",
+      "channel": "editor",
+      "description": "烘焙当前激活场景的静态间接光到 lightmap（CPU 路径追踪，后台长任务；task.list/task.status 查进度，产物 lightmap.lmap 自动加载进运行时）。atlas_size 单位像素（默认 1024）；samples 每纹素采样数（默认 64）；bounces 间接反弹次数（默认 2）；texel_density 纹素/米（默认 16，注意大尺度场景需调低）；denoise 双边滤波开关；output_dir 产物目录（默认 Content/Bakes/<scene-guid>）。失败语义：任务登记为 failed，task.status 的 error 给出引擎侧摘要。",
+      "example": "{\"atlas_size\":1024,\"samples\":64,\"bounces\":2,\"texel_density\":16}",
+      "params": [
+        {
+          "name": "atlas_size",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "samples",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "bounces",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "texel_density",
+          "type": "number",
+          "required": false
+        },
+        {
+          "name": "denoise",
+          "type": "boolean",
+          "required": false
+        },
+        {
+          "name": "output_dir",
+          "type": "string",
+          "required": false
+        }
+      ],
       "returns": "object"
     },
     {

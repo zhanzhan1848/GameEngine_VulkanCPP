@@ -38,6 +38,10 @@ public static class TaskRegistry
         public DateTime? FinishedAtUtc { get; internal set; }
         public string? Error { get; internal set; }
         public List<TaskArtifact> Artifacts { get; } = new();
+        /// <summary>数值进度 0..1（lightmap bake 等）；null = 无语义进度。
+        /// 更新走 <see cref="ReportProgress"/>（任意线程，内部 lock）。</summary>
+        public double? Progress { get; internal set; }
+        public string? ProgressLabel { get; internal set; }
         internal Action? CancelCallback { get; set; }
         public bool Cancellable => State == TaskState.Running && CancelCallback != null;
     }
@@ -63,6 +67,23 @@ public static class TaskRegistry
             if (artifacts != null) record.Artifacts.AddRange(artifacts);
             Tasks.Add(record);
             return record;
+        }
+    }
+
+    /// <summary>任意线程登记产物（锁内追加，避免与读侧竞态）。</summary>
+    public static void AddArtifact(TaskRecord task, string path, string kind)
+    {
+        lock (Gate) task.Artifacts.Add(new TaskArtifact { Path = path, Kind = kind });
+    }
+
+    /// <summary>任意线程更新数值进度（0..1 + 阶段标签）。任务结束后的更新被忽略。</summary>
+    public static void ReportProgress(TaskRecord task, double progress, string? label = null)
+    {
+        lock (Gate)
+        {
+            if (task.State != TaskState.Running) return;
+            task.Progress = Math.Clamp(progress, 0.0, 1.0);
+            task.ProgressLabel = label;
         }
     }
 

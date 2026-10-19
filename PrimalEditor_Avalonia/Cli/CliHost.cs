@@ -35,6 +35,7 @@ public static class CliHost
             Registry.Register(new EditorCommands());
             Registry.Register(new EntityCommands());
             Registry.Register(new SceneCommands());
+            Registry.Register(new LightmapCommands());
             Registry.Register(new ComponentCommands());
             Registry.Register(new PhysicsCommands());
             Registry.Register(new ScriptCommands());

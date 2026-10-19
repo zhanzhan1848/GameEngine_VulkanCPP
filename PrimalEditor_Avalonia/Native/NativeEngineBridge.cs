@@ -237,6 +237,36 @@ public static class NativeEngineBridge
     [DllImport("PrimalEngine", EntryPoint = "UnloadGameCodeDll", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _UnloadGameCodeDll(IntPtr dllPath);
 
+    // ---- Lightmap（2026-10-19 计划，M4）----
+    // 与 EngineDLL/LightmapAPI.h 的 LightmapBakeSettingsC 逐字节同构（280B，
+    // static_assert 在 Engine/Graphics/Baking/LightmapBaker.h 锁死）。
+    [StructLayout(LayoutKind.Sequential, Size = 280)]
+    public struct LightmapBakeSettings
+    {
+        public uint AtlasSize;
+        public uint SamplesPerTexel;
+        public uint Bounces;
+        public float TexelDensity;
+        public int Denoise;
+        public uint DilationPx;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+        public string OutputDir;
+    }
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void LightmapProgressCallback(IntPtr user, uint phase, uint done, uint total);
+
+    [DllImport("PrimalEngine", EntryPoint = "LightmapBake", CallingConvention = CallingConvention.Cdecl)]
+    public static extern uint LightmapBake(ref LightmapBakeSettings settings,
+        LightmapProgressCallback? progress, IntPtr progressUser,
+        byte[] outStatusJson, uint statusCap);
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineSetLightmapPage", CallingConvention = CallingConvention.Cdecl)]
+    public static extern uint PipelineSetLightmapPage([MarshalAs(UnmanagedType.LPStr)] string path);
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineClearLightmap", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void PipelineClearLightmap();
+
     [DllImport("PrimalEngine", EntryPoint = "CreateRenderSurface", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _CreateRenderSurface(IntPtr host, int width, int height);
 
