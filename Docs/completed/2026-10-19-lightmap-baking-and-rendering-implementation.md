@@ -350,3 +350,30 @@ SSBO 体量：3.3MB pos + 1.65MB uv + 3.1MB idx（无上传失败）。
 地板 chart 健康、393 实体缓冲已建、单实体演示地板曾工作。疑 GBuffer
 （meshlet 绘制）与 UV pre-pass 重绘的深度等值性近场失配。取证工具：
 PRIMAL_LIGHTMAP_LOAD=<lmap> 跳烘加载 + PRIMAL_LIGHTMAP_UVDUMP。
+
+## 9. 近场 UV 覆盖攻坚轮（2026-10-20 深夜，5cbeefd0）
+
+**判别实验链（逐步定罪）**：
+1. DEPTHALWAYS=1（跳深度比较）→ 覆盖 100%（3686400/3686400）：几何绘制
+   完整，阻塞 = LessEqual 深度等值性，排除"实体未建/变换全错"；
+2. TAA jitter 假设死路：GPUDrivenDraw 绘制链（PipelineDraw.vert /
+   VisibilityBuffer.vert）均未应用 jitter（常量上传但 shader 不消费，
+   spv 与源同步）；
+3. Vulkan depthBias 死路：D32_Float 下 bias 按 ~1ULP 缩放，0.05/0.2 档
+   覆盖逐位不变（1841967→1834960 为噪声差）；
+4. VP z 行 (1-eps) CPU 收缩：eps=1e-3 → +59k px（屏幕中心地板恢复），
+   eps=1e-2 → 59.5% 仍不饱和——**结论：两条变换链存在真实几何偏移**
+   （GBuffer 实例矩阵三段式 GPU 链 vs UV pre-pass CPU 烘焙位置 +
+   CPU 段拼 VP），非纯浮点舍入，epsilon 无法安全闭合。
+
+**交付**：LightmapUvPassViewProjection（双站点，默认 eps=1e-3，
+PRIMAL_LIGHTMAP_ZEPS 可调；PRIMAL_LIGHTMAP_DEPTHALWAYS 取证旋钮）。
+OFF 零影响 0 像素差>8（max 5）；TestLightmapBaking 全绿。
+
+**下一轮建议（数据级根因定位路线）**：
+- UV FS 写 gl_FragCoord.z 到 RT .w 通道 + DumpUvRT 同帧读回
+  GBufferDepthSampleable → 逐像素打印两链深度差的空间分布（按
+  实体/按距离分桶），直接定位偏移来源与量级；
+- 嫌疑排序：RenderScene 代理 transform 与 GPUDrivenDraw 实例
+  world_matrix 的数据分叉（上传时机/来源组件不同）；其次 CPU
+  transformPoint 与 GPU 三段乘的系统性差（若分布均匀随距离增长）。
