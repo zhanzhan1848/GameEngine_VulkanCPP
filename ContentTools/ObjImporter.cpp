@@ -663,8 +663,13 @@ namespace primal::tools
 	void obj_context::load_obj_file(const char* file)
 	{
 		std::string path{ file };
-		size_t pos = path.rfind("\\", path.length());
-		std::string base_file_path{ path.substr(0, pos) };
+		// MTL search dir = dirname(input). Accept both separators: the old
+		// backslash-only rfind returned npos on POSIX paths, so substr(0, npos)
+		// handed tinyobj the FULL file path as the search dir and the .mtl
+		// never loaded — multi-mesh OBJ imports lost every material on
+		// macOS/Linux (no per-material split, scene collapsed to one soup).
+		size_t pos = path.find_last_of("/\\");
+		std::string base_file_path{ pos == std::string::npos ? std::string{"."} : path.substr(0, pos) };
 
 		std::string warn, err;
 
@@ -856,19 +861,29 @@ namespace primal::tools
 
 		assert(m.raw_indices.size() % 3 == 0);
 
-		// Get material index per polygon
+		// Get material index per polygon — ONE ENTRY PER POLYGON. This is the
+		// contract Geometry.cpp split_meshes_by_material relies on
+		// (m.material_indices[i] for the i-th triangle; FbxImporter fills the
+		// same way). The old version pushed a single entry per shape, so a
+		// coalesced multi-mesh OBJ carried num_polys triangles but only
+		// num_shapes material entries — the split loop then read past the
+		// vector and scrambled the import into per-material triangle soup.
 		// Use materials' name to generate hash to connect shader file
 		assert(num_polys > 0);
-		const s32 mtl_index{ shape->mesh.material_ids.empty() ? -1 : shape->mesh.material_ids[0] };
-		u32 mtl_name_hash{ 0 };
-		if (mtl_index >= 0 && (u64)mtl_index < _materials.size())
+		for (s32 f{ 0 }; f < num_polys; ++f)
 		{
-			utl::MurmurHash3_x86_32(static_cast<void*>(&_materials[mtl_index].name), (u32)_materials[mtl_index].name.length(), (u32)123, &mtl_name_hash);
-		}
-		m.material_indices.emplace_back(mtl_name_hash);
-		if (std::find(m.material_used.begin(), m.material_used.end(), mtl_name_hash) == m.material_used.end())
-		{
-			m.material_used.emplace_back(mtl_name_hash);
+			const s32 mtl_index{ f < (s32)shape->mesh.material_ids.size()
+				? shape->mesh.material_ids[f] : -1 };
+			u32 mtl_name_hash{ 0 };
+			if (mtl_index >= 0 && (u64)mtl_index < _materials.size())
+			{
+				utl::MurmurHash3_x86_32(static_cast<void*>(&_materials[mtl_index].name), (u32)_materials[mtl_index].name.length(), (u32)123, &mtl_name_hash);
+			}
+			m.material_indices.emplace_back(mtl_name_hash);
+			if (std::find(m.material_used.begin(), m.material_used.end(), mtl_name_hash) == m.material_used.end())
+			{
+				m.material_used.emplace_back(mtl_name_hash);
+			}
 		}
 
 		// Importing normals is ON by default

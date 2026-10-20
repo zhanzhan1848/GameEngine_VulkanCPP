@@ -995,7 +995,13 @@ namespace primal::tools
 					utl::MurmurHash3_x86_32((void*)name.c_str(), (u32)name.size(), 123, &mtl_hash);
 				}
 			}
-			m.material_indices.emplace_back(mtl_hash);
+			// One material entry PER POLYGON (the split_meshes_by_material
+			// contract; see ObjImporter/FbxImporter). glTF primitives are
+			// single-material, so every triangle gets the primitive's hash.
+			// The old single-entry version left coalesced multi-primitive
+			// meshes with num_polys triangles but one material entry — the
+			// split loop read past the vector (same soup bug as OBJ).
+			m.material_indices.resize(index_count / 3, mtl_hash);
 			if (std::find(m.material_used.begin(), m.material_used.end(), mtl_hash) == m.material_used.end())
 			{
 				m.material_used.emplace_back(mtl_hash);

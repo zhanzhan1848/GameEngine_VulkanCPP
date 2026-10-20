@@ -184,6 +184,42 @@ void Run(ProcessableScene&& in, const Config& cfg, Result& out) {
         }
     }
 
+    // ---- Phase 1.5: uvatlas on pre-existing source LOD levels ----------
+    // Importers that bake legacy LOD chains up front (OBJ/GLTF
+    // generate_lod_chain) hand us lods[1..N] that never pass through the
+    // Phase 1 module loop — with --uvatlas-lightmap only LOD 0 got lightmap
+    // UVs, leaving every LOD>=1 copy as a runtime trace-only occluder.
+    // Re-run just uvatlas (same params as LOD 0) on those levels. Other
+    // in-place modules (remesh/subdivide) intentionally stay LOD-0-only:
+    // they would re-densify the simplified levels and defeat their purpose.
+    if (cfg.enable_uvatlas && out.scene.lods.size() > 1) {
+        for (u32 li = 1; li < (u32)out.scene.lods.size(); ++li) {
+            for (auto& m : out.scene.lods[li].meshes) {
+                ProcessableMesh snapshot = m;
+
+                pipeline_handler_active = true;
+                auto* prev_handler = std::signal(SIGABRT, pipeline_sigabrt_handler);
+                bool aborted = (setjmp(pipeline_jmp_buf) != 0);
+
+                if (!aborted) {
+                    uvatlas::Run(m, cfg.uvatlas_params, out.warnings);
+                }
+
+                if (aborted) {
+                    m = std::move(snapshot);
+                    out.warnings.emplace_back(ErrorReport{
+                        Severity::Warning, "pipeline.module_aborted",
+                        "pipeline: uvatlas aborted (SIGABRT) on a source LOD>=1 "
+                        "mesh; preserving pre-module geometry",
+                        "pipeline"});
+                }
+
+                pipeline_handler_active = false;
+                std::signal(SIGABRT, prev_handler);
+            }
+        }
+    }
+
     // ---- Phase 2: per-mesh LOD generation ------------------------------
     // If the source asset already has LOD levels (lods.size() > 1), preserve
     // them as-is — don't auto-generate additional LODs. Otherwise, generate
