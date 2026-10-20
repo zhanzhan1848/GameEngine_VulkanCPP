@@ -49,6 +49,32 @@
 
 namespace primal::graphics {
 
+// Lightmap UV pre-pass 的重绘匹配 view-projection（2026-10-20 近场覆盖根因）。
+// GBuffer 深度由 GPUDrivenDraw 按实例矩阵三段式 GPU 链光栅化（world→view→proj，
+// FMA 收缩），UV pre-pass 用 CPU 烘焙世界坐标 + CPU 段拼 (proj*view)——两条链的
+// 浮点结合序差异在近场（深度梯度大）超出 LessEqual 等值容差、远场容差内通过
+// （取证：PRIMAL_LIGHTMAP_DEPTHALWAYS=1 时覆盖 100%，几何绘制无缺失； Vulkan
+// slope-scaled depthBias 对 D32_Float 按 ULP 缩放，实测 0.05~0.2 档全无效）。
+// 修复 = 重绘 VP 的 z 行按 (1-eps) 收缩——重绘面整体向相机侧推 eps 相对深度，
+// 亚像素级链差全过、真实遮挡（>eps 相对深度差）仍被拒。PRIMAL_LIGHTMAP_ZEPS
+// 可调（默认 1e-3；近 z~0.01 档 ≈ 1e-5 NDC ≈ 亚毫米，遮挡安全）。
+static math::m4x4 LightmapUvPassViewProjection(const math::m4x4& proj, const math::m4x4& view) {
+    math::m4x4 vp = proj * view;
+    static const f32 zScale = [] {
+        if (const char* e = std::getenv("PRIMAL_LIGHTMAP_ZEPS")) {
+            const f32 v = (f32)std::atof(e);
+            if (v >= 0.0f && v < 0.1f) return 1.0f - v;
+        }
+        return 1.0f - 1e-3f;
+    }();
+    // 列主主序：clip.z = Σ columns[i].z × v[i]，缩放 z 行即缩放 clip.z。
+    vp.columns[0].z *= zScale;
+    vp.columns[1].z *= zScale;
+    vp.columns[2].z *= zScale;
+    vp.columns[3].z *= zScale;
+    return vp;
+}
+
 // A4 (T0.4): pack the real scene light list into SurfaceCacheFrameData so the
 // Surface Cache LightEval uploads per-slot type/position/radius (keeps the
 // point-light path alive). Leaves sc_light_count == 0 when the scene has no
@@ -4353,7 +4379,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         lmFrame.frame_index = static_cast<u32>(frameCount_);
         lmFrame.render_width = render_width_;
         lmFrame.render_height = render_height_;
-        lmFrame.view_projection = proj_matrix_ * view_matrix_;
+        lmFrame.view_projection = LightmapUvPassViewProjection(proj_matrix_, view_matrix_);
         lmFrame.gbuffer_depth_rg = gbufferDepthRG;
         lmFrame.encoder_flush = lmMutex;
         lightmap_module_->AddUVPrePass(graph, lmFrame);
@@ -6084,7 +6110,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             lmFrame.frame_index = static_cast<u32>(frameCount_);
             lmFrame.render_width = render_width_;
             lmFrame.render_height = render_height_;
-            lmFrame.view_projection = proj_matrix_ * view_matrix_;
+            lmFrame.view_projection = LightmapUvPassViewProjection(proj_matrix_, view_matrix_);
             lmFrame.gbuffer_depth_rg =
                 graph.ImportResource("GBufferDepth_LM", gpuDraw.GetGBufferDepthSampleable());
             lmFrame.encoder_flush = lmMutex;

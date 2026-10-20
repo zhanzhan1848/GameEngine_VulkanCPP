@@ -262,7 +262,15 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
         pd.depthStencilFormat = DataFormat::D32_Float;
         pd.enableDepthTest = true;
         pd.enableDepthWrite = false;
-        pd.depthFunc = ComparisonFunc::LessEqual;  // 与 GBuffer 同深度 → 等值通过
+        // 重绘匹配（rebinding）深度语义：与 GBuffer 同面等值通过。两条变换链
+        // 的浮点结合序差异由 StandardRenderPipeline::LightmapUvPassViewProjection
+        // 的 z 行 (1-eps) 收缩吸收（2026-10-20 取证：Vulkan slope-scaled
+        // depthBias 对 D32_Float 按 ULP 缩放，0.05~0.2 档全无效——故不走
+        // 管线偏差）。PRIMAL_LIGHTMAP_DEPTHALWAYS=1 为取证旋钮：跳过深度比较
+        // （遮挡关系错误但覆盖计数不失真），用于分离"深度等值性失配"与
+        // "几何绘制缺失"两类覆盖失效。
+        pd.depthFunc = std::getenv("PRIMAL_LIGHTMAP_DEPTHALWAYS")
+            ? ComparisonFunc::Always : ComparisonFunc::LessEqual;
         pd.cullMode = CullMode::None;              // 烘焙面双面
         pd.topology = PrimitiveTopology::TriangleList;
         pd.vertexAttributes.clear();               // 顶点拉取
