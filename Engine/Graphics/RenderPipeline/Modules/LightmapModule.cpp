@@ -300,6 +300,15 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
             UploadRGBA16F(device_, uv_black_tex_, zero, 1, 1);
         }
     }
+    {
+        // 编码器切换 flush 哑元对（16B；见 FrameInputs::encoder_flush 注）。
+        BufferDesc fb{};
+        fb.size = 16;
+        fb.usage = GPUMemoryUsage::Dynamic;
+        fb.memoryUsage = GPUMemoryUsage::Dynamic;
+        flush_src_ = device->CreateBuffer(fb);
+        flush_dst_ = device->CreateBuffer(fb);
+    }
 
     const bool ok = composite_pipeline_ != handles::INVALID_PIPELINE &&
                     uv_pipeline_ != handles::INVALID_PIPELINE &&
@@ -323,6 +332,8 @@ void LightmapModule::Shutdown() {
     if (output_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(output_tex_);
     if (uv_rt_ != handles::INVALID_RESOURCE) device_->DestroyTexture(uv_rt_);
     if (uv_black_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(uv_black_tex_);
+    if (flush_src_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(flush_src_);
+    if (flush_dst_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(flush_dst_);
     if (positions_sb_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(positions_sb_);
     if (uvs_sb_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(uvs_sb_);
     if (indices_ib_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(indices_ib_);
@@ -652,6 +663,28 @@ void LightmapModule::AddUVPrePass(rendergraph::RenderGraph& graph, const FrameIn
                 cmd->DrawIndexed(e.index_count, e.first_index, 0, 1, 0);
             }
         });
+
+    // 编码器切换 flush（v3.1，2026-10-20 §6.5 二分定罪）：互斥态下 UV
+    // pass(render) 与 composite(render) 直连时，uv_rt_ 的附件写入对紧随的
+    // 采样不可见（COLOR→SRO 屏障已发出仍失效——MoltenVK tiler 的 render→
+    // render 直连缺编码器边界落盘；composite 读到全零）。任何非 render
+    // 编码器切入即恢复（二分：refl_specular(Compute) 单块放开即恢复，
+    // fusion 两 render pass 放开仍死）。16B buffer→buffer 拷贝是最小代价
+    // 的编码器切换；并存态不挂（保持 v2 图形状零影响）。
+    if (inputs.encoder_flush &&
+        flush_src_ != handles::INVALID_RESOURCE && flush_dst_ != handles::INVALID_RESOURCE) {
+        struct FlushData {};
+        graph.AddPass<FlushData>("LightmapUvEncoderFlush",
+            rendergraph::RGPassType::Copy,
+            rendergraph::RGPassCategory::Copy,
+            [uvRG](FlushData&, rendergraph::RenderGraphBuilder& builder) {
+                builder.SideEffect();
+                builder.Read(uvRG, ResourceState::CopySource);
+            },
+            [this](const FlushData&, rendergraph::RenderGraphContext& context) {
+                context.cmdBuffer->CopyBuffer(flush_src_, flush_dst_, 0, 0, 16);
+            });
+    }
 }
 
 bool LightmapModule::IsActive() const {

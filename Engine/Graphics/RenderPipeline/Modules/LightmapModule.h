@@ -42,8 +42,13 @@ public:
         u32 render_width = 0;
         u32 render_height = 0;
         // 底图物理句柄：v3 互斥态 = deferred 直射输出（fusion 缺席）；
-        // COEXIST 诊断态 = fusion 最终输出。composite binding 0 直连。
+        // 默认并存态 = fusion 最终输出。composite binding 0 直连。
         rhi::ResourceHandle scene_color_tex{rhi::handles::INVALID_RESOURCE};
+        // 互斥态置 true：UV pre-pass 之后追加 16B dummy 拷贝 pass（非 render
+        // 编码器切换）。MoltenVK tiler 上 render→render 直连时前一 pass 的
+        // 附件写入对紧随采样不可见（COLOR→SRO 屏障不足，§6.5 取证）；
+        // 并存态 false 保持 v2 图形状零影响。
+        bool encoder_flush = false;
         // UV pre-pass 帧输入。
         math::m4x4 view_projection{};
         rendergraph::RGResourceHandle gbuffer_depth_rg{};
@@ -143,6 +148,9 @@ private:
     rhi::ResourceHandle output_tex_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle uv_rt_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle uv_black_tex_{rhi::handles::INVALID_RESOURCE};  // 1×1 z=0
+    // 编码器切换 flush 用 16B 哑元对（互斥态 UV pass 后 16B 拷贝）。
+    rhi::ResourceHandle flush_src_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle flush_dst_{rhi::handles::INVALID_RESOURCE};
     // 本帧 UV RT 的 RG 身份（AddUVPrePass 导入；composite 声明读以获得
     // 颜色附件→着色读屏障）。
     rendergraph::RGResourceHandle uv_rt_rg_{};

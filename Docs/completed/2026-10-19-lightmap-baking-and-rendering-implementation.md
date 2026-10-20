@@ -226,6 +226,50 @@ AddLight），非 Lumen 差异。
 方向：GPU 捕获（RenderDoc/Xcode GPU）对比 MUTEX/并存两形态 composite draw
 的 descriptor 状态；候选根因：MoltenVK 稀疏描述符更新下的编码器状态泄漏。
 
+## 6.5 互斥攻坚 II（2026-10-20 v3.1）：binding-2 之谜定罪为 MoltenVK
+render→render 编码器边界缺落盘；16B 哑拷贝 flush 修复，互斥形态全绿
+
+**逐块二分**（PRIMAL_LM_KEEP 单块放开旋钮，已随轮移除）：fusion 两 pass
+放开仍死；SPGI 放开（位于 UV pass 之前）仍死；**refl_specular（Compute
+pass，恰在 UV pass 与 composite 之间）单块放开即恢复**（DEBUG=3 绿带
+55,464px）——magic 不是某个 Lumen 块本身，而是"UV pass(render 写附件) 与
+composite(render 采样) 之间是否存在非 render 编码器"。
+
+**交叉矩阵修正**（v2 spv 全程）：b1 绑烘焙页在互斥态正常（DEBUG=1 显页
+内容——上轮"b1+b2 全死"是误读，页大部分为黑）；uv_rt_ 经 b1/b2 均读零
+（纹理级失效而非槽位级）。CPU 帧末读回 marker 完好 vs 帧中采样为零 ⇒
+写入存在但**对紧随的 render pass 采样不可见**：COLOR→SRO 屏障已发出仍
+失效（RGTRACE 证实）。并存态之所以工作：refl_specular(Compute) 恰好位于
+两 pass 之间。定罪：**MoltenVK(tiler) render→render 直连缺编码器边界落盘，
+任何 compute/blit 编码器切入即强制收尾落盘**。
+
+**修复**：LightmapModule::AddUVPrePass 互斥态（FrameInputs::encoder_flush）
+在 UV pass 后追加 16B buffer→buffer 哑拷贝 pass（RGPassType::Copy）——
+最小代价编码器切换；并存态不挂（v2 图形状零影响）。修复后与 keep=refl
+参照逐字节同（带均值 (72,80,82)、样本一致）。
+
+**指标修正（重要）**：地板烘焙带的真实屏幕位置=右上带（UVLM 地板远端
+投影，DEBUG=3 绿带=marker 区，互斥/并存两态逐网格一致）；显示坐标
+(431,416) 从未被 marker 覆盖——历轮"暖池"指标实测的是日光地斑+烘焙演示
+点光（OFF 基线即 120k 暖像素）。本轮验收判据改用：①右上带 (x[640,1200]
+y[0,380]) 与 OFF 的逐像素差（互斥 50,688/53,200px 重写=烘焙内容在显）；
+②墙 (200,300)=(14,14,14) 直射-only（Lumen 关）。
+
+**验收**（SPGI_CAM=0,6.5,-3,-42,0，frame 360）：
+| 配置 | 烘焙带 | 墙区 | 暖池回归 | 判定 |
+|---|---|---|---|---|
+| MUTEX（交付形态） | diff 50,688/53,200，均值 (72,80,82) | (14,14,14) | — | ①②✓ |
+| OFF（新二进制） | — | (22,18,13) | 121,472≈HEAD 120,640 | 零影响 ✓ |
+| 并存（默认） | — | (104,82,45) | 167,520≈基线 170,344 | 回归 ✓ |
+| 单测 | TestLightmapBaking ALL PASSED（14 项） | | | ✓ |
+
+**遗留**：①编码器切换 flush 是驱动级 workaround，Vulkan 语义上 COLOR→SRO
+屏障应已足够——建议 MoltenVK 侧提交 issue（macOS/Metal, tiler, render→
+render 直连附件写入不可见）；②Metal 端（非 MoltenVK）未复验互斥形态；
+③历轮以 (431,416) 暖池作指标的记录需按本节修正读法；④哑拷贝 pass 依赖
+RGPassType::Copy 产生真实 blit 编码器（16B CopyBuffer），若未来 RHI 把
+小拷贝优化为 no-op 需复验。
+
 ## 7. 集成协议
 
 与 fluid 线（主树未提交改动）在 `FusionCompositeModule.cpp`、`StandardRenderPipeline.cpp` 相遇：

@@ -3745,20 +3745,19 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     // ========================================================================
-    // Lightmap 互斥判定（2026-10-20 v3）：lmMutex = lightmap 激活（env 开 +
+    // Lightmap 互斥判定（2026-10-20 v3.1）：lmMutex = lightmap 激活（env 开 +
     // 页已载 + 有实体）且 PRIMAL_LIGHTMAP_MUTEX=1。激活时本帧整个 Lumen GI
     // 区不挂（Step 4.5 volume / Step 5 SC / Step 6 DDGI / Step 6.7 WRC /
     // Step 7 SC-DDGI / Step 8 SSGI / Step 8.5 SSR / Step 9 SPGI+GIGather /
     // Step 10 fusion 全部让路），composite 以 deferred 直射输出为底图——
-    // "开 lightmap ⇒ Lumen GI 完全关闭"。
-    // 【2026-10-20 v3 轮实测】：互斥形态下墙区直射-only 达标（Lumen 关闭
-    // ✓），但 composite 的 binding 2（UV RT）采样恒零——CPU 读回证实
-    // uv_rt_ 内 289,593 个 z=1 marker 完好、RGTRACE 证实 COLOR→SRO 屏障
-    // 正常发出、DS 追踪证实描述符写入正确的原生图像、验证层零错；同页
-    // 纹理换绑 b1 或换绑页到 b2 仍零（slot 级失效，非纹理级）。默认并存
-    // （v2 已验证形态，170k 暖池），互斥留 PRIMAL_LIGHTMAP_MUTEX=1 供
-    // 下轮带 GPU 捕获攻坚（候选方向：MoltenVK 稀疏描述符页驻留/编码器
-    // 状态泄漏）。UpdateFrame 幂等，提前执行只为判活。
+    // "开 lightmap ⇒ Lumen GI 完全关闭"。e2e：墙区 (14,14,14)=直射-only，
+    // 地板烘焙带 50,688px 与 OFF 显著差异（§6.5）。
+    // 【根因已定罪（§6.5 二分）】互斥态 UV pass(render) 与 composite(render)
+    // 直连时 uv_rt_ 附件写入对紧随采样不可见（COLOR→SRO 屏障已发出仍失效，
+    // MoltenVK tiler 的 render→render 直连缺编码器边界落盘）——修复 =
+    // AddUVPrePass 内互斥态追加 16B dummy 拷贝 pass（非 render 编码器切入
+    // 即恢复；二分证据：refl_specular(Compute) 单块放开即恢复、fusion 两
+    // render pass 放开仍死）。并存态零影响（不挂 flush，v2 图形状原样）。
     // ========================================================================
     const bool lmMutex = [&] {
         if (!lightmap_module_) return false;
@@ -4353,6 +4352,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         lmFrame.render_height = render_height_;
         lmFrame.view_projection = proj_matrix_ * view_matrix_;
         lmFrame.gbuffer_depth_rg = gbufferDepthRG;
+        lmFrame.encoder_flush = lmMutex;
         lightmap_module_->AddUVPrePass(graph, lmFrame);
     }
 
@@ -5466,10 +5466,11 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
         auto deferredOut = deferred_module_->AddPasses(graph, deferredIn);
 
-        // Lightmap 互斥判定（v3，twin 站点同步，见 BuildRenderGraph Step 4
-        // 后同名块）：lmMutex 时 Lumen 区整体不挂，composite 以 deferred
-        // 直射输出为底图。默认并存（PRIMAL_LIGHTMAP_MUTEX=1 启用互斥，
-        // 详见主站点注释与完工记录 §6.4）。UpdateFrame 幂等。
+        // Lightmap 互斥判定（v3.1，twin 站点同步，见 BuildRenderGraph Step 4
+        // 后同名块含根因定罪与修复说明）：lmMutex 时 Lumen 区整体不挂，
+        // composite 以 deferred 直射输出为底图，UV pass 后追加编码器切换
+        // flush（FrameInputs::encoder_flush）。默认并存
+        // （PRIMAL_LIGHTMAP_MUTEX=1 启用互斥）。UpdateFrame 幂等。
         const bool lmMutex = [&] {
             if (!lightmap_module_) return false;
             if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
@@ -6082,13 +6083,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             lmFrame.view_projection = proj_matrix_ * view_matrix_;
             lmFrame.gbuffer_depth_rg =
                 graph.ImportResource("GBufferDepth_LM", gpuDraw.GetGBufferDepthSampleable());
+            lmFrame.encoder_flush = lmMutex;
             lightmap_module_->AddUVPrePass(graph, lmFrame);
         }
 
         FusionOutputs fusionOut;
         // lmMutex：lightmap 激活 ⇒ fusion 不挂（twin 站点同步）。
-        if (!lmMutex && fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
-                               settings_.quality.enable_screen_probes) && lumen::GIDebug().fusion) {
+        if (!lmMutex && fusion_module_ &&
+            (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
+             settings_.quality.enable_screen_probes) && lumen::GIDebug().fusion) {
             FusionInputs fusionIn;
             fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
             fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
