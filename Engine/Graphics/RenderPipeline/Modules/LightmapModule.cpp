@@ -128,6 +128,7 @@ struct UvPushConstants {
     std::uint32_t position_offset;
     std::uint32_t uv_offset;
     float scale_bias[4];
+    float calib;  // §13 V 翻转金标定：>0.5 时 FS 输出归一化 gl_FragCoord.xy
 };
 
 } // namespace
@@ -243,7 +244,7 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
 
         PipelineLayoutDesc plDesc{};
         PushConstantRange pcRange{};
-        pcRange.stageFlags = ShaderStage::Vertex;
+        pcRange.stageFlags = ShaderStage::Vertex | ShaderStage::Pixel;
         pcRange.offset = 0;
         pcRange.size = sizeof(UvPushConstants);
         plDesc.pushConstantRangeCount = 1;
@@ -603,6 +604,38 @@ void LightmapModule::RebuildEntityBuffers(const std::vector<EntitySpec>& specs) 
         };
         UpdateDesc(device_, uv_ds_, ssbos, 2);
     }
+    // [DIAG] PRIMAL_LIGHTMAP_CHECK_ENTITY=<n>：实体 n 的 SSBO 顶点共面性/
+    // 索引跨界校验（判别 merged 缓冲错位——共面几何不可能双深度）。
+    if (const char* ce = std::getenv("PRIMAL_LIGHTMAP_CHECK_ENTITY")) {
+        const int enAll = std::atoi(ce);  // -1 = 全实体
+        for (int en = (enAll < 0 ? 0 : enAll);
+             en < (enAll < 0 ? (int)entities_.size() : enAll + 1); ++en) {
+            const auto& e = entities_[en];
+            float yMin = 1e30f, yMax = -1e30f;
+            std::uint32_t badIdx = 0;
+            for (std::uint32_t k = 0; k < e.index_count; ++k) {
+                const std::uint32_t vi = cpuIndices[e.first_index + k];
+                if (vi >= (cpuPositions.size() / 4) - e.position_offset) { ++badIdx; continue; }
+                const float y = cpuPositions[(e.position_offset + vi) * 4 + 1];
+                yMin = std::min(yMin, y); yMax = std::max(yMax, y);
+            }
+            float xMin = 1e30f, xMax = -1e30f, zMin = 1e30f, zMax = -1e30f;
+            for (std::uint32_t k = 0; k < e.index_count; ++k) {
+                const std::uint32_t vi = cpuIndices[e.first_index + k];
+                if (vi >= (cpuPositions.size() / 4) - e.position_offset) continue;
+                const float* P = &cpuPositions[(e.position_offset + vi) * 4];
+                xMin = std::min(xMin, P[0]); xMax = std::max(xMax, P[0]);
+                zMin = std::min(zMin, P[2]); zMax = std::max(zMax, P[2]);
+            }
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[LMCHK] entity=" << en << " idx=" << e.index_count
+                << " firstIdx=" << e.first_index << " posOff=" << e.position_offset
+                << " yRange=[" << yMin << "," << yMax << "]"
+                << " xz=[" << xMin << "," << xMax << "]x[" << zMin << "," << zMax << "]"
+                << " oobIdx=" << badIdx
+                << " totalPos=" << (cpuPositions.size() / 4) << std::endl;
+        }
+    }
     PRIMAL_LOG_STREAM(Info, "Render")
         << "[Lightmap] entities rebuilt: " << entities_.size();
 
@@ -691,7 +724,14 @@ void LightmapModule::AddUVPrePass(rendergraph::RenderGraph& graph, const FrameIn
                 push.position_offset = e.position_offset;
                 push.uv_offset = e.uv_offset;
                 std::memcpy(push.scale_bias, e.scale_bias, sizeof(push.scale_bias));
-                cmd->PushConstants(uv_layout_, ShaderStage::Vertex, 0, sizeof(push), &push);
+                // §13 金标定（PRIMAL_LIGHTMAP_UVCALIB=1）：FS 输出归一化
+                // gl_FragCoord.xy，读回行序方向一锤定音。
+                static const float uvCalib =
+                    std::getenv("PRIMAL_LIGHTMAP_UVCALIB") ? 1.0f : 0.0f;
+                push.calib = uvCalib;
+                cmd->PushConstants(uv_layout_,
+                                   ShaderStage::Vertex | ShaderStage::Pixel,
+                                   0, sizeof(push), &push);
                 cmd->DrawIndexed(e.index_count, e.first_index, 0, 1, 0);
             }
         });
@@ -1016,6 +1056,61 @@ void LightmapModule::DumpUvRT(const FrameInputs& inputs) {
                 probeZXY("bot1", dispIdx(640, 446));
                 probeZXY("bot2", dispIdx(640, 560));
                 probeZXY("bot3", dispIdx(640, 680));
+                // [DIAG] PRIMAL_LIGHTMAP_DUMPPAIR：.w 与 gb 深度场各导出
+                // 灰度 PPM（/tmp/lm_mirror/{uvw,gbw}.ppm）供视觉对照。
+                if (std::getenv("PRIMAL_LIGHTMAP_DUMPPAIR")) {
+                    auto writeDepthPpm = [&](const char* path, const float* src) {
+                        FILE* f = std::fopen(path, "wb");
+                        if (!f) return;
+                        std::fprintf(f, "P6\n%u %u\n255\n", w, h);
+                        std::vector<u8> row(w * 3);
+                        for (u32 y = 0; y < h; ++y) {
+                            for (u32 x = 0; x < w; ++x) {
+                                const float z = src[y * w + x];
+                                const u8 v = (z <= 0.f || z >= 1.f)
+                                                 ? 0
+                                                 : (u8)std::lround((z - 0.85f) / 0.15f * 255.f);
+                                row[x * 3] = row[x * 3 + 1] = row[x * 3 + 2] = v;
+                            }
+                            std::fwrite(row.data(), 1, row.size(), f);
+                        }
+                        std::fclose(f);
+                    };
+                    std::vector<float> wbuf((u64)w * h);
+                    for (u64 i = 0; i < (u64)w * h; ++i) wbuf[i] = halfToFloat(p[i * 4 + 3]);
+                    writeDepthPpm("/tmp/lm_mirror/uvw.ppm", wbuf.data());
+                    writeDepthPpm("/tmp/lm_mirror/gbw.ppm", dp);
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[Lightmap][DUMPPAIR] written /tmp/lm_mirror/{uvw,gbw}.ppm"
+                        << std::endl;
+                }
+                // [DIAG] 镜像相关性判别：.w（重绘深度，ALWAYS 全落盘）与 gb
+                // 的直接 vs 垂直镜像平均绝对差——裁决读回/写入坐标错位
+                // （MoltenVK tiler 一族）vs 光栅化深度真错。纯统计，零开销。
+                {
+                    double sumDir = 0, sumMir = 0;
+                    u64 nDir = 0, nMir = 0;
+                    for (u64 y = 0; y + 1 < (u64)h; ++y) {
+                        const u64 ym = (u64)h - 1 - y;
+                        for (u64 x = 0; x < (u64)w; x += 4) {
+                            const u64 iA = y * w + x, iB = ym * w + x;
+                            const f32 rzA = halfToFloat(p[iA * 4 + 3]);
+                            const f32 gzA = dp[iA];
+                            const f32 gzB = dp[iB];
+                            if (gzA > 0.f && gzA < 1.f && rzA > 0.f && rzA < 1.f) {
+                                sumDir += std::fabs(rzA - gzA); ++nDir;
+                            }
+                            if (gzB > 0.f && gzB < 1.f && rzA > 0.f && rzA < 1.f) {
+                                sumMir += std::fabs(rzA - gzB); ++nMir;
+                            }
+                        }
+                    }
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[Lightmap][UVMIRROR] direct MAD=" << (nDir ? sumDir / nDir : -1.0)
+                        << " (n=" << nDir << ")  mirrored MAD="
+                        << (nMir ? sumMir / nMir : -1.0) << " (n=" << nMir << ")"
+                        << std::endl;
+                }
                 device_->UnmapBuffer(dstage);
             }
             device_->DestroyBuffer(dstage);

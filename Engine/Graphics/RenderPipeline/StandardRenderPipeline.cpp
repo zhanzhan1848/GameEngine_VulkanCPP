@@ -72,6 +72,17 @@ static math::m4x4 LightmapUvPassViewProjection(const math::m4x4& proj, const mat
     vp.columns[1].z *= zScale;
     vp.columns[2].z *= zScale;
     vp.columns[3].z *= zScale;
+    // Y 翻转（2026-10-20 镜像定罪修复）：实测 uv_rt 与 GBuffer 互为垂直
+    // 镜像（UVMIRROR：direct MAD 0.047 vs mirrored 0.0024，深度对图目视
+    // 定案）——主链光栅化朝向与 GBuffer 存储相差一个 Y。UV pre-pass 以
+    // clip.y 取反对齐：深度测试与颜色写入同时归位（cull=None，绕序翻转
+    // 无副作用）。PRIMAL_LIGHTMAP_NOYFLIP=1 可关闭作 A/B。
+    if (!std::getenv("PRIMAL_LIGHTMAP_NOYFLIP")) {
+        vp.columns[0].y = -vp.columns[0].y;
+        vp.columns[1].y = -vp.columns[1].y;
+        vp.columns[2].y = -vp.columns[2].y;
+        vp.columns[3].y = -vp.columns[3].y;
+    }
     return vp;
 }
 
