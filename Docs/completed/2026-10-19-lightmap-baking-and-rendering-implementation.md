@@ -377,3 +377,29 @@ OFF 零影响 0 像素差>8（max 5）；TestLightmapBaking 全绿。
 - 嫌疑排序：RenderScene 代理 transform 与 GPUDrivenDraw 实例
   world_matrix 的数据分叉（上传时机/来源组件不同）；其次 CPU
   transformPoint 与 GPU 三段乘的系统性差（若分布均匀随距离增长）。
+
+## 10. §9 差分取证执行轮（2026-10-20 深夜 II，9a545b0b）
+
+**插桩**（永久保留）：UV FS `.w=gl_FragCoord.z`（GLSL+MSL+spv，composite 不读）；
+DumpUvRT 同帧读回 GBuffer 深度做逐像素 rel-delta 直方图（7 幅度桶 × 3 纵带）
++ 探针绝对深度；`PRIMAL_LIGHTMAP_UVONLY=<实体序号>` 单实体取证旋钮。
+
+**判决数据**（SPGI_CAM=0,5,-4,-35,10，frame 360）：
+- mesh 118 地板：可见处 **78859/78859 像素 delta≤1e-7（位级相等）**；
+- mesh 17 二层廊道地板：**1554082/1554082 像素位级相等**；
+- ⇒ **两条变换链无任何分叉**（world matrix/矩阵约定/VP 拼接全部排除）。
+  §9 的"实例矩阵 vs 代理变换分叉"假设与上轮"6.8× 真实偏移"推断一并
+  撤销——后者系 DEPTHALWAYS 全实体绘制被后绘远面覆盖污染直方图所致
+  （UVONLY 旋钮即为此引入）。
+- z 行收缩 eps=1e-3 工作如设计（通过像素 rel ≈ -1.1e-3，向相机侧）。
+
+**剩余谜题（精确框定）**：屏幕中/下带存在大面积 GBuffer 深度 ~1.3-1.5m
+的表面，**无一实体重绘能匹配**（帘幕 mesh 330 在视内、重绘几何距离正确
+（8.9m 射线落点 y≈0 ✓），但其像素处 GBuffer 全为 1.3-1.5m 近面，delta
+全 >1e-2）。同时 (200,300) 墙探针在 1.72m 处正常匹配——近面是真实场景
+几何而非叠加层。候选：拱顶内侧 flank/近柱列/未识别的近场面。定位手段
+（下一轮）：VisibilityBufferResolve 的 per-pixel mesh_id 读回直接点名。
+布料仿真假设已排除（无仿真代码；静态双面）。
+
+**重定性**：UV pre-pass 对全部已核静态面（地板/廊道/墙）工作正确；
+"下半屏黑"= 该近面实体的 lightmap 替换缺席（互斥态透传直射-only）。
