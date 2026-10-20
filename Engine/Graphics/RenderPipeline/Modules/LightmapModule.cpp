@@ -287,6 +287,7 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
         rtDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
         output_tex_ = device->CreateTexture(rtDesc);
         uv_rt_ = device->CreateTexture(rtDesc);
+        zero_tex_ = device->CreateTexture(rtDesc);
     }
     {
         // 1×1 z=0 UV 占位（无实体时 composite 读它 → 全像素走原路径）。
@@ -585,14 +586,23 @@ void LightmapModule::RebuildEntityBuffers(const std::vector<EntitySpec>& specs) 
         UpdateDesc(device_, uv_ds_, ssbos, 2);
     }
     PRIMAL_LOG_STREAM(Info, "Render")
-        << "[Lightmap] entities rebuilt: " << entities_.size() << std::endl;
+        << "[Lightmap] entities rebuilt: " << entities_.size();
+
 }
 
 void LightmapModule::AddUVPrePass(rendergraph::RenderGraph& graph, const FrameInputs& inputs) {
     if (!LightmapEnabledByEnv() || !HasActiveLightmap() || entities_.empty()) return;
     if (!inputs.gbuffer_depth_rg.IsValid()) return;
 
-    uv_rt_rg_ = graph.ImportResource("LightmapUV_RT", uv_rt_);
+    // ImportTexture（非 ImportResource）：携带 desc 注册为 Texture 类型，
+    // 避免 RG 瞬态别名池复用本纹理内存（同 DeferredOutput 修复——
+    // fusion 抑制模式下图集布局变化时实测被场景色覆写）。
+    TextureDesc uvRtDesc{};
+    uvRtDesc.size = {render_width_, render_height_, 1};
+    uvRtDesc.format = DataFormat::RGBA16_Float;
+    uvRtDesc.type = TextureType::Texture2D;
+    uvRtDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+    uv_rt_rg_ = graph.ImportTexture("LightmapUV_RT", uv_rt_, uvRtDesc);
     auto uvRG = uv_rt_rg_;
     auto depthRG = inputs.gbuffer_depth_rg;
 
@@ -620,10 +630,10 @@ void LightmapModule::AddUVPrePass(rendergraph::RenderGraph& graph, const FrameIn
         },
         [this, inputs](const UvData&, rendergraph::RenderGraphContext& context) {
             static std::uint64_t s_execCount = 0;
-            if ((s_execCount++ % 120) == 0) {
+            if ((s_execCount++ % 600) == 0) {
                 PRIMAL_LOG_STREAM(Info, "Render")
-                    << "[Lightmap][DIAG] UV pass exec #" << s_execCount << " entities="
-                    << entities_.size() << std::endl;
+                    << "[Lightmap] UV pass running (frame group #" << s_execCount << ")"
+                    << std::endl;
             }
             auto cmd = context.cmdBuffer;
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
@@ -645,10 +655,16 @@ void LightmapModule::AddUVPrePass(rendergraph::RenderGraph& graph, const FrameIn
         });
 }
 
+bool LightmapModule::IsActive() const {
+    return LightmapEnabledByEnv() && HasActiveLightmap() && !entities_.empty();
+}
+
 rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
     rendergraph::RenderGraph& graph, const FrameInputs& inputs,
     rendergraph::RGResourceHandle scene_color_rg) {
-    if (!LightmapEnabledByEnv()) return rendergraph::RGResourceHandle{};
+    if (!LightmapEnabledByEnv() || !HasActiveLightmap()) {
+        return rendergraph::RGResourceHandle{};
+    }
 
     // 尺寸变更（窗口 resize / 超采样档切换）→ 重建中间纹理。渲染图每帧
     // 重新导入，无跨帧身份问题。
@@ -661,13 +677,22 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
         rtDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
         if (output_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(output_tex_);
         if (uv_rt_ != handles::INVALID_RESOURCE) device_->DestroyTexture(uv_rt_);
+        if (zero_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(zero_tex_);
         output_tex_ = device_->CreateTexture(rtDesc);
         uv_rt_ = device_->CreateTexture(rtDesc);
+        zero_tex_ = device_->CreateTexture(rtDesc);
         PRIMAL_LOG_STREAM(Info, "Render")
             << "[Lightmap] rt resized -> " << render_width_ << "x" << render_height_ << std::endl;
     }
 
-    auto outRG = graph.ImportResource("LightmapCompositeOut", output_tex_);
+    TextureDesc lmOutDesc{};
+    lmOutDesc.size = {render_width_, render_height_, 1};
+    lmOutDesc.format = DataFormat::RGBA16_Float;
+    lmOutDesc.type = TextureType::Texture2D;
+    lmOutDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
+    const rhi::ResourceHandle outTex = inputs.zero_indirect ? zero_tex_ : output_tex_;
+    auto outRG = graph.ImportTexture(inputs.zero_indirect ? "LightmapZeroOut" : "LightmapCompositeOut",
+                                     outTex, lmOutDesc);
     // UV RT 的 RG 依赖：AddUVPrePass 已在本帧导入（写）——这里声明读，
     // RG 才会插 COLOR_ATTACHMENT→SHADER_READ 屏障。无实体的帧 UV RG
     // 无效（pre-pass 未加），composite 绑占位页。
@@ -697,8 +722,10 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
+            // 增益与 fusion 解耦（互斥模式会把 PRIMAL_GI_INDIRECT_GAIN 置 0
+            // 关闭 Lumen GI——lightmap 自身的烘焙值增益用独立旋钮）。
             float gain = 1.0f;
-            if (const char* g = std::getenv("PRIMAL_GI_INDIRECT_GAIN")) {
+            if (const char* g = std::getenv("PRIMAL_LIGHTMAP_GAIN")) {
                 const float v = static_cast<float>(std::atof(g));
                 if (v >= 0.0f && v <= 8.0f) gain = v;
             }
@@ -707,6 +734,7 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
                 if (d[0] == '1') debugMode = 1.0f;
                 else if (d[0] == '2') debugMode = 2.0f;
                 else if (d[0] == '3') debugMode = 3.0f;
+                else if (d[0] == '4') debugMode = 4.0f;
             }
             // 无实体时绑 z=0 占位页（全像素走原路径/debug 分支）。
             const ResourceHandle uvTex = HasEntities() ? uv_rt_ : uv_black_tex_;
@@ -721,7 +749,7 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             cmd->BindGraphicsPipeline(composite_pipeline_);
             const DescriptorSetHandle sets[] = {composite_ds_[slot]};
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, composite_layout_, 0, 1, sets, 0, nullptr);
-            const float pushParams[2] = {gain, debugMode};
+            const float pushParams[2] = {gain, inputs.zero_indirect ? 5.0f : debugMode};
             cmd->PushConstants(composite_layout_, ShaderStage::Pixel, 0, sizeof(pushParams),
                                pushParams);
             cmd->Draw(3, 0, 1, 0);

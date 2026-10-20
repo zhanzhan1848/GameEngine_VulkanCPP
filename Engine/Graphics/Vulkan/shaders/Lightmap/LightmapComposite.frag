@@ -41,7 +41,13 @@ void lightmap_composite() {
     const vec4 uvMarker = texture(sampler2D(lightmapUV, defaultSampler), inUv);
     // 诊断档必须先于替换分支判断：否则 z>0.5 像素永远进不了诊断路径
     // （实测把档 3 变成死代码、绿色不可达的坑）。
-    if (params.debugMode > 2.5) {
+    if (params.debugMode > 4.5) {
+        // 互斥清零级（fusion 内）：输出全零 = Lumen GI 间接贡献关闭。
+        result = vec3(0.0);
+    } else if (params.debugMode > 3.5) {
+        // 诊断档 4：UV RT 的 xy 直视（R=atlas u, G=atlas v, 无光像素黑）。
+        result = vec3(uvMarker.xy, 0.0);
+    } else if (params.debugMode > 2.5) {
         // 诊断档 3：UV RT 直视——z>0.5（有 lightmap）绿色，否则红色。
         // 用于回答"UV pre-pass 到底写没写进可见像素"。
         result = uvMarker.z > 0.5 ? vec3(0.0, 1.0, 0.0) : vec3(0.6, 0.05, 0.05);

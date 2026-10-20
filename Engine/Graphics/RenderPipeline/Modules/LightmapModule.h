@@ -37,9 +37,11 @@ public:
         u32 frame_index = 0;
         u32 render_width = 0;
         u32 render_height = 0;
-        // fusion 最终输出（FusionComposite 输出）的物理句柄，
-        // composite binding 0 直连（整像素替换的底图）。
+        // 底图物理句柄（fusion 后消费 = 最终输出；fusion 内清零级 =
+        // FusionIndirect 输出），composite binding 0 直连。
         rhi::ResourceHandle scene_color_tex{rhi::handles::INVALID_RESOURCE};
+        // true = 互斥清零级（输出全零 = Lumen GI 关）；false = 正常消费级。
+        bool zero_indirect = false;
         // UV pre-pass 帧输入。
         math::m4x4 view_projection{};
         rendergraph::RGResourceHandle gbuffer_depth_rg{};
@@ -66,6 +68,10 @@ public:
     void UpdateFrame(const RenderScene& scene);
 
     bool HasActiveLightmap() const { return lightmap_tex_ != rhi::handles::INVALID_RESOURCE; }
+
+    // v2（2026-10-20 用户定调）：激活 = env 开 + 页已载 + 有实体。
+    // 管线据此整链关闭 Lumen GI（模式级互斥，非逐像素并存）。
+    bool IsActive() const;
     // 有真实实体注册（UV pre-pass 需要跑）。
     bool HasEntities() const { return !entities_.empty(); }
 
@@ -81,6 +87,10 @@ public:
 
     // 后处理输入切换用的物理句柄（与 AddCompositePass 输出同源）。
     rhi::ResourceHandle GetOutputTexture() const { return output_tex_; }
+
+    // 互斥清零级输出（fusion 内插针用；与消费级 output_tex_ 分离——
+    // 一帧两 pass 读写同一物理纹理会打乱 RG 版本序）。
+    rhi::ResourceHandle GetZeroTexture() const { return zero_tex_; }
 
     // 测试/工具旁路：显式 scale/bias 直登记（绕开场景匹配；见管线同名注）。
     bool RegisterEntityDirect(id::id_type mesh_content_id, u32 entity_id,
@@ -130,6 +140,7 @@ private:
     rhi::ResourceHandle lightmap_tex_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle output_tex_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle uv_rt_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle zero_tex_{rhi::handles::INVALID_RESOURCE};  // 清零级专用
     rhi::ResourceHandle uv_black_tex_{rhi::handles::INVALID_RESOURCE};  // 1×1 z=0
     // 本帧 UV RT 的 RG 身份（AddUVPrePass 导入；composite 声明读以获得
     // 颜色附件→着色读屏障）。

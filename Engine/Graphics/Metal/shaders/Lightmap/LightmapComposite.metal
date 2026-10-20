@@ -38,7 +38,10 @@ fragment float4 lightmap_composite_fragment(
 
     const float4 uvMarker = lightmapUV.sample(s, in.uv);
     // 诊断档先于替换分支判断（与 Vulkan 版同坑：z>0.5 会吞掉诊断路径）。
-    if (params.debugMode > 2.5) {
+    if (params.debugMode > 4.5) {
+        // 互斥清零级（fusion 内）：输出全零 = Lumen GI 间接贡献关闭。
+        result = float3(0.0);
+    } else if (params.debugMode > 2.5) {
         // 诊断档 3：UV RT 直视——绿=有 lightmap 像素，红=无。
         result = uvMarker.z > 0.5 ? float3(0.0, 1.0, 0.0) : float3(0.6, 0.05, 0.05);
     } else if (params.debugMode > 1.5) {

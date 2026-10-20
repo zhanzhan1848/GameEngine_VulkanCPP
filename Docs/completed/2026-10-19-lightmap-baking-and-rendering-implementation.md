@@ -155,6 +155,32 @@ fusion 消费后的暗绿（饱和绿阈值会漏检——绿经 FusionComposite
 6. 测试 hook 的资产绝对路径指向主树 EngineTest/assets（worktree 内改动不生效，
    本轮踩过：12m 旧地板被反复加载）。
 
+## 6.3 互斥轮（2026-10-20 用户追加需求）：五路实现全被挡，取证入档
+
+**需求**："如果开启 lightmap，Lumen GI 就完全关闭"。五条实现路线与结果：
+1. **跳过 fusion pass**（真抑制/质量开关）：fusion 缺席的图布局下 lightmap
+   UV pre-pass 内容失效（exec 在跑、CPU 侧 scale_bias/UV 数据全对、句柄
+   互异、验证层无错，但 composite 读到的 UV RT = 场景色样值——片元常量
+   探针 (0.25,0.75) 完全不可见=本 pass 写入被丢弃/覆盖）；
+2. **PRIMAL_GI_INDIRECT_GAIN=0**：触发 SC↔probe 回路分叉（ToneMappingPass
+   注释官方警告），直射/点光一并变黑；
+3. **SSGI/DDGI/SPGI_SILENCE 静音族**：fusionIn 空 rg → 融合内部 pass 集
+   变化 → 同 1 的图布局失效；且 DDGI 空 tex 有"解析 sky fallback"自愈
+   （黑≠关）；
+4. **fusion 内插"间接清零"级**（v1 钩子位+独立 zero_tex_）：清零输出同样
+   触发 sky fallback（地板变蓝非黑），且 fusion 内多一个 pass 后消费级
+   替换同样失效；
+5. **UV pre-pass 提出图外直录**：未实施（RHI 无现成 ad-hoc render pass 面）。
+**对照实验铁律**：同一二进制下，图形状=v2-COEXIST 原样（UV 在 fusion 前+
+composite 在 fusion 后+fusion pass 集不变）→ 替换稳定工作（19k 暖池像素）；
+任何对 fusion 区域 pass 集的增删 → 替换消失。指向 RG/RHI 层对 pass 布局
+敏感的资源失效（怀疑瞬态纹理内存别名或描述符集时序），需 GPU 调试器+
+RenderDoc 下一轮攻坚。
+**已交付**：互斥代码（钩子+清零级+zero_tex_）保留但 PRIMAL_LIGHTMAP_MUTEX=1
+门控（默认关=稳定并存形态）；诊断旋钮 PRIMAL_LIGHTMAP_COEXIST=1。
+**当前语义**（默认）：lightmap 覆盖表面整像素替换为烘焙完整光照（含该表面
+的直射+间接），Lumen 继续服务其余表面——"逐像素互斥、同帧并存"。
+
 ## 7. 集成协议
 
 与 fluid 线（主树未提交改动）在 `FusionCompositeModule.cpp`、`StandardRenderPipeline.cpp` 相遇：

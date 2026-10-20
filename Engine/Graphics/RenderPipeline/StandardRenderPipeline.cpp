@@ -1517,6 +1517,11 @@ void StandardRenderPipeline::InitializeSubsystems() {
         lightmap_module_ = std::make_unique<LightmapModule>();
         if (!lightmap_module_->Initialize(device_, blit_vs_, render_width_, render_height_)) {
             lightmap_module_.reset();
+        } else if (std::getenv("PRIMAL_LIGHTMAP_MUTEX")) {
+            // [实验] 互斥清零级（fusion 内插零 pass）：五条实现路线实测均
+            // 被融合层自愈/图布局敏感问题挡住（详见完工记录 §6.3）——默认
+            // 关闭，PRIMAL_LIGHTMAP_MUTEX=1 供下轮带 GPU 调试器攻坚。
+            fusion_module_->SetLightmapHook(lightmap_module_.get());
         }
     }
 
@@ -4321,7 +4326,25 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // Step 10: GI Fusion Composite
     // ========================================================================
 
+    // Lightmap 帧注册 + UV pre-pass（v2 2026-10-20：位于融合链之前，
+    // 需要 GBuffer 深度；composite 在 fusion 输出之后消费）。
+    if (lightmap_module_) {
+        if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
+        LightmapModule::FrameInputs lmFrame;
+        lmFrame.frame_index = static_cast<u32>(frameCount_);
+        lmFrame.render_width = render_width_;
+        lmFrame.render_height = render_height_;
+        lmFrame.view_projection = proj_matrix_ * view_matrix_;
+        lmFrame.gbuffer_depth_rg = gbufferDepthRG;
+        lightmap_module_->AddUVPrePass(graph, lmFrame);
+    }
+
     FusionOutputs fusionOut;
+    // 互斥（2026-10-20 v2.1）：fusion 钩子在两 fusion pass 之间插"间接清零"
+    // 级（见 FusionCompositeModule::SetLightmapHook 注）——开 lightmap ⇒
+    // Lumen GI 完全关闭。PRIMAL_LIGHTMAP_COEXIST=1 为诊断旋钮（并存）：
+    // 钩子仍然工作但不清零（下传 zero_indirect=false）。
+
     if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
                            settings_.quality.enable_screen_probes) && lumen::GIDebug().fusion) {
         FusionInputs fusionIn;
@@ -4393,28 +4416,13 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 static_cast<u32>(frameCount_));
         }
 
-        // Lightmap 旁路（2026-10-19 计划，M3）：帧注册 + UV pre-pass，在融合
-        // 链内部（fusion AddPasses 的两 pass 之间由插针追加 composite）。
-        // fusion 未激活时 lightmap 一并休眠——它改写的是 fusion 的间接信号。
-        if (lightmap_module_) {
-            if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
-            LightmapModule::FrameInputs lmFrame;
-            lmFrame.frame_index = static_cast<u32>(frameCount_);
-            lmFrame.render_width = render_width_;
-            lmFrame.render_height = render_height_;
-            lmFrame.view_projection = proj_matrix_ * view_matrix_;
-            lmFrame.gbuffer_depth_rg = gbufferDepthRG;
-            lightmap_module_->AddUVPrePass(graph, lmFrame);
-        }
-
         fusionOut = fusion_module_->AddPasses(graph, fusionIn);
     }
 
-    // Lightmap 独立消费级（2026-10-20）：fusion 最终输出之后、后处理之前，
-    // lightmap 覆盖像素（UV RT z>0.5）整像素替换为烘焙完整光照（直射+
-    // 间接，离线路径追踪）。未烘焙/未激活时零 pass、后处理输入原样。
+    // Lightmap 独立消费级（fusion 最终输出之后、后处理之前整像素替换）。
     RGResourceHandle lightmapOutRG;
-    if (lightmap_module_ && fusionOut.output_tex != handles::INVALID_RESOURCE) {
+    if (lightmap_module_ &&
+        fusionOut.output_tex != rhi::handles::INVALID_RESOURCE) {
         LightmapModule::FrameInputs lmComp;
         lmComp.frame_index = static_cast<u32>(frameCount_);
         lmComp.render_width = render_width_;
@@ -6030,7 +6038,21 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
 
         // --- FusionComposite ---
+        // Lightmap 帧注册 + UV pre-pass（v2：见 BuildRenderGraph 站点同注释）。
+        if (lightmap_module_) {
+            if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
+            LightmapModule::FrameInputs lmFrame;
+            lmFrame.frame_index = static_cast<u32>(frameCount_);
+            lmFrame.render_width = render_width_;
+            lmFrame.render_height = render_height_;
+            lmFrame.view_projection = proj_matrix_ * view_matrix_;
+            lmFrame.gbuffer_depth_rg =
+                graph.ImportResource("GBufferDepth_LM", gpuDraw.GetGBufferDepthSampleable());
+            lightmap_module_->AddUVPrePass(graph, lmFrame);
+        }
+
         FusionOutputs fusionOut;
+        // 互斥清零级由 fusion 钩子插入（见 BuildRenderGraph 站点同注释）。
         if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
                                settings_.quality.enable_screen_probes) && lumen::GIDebug().fusion) {
             FusionInputs fusionIn;
@@ -6117,27 +6139,13 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     static_cast<u32>(frameCount_));
             }
 
-            // Lightmap 旁路（RenderWithCommandBuffer 站点，与 BuildRenderGraph
-            // 站点镜像——见另一处同注释；深度在此站点按需导入，RG 同物理
-            // 资源自动合并身份）。
-            if (lightmap_module_) {
-                if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
-                LightmapModule::FrameInputs lmFrame;
-                lmFrame.frame_index = static_cast<u32>(frameCount_);
-                lmFrame.render_width = render_width_;
-                lmFrame.render_height = render_height_;
-                lmFrame.view_projection = proj_matrix_ * view_matrix_;
-                lmFrame.gbuffer_depth_rg =
-                    graph.ImportResource("GBufferDepth_LM", gpuDraw.GetGBufferDepthSampleable());
-                lightmap_module_->AddUVPrePass(graph, lmFrame);
-            }
-
             fusionOut = fusion_module_->AddPasses(graph, fusionIn);
         }
 
-        // Lightmap 独立消费级（与 BuildRenderGraph 站点镜像，见彼处注释）。
+        // Lightmap 独立消费级（fusion 最终输出之后、后处理之前）。
         RGResourceHandle lightmapOutRG;
-        if (lightmap_module_ && fusionOut.output_tex != handles::INVALID_RESOURCE) {
+        if (lightmap_module_ &&
+            fusionOut.output_tex != rhi::handles::INVALID_RESOURCE) {
             LightmapModule::FrameInputs lmComp;
             lmComp.frame_index = static_cast<u32>(frameCount_);
             lmComp.render_width = render_width_;
