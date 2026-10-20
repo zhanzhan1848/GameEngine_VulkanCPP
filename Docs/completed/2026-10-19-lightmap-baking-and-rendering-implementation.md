@@ -315,3 +315,38 @@ PIL 验收：PNG 1024×1024=图集尺寸；白框完整（顶行/左列逐像素
 与 fluid 线（主树未提交改动）在 `FusionCompositeModule.cpp`、`StandardRenderPipeline.cpp` 相遇：
 谁先合 dev，另一边 rebase 解冲突；rebase 后重跑零影响证明 + §6 验收，然后
 `git worktree remove .worktrees/lightmap`。
+
+## 8. 全场景定义轮（2026-10-20，3a25a55b + 732451db）
+
+**上游 ContentTools 修复（3a25a55b，小样本 3 网格/3 材质 OBJ 复现→修复→验证）**：
+1. ObjImporter::load_obj_file MTL 搜索目录反斜杠 rfind——POSIX 下 npos→整路径当
+   目录，.mtl 从不加载、材质全丢（macOS 多网格 OBJ 必现）。改 find_last_of("/\\")。
+2. ObjImporter::get_mesh_data 每网格只 push 1 条 material_indices，而
+   Geometry.cpp:820 split 按逐三角形读——合并后越界读堆，"mesh[1..] 全场景
+   三角汤"的机制根因。改逐多边形填充（FbxImporter 同契约）；GltfImporter
+   同型隐患一并修。修后小样本 18/18 网格 UVLM（修前 1/6），逐材质 bb 与
+   源形状精确一致、三角形坐标逐点核对；ContentTools 11 套测试 108 项全绿。
+3. AssetPipeline Phase 1.5：既有 LOD≥1 级补跑 uvatlas（OBJ/GLTF legacy LOD
+   链此前只有 LOD0 拿 UVLM）。
+
+**Sponza 重 cook**：Sponza.fbx 经 ContentToolsCLI --pipeline --no-lod
+--no-remesh --uvatlas-lightmap → SponzaLM.model（主树 EngineTest/assets/，
+12.5MB）：393 网格全带 UVLM（与旧 Sponza.model 同 393 网格布局）、206,596
+顶点、总面积 12,669 m²、米制尺度（旧记录"厘米级"不适用于当前 FBX 链）。
+注意：cook 工具是 worktree Darwin/Debug/{primal-engine,ContentToolsCLI}
+（主树 DebugEditor 二进制为 9/17 dev 分支产物，无 UVLM 能力）。
+
+**e2e 实测（SPGI_CAM=0,5,-4,-35,10）**：density 16 溢出→12 OK（2048 页，
+393 entries，烘焙 ~14 分钟，frame 20 阻塞）。lightmap_page.png：覆盖 33.7%
+（烘焙值 32.1%+chart 框 1.56%），全亮度带分布（26.2% 暗~4.6% 满亮），
+页内最大 chart 978²、地板 chart 265² 均值 46.6/255。ON/OFF 98.90% 像素
+显著差（max=151）；ON 上半屏（墙体/拱）为烘焙天空反弹值 (108-120,
+115-127, 128-141) 冷调，OFF 为 Lumen 暖调。OFF 零影响复证：含 hook 改动
+的新二进制（无 env）vs HEAD 旧二进制 = 0 像素差>8、六探针逐一相等。
+SSBO 体量：3.3MB pos + 1.65MB uv + 3.1MB idx（无上传失败）。
+
+**新遗留（独立立项）**：UV pre-pass 场景级消费在屏幕下半（近场地板）无效
+——UVDUMP valid=50%（墙探针有效、地板探针无效；两个机位复现），而页内
+地板 chart 健康、393 实体缓冲已建、单实体演示地板曾工作。疑 GBuffer
+（meshlet 绘制）与 UV pre-pass 重绘的深度等值性近场失配。取证工具：
+PRIMAL_LIGHTMAP_LOAD=<lmap> 跳烘加载 + PRIMAL_LIGHTMAP_UVDUMP。
