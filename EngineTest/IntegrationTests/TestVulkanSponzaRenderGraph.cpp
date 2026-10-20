@@ -1159,6 +1159,34 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         if (meshInfo.mesh && meshInfo.mesh->IsValid()) {
             proxy.worldAABB = meshInfo.mesh->GetLocalAABB();
         }
+        // 2026-10-20 色渗透（§6.7）：LightmapSceneCollector v1 用
+        // proxy.base_color 作烘焙 albedo——此前恒默认 {1,1,1} 白（Sponza
+        // 材质色在 diffuse 贴图、Kd 近白），间接反弹无色渗透（红帷幕的
+        // 反弹不红）。per-mesh 线性平均贴图色注入（方案 A；per-texel
+        // 贴图采样为后续 B）。decAlbedo 为 sRGB 8bit——逐像素转线性后
+        // strided 采样平均（≤64k 样本/mesh）；贴图缺失回退白。
+        if (decAlbedo[i].valid && decAlbedo[i].data && decAlbedo[i].width > 0) {
+            const unsigned char* px = decAlbedo[i].data;
+            const size_t n = (size_t)decAlbedo[i].width * (size_t)decAlbedo[i].height;
+            const size_t stride = std::max<size_t>(1, n / 65536);
+            double lr = 0.0, lg = 0.0, lb = 0.0;
+            size_t count = 0;
+            for (size_t p = 0; p < n; p += stride) {
+                const auto toLinear = [](unsigned char c) {
+                    const float s = (float)c / 255.0f;
+                    return std::pow(s, 2.2f);
+                };
+                lr += toLinear(px[p * 4 + 0]);
+                lg += toLinear(px[p * 4 + 1]);
+                lb += toLinear(px[p * 4 + 2]);
+                ++count;
+            }
+            if (count > 0) {
+                proxy.base_color[0] = (float)(lr / count);
+                proxy.base_color[1] = (float)(lg / count);
+                proxy.base_color[2] = (float)(lb / count);
+            }
+        }
         scene_.AddProxy(proxy);
     }
     std::cout << "[Part30.4] Textures: diffuse " << texLoaded << " loaded / "

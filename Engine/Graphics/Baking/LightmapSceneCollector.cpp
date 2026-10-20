@@ -68,6 +68,15 @@ bool CollectBakeScene(const RenderScene& renderScene, CollectedBakeScene& out,
         mesh.name = "mesh_" + std::to_string(proxy.meshId) + "_e" +
                     std::to_string(proxy.entityId);
 
+        // §6.7 色渗透取证：前 10 个 mesh 的烘焙 albedo 一览（注入链可见
+        // 性——红帷幕/彩墙 vs 石墙应显著异色；全白≈贴图平均未注入）。
+        if (out.scene.meshes.size() < 10) {
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[Lightmap][collect] albedo[" << out.scene.meshes.size()
+                << "] " << mesh.name << " (" << mesh.albedo[0] << ", "
+                << mesh.albedo[1] << ", " << mesh.albedo[2] << ")";
+        }
+
         const bool hasUv = asset.lightmap_uv_buffer.size() >= (size_t)asset.num_vertices * 8;
 
         out.ownedPositions.push_back(std::move(worldPos));
