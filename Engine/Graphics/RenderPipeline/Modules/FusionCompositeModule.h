@@ -7,7 +7,6 @@
 namespace primal::graphics {
 namespace rendergraph { class RenderGraph; }
 namespace lumen { class ScreenProbeGIPass; }
-class LightmapModule;
 
 struct FusionInputs {
     // Scene color (deferred output or raw albedo)
@@ -101,14 +100,7 @@ public:
 
     FusionOutputs AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& inputs);
 
-    // Lightmap 互斥（2026-10-20 v2.1）：lightmap 激活时在两个 fusion pass
-    // 之间插入"间接清零"级（Lumen GI 贡献归零——用户定调的完全关闭），
-    // Pass 2 消费清零后的间接信号。未激活时零额外 pass、绑定原样。
-    void SetLightmapHook(LightmapModule* m) { lightmap_hook_ = m; }
-
 private:
-    LightmapModule* lightmap_hook_ = nullptr;
-
     static constexpr u32 kRoiAuditSourceCount = 13;
     static constexpr u32 kRoiAuditCompositeBindingCount = 9;
 

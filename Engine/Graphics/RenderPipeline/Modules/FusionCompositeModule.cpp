@@ -1,5 +1,4 @@
 #include "FusionCompositeModule.h"
-#include "LightmapModule.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.h"
 #include "Graphics/Lumen/DDGISlotMap.h"
@@ -1102,28 +1101,6 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
         }
     );
 
-    // --- Lightmap 互斥清零级（2026-10-20 v2.1）---
-    // lightmap 激活时在两个 fusion pass 之间追加"间接清零"pass：Lumen GI
-    // 的间接漫反射贡献归零（用户定调：开 lightmap ⇒ Lumen GI 完全关闭），
-    // Pass 2 消费清零后的间接信号。未激活时零额外 pass、绑定原样。
-    rendergraph::RGResourceHandle effectiveIndirectRG = indirectRG;
-    ResourceHandle effectiveIndirectTex = indirect_output_[cbIdx];
-    if (lightmap_hook_ && lightmap_hook_->HasActiveLightmap() &&
-        !std::getenv("PRIMAL_LIGHTMAP_COEXIST")) {
-        LightmapModule::FrameInputs lmIn;
-        lmIn.frame_index = inputs.frame_index;
-        lmIn.render_width = inputs.render_width;
-        lmIn.render_height = inputs.render_height;
-        lmIn.scene_color_tex = indirect_output_[cbIdx];
-        lmIn.zero_indirect = true;
-        const rendergraph::RGResourceHandle lmOut =
-            lightmap_hook_->AddCompositePass(graph, lmIn, indirectRG);
-        if (lmOut.IsValid()) {
-            effectiveIndirectRG = lmOut;
-            effectiveIndirectTex = lightmap_hook_->GetZeroTexture();
-        }
-    }
-
     // --- Pass 2: FusionComposite (full-res) ---
     struct ComposeData {
         rendergraph::RGResourceHandle output;
@@ -1133,8 +1110,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::PostProcess,
         [primaryRG = inputs.primary_input_rg, volumeRG = inputs.volume_scatter_rg, ssrRG = inputs.ssr_rg,
-         specRG = inputs.ddgi_specular_rg, reflRG = inputs.refl_specular_rg,
-         indirectRG = effectiveIndirectRG, fusionOutRG](ComposeData& data, rendergraph::RenderGraphBuilder& builder) {
+         specRG = inputs.ddgi_specular_rg, reflRG = inputs.refl_specular_rg, indirectRG, fusionOutRG](ComposeData& data, rendergraph::RenderGraphBuilder& builder) {
             builder.SideEffect(); // prevent RG culling
             if (primaryRG.IsValid()) builder.Read(primaryRG, ResourceState::ShaderResource);
             builder.Read(indirectRG, ResourceState::ShaderResource);
@@ -1148,7 +1124,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             rpDesc.colors.push_back({.texture = data.output, .loadOp = LoadAction::DontCare, .storeOp = StoreAction::Store, .clearColor = {math::v4{0, 0, 0, 1}}});
             builder.DeclareRenderPass(rpDesc);
         },
-        [this, inputs, cbIdx, indirectTex = effectiveIndirectTex, resolve](const ComposeData&, rendergraph::RenderGraphContext& context) {
+        [this, inputs, cbIdx, indirectTex = indirect_output_[cbIdx], resolve](const ComposeData&, rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             static int s_composite_diag = 0;
             if (s_composite_diag < 3) { PRIMAL_LOG_STREAM(Error, "Render") << "[FUSION_COMPOSITE] exec " << s_composite_diag << std::endl; s_composite_diag++; }

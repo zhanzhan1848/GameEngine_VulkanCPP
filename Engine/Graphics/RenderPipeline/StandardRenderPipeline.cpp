@@ -1509,19 +1509,14 @@ void StandardRenderPipeline::InitializeSubsystems() {
                                    fusion_composite_ps_, render_width_, render_height_);
     }
 
-    // Lightmap 独立消费级（2026-10-20 用户定调：与 Lumen 动态 GI 解耦）：
-    // 模块自装 shader；非 Vulkan/Metal 平台或 shader 未部署时 Initialize
-    // 返回 false、模块不存在——渲染图与既有路径零差异。仅在 fusion 存在
-    // 时有意义（在其最终输出之后整像素替换烘焙结果）。
+    // Lightmap 独立消费级（2026-10-20 用户定调：开 lightmap ⇒ Lumen GI 完全
+    // 关闭，v3 由两渲染站点 lmMutex 门控实现）：模块自装 shader；非
+    // Vulkan/Metal 平台或 shader 未部署时 Initialize 返回 false、模块不
+    // 存在——渲染图与既有路径零差异。
     if (fusion_module_) {
         lightmap_module_ = std::make_unique<LightmapModule>();
         if (!lightmap_module_->Initialize(device_, blit_vs_, render_width_, render_height_)) {
             lightmap_module_.reset();
-        } else if (std::getenv("PRIMAL_LIGHTMAP_MUTEX")) {
-            // [实验] 互斥清零级（fusion 内插零 pass）：五条实现路线实测均
-            // 被融合层自愈/图布局敏感问题挡住（详见完工记录 §6.3）——默认
-            // 关闭，PRIMAL_LIGHTMAP_MUTEX=1 供下轮带 GPU 调试器攻坚。
-            fusion_module_->SetLightmapHook(lightmap_module_.get());
         }
     }
 
@@ -3750,6 +3745,28 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     // ========================================================================
+    // Lightmap 互斥判定（2026-10-20 v3）：lmMutex = lightmap 激活（env 开 +
+    // 页已载 + 有实体）且 PRIMAL_LIGHTMAP_MUTEX=1。激活时本帧整个 Lumen GI
+    // 区不挂（Step 4.5 volume / Step 5 SC / Step 6 DDGI / Step 6.7 WRC /
+    // Step 7 SC-DDGI / Step 8 SSGI / Step 8.5 SSR / Step 9 SPGI+GIGather /
+    // Step 10 fusion 全部让路），composite 以 deferred 直射输出为底图——
+    // "开 lightmap ⇒ Lumen GI 完全关闭"。
+    // 【2026-10-20 v3 轮实测】：互斥形态下墙区直射-only 达标（Lumen 关闭
+    // ✓），但 composite 的 binding 2（UV RT）采样恒零——CPU 读回证实
+    // uv_rt_ 内 289,593 个 z=1 marker 完好、RGTRACE 证实 COLOR→SRO 屏障
+    // 正常发出、DS 追踪证实描述符写入正确的原生图像、验证层零错；同页
+    // 纹理换绑 b1 或换绑页到 b2 仍零（slot 级失效，非纹理级）。默认并存
+    // （v2 已验证形态，170k 暖池），互斥留 PRIMAL_LIGHTMAP_MUTEX=1 供
+    // 下轮带 GPU 捕获攻坚（候选方向：MoltenVK 稀疏描述符页驻留/编码器
+    // 状态泄漏）。UpdateFrame 幂等，提前执行只为判活。
+    // ========================================================================
+    const bool lmMutex = [&] {
+        if (!lightmap_module_) return false;
+        if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
+        return lightmap_module_->IsActive() && std::getenv("PRIMAL_LIGHTMAP_MUTEX") != nullptr;
+    }();
+
+    // ========================================================================
     // Step 4.5: Volume (Froxel Fog or Ray March)
     // ========================================================================
 
@@ -3771,7 +3788,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     };
 
     volume::VolumeOutput volumeOut;
-    if (froxel_fog_pass_ && froxel_fog_pass_->IsInitialized()) {
+    if (!lmMutex && froxel_fog_pass_ && froxel_fog_pass_->IsInitialized()) {
         volume::FroxelInputs froxelIn;
         froxelIn.gbuffer_depth = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
         froxelIn.scene_color = deferredOut.deferred_output_rg;
@@ -3818,7 +3835,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         auto froxelOut = froxel_fog_pass_->AddPass(graph, froxelIn);
         volumeOut.volume_scatter = froxelOut.volume_scatter;
         volumeOut.valid = froxelOut.valid;
-    } else if (volume_pass_ && volume_pass_->IsInitialized()) {
+    } else if (!lmMutex && volume_pass_ && volume_pass_->IsInitialized()) {
         volume::VolumeInputs volIn;
         volIn.gbuffer_depth = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
         volIn.scene_color = deferredOut.deferred_output_rg;
@@ -3867,7 +3884,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
     RGResourceHandle scLightingRG;
     RGResourceHandle scNodirectRG;   // [E0-B]
-    if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
+    if (!lmMutex && surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
         lumen::SurfaceCacheFrameData frameData{};
         frameData.camera_position = {camera_position_.x, camera_position_.y, camera_position_.z};
         frameData.frame_index = static_cast<u32>(frameCount_);
@@ -3987,7 +4004,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
 
     lumen::LumenDDGIOutput ddgiOut;
-    if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+    if (!lmMutex && ddgi_pass_ && ddgi_pass_->IsInitialized()) {
         lumen::DDGICameraData camData{};
         camData.camera_position = camera_position_;
         camData.view_matrix = view_matrix_;
@@ -4046,7 +4063,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // 变化）。能量单向律：WRC 只在此被 SC 填充（trace 采样），消费在 SPGI
     // 远场（fallback_spgi_to_wrc 边，A3）——绝不回灌 SC/DDGI。
     // ========================================================================
-    if (wrc_volume_count_ > 0) {
+    if (!lmMutex && wrc_volume_count_ > 0) {
         for (u32 vi = 0; vi < wrc_volume_count_; ++vi) {
             if (!wrc_volumes_[vi] || !wrc_volumes_[vi]->IsInitialized()) continue;
             if (vi == 0 && surface_cache_pass_) {
@@ -4089,7 +4106,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
     // X3/A6 轴4: propagate_sc_to_ddgi=false 跳过喂食边（RG 不声明该 pass，
     // DDGI 回落自身 trace 链）；默认 true 保持 SC→DDGI AddPass 不变。
-    if (settings_.lumen.axes.propagate_sc_to_ddgi &&
+    if (!lmMutex && settings_.lumen.axes.propagate_sc_to_ddgi &&
         sc_ddgi_module_ && surface_cache_pass_ && ddgi_pass_) {
         SCDDGIInputs scDDGIIn;
         scDDGIIn.ddgi_pass = ddgi_pass_.get();
@@ -4113,7 +4130,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // active ⇒ SSGI passes skipped; SSGI_FORCE=1 keeps both for A/B.
     const bool spgiActive = screen_probe_pass_ && screen_probe_pass_->IsInitialized();
     const bool ssgiSuppressed = spgiActive && !std::getenv("SSGI_FORCE");
-    if (ssgi_pass_ && ssgi_pass_->IsInitialized() && !ssgiSuppressed) {
+    if (!lmMutex && ssgi_pass_ && ssgi_pass_->IsInitialized() && !ssgiSuppressed) {
         auto gbufferNormalSSGI = gbufferInRG ? gbufferNormalRG : graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
         auto gbufferDepthSSGI = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
         auto gbufferVelocitySSGI = graph.ImportResource("GBufferVelocity_SSGI", gpuDraw.GetGBufferVelocity());
@@ -4149,7 +4166,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // reflection-color texture that FusionComposite blends additively into the
     // scene. GBuffer ORM (.g=roughness, .b=metallic) gates reflection strength.
     PostProcess::SSRPassData ssrOut;
-    if (settings_.quality.enable_ssr && frameCount_ > 0) {
+    if (!lmMutex && settings_.quality.enable_ssr && frameCount_ > 0) {
         RGResourceHandle hdrSSR;
         if (deferredOut.deferred_output_rg.IsValid()) {
             hdrSSR = deferredOut.deferred_output_rg;
@@ -4175,7 +4192,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
 
     lumen::ScreenProbeGIOutput spgiOut;
-    if (screen_probe_pass_ && screen_probe_pass_->IsInitialized() && frameCount_ > 0) {
+    if (!lmMutex && screen_probe_pass_ && screen_probe_pass_->IsInitialized() && frameCount_ > 0) {
         // [WRC] A3（fallback_spgi_to_wrc 边）：远场段优先消费 WRC。near volume
         // 的 cache view + 消费计数缓冲传入；边关断/WRC 未启用 → 空视图
         // （shader 走冻结的 DDGI 回退边，行为与 A3 前一致）。
@@ -4289,7 +4306,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
 
     GIGatherOutputs giOut;
-    if (gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized() && lumen::GIDebug().gi_gather) {
+    if (!lmMutex && gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized() && lumen::GIDebug().gi_gather) {
         // Import GBuffer under UNIQUE names for GIGather — same physical textures,
         // different RG identities.
         auto gbufferDepthGI = gbufferInRG ? gbufferDepthRG : graph.ImportResource("GBufferDepthGI", gpuDraw.GetGBufferDepthSampleable());
@@ -4326,10 +4343,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // Step 10: GI Fusion Composite
     // ========================================================================
 
-    // Lightmap 帧注册 + UV pre-pass（v2 2026-10-20：位于融合链之前，
-    // 需要 GBuffer 深度；composite 在 fusion 输出之后消费）。
+    // Lightmap UV pre-pass（v3：UpdateFrame 已提前到 Step 4 后的互斥判定；
+    // 此处仅挂 pre-pass。lmMutex 时 fusion 区整体缺席，composite 以
+    // deferred 直射输出为底图）。
     if (lightmap_module_) {
-        if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
         LightmapModule::FrameInputs lmFrame;
         lmFrame.frame_index = static_cast<u32>(frameCount_);
         lmFrame.render_width = render_width_;
@@ -4340,12 +4357,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     FusionOutputs fusionOut;
-    // 互斥（2026-10-20 v2.1）：fusion 钩子在两 fusion pass 之间插"间接清零"
-    // 级（见 FusionCompositeModule::SetLightmapHook 注）——开 lightmap ⇒
-    // Lumen GI 完全关闭。PRIMAL_LIGHTMAP_COEXIST=1 为诊断旋钮（并存）：
-    // 钩子仍然工作但不清零（下传 zero_indirect=false）。
+    // lmMutex（Step 4 后判定）：lightmap 激活 ⇒ Lumen GI 整区不挂，
+    // fusion 不再执行；composite 直接消费 deferred 输出。
 
-    if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
+    if (!lmMutex && fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
                            settings_.quality.enable_screen_probes) && lumen::GIDebug().fusion) {
         FusionInputs fusionIn;
         fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
@@ -4419,16 +4434,25 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         fusionOut = fusion_module_->AddPasses(graph, fusionIn);
     }
 
-    // Lightmap 独立消费级（fusion 最终输出之后、后处理之前整像素替换）。
+    // Lightmap 独立消费级。默认（并存，v2 语义）：底图 = fusion 输出，
+    // lightmap 像素替换为烘焙完整光照。PRIMAL_LIGHTMAP_MUTEX=1（互斥）：
+    // Lumen 区缺席，底图 = deferred 直射输出。无页/无实体时
+    // AddCompositePass 返回无效句柄（零影响）。
     RGResourceHandle lightmapOutRG;
-    if (lightmap_module_ &&
-        fusionOut.output_tex != rhi::handles::INVALID_RESOURCE) {
+    if (lightmap_module_) {
         LightmapModule::FrameInputs lmComp;
         lmComp.frame_index = static_cast<u32>(frameCount_);
         lmComp.render_width = render_width_;
         lmComp.render_height = render_height_;
-        lmComp.scene_color_tex = fusionOut.output_tex;
-        lightmapOutRG = lightmap_module_->AddCompositePass(graph, lmComp, fusionOut.output_rg);
+        if (lmMutex) {
+            lmComp.scene_color_tex = deferredOut.deferred_output_tex;
+            lightmapOutRG = lightmap_module_->AddCompositePass(graph, lmComp,
+                                                               deferredOut.deferred_output_rg);
+        } else if (fusionOut.output_tex != rhi::handles::INVALID_RESOURCE) {
+            lmComp.scene_color_tex = fusionOut.output_tex;
+            lightmapOutRG = lightmap_module_->AddCompositePass(graph, lmComp,
+                                                               fusionOut.output_rg);
+        }
     }
 
     // ========================================================================
@@ -5442,6 +5466,16 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
         auto deferredOut = deferred_module_->AddPasses(graph, deferredIn);
 
+        // Lightmap 互斥判定（v3，twin 站点同步，见 BuildRenderGraph Step 4
+        // 后同名块）：lmMutex 时 Lumen 区整体不挂，composite 以 deferred
+        // 直射输出为底图。默认并存（PRIMAL_LIGHTMAP_MUTEX=1 启用互斥，
+        // 详见主站点注释与完工记录 §6.4）。UpdateFrame 幂等。
+        const bool lmMutex = [&] {
+            if (!lightmap_module_) return false;
+            if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
+            return lightmap_module_->IsActive() && std::getenv("PRIMAL_LIGHTMAP_MUTEX") != nullptr;
+        }();
+
         // P1-B（sponza-gap-audit §4.2）: 世界空间定点 HDR 探针（RWCB 路径，
         // P3 修订：接入点改挂 TAA 解析后的最终 HDR（hdrCleanRWCB），
         // 逐级能量链审计以 GI_ALL_OFF / GI_ISOLATE 消融驱动）。
@@ -5527,7 +5561,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         RGResourceHandle scLightingRG;
         RGResourceHandle scNodirectRG;   // [E0-B]
         u32 giFrameT = GIFrame(static_cast<u32>(frameCount_));
-        if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
+        if (!lmMutex && surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
             lumen::SurfaceCacheFrameData frameData{};
             frameData.camera_position = {camera_position_.x, camera_position_.y, camera_position_.z};
             frameData.frame_index = static_cast<u32>(frameCount_);
@@ -5639,7 +5673,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- DDGI ---
         lumen::LumenDDGIOutput ddgiOut;
-        if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
+        if (!lmMutex && ddgi_pass_ && ddgi_pass_->IsInitialized()) {
             lumen::DDGICameraData camData{};
             camData.camera_position = camera_position_;
             camData.view_matrix = view_matrix_;
@@ -5685,7 +5719,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
 
         // --- [WRC] twin 站点同步（Step 6.7 的 RWCB 路径镜像，独立接线 block）。
-        if (wrc_volume_count_ > 0) {
+        if (!lmMutex && wrc_volume_count_ > 0) {
             for (u32 vi = 0; vi < wrc_volume_count_; ++vi) {
                 if (!wrc_volumes_[vi] || !wrc_volumes_[vi]->IsInitialized()) continue;
                 if (vi == 0 && surface_cache_pass_) {
@@ -5714,7 +5748,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- SC-DDGI Integration ---
         // X3/A6 轴4: propagate_sc_to_ddgi=false 跳过喂食边（同 Step 7 路径）
-        if (settings_.lumen.axes.propagate_sc_to_ddgi &&
+        if (!lmMutex && settings_.lumen.axes.propagate_sc_to_ddgi &&
             sc_ddgi_module_ && surface_cache_pass_ && ddgi_pass_) {
             SCDDGIInputs scDDGIIn;
             scDDGIIn.ddgi_pass = ddgi_pass_.get();
@@ -5729,7 +5763,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- GIGather ---
         GIGatherOutputs giOut;
-        if (gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized() && lumen::GIDebug().gi_gather) {
+        if (!lmMutex && gi_gather_module_ && ddgi_pass_ && ddgi_pass_->IsInitialized() && lumen::GIDebug().gi_gather) {
             auto gbufferDepthGI = graph.ImportResource("GBufferDepthGI", gpuDraw.GetGBufferDepthSampleable());
             auto gbufferNormalGI = graph.ImportResource("GBufferNormalGI", gpuDraw.GetGBufferNormal());
             auto gbufferOrmGI = graph.ImportResource("GBufferOrmGI", gpuDraw.GetGBufferORM());
@@ -5766,7 +5800,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     // active ⇒ SSGI passes skipped; SSGI_FORCE=1 keeps both for A/B.
     const bool spgiActive = screen_probe_pass_ && screen_probe_pass_->IsInitialized();
     const bool ssgiSuppressed = spgiActive && !std::getenv("SSGI_FORCE");
-    if (ssgi_pass_ && ssgi_pass_->IsInitialized() && !ssgiSuppressed) {
+    if (!lmMutex && ssgi_pass_ && ssgi_pass_->IsInitialized() && !ssgiSuppressed) {
             auto gbufferNormalSSGI = graph.ImportResource("GBufferNormal_SSGI", gpuDraw.GetGBufferNormal());
             auto gbufferDepthSSGI = graph.ImportResource("GBufferDepth_SSGI", gpuDraw.GetGBufferDepthSampleable());
             auto gbufferVelocitySSGI = graph.ImportResource("GBufferVelocity_SSGI", gpuDraw.GetGBufferVelocity());
@@ -5792,7 +5826,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- SPGI (Screen Probe GI) ---
         lumen::ScreenProbeGIOutput spgiOut;
-        if (screen_probe_pass_ && screen_probe_pass_->IsInitialized() && frameCount_ > 0) {
+        if (!lmMutex && screen_probe_pass_ && screen_probe_pass_->IsInitialized() && frameCount_ > 0) {
             // T2.2: DDGI probe fallback for miss rays
             if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
                 if (settings_.lumen.axes.fallback_spgi_to_ddgi) {
@@ -5893,7 +5927,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
         // --- Volume (Froxel Fog or Ray March) ---
         volume::VolumeOutput volumeOut;
-        if (froxel_fog_pass_ && froxel_fog_pass_->IsInitialized()) {
+        if (!lmMutex && froxel_fog_pass_ && froxel_fog_pass_->IsInitialized()) {
             volume::FroxelInputs froxelIn;
             froxelIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
             froxelIn.scene_color = deferredOut.deferred_output_rg;
@@ -5944,7 +5978,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             auto froxelOut = froxel_fog_pass_->AddPass(graph, froxelIn);
             volumeOut.volume_scatter = froxelOut.volume_scatter;
             volumeOut.valid = froxelOut.valid;
-        } else if (volume_pass_ && volume_pass_->IsInitialized()) {
+        } else if (!lmMutex && volume_pass_ && volume_pass_->IsInitialized()) {
             volume::VolumeInputs volIn;
             volIn.gbuffer_depth = graph.ImportResource("GBufferDepth_Volume", gpuDraw.GetGBufferDepthSampleable());
             volIn.scene_color = deferredOut.deferred_output_rg;
@@ -5982,7 +6016,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         // Trace → Temporal → Upsample. Output is a pure reflection-color texture
         // (RGBA16F: RGB=reflection, A=strength). FusionComposite blends it in.
         PostProcess::SSRPassData ssrOutRWCB;
-        if (settings_.quality.enable_ssr && frameCount_ > 0) {
+        if (!lmMutex && settings_.quality.enable_ssr && frameCount_ > 0) {
             RGResourceHandle hdrSSR;
             if (deferredOut.deferred_output_rg.IsValid()) {
                 hdrSSR = deferredOut.deferred_output_rg;
@@ -6017,7 +6051,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         // --- Volume Object Rendering (forward, into scatter texture) ---
         // Must run BEFORE graph.Execute() so scatter texture can be imported into FusionComposite.
         rendergraph::RGResourceHandle volume_scatter_rg;
-        if (volume_renderer_ && volume_renderer_->IsInitialized()) {
+        if (!lmMutex && volume_renderer_ && volume_renderer_->IsInitialized()) {
             volume::VolumeCameraData volCam{};
             volCam.camera_position = camera_position_;
             volCam.view_matrix = view_matrix_;
@@ -6038,9 +6072,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
 
         // --- FusionComposite ---
-        // Lightmap 帧注册 + UV pre-pass（v2：见 BuildRenderGraph 站点同注释）。
+        // Lightmap UV pre-pass（v3：UpdateFrame 已提前到 deferred 后的互斥
+        // 判定；见 BuildRenderGraph 站点同注释）。
         if (lightmap_module_) {
-            if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
             LightmapModule::FrameInputs lmFrame;
             lmFrame.frame_index = static_cast<u32>(frameCount_);
             lmFrame.render_width = render_width_;
@@ -6052,8 +6086,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
 
         FusionOutputs fusionOut;
-        // 互斥清零级由 fusion 钩子插入（见 BuildRenderGraph 站点同注释）。
-        if (fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
+        // lmMutex：lightmap 激活 ⇒ fusion 不挂（twin 站点同步）。
+        if (!lmMutex && fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
                                settings_.quality.enable_screen_probes) && lumen::GIDebug().fusion) {
             FusionInputs fusionIn;
             fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
@@ -6142,16 +6176,23 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             fusionOut = fusion_module_->AddPasses(graph, fusionIn);
         }
 
-        // Lightmap 独立消费级（fusion 最终输出之后、后处理之前）。
+        // Lightmap 独立消费级（twin 站点同步，见 BuildRenderGraph 同名块：
+        // 默认并存消费 fusion 输出；MUTEX 时 deferred 直射为底图）。
         RGResourceHandle lightmapOutRG;
-        if (lightmap_module_ &&
-            fusionOut.output_tex != rhi::handles::INVALID_RESOURCE) {
+        if (lightmap_module_) {
             LightmapModule::FrameInputs lmComp;
             lmComp.frame_index = static_cast<u32>(frameCount_);
             lmComp.render_width = render_width_;
             lmComp.render_height = render_height_;
-            lmComp.scene_color_tex = fusionOut.output_tex;
-            lightmapOutRG = lightmap_module_->AddCompositePass(graph, lmComp, fusionOut.output_rg);
+            if (lmMutex) {
+                lmComp.scene_color_tex = deferredOut.deferred_output_tex;
+                lightmapOutRG = lightmap_module_->AddCompositePass(graph, lmComp,
+                                                                   deferredOut.deferred_output_rg);
+            } else if (fusionOut.output_tex != rhi::handles::INVALID_RESOURCE) {
+                lmComp.scene_color_tex = fusionOut.output_tex;
+                lightmapOutRG = lightmap_module_->AddCompositePass(graph, lmComp,
+                                                                   fusionOut.output_rg);
+            }
         }
 
         // --- PostProcess: TAA → Bloom → ToneMapping ---

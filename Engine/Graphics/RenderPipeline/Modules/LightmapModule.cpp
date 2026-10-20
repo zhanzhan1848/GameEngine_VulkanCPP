@@ -287,7 +287,6 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
         rtDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
         output_tex_ = device->CreateTexture(rtDesc);
         uv_rt_ = device->CreateTexture(rtDesc);
-        zero_tex_ = device->CreateTexture(rtDesc);
     }
     {
         // 1×1 z=0 UV 占位（无实体时 composite 读它 → 全像素走原路径）。
@@ -677,10 +676,8 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
         rtDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
         if (output_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(output_tex_);
         if (uv_rt_ != handles::INVALID_RESOURCE) device_->DestroyTexture(uv_rt_);
-        if (zero_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(zero_tex_);
         output_tex_ = device_->CreateTexture(rtDesc);
         uv_rt_ = device_->CreateTexture(rtDesc);
-        zero_tex_ = device_->CreateTexture(rtDesc);
         PRIMAL_LOG_STREAM(Info, "Render")
             << "[Lightmap] rt resized -> " << render_width_ << "x" << render_height_ << std::endl;
     }
@@ -690,9 +687,7 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
     lmOutDesc.format = DataFormat::RGBA16_Float;
     lmOutDesc.type = TextureType::Texture2D;
     lmOutDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
-    const rhi::ResourceHandle outTex = inputs.zero_indirect ? zero_tex_ : output_tex_;
-    auto outRG = graph.ImportTexture(inputs.zero_indirect ? "LightmapZeroOut" : "LightmapCompositeOut",
-                                     outTex, lmOutDesc);
+    auto outRG = graph.ImportTexture("LightmapCompositeOut", output_tex_, lmOutDesc);
     // UV RT 的 RG 依赖：AddUVPrePass 已在本帧导入（写）——这里声明读，
     // RG 才会插 COLOR_ATTACHMENT→SHADER_READ 屏障。无实体的帧 UV RG
     // 无效（pre-pass 未加），composite 绑占位页。
@@ -722,8 +717,8 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
-            // 增益与 fusion 解耦（互斥模式会把 PRIMAL_GI_INDIRECT_GAIN 置 0
-            // 关闭 Lumen GI——lightmap 自身的烘焙值增益用独立旋钮）。
+            // 增益独立旋钮（PRIMAL_LIGHTMAP_GAIN，默认 1.0）：烘焙页自身的
+            // 显示增益，不进入任何 Lumen 回路。
             float gain = 1.0f;
             if (const char* g = std::getenv("PRIMAL_LIGHTMAP_GAIN")) {
                 const float v = static_cast<float>(std::atof(g));
@@ -738,10 +733,17 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             }
             // 无实体时绑 z=0 占位页（全像素走原路径/debug 分支）。
             const ResourceHandle uvTex = HasEntities() ? uv_rt_ : uv_black_tex_;
+            // [诊断] PRIMAL_LIGHTMAP_SWAPUV=1：交换 b1/b2 纹理。配 DEBUG=3
+            // （读 b2）判别"binding 2 槽位失效"vs"uv_rt_ 图像采样内容坏"：
+            // 交换后全绿（页的 a=1>0.5）→ 槽位正常，坏在 uv_rt_ 采样；
+            // 仍全红 → binding 2 槽位本身失效。
+            ResourceHandle b1Tex = lightmap_tex_;
+            ResourceHandle b2Tex = uvTex;
+            if (std::getenv("PRIMAL_LIGHTMAP_SWAPUV")) std::swap(b1Tex, b2Tex);
             DescData params[4] = {
                 {0, DescriptorType::SampledImage, inputs.scene_color_tex},
-                {1, DescriptorType::SampledImage, lightmap_tex_},
-                {2, DescriptorType::SampledImage, uvTex},
+                {1, DescriptorType::SampledImage, b1Tex},
+                {2, DescriptorType::SampledImage, b2Tex},
                 {3, DescriptorType::Sampler, static_cast<ResourceHandle>(sampler_)},
             };
             const u32 slot = inputs.frame_index % 3;
@@ -749,13 +751,149 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             cmd->BindGraphicsPipeline(composite_pipeline_);
             const DescriptorSetHandle sets[] = {composite_ds_[slot]};
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, composite_layout_, 0, 1, sets, 0, nullptr);
-            const float pushParams[2] = {gain, inputs.zero_indirect ? 5.0f : debugMode};
+            const float pushParams[2] = {gain, debugMode};
             cmd->PushConstants(composite_layout_, ShaderStage::Pixel, 0, sizeof(pushParams),
                                pushParams);
             cmd->Draw(3, 0, 1, 0);
+
+            // 一次性 UV RT 读回（PRIMAL_LIGHTMAP_UVDUMP[=frame]，取证用）：
+            // 把 uv_rt_ 内容读回 CPU，统计 z>0.5 有效像素数并抽样 3 点——
+            // 直接回答"UV pre-pass 写入是否存活到消费点"（前轮 §6.3 争议）。
+            // 时机：execute lambda 在本帧命令缓冲录制期，此刻本帧尚未提交，
+            // 读当前帧会拿到未初始化数据（实测 NaN）——触发帧取 ≥360，
+            // 届时 ≥3 帧前的帧已完成 fence，读到的是已提交的 UV 内容
+            // （静态场景逐帧等价）。
+            if (HasEntities() && uv_rt_ != handles::INVALID_RESOURCE &&
+                std::getenv("PRIMAL_LIGHTMAP_UVDUMP")) {
+                static bool s_uvDumped = false;
+                if (!s_uvDumped && inputs.frame_index >= 360) {
+                    s_uvDumped = true;
+                    DumpUvRT(inputs);
+                }
+            }
         });
 
     return outRG;
+}
+
+void LightmapModule::DumpUvRT(const FrameInputs& inputs) {
+    const u32 w = inputs.render_width, h = inputs.render_height;
+    BufferDesc bd{};
+    bd.size = (u64)w * h * 8;
+    bd.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+    bd.memoryUsage = GPUMemoryUsage::Readback;
+    ResourceHandle stage = device_->CreateBuffer(bd);
+    if (stage == handles::INVALID_RESOURCE) return;
+    auto ch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+    auto* c2 = GetCommandBuffer(ch);
+    if (!c2) {
+        device_->DestroyBuffer(stage);
+        return;
+    }
+    c2->Begin();
+    BufferTextureCopyRegion region{};
+    region.bufferOffset = 0;
+    region.imageSubresource = {0, 0, 1};
+    region.imageOffset = {0, 0, 0};
+    region.imageExtent = {w, h, 1};
+    c2->CopyTextureToBuffer(uv_rt_, stage, &region, 1);
+    c2->End();
+    QueueSubmitInfo submit{};
+    submit.cmdBuffer = ch;
+    SyncHandle fence = device_->CreateSync();
+    submit.signalFence = fence;
+    device_->Submit(submit);
+    device_->WaitForSync(fence, UINT32_MAX);
+    device_->DestroySync(fence);
+    device_->DestroyCommandBuffer(ch);
+
+    const u16* p = static_cast<const u16*>(device_->MapBuffer(stage));
+    if (!p) {
+        device_->DestroyBuffer(stage);
+        return;
+    }
+    auto halfToFloat = [](u16 x) {
+        u32 sign = (u32)(x & 0x8000u) << 16, expo = (x & 0x7C00u) >> 10, man = x & 0x03FFu;
+        u32 bits;
+        if (expo == 0) bits = sign;
+        else if (expo == 31) bits = sign | 0x7F800000u | (man << 13);
+        else bits = sign | ((expo - 15u + 127u) << 23) | (man << 13);
+        f32 f;
+        std::memcpy(&f, &bits, 4);
+        return f;
+    };
+    u64 valid = 0;
+    const u64 total = (u64)w * h;
+    u64 minX = ~0ull, minY = ~0ull, maxX = 0, maxY = 0;
+    for (u64 i = 0; i < total; ++i) {
+        if (halfToFloat(p[i * 4 + 2]) > 0.5f) {
+            ++valid;
+            const u64 x = i % w, y = i / w;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+        }
+    }
+    // 定点采样（显示 1280x720 标定 → render 等比）：中心 / 地板池 (431,416)
+    // / 墙区 (200,300)。x 按 1280 归一（720 是 y 基准——首轮曾误用致样点
+    // 偏移，取到池外）。
+    const auto dispIdx = [&](u32 dx, u32 dy) {
+        return ((u64)(h * dy / 720) * w + (u64)w * dx / 1280) * 4;
+    };
+    const u64 sCenter = dispIdx(640, 360);
+    const u64 sFloor = dispIdx(431, 416);
+    const u64 sWall = dispIdx(200, 300);
+    const f32 fU = halfToFloat(p[sFloor]), fV = halfToFloat(p[sFloor + 1]);
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[Lightmap][UVDUMP] frame=" << inputs.frame_index << " " << w << "x" << h
+        << " valid(z>0.5)=" << valid << "/" << total
+        << " bbox x[" << minX << "," << maxX << "] y[" << minY << "," << maxY << "]"
+        << " center=(" << halfToFloat(p[sCenter]) << "," << halfToFloat(p[sCenter + 1]) << ")"
+        << " floorUV=(" << fU << "," << fV << ")"
+        << " wall=(" << halfToFloat(p[sWall]) << "," << halfToFloat(p[sWall + 1]) << ")"
+        << std::endl;
+    device_->UnmapBuffer(stage);
+    device_->DestroyBuffer(stage);
+
+    // 追加：烘焙页在 floorUV 处的值（回答"composite 对地板池会替换成什么"）。
+    if (fU > 0.f && fV > 0.f && lightmap_tex_ != handles::INVALID_RESOURCE) {
+        BufferDesc pb2{};
+        pb2.size = 8;
+        pb2.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+        pb2.memoryUsage = GPUMemoryUsage::Readback;
+        ResourceHandle stage2 = device_->CreateBuffer(pb2);
+        if (stage2 != handles::INVALID_RESOURCE) {
+            auto ch2 = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+            auto* c3 = GetCommandBuffer(ch2);
+            if (c3) {
+                c3->Begin();
+                BufferTextureCopyRegion pr{};
+                pr.bufferOffset = 0;
+                pr.imageSubresource = {0, 0, 1};
+                pr.imageOffset = {(s32)(fU * 1023), (s32)(fV * 1023), 0};
+                pr.imageExtent = {1, 1, 1};
+                c3->CopyTextureToBuffer(lightmap_tex_, stage2, &pr, 1);
+                c3->End();
+                QueueSubmitInfo s2{};
+                s2.cmdBuffer = ch2;
+                SyncHandle f2 = device_->CreateSync();
+                s2.signalFence = f2;
+                device_->Submit(s2);
+                device_->WaitForSync(f2, UINT32_MAX);
+                device_->DestroySync(f2);
+                device_->DestroyCommandBuffer(ch2);
+                if (const u16* q = static_cast<const u16*>(device_->MapBuffer(stage2))) {
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[Lightmap][PAGEDUMP] page(" << (u32)(fU * 1023) << "," << (u32)(fV * 1023)
+                        << ") rgb=(" << halfToFloat(q[0]) << "," << halfToFloat(q[1])
+                        << "," << halfToFloat(q[2]) << ")" << std::endl;
+                    device_->UnmapBuffer(stage2);
+                }
+            }
+            device_->DestroyBuffer(stage2);
+        }
+    }
 }
 
 } // namespace primal::graphics

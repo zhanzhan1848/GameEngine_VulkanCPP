@@ -181,6 +181,51 @@ RenderDoc 下一轮攻坚。
 **当前语义**（默认）：lightmap 覆盖表面整像素替换为烘焙完整光照（含该表面
 的直射+间接），Lumen 继续服务其余表面——"逐像素互斥、同帧并存"。
 
+## 6.4 全隔离互斥轮（2026-10-20 v3）：铁律破除一半，binding-2 采样之谜入档
+
+**实现**（用户授权"全新通道、不复用 fusion 链"的 A+B 全隔离形态）：两渲染
+站点（BuildRenderGraph Step 4 后 / RenderWithCommandBuffer deferred 后）以
+`lmMutex = IsActive() && PRIMAL_LIGHTMAP_MUTEX` 门控整个 Lumen GI 区——
+volume/SC/DDGI/WRC/SC-DDGI/SSGI/SSR/SPGI/GIGather/fusion（含 refl_specular）
+十一个块全部让路，composite 以 deferred 直射输出为底图，UpdateFrame 提前
+（幂等）。FusionCompositeModule 钩子实验代码还原基线（流体线 rebase 友好）；
+LightmapModule 清 zero_tex_/zero_indirect；新增 PRIMAL_LIGHTMAP_UVDUMP（UV RT
+一次性读回：有效像素数+bbox+三定点+页值，帧 360 读 ≥3 帧前已完成内容）与
+PRIMAL_LIGHTMAP_SWAPUV（b1/b2 纹理交换判别）两个诊断旋钮。
+
+**e2e 四路对照**（SPGI_CAM=0,6.5,-3,-42,0，frame 360，1280x720 判据同 §6.3）：
+| 配置 | 暖池 | 池心 (431,416) | 墙 (200,300) | 结论 |
+|---|---|---|---|---|
+| HEAD + v2 shader（并存） | 170,344 | (148,131,99) | (106,83,46) | 基线复现 ✓ |
+| 本轮 C++ + v2 shader（并存） | 170,292 | (148,131,99) | (106,83,46) | C++ 重构零影响 ✓ |
+| 本轮 C++ + v2 shader（MUTEX） | 552 | (8,8,7) | (14,14,14) | 墙=直射-only ✓ 池黑 ✗ |
+| OFF（本轮 / HEAD 逐值同） | 120,640 | (161,142,108) | (22,17,13) | 零影响 ✓（暖池=日光地斑） |
+
+注：并存 ON 的墙暖增量来自烘焙演示点光（TestVulkanSponzaRenderGraph L2380
+AddLight），非 Lumen 差异。
+
+**§6.3 两项旧结论被本轮推翻/收窄**：
+1. **"UV pre-pass 写入被丢弃"不成立**：MUTEX 形态下 UVDUMP 读回 uv_rt_ 含
+   289,593 个 z=1 marker（与并存形态逐字节同分布）——写入存活，两形态
+   uv_rt_ 内容一致；
+2. **失效点精确到 composite 的 binding 2 采样**：DEBUG=3 全红（marker z≤0.5
+   恒假）+ SWAPUV 换绑烘焙页（a=1 处处）到 b2 仍全红 ⇒ binding 2 槽位采样
+   恒零，与绑哪张纹理无关；同 pass 内 binding 0（deferred 底图）采样正常
+   （墙区直射-only 透传证明）。DS 追踪（PRIMAL_DS_TRACE）证实 b1=烘焙页
+   0x44b7…/b2=uv_rt_ 0x3c7… 写入正确的原生图像；RGTRACE 证实 uv_rt_
+   COLOR→SRO 屏障逐帧正常发出；除烘焙页遗留 TRANSFER_DST（并存形态同样
+   存在、MoltenVK 下无害）外验证层零错；MVK_CONFIG_USE_METAL_ARGUMENT_
+   BUFFERS=0 无改善。
+3. **新发现（渲染资产生命周期纪律）**：重建 LightmapComposite.frag.spv（仅
+   删除 mode-5 死分支、glslang 同版本）后并存形态也全红——提交在库的
+   Lightmap 系列 spv 是 load-bearing，任何"无害"重建都需全量 e2e 复验后
+   才能入库。本轮最终交付保留 v2 原版 spv 未动。
+
+**当前语义**：默认=并存（v2，170k 暖池回归）；PRIMAL_LIGHTMAP_MUTEX=1 启用
+全隔离互斥（Lumen 关闭 ✓、烘焙替换被 binding-2 之谜挡住，池黑）。下轮攻坚
+方向：GPU 捕获（RenderDoc/Xcode GPU）对比 MUTEX/并存两形态 composite draw
+的 descriptor 状态；候选根因：MoltenVK 稀疏描述符更新下的编码器状态泄漏。
+
 ## 7. 集成协议
 
 与 fluid 线（主树未提交改动）在 `FusionCompositeModule.cpp`、`StandardRenderPipeline.cpp` 相遇：
