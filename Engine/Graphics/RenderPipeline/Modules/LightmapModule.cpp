@@ -667,15 +667,24 @@ void LightmapModule::AddUVPrePass(rendergraph::RenderGraph& graph, const FrameIn
             const DescriptorSetHandle sets[] = {uv_ds_};
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, uv_layout_, 0, 1, sets, 0, nullptr);
             cmd->BindIndexBuffer(indices_ib_, DataFormat::R32_UInt, 0);
-            // §9 取证旋钮：PRIMAL_LIGHTMAP_UVONLY=<实体序号> 只绘该实体
-            // （配 UVDUMP/DEPTHALWAYS 做逐实体深度差分——DEPTHALWAYS 下
-            // 全实体绘会被后绘远面覆盖污染直方图）。
-            static const long uvOnly = [] {
+            // §9/§10 取证旋钮：PRIMAL_LIGHTMAP_UVONLY=<实体序号> 只绘该实体；
+            // "a:b" 区间语法（[a,b)）支持 LessEqual 二分点名——被 GBuffer
+            // 深度匹配的实体（位级等值）才会写入，按 bot 带计数对半缩小。
+            static const long uvOnlyLo = [] {
                 const char* e = std::getenv("PRIMAL_LIGHTMAP_UVONLY");
+                long lo = -1, hi = -1;
+                if (e && std::sscanf(e, "%ld:%ld", &lo, &hi) == 2) return lo;
                 return e ? std::atol(e) : -1L;
             }();
+            static const long uvOnlyHi = [] {
+                const char* e = std::getenv("PRIMAL_LIGHTMAP_UVONLY");
+                long lo = -1, hi = -1;
+                if (e && std::sscanf(e, "%ld:%ld", &lo, &hi) == 2) return hi;
+                return e ? std::atol(e) + 1 : 0L;
+            }();
             for (size_t ei = 0; ei < entities_.size(); ++ei) {
-                if (uvOnly >= 0 && (long)ei != uvOnly) continue;
+                if (uvOnlyLo >= 0 &&
+                    !((long)ei >= uvOnlyLo && (long)ei < uvOnlyHi)) continue;
                 const auto& e = entities_[ei];
                 UvPushConstants push{};
                 push.view_proj = inputs.view_projection;
@@ -992,6 +1001,10 @@ void LightmapModule::DumpUvRT(const FrameInputs& inputs) {
                 probeZ("center", sCenter);
                 probeZ("floorProbe", sFloor);
                 probeZ("wall", sWall);
+                // §10 下带点名探针（ON 图黑带：display y 446/560/680 @ x 640）。
+                probeZ("bot1", dispIdx(640, 446));
+                probeZ("bot2", dispIdx(640, 560));
+                probeZ("bot3", dispIdx(640, 680));
                 device_->UnmapBuffer(dstage);
             }
             device_->DestroyBuffer(dstage);
