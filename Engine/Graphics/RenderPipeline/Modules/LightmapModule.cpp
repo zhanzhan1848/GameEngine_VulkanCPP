@@ -1002,9 +1002,20 @@ void LightmapModule::DumpUvRT(const FrameInputs& inputs) {
                 probeZ("floorProbe", sFloor);
                 probeZ("wall", sWall);
                 // §10 下带点名探针（ON 图黑带：display y 446/560/680 @ x 640）。
-                probeZ("bot1", dispIdx(640, 446));
-                probeZ("bot2", dispIdx(640, 560));
-                probeZ("bot3", dispIdx(640, 680));
+                // §11 对账：同步打印纹理整数像素坐标（display→texture 换算
+                // 自证——x 按 1280、y 按 720 基准等比）。
+                auto probeZXY = [&](const char* tag, u64 idx) {
+                    const u64 px = (idx / 4) % w, py = (idx / 4) / w;
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[Lightmap][UVDIFF] " << tag
+                        << " px=(" << px << "," << py << ")"
+                        << " redraw=" << halfToFloat(p[idx + 3])
+                        << " gb=" << dp[idx / 4]
+                        << std::endl;
+                };
+                probeZXY("bot1", dispIdx(640, 446));
+                probeZXY("bot2", dispIdx(640, 560));
+                probeZXY("bot3", dispIdx(640, 680));
                 device_->UnmapBuffer(dstage);
             }
             device_->DestroyBuffer(dstage);

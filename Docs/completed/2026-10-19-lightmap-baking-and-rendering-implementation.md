@@ -429,3 +429,30 @@ DumpUvRT 同帧读回 GBuffer 深度做逐像素 rel-delta 直方图（7 幅度�
 - 单测：TestLightmapBaking ALL PASSED、TestAssetPipeline 12/12、
   TestUvAtlas 6/6；
 - 提交：UVONLY 区间+探针（本轮）、文档本轮。
+
+## 12. 两步对账轮（2026-10-20 IV）：映射排除、VP 复刻自证、矛盾锐化为"共面双深度"
+
+**步 1（探针映射）**：DumpUvRT 打印整数像素坐标——bot1=(1280,892)
+与手算一致，display→texture 换算无误。✓排除。
+
+**步 2（CPU 投影复刻）**：精确复刻 CreateLookAtMatrix/CreatePerspectiveMatrix
+（列主序）+ z 收缩 eps，mesh 17 的 16 顶点前向投影 + 屏幕重心插值：
+- **center (1280,720)：CPU 0.931258 ↔ GPU 0.931152——f16 量化内一致**。
+  整条相机/VP/像素映射复刻链自证正确；
+- **bot1 (1280,892)：CPU 0.917895（=gb×(1-eps)，恰可通过）vs GPU 读数
+  0.944336**——后者恰为同一平面 ~564 行处的值（行差 ~328）；
+- mesh 17 全部 16 顶点 y=4.1553 完全共面 ⇒ 平面上任一三角形在同一像素
+  深度唯一 ⇒ **RT(1280,892) 的 0.9443 不可能来自 mesh 17 在该像素的
+  光栅化** ⇒ UV pass 之后存在部分性写入/内存别名（行 720 内容正确、
+  行 892 为他源内容；UVONLY=118 的 LessEqual 帧 clear 值全帧存活 ⇒
+  覆写似与 ALWAYS 大覆盖形态相关，或依赖当帧 RG 布局）。
+
+**下一步最优路线（RenderDoc/Xcode GPU 帧抓取预案）**：
+1. MoltenVK 层开 layer（MVK_CONFIG_TRACE_PATH 或 RenderDoc macOS
+   Vulkan 支持）抓 UV pass 前后 uv_rt_ 内存快照与 RG 瞬态池分配表——
+   直接看谁在 UV pass 后写了该区域（候选：RG alias pool 部分复用、
+   composite/后处理某 pass 越界写）；
+2. 或最小复现：构造两 pass 图（A 写纹理下半→B 读），在 MoltenVK
+   上验证 tiler 部分区域可见性（§6.5 曾有编码器边界先例——本轮怀疑
+   同族但形态不同：不是"读不到"而是"读到旧/他内容"）；
+3. 复验时保留三件取证旋钮（DEPTHALWAYS/UVONLY/UVDUMP+坐标打印）。
