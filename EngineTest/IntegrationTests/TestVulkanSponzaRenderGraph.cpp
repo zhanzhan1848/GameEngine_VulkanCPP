@@ -2394,7 +2394,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                           "/tmp/lm_e2e_bake");
             bool lmOk = false;
             std::string lmErr;
-            for (float density : {1.0f, 0.5f, 0.25f, 0.1f, 0.05f, 0.02f}) {
+            for (float density : {8.0f, 4.0f, 2.0f, 1.0f, 0.5f, 0.25f}) {
                 lmSettings.texel_density = density;
                 lmErr.clear();
                 lmOk = pipeline_->BakeSceneLightmaps(lmSettings, nullptr, &lmErr);
