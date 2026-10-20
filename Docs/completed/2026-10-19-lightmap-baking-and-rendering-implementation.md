@@ -485,3 +485,32 @@ proxy.base_color[0..2]；收集器零改动。收集侧新增前 10 mesh albedo 
 RHIMeshAsset，成本=收集期解码+双线性）；金属度未参与（链/旗杆反弹
 按漫反射处理）；GAIN=5 为显示尺度匹配而非物理修正（正解=bake 输出
 对齐实时单位制，另行立项）。
+
+## 14. 方案 B——per-texel 贴图采样 albedo（2026-10-20 VI，84caf704）
+
+**实现**（纯 C++，零 spv）：BakeMesh 契约扩展（albedo_texture sRGB u8 +
+w/h + material_uvs + source_mesh_id，缺一回退方案 A）；收集器从 element
+static_normal_texture(0x3) 24B 布局提取材质 UV0（uv=每顶点末 8B f32 对，
+与 PipelineDraw 顶点拉取同源同偏移）；管道 SetLightmapBakeAlbedoTexture
+注册（照 AddLightmapBakeMeshOverride 模式）；测试侧 stbi 释放前 ≤256²
+盒滤波降采样 u8 副本注册（392/393——Material__300 无 diffuse 回退 A）；
+baker 栅格化重心插值 UV0 → 双线性 → 256 项 LUT 线性化。**顺修 §13 UB**：
+平均色原在 stbi_image_free 后读已释放内存（堆运气下碰巧正确），移到释放前。
+
+**实测**：
+1. 单测 TestBakerTexelAlbedoVariance（条纹贴图→左红/右蓝主导+方差）通过；
+   全套 15 项 ALL PASSED；
+2. 烘焙耗时 **958s vs 方案 A ~13min（+~25%）**——逐 texel 双线性无额外
+   射线，纯采样开销；
+3. 页差（A vs B 同 packing）：**365k/989k 纹素显著变化（37%）**——
+   per-texel 真值 vs 全网格平均；蓝主导 179445:红 84599；均值亮度
+   53.7→40.9（average-of-linear 比 linear-of-average 暗——Jensen 间隙，
+   物理正确方向）；
+4. 上屏（GAIN=5 同口径）：B vs A **9.56% 像素差>8**（上半阴影区
+   15049 : 下半 7008——远面/掠射角花纹细节进入反弹）；vs OFF 92.68%
+   差异；floor-center (117,109,94) 与 A (114,111,103) 同量级；
+5. OFF 零影响 0.00%（max 4）。
+
+**遗留**：金属度仍未参与（链/旗杆按漫反射反弹）；UV0 插值在 lightmap-UV
+参数空间线性（v1 近似，与 pos/normal 同级）；编辑器生产路径需把贴图
+albedo 从材质系统同源注入（当前为测试链注册）。
