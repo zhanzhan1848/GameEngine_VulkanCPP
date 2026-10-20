@@ -2329,96 +2329,46 @@ void TestVulkanSponzaRenderGraph::Run() {
     //   两者皆无 —— 渲染图与基线零差异。PRIMAL_LIGHTMAP=0 总开关。
     {
         static bool lmBakeDone = false;
-        static primal::id::id_type lmOverrideMeshId_ = 0;
         if (!lmBakeDone && frameCount_ == 20 && pipeline_) {
             if (std::getenv("PRIMAL_LIGHTMAP_BAKE")) {
             lmBakeDone = true;
 
-            // 终验载体（2026-10-19 计划 §6）：默认 Sponza（已证消费 fusion 呈现
-            // 链）+ 经 LoadRenderItemData 正规注册的 UVLM 地板，走管线旁路
-            //（AddLightmapBakeMeshOverride/RegisterEntityDirect——场景代理路
-            // 径要求真实 game-entity 号，测试注入必越界 transform 组件表）。
-            {
-                const std::string lmModelPath =
-                    "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/FloorUVLM.model";
-                std::ifstream lmFile(lmModelPath, std::ios::binary | std::ios::ate);
-                if (lmFile.is_open()) {
-                    const std::streamsize lmSize = lmFile.tellg();
-                    lmFile.seekg(0);
-                    std::vector<char> lmBytes(static_cast<size_t>(lmSize));
-                    lmFile.read(lmBytes.data(), lmSize);
-                    SceneDataAdapter lmAdapter;
-                    const auto lmMeshes =
-                        lmAdapter.LoadRenderItemData(device_, lmBytes.data(), (u32)lmBytes.size());
-                    primal::id::id_type lmMesh = 0;
-                    for (const auto& mi : lmMeshes) {
-                        rhi::RHIMeshAsset probe{};
-                        if (mi.meshEntityId &&
-                            primal::content::get_rhi_mesh_asset(
-                                primal::content::get_rhi_mesh_id(mi.meshEntityId), probe) &&
-                            probe.lightmap_uv_buffer.size() >= (size_t)probe.num_vertices * 8) {
-                            lmMesh = mi.meshEntityId;
-                            break;
-                        }
-                    }
-                    if (lmMesh) {
-                        lmOverrideMeshId_ = lmMesh;
-                        auto lmT = rhimath::MatrixIdentity();
-                        pipeline_->AddLightmapBakeMeshOverride(lmMesh, lmT);
-                        std::cerr << "[Lightmap][e2e] bake override added: mesh=" << lmMesh
-                                  << std::endl;
-                    } else {
-                        std::cerr << "[Lightmap][e2e] no UVLM mesh in FloorUVLM.model" << std::endl;
-                    }
+            if (const char* lmLoad = std::getenv("PRIMAL_LIGHTMAP_LOAD")) {
+                // 诊断旁路：直接加载既有 LMAP 页（跳过烘焙），配
+                // PRIMAL_LIGHTMAP_UVDUMP/GAIN 快速取证消费链。
+                lmBakeDone = true;
+                if (pipeline_->SetLightmapPage(lmLoad)) {
+                    std::cerr << "[Lightmap][e2e] loaded page: " << lmLoad << std::endl;
                 } else {
-                    std::cerr << "[Lightmap][e2e] FloorUVLM.model missing" << std::endl;
+                    std::cerr << "[Lightmap][e2e] page load failed: " << lmLoad << std::endl;
                 }
-            }
-            // 烘焙演示光源：中庭内一盏暖点光。Vulkan deferred 实时链只支持
-            // 太阳（已知缺口）——OFF 地板近黑，ON 为烘焙出的暖光池 + 柱列
-            // 投影，直观展示"独立离线烘焙 vs 动态 GI"的差异面。
-            RenderLight lmDemoLight{};
-            lmDemoLight.type = LightType::Point;
-            lmDemoLight.position = v3{0.0f, 3.2f, 0.0f};
-            lmDemoLight.color = v3{1.0f, 0.85f, 0.6f};
-            lmDemoLight.intensity = 80.0f;
-            lmDemoLight.range = 40.0f;
-            scene_.AddLight(lmDemoLight);
+            } else {
+            // 全场景烘焙（2026-10-20 定义轮）：Sponza 源资产已带 UVLM 重 cook
+            //（PRIMAL_TEST_MODEL=SponzaLM.model，ContentTools --uvatlas-lightmap，
+            // 全 25 网格无 LOD 重复）。收集器按 RenderScene 代理全量收集——
+            // 有 UVLM 即可烘，无 UVLM 作 trace-only 遮挡物。光照 = 场景太阳 +
+            // 天空 miss；演示点光（前轮演示专用）移除。
             auto lmSettings = primal::graphics::baking::DefaultLightmapBakeSettings();
-            lmSettings.atlas_size = 1024;
+            lmSettings.atlas_size = 2048;
             lmSettings.samples_per_texel = 64;  // 用户基线 spp
             lmSettings.bounces = 3;
-            // DLSS Sponza 为厘米级源网格（世界面积巨大）——密度自适应减半
-            // 直到装进图集（验证消费链路而非画质）。
+            // 密度自适应阶梯：从 8 纹素/米减半直到全部 chart 装进 2048 页
+            //（下限 0.02 级——覆盖厘米级源网格的极端面积）。
             std::snprintf(lmSettings.output_dir, sizeof(lmSettings.output_dir), "%s",
                           "/tmp/lm_e2e_bake");
             bool lmOk = false;
             std::string lmErr;
-            for (float density : {8.0f, 4.0f, 2.0f, 1.0f, 0.5f, 0.25f}) {
+            for (float density : {16.0f, 12.0f, 10.0f, 8.0f, 4.0f, 2.0f, 1.0f,
+                                  0.5f, 0.25f, 0.125f, 0.0625f, 0.03f, 0.02f}) {
                 lmSettings.texel_density = density;
                 lmErr.clear();
                 lmOk = pipeline_->BakeSceneLightmaps(lmSettings, nullptr, &lmErr);
                 std::cerr << "[Lightmap][e2e] density=" << density << " -> "
                           << (lmOk ? "OK" : lmErr) << std::endl;
-                if (lmOk) {
-                    // 旁路直登记：覆写网格条目名 = mesh_<id>_e700（管线约定）。
-                    // 取清单条目 scale/bias 注册消费实体。
-                    if (baking::LightmapContainer lmC;
-                        baking::LoadLightmapContainer("/tmp/lm_e2e_bake/lightmap.lmap", lmC)) {
-                        for (const auto& e : lmC.entries) {
-                            const std::string expect =
-                                "mesh_" + std::to_string(lmOverrideMeshId_) + "_e700";
-                            if (e.GetName() == expect) {
-                                const float sb[4] = {e.scale_x, e.scale_y, e.bias_x, e.bias_y};
-                                pipeline_->RegisterLightmapEntityDirect(lmOverrideMeshId_, 700, sb);
-                                std::cerr << "[Lightmap][e2e] direct entity registered: "
-                                          << expect << std::endl;
-                                break;
-                            }
-                        }
-                    }
-                    break;
-                }
+                if (lmOk) break;
+            }
+            // 运行时消费走 LightmapModule::UpdateFrame 的
+            // mesh_<contentId>_e<entityId> 代理自动匹配——无需旁路直登记。
             }
             } else if (std::getenv("PRIMAL_LIGHTMAP_DEBUG")) {
                 lmBakeDone = true;
