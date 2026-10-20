@@ -79,6 +79,23 @@ bool CollectBakeScene(const RenderScene& renderScene, CollectedBakeScene& out,
 
         const bool hasUv = asset.lightmap_uv_buffer.size() >= (size_t)asset.num_vertices * 8;
 
+        // §14 方案 B：材质 UV0 提取（element static_normal_texture 24B 布局，
+        // uv = 每顶点末 8B f32 对——与 GPUDrivenDraw PipelineDraw 顶点拉取
+        // 同源同偏移；烘焙采样按渲染同约定 y 翻转）。其他 elements_type 无
+        // 材质 UV → material_uvs 空，baker 回退 per-mesh 平均 albedo。
+        if (asset.elements_type == 0x3 /*static_normal_texture*/ &&
+            asset.element_buffer.size() >= (size_t)asset.num_vertices * 24) {
+            auto& muvs = out.ownedMaterialUvs.emplace_back();
+            muvs.resize((size_t)asset.num_vertices * 2);
+            const std::uint8_t* eb = asset.element_buffer.data();
+            for (std::uint32_t v = 0; v < asset.num_vertices; ++v) {
+                std::memcpy(&muvs[(size_t)v * 2 + 0], eb + (size_t)v * 24 + 16, 4);
+                std::memcpy(&muvs[(size_t)v * 2 + 1], eb + (size_t)v * 24 + 20, 4);
+            }
+        } else {
+            out.ownedMaterialUvs.emplace_back();  // 占位——与 mesh 下标对齐
+        }
+
         out.ownedPositions.push_back(std::move(worldPos));
         out.ownedIndices.push_back(std::move(indices));
         if (hasUv) {
@@ -95,6 +112,9 @@ bool CollectBakeScene(const RenderScene& renderScene, CollectedBakeScene& out,
         stored.indices = out.ownedIndices[idx].data();
         stored.lightmap_uvs = out.ownedUvs[idx].empty() ? nullptr
                                                         : out.ownedUvs[idx].data();
+        stored.material_uvs = out.ownedMaterialUvs[idx].empty() ? nullptr
+                                                                : out.ownedMaterialUvs[idx].data();
+        stored.source_mesh_id = (std::uint32_t)proxy.meshId;
     }
 
     // 灯源映射。RenderLight 的锥角存 cos 值 → BakeLight 契约为角度。

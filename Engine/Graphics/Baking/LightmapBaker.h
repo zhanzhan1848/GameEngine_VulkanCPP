@@ -46,9 +46,21 @@ struct BakeMesh {
     const std::uint32_t* indices = nullptr;
     std::uint32_t vertex_count = 0;
     std::uint32_t index_count = 0;         // 3 的倍数
-    float albedo[3] = {0.8f, 0.8f, 0.8f};  // v1 材质底色
+    float albedo[3] = {0.8f, 0.8f, 0.8f};  // v1 材质底色（方案 A per-mesh 平均）
     float emissive[3] = {0.0f, 0.0f, 0.0f};
     std::string name;                      // 场景内 mesh 键（LMAP manifest 同名）
+    // §14 方案 B：per-texel 贴图采样。albedo_texture = sRGB u8 RGB 三元组
+    //（w×h，行 0 = 贴图顶行）；material_uvs = 材质 UV0（xy × vertex_count，
+    // 资产 element 原值——采样按渲染同约定 y 翻转，与 PipelineDraw 对齐）。
+    // 二者齐备时栅格化逐 texel 重心插值 UV0 → 双线性采样 → LUT 线性化，
+    // 贴图花纹参与反弹；缺失任一则回退 albedo（方案 A）。
+    const unsigned char* albedo_texture = nullptr;
+    std::uint32_t albedo_tex_w = 0;
+    std::uint32_t albedo_tex_h = 0;
+    const float* material_uvs = nullptr;
+    // 收集器回填的代理 mesh id（BakeSceneLightmaps 据此挂接烘焙期注册的
+    // per-mesh 贴图 albedo；0 = 未设）。
+    std::uint32_t source_mesh_id = 0;
 };
 
 struct BakeLight {

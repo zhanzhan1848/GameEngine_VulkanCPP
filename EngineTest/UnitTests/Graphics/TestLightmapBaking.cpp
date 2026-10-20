@@ -511,6 +511,65 @@ void TestBakerBlockerBounce() {
     CHECK(got < 0.25f, "bounced floor indirect bounded (got " + std::to_string(got) + ")");
 }
 
+
+// §14 方案 B：per-texel 贴图采样 albedo。条纹贴图（左半红右半蓝）+
+// 已知 UV → 采样出的 texel albedo 随位置变化（方差>0 且方向正确）。
+// 天光-only 烘焙下出射 ≈ albedo/π × sky——页内左/右半分别红/蓝主导。
+void TestBakerTexelAlbedoVariance() {
+    const float albedo[3] = {0.5f, 0.5f, 0.5f};
+    const float emissive0[3] = {0, 0, 0};
+    BakeScene scene;
+    BakeMesh floor = MakeQuad("floor", 0, 0, 0, 0.5f, +1, true, albedo, emissive0);
+    // 8×2 条纹：x<4 红 (255,0,0)，x>=4 蓝 (0,0,255)——材质 UV 与 lightmap
+    // UV 同布局（us/vs = quad 角点 0..1），采样 y 翻转不影响左右判定。
+    static unsigned char stripe[8 * 2 * 3];
+    for (int y = 0; y < 2; ++y)
+        for (int x = 0; x < 8; ++x) {
+            unsigned char* p = &stripe[(y * 8 + x) * 3];
+            p[0] = x < 4 ? 255 : 0; p[1] = 0; p[2] = x < 4 ? 0 : 255;
+        }
+    static float matUvs[8];  // 与 MakeQuad 顶点序一致（u,v 对）
+    matUvs[0] = 0; matUvs[1] = 0; matUvs[2] = 0; matUvs[3] = 1;
+    matUvs[4] = 1; matUvs[5] = 0; matUvs[6] = 1; matUvs[7] = 1;
+    floor.albedo_texture = stripe;
+    floor.albedo_tex_w = 8;
+    floor.albedo_tex_h = 2;
+    floor.material_uvs = matUvs;
+    scene.meshes.push_back(floor);
+    scene.sky.intensity = 1.0f;  // 天光-only：出射 ∝ albedo
+
+    LightmapBakeSettings s = DefaultLightmapBakeSettings();
+    s.atlas_size = 64;
+    s.samples_per_texel = 32;
+    s.bounces = 1;
+    s.texel_density = 16.0f;
+    s.denoise = 0;
+    s.dilation_px = 0;
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_texelalbedo");
+    const auto r = BakeLightmaps(scene, s);
+    CHECK(r.ok, "texel albedo bake ok" + (r.ok ? "" : " err=" + r.error));
+    if (!r.ok) return;
+
+    LightmapContainer c;
+    CHECK(LoadLightmapContainer(r.output_path, c), "load");
+    const auto& e = c.entries[0];
+    const auto& page = c.pages[0];
+    const float redL = HalfToFloat(page.texels_rgba16f[
+        ((e.rect_y + e.rect_h / 2) * page.width + e.rect_x + e.rect_w / 4) * 4 + 0]);
+    const float blueL = HalfToFloat(page.texels_rgba16f[
+        ((e.rect_y + e.rect_h / 2) * page.width + e.rect_x + e.rect_w / 4) * 4 + 2]);
+    const float redR = HalfToFloat(page.texels_rgba16f[
+        ((e.rect_y + e.rect_h / 2) * page.width + e.rect_x + e.rect_w * 3 / 4) * 4 + 0]);
+    const float blueR = HalfToFloat(page.texels_rgba16f[
+        ((e.rect_y + e.rect_h / 2) * page.width + e.rect_x + e.rect_w * 3 / 4) * 4 + 2]);
+    CHECK(redL > blueL * 2.0f + 0.01f,
+          "left half red-dominant (r=" + std::to_string(redL) + " b=" + std::to_string(blueL) + ")");
+    CHECK(blueR > redR * 2.0f + 0.01f,
+          "right half blue-dominant (r=" + std::to_string(redR) + " b=" + std::to_string(blueR) + ")");
+    CHECK(std::abs(redL - redR) + std::abs(blueL - blueR) > 0.05f,
+          "texel albedo variance across mesh");
+}
+
 } // namespace
 
 int main() {
@@ -526,6 +585,7 @@ int main() {
     TestBakerTraceOnly();
     TestBakerBlockerBounce();
     TestBakerSkyDirect();
+    TestBakerTexelAlbedoVariance();
     if (g_failures == 0) {
         std::cout << "[TestLightmapBaking] ALL PASSED" << std::endl;
         return 0;

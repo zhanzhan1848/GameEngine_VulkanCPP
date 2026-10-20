@@ -14,6 +14,7 @@
 #include "Engine/Graphics/RHI/Systems/RenderSystem.h"
 #include "Engine/Graphics/RHI/Components/RHICamera.h"
 #include <chrono>
+#include <unordered_map>
 #include "Engine/Graphics/RHI/Utils/IBLPrecomputer.h"
 #include "Engine/Graphics/RenderPipeline/StandardRenderPipeline.h"
 #include "Engine/Graphics/RenderScene.h"
@@ -104,6 +105,10 @@ private:
     std::vector<std::shared_ptr<primal::graphics::MaterialInstance>> materialInstances_;
     std::vector<primal::game_entity::entity> entities_;
     std::vector<primal::cluster::component> clusterComps_;
+    // §14 方案 B：per-mesh 烘焙贴图 albedo（≤256² 盒滤波 u8 sRGB RGB，
+    // stbi 释放前计算，烘焙 hook 期注册给管道）。
+    std::unordered_map<u32, std::vector<unsigned char>> lmBakeAlbedoTex_;
+    std::unordered_map<u32, std::pair<int, int>> lmBakeAlbedoDims_;
     std::shared_ptr<primal::graphics::Material> sharedMaterial_;
     primal::graphics::nanite::GPUMaterialRegistry* materialRegistry_{nullptr};
 

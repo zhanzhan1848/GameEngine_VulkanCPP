@@ -15,6 +15,7 @@
 #include "Graphics/Lumen/SSAO/LumenSSAOPass.h"
 #include "Graphics/Lumen/SSGI/LumenSSGIPass.h"
 #include <array>
+#include <unordered_map>
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Lumen/GIPlatformProfile.h"
 #include "Engine/Common/CoreLogStream.h"   // SetOfflineSDFSource 的 auto-fit 日志（P1-A）
@@ -243,6 +244,12 @@ public:
     void AddLightmapBakeMeshOverride(id::id_type mesh_content_id, const math::m4x4& transform);
     bool RegisterLightmapEntityDirect(id::id_type mesh_content_id, u32 entity_id,
                                       const float scale_bias[4]);
+    // §14 方案 B：注册 per-mesh 烘焙贴图 albedo（sRGB u8 RGB 三元组，w×h，
+    // 行 0 = 顶行）。BakeSceneLightmaps 按 BakeMesh.source_mesh_id 挂接——
+    // 栅格化逐 texel 重心插值材质 UV0 → 双线性采样（花纹参与反弹）。
+    // 数据拷贝归管道所有；w/h 为 0 或 tex 空 = 移除该 mesh 的注册。
+    void SetLightmapBakeAlbedoTexture(id::id_type mesh_content_id,
+                                      const u8* srgb_rgb, u32 w, u32 h);
 
     bool BakeSceneLightmaps(const baking::LightmapBakeSettings& settings,
                             std::string* out_path = nullptr, std::string* out_err = nullptr,
@@ -718,6 +725,9 @@ private:
     std::unique_ptr<FusionCompositeModule> fusion_module_;
     // 测试/工具旁路登记（见 AddLightmapBakeMeshOverride）。
     std::vector<std::pair<id::id_type, math::m4x4>> lightmapBakeOverrides_;
+    // §14 方案 B：per-mesh 烘焙贴图 albedo（sRGB u8 RGB 拷贝，管道所有）。
+    std::unordered_map<id::id_type, std::vector<u8>> lightmapBakeAlbedoTex_;
+    std::unordered_map<id::id_type, std::pair<u32, u32>> lightmapBakeAlbedoDims_;
 
     // Lightmap 旁路（2026-10-19 计划）：fusion 钩子注入的独立改写级。模块
     // 自装 shader（Metal 移植前 Vulkan-only，装配失败即不存在）；场景未

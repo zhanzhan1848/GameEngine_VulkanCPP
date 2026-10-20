@@ -119,6 +119,54 @@ inline void Onb(const Vec3& n, Vec3& t, Vec3& b) {
     b = Cross(n, t);
 }
 
+// ---------- §14 方案 B：贴图 albedo 采样 ----------
+
+// sRGB u8 → 线性 f32 LUT（256 项，pow 2.2——与方案 A 的逐像素线性化同式）。
+struct AlbedoLut {
+    float v[256];
+    AlbedoLut() {
+        for (int i = 0; i < 256; ++i) v[i] = std::pow((float)i / 255.0f, 2.2f);
+    }
+};
+inline const AlbedoLut& AlbedoLutTable() {
+    static const AlbedoLut lut;
+    return lut;
+}
+
+// 双线性采样 sRGB u8 RGB 贴图 → 线性 albedo。u/v 为资产 element 原值；
+// v 按渲染同约定翻转（PipelineDraw: uv.y = 1-uv.y），行 0 = 贴图顶行。
+inline void SampleAlbedoBilinear(const unsigned char* tex, std::uint32_t w,
+                                 std::uint32_t h, float u, float v,
+                                 float out[3]) {
+    if (!tex || w == 0 || h == 0) return;
+    const float fy = 1.0f - v;
+    const float fx = u * (float)w - 0.5f;
+    const float gy = fy * (float)h - 0.5f;
+    const auto& lut = AlbedoLutTable();
+    const auto fetch = [&](int x, int y, float rgb[3]) {
+        x = std::clamp(x, 0, (int)w - 1);
+        y = std::clamp(y, 0, (int)h - 1);
+        const unsigned char* p = tex + ((size_t)y * w + (size_t)x) * 3;
+        rgb[0] = lut.v[p[0]];
+        rgb[1] = lut.v[p[1]];
+        rgb[2] = lut.v[p[2]];
+    };
+    float x0 = std::floor(fx), y0 = std::floor(gy);
+    float tx = fx - x0, ty = gy - y0;
+    if (tx < 0) { tx = 0; }
+    if (ty < 0) { ty = 0; }
+    float c00[3], c10[3], c01[3], c11[3];
+    fetch((int)x0, (int)y0, c00);
+    fetch((int)x0 + 1, (int)y0, c10);
+    fetch((int)x0, (int)y0 + 1, c01);
+    fetch((int)x0 + 1, (int)y0 + 1, c11);
+    for (int k = 0; k < 3; ++k) {
+        const float a = c00[k] * (1 - tx) + c10[k] * tx;
+        const float b = c01[k] * (1 - tx) + c11[k] * tx;
+        out[k] = a * (1 - ty) + b * ty;
+    }
+}
+
 // ---------- 每纹素栅格化数据 ----------
 
 struct TexelSample {
@@ -339,7 +387,22 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                         } else {
                             s.normal = faceN;
                         }
-                        s.albedo[0] = m.albedo[0]; s.albedo[1] = m.albedo[1]; s.albedo[2] = m.albedo[2];
+                        // §14 方案 B：贴图齐备时逐 texel 重心插值 UV0 → 双线性
+                        // 采样（贴图花纹参与反弹）；否则回退 per-mesh 平均。
+                        if (m.albedo_texture && m.material_uvs) {
+                            const float mu = m.material_uvs[ia * 2] * w0 +
+                                             m.material_uvs[ib * 2] * w1 +
+                                             m.material_uvs[ic * 2] * w2;
+                            const float mv = m.material_uvs[ia * 2 + 1] * w0 +
+                                             m.material_uvs[ib * 2 + 1] * w1 +
+                                             m.material_uvs[ic * 2 + 1] * w2;
+                            float alb[3] = {m.albedo[0], m.albedo[1], m.albedo[2]};
+                            SampleAlbedoBilinear(m.albedo_texture, m.albedo_tex_w,
+                                                 m.albedo_tex_h, mu, mv, alb);
+                            s.albedo[0] = alb[0]; s.albedo[1] = alb[1]; s.albedo[2] = alb[2];
+                        } else {
+                            s.albedo[0] = m.albedo[0]; s.albedo[1] = m.albedo[1]; s.albedo[2] = m.albedo[2];
+                        }
                     }
                 }
             }

@@ -30,6 +30,8 @@ struct CollectedBakeScene {
     std::vector<std::vector<float>> ownedPositions;  // xyz
     std::vector<std::vector<float>> ownedUvs;        // uv
     std::vector<std::vector<std::uint32_t>> ownedIndices;
+    // §14 方案 B：材质 UV0（element static_normal_texture 布局提取）。
+    std::vector<std::vector<float>> ownedMaterialUvs;
 };
 
 // 收集全部 proxy/灯源。至少一个 bakeable mesh 才算成功（与 baker 契约一致）。

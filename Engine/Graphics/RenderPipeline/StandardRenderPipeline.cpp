@@ -1629,6 +1629,18 @@ void StandardRenderPipeline::AddLightmapBakeMeshOverride(id::id_type mesh_conten
     lightmapBakeOverrides_.push_back({mesh_content_id, transform});
 }
 
+void StandardRenderPipeline::SetLightmapBakeAlbedoTexture(id::id_type mesh_content_id,
+                                                          const u8* srgb_rgb, u32 w, u32 h) {
+    if (!srgb_rgb || w == 0 || h == 0) {
+        lightmapBakeAlbedoTex_.erase(mesh_content_id);
+        lightmapBakeAlbedoDims_.erase(mesh_content_id);
+        return;
+    }
+    lightmapBakeAlbedoTex_[mesh_content_id].assign(
+        srgb_rgb, srgb_rgb + (size_t)w * h * 3);
+    lightmapBakeAlbedoDims_[mesh_content_id] = {w, h};
+}
+
 bool StandardRenderPipeline::RegisterLightmapEntityDirect(id::id_type mesh_content_id,
                                                           u32 entity_id,
                                                           const float scale_bias[4]) {
@@ -1665,6 +1677,25 @@ bool StandardRenderPipeline::BakeSceneLightmaps(const baking::LightmapBakeSettin
     if (!baking::CollectBakeScene(*scene, collected, err)) {
         if (out_err) *out_err = "collect: " + err;
         return false;
+    }
+    // §14 方案 B：per-mesh 贴图 albedo 挂接（source_mesh_id 键控；收集器已
+    // 提取材质 UV0）。挂上的网格栅格化走逐 texel 双线性采样，其余回退
+    // per-mesh 平均（方案 A）。
+    if (!lightmapBakeAlbedoTex_.empty()) {
+        u32 hooked = 0;
+        for (auto& m : collected.scene.meshes) {
+            const auto it = lightmapBakeAlbedoTex_.find(m.source_mesh_id);
+            if (it == lightmapBakeAlbedoTex_.end() || !m.material_uvs) continue;
+            const auto dit = lightmapBakeAlbedoDims_.find(m.source_mesh_id);
+            if (dit == lightmapBakeAlbedoDims_.end()) continue;
+            m.albedo_texture = it->second.data();
+            m.albedo_tex_w = dit->second.first;
+            m.albedo_tex_h = dit->second.second;
+            ++hooked;
+        }
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[Lightmap] per-texel albedo textures hooked: " << hooked
+            << "/" << collected.scene.meshes.size() << " meshes";
     }
     // 测试/工具覆写网格并入（世界坐标直拷；见 AddLightmapBakeMeshOverride 注）。
     for (const auto& ov : lightmapBakeOverrides_) {

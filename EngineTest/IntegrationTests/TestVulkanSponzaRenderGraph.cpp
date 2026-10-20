@@ -925,6 +925,9 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         bool valid{false};
     };
     std::vector<DecodedTex> decAlbedo(meshCount), decNormal(meshCount), decORM(meshCount);
+    // §13/§14：per-mesh 平均色（方案 A 回退值）——stbi 释放前计算（此前
+    // 读已释放内存属 UB，堆运气下碰巧正确，本轮修正）。
+    std::vector<std::array<float, 3>> avgAlbedo(meshCount, {1.0f, 1.0f, 1.0f});
 
     auto decodeJob = [&](u32 i, u32) {
         auto& meshInfo = sceneMeshes_[i];
@@ -1091,6 +1094,51 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
 
         const u64 surfaceTextureDigest = decAlbedo[i].valid
             ? rhi::card_surface_identity::Texture(u32(decAlbedo[i].width), u32(decAlbedo[i].height), decAlbedo[i].data) : 0;
+        // §13/§14（stbi 释放前）：全分辨率线性平均色（方案 A）+ ≤256²
+        // 盒滤波降采样 u8 副本（方案 B per-texel 采样源）。
+        if (decAlbedo[i].valid && decAlbedo[i].data && decAlbedo[i].width > 0) {
+            const unsigned char* px = decAlbedo[i].data;
+            const int tw = decAlbedo[i].width, th = decAlbedo[i].height;
+            double lr = 0, lg = 0, lb = 0;
+            const size_t n = (size_t)tw * th;
+            const size_t stride = std::max<size_t>(1, n / 65536);
+            size_t count = 0;
+            for (size_t q = 0; q < n; q += stride) {
+                const auto toLinear = [](unsigned char c) {
+                    const float v = (float)c / 255.0f;
+                    return std::pow(v, 2.2f);
+                };
+                lr += toLinear(px[q * 4 + 0]);
+                lg += toLinear(px[q * 4 + 1]);
+                lb += toLinear(px[q * 4 + 2]);
+                ++count;
+            }
+            if (count > 0) {
+                avgAlbedo[i] = {(float)(lr / count), (float)(lg / count), (float)(lb / count)};
+            }
+            const int scale = std::max(1, (std::max(tw, th) + 255) / 256);
+            const int dw = std::max(1, tw / scale), dh = std::max(1, th / scale);
+            std::vector<unsigned char> dst((size_t)dw * dh * 3);
+            for (int dy = 0; dy < dh; ++dy) {
+                for (int dx = 0; dx < dw; ++dx) {
+                    const int sx0 = dx * scale, sy0 = dy * scale;
+                    const int sx1 = std::min(tw, sx0 + scale), sy1 = std::min(th, sy0 + scale);
+                    unsigned rAcc = 0, gAcc = 0, bAcc = 0;
+                    for (int sy = sy0; sy < sy1; ++sy)
+                        for (int sx = sx0; sx < sx1; ++sx) {
+                            const size_t q = ((size_t)sy * tw + sx) * 4;
+                            rAcc += px[q + 0]; gAcc += px[q + 1]; bAcc += px[q + 2];
+                        }
+                    const size_t cnt = (size_t)(sy1 - sy0) * (sx1 - sx0);
+                    unsigned char* o = &dst[((size_t)dy * dw + dx) * 3];
+                    o[0] = (unsigned char)(rAcc / cnt);
+                    o[1] = (unsigned char)(gAcc / cnt);
+                    o[2] = (unsigned char)(bAcc / cnt);
+                }
+            }
+            lmBakeAlbedoTex_[meshInfo.meshEntityId] = std::move(dst);
+            lmBakeAlbedoDims_[meshInfo.meshEntityId] = {dw, dh};
+        }
         // Free stbi buffers now that CreateTextureFromData has copied the pixels.
         if (decAlbedo[i].data) stbi_image_free(decAlbedo[i].data);
         if (decNormal[i].data) stbi_image_free(decNormal[i].data);
@@ -1159,34 +1207,11 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         if (meshInfo.mesh && meshInfo.mesh->IsValid()) {
             proxy.worldAABB = meshInfo.mesh->GetLocalAABB();
         }
-        // 2026-10-20 色渗透（§6.7）：LightmapSceneCollector v1 用
-        // proxy.base_color 作烘焙 albedo——此前恒默认 {1,1,1} 白（Sponza
-        // 材质色在 diffuse 贴图、Kd 近白），间接反弹无色渗透（红帷幕的
-        // 反弹不红）。per-mesh 线性平均贴图色注入（方案 A；per-texel
-        // 贴图采样为后续 B）。decAlbedo 为 sRGB 8bit——逐像素转线性后
-        // strided 采样平均（≤64k 样本/mesh）；贴图缺失回退白。
-        if (decAlbedo[i].valid && decAlbedo[i].data && decAlbedo[i].width > 0) {
-            const unsigned char* px = decAlbedo[i].data;
-            const size_t n = (size_t)decAlbedo[i].width * (size_t)decAlbedo[i].height;
-            const size_t stride = std::max<size_t>(1, n / 65536);
-            double lr = 0.0, lg = 0.0, lb = 0.0;
-            size_t count = 0;
-            for (size_t p = 0; p < n; p += stride) {
-                const auto toLinear = [](unsigned char c) {
-                    const float s = (float)c / 255.0f;
-                    return std::pow(s, 2.2f);
-                };
-                lr += toLinear(px[p * 4 + 0]);
-                lg += toLinear(px[p * 4 + 1]);
-                lb += toLinear(px[p * 4 + 2]);
-                ++count;
-            }
-            if (count > 0) {
-                proxy.base_color[0] = (float)(lr / count);
-                proxy.base_color[1] = (float)(lg / count);
-                proxy.base_color[2] = (float)(lb / count);
-            }
-        }
+        // §13 色渗透（方案 A 回退值；§14 逐 texel 采样在烘焙侧按贴图
+        // 覆盖）——平均色已在 stbi 释放前算入 avgAlbedo[i]。
+        proxy.base_color[0] = avgAlbedo[i][0];
+        proxy.base_color[1] = avgAlbedo[i][1];
+        proxy.base_color[2] = avgAlbedo[i][2];
         scene_.AddProxy(proxy);
     }
     std::cout << "[Part30.4] Textures: diffuse " << texLoaded << " loaded / "
@@ -2376,6 +2401,15 @@ void TestVulkanSponzaRenderGraph::Run() {
             // 全 25 网格无 LOD 重复）。收集器按 RenderScene 代理全量收集——
             // 有 UVLM 即可烘，无 UVLM 作 trace-only 遮挡物。光照 = 场景太阳 +
             // 天空 miss；演示点光（前轮演示专用）移除。
+            // §14 方案 B：注册 per-mesh 贴图 albedo（收集器已提取 UV0，
+            // 管道按 source_mesh_id 挂接——baker 逐 texel 双线性采样）。
+            for (const auto& kv : lmBakeAlbedoTex_) {
+                const auto& dims = lmBakeAlbedoDims_[kv.first];
+                pipeline_->SetLightmapBakeAlbedoTexture(
+                    kv.first, kv.second.data(), (u32)dims.first, (u32)dims.second);
+            }
+            std::cerr << "[Lightmap][e2e] per-texel albedo textures registered: "
+                      << lmBakeAlbedoTex_.size() << std::endl;
             auto lmSettings = primal::graphics::baking::DefaultLightmapBakeSettings();
             lmSettings.atlas_size = 2048;
             lmSettings.samples_per_texel = 64;  // 用户基线 spp
