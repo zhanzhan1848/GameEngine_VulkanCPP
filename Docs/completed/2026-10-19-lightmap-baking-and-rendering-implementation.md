@@ -456,3 +456,32 @@ DumpUvRT 同帧读回 GBuffer 深度做逐像素 rel-delta 直方图（7 幅度�
    上验证 tiler 部分区域可见性（§6.5 曾有编码器边界先例——本轮怀疑
    同族但形态不同：不是"读不到"而是"读到旧/他内容"）；
 3. 复验时保留三件取证旋钮（DEPTHALWAYS/UVONLY/UVDUMP+坐标打印）。
+
+## 13. 间接光色渗透轮（2026-10-20 V，93baba0a）
+
+**验收发现**：最终渲染间接光黑白无彩（红帷幕反弹不红）。根因坐实：
+收集器 v1 用 proxy.base_color 作 BakeMesh.albedo（LightmapSceneCollector.h:13
+自注），而 RenderProxy 默认 {1,1,1} 白（RenderProxy.h:20）、测试从未赋值、
+Sponza 材质色在 diffuse 贴图（Kd 近白）→ 全场景白 albedo 路径追踪。
+
+**修复（方案 A）**：LoadSponzaScene 把每 mesh 已解码 diffuse（decAlbedo，
+sRGB 8bit）逐像素转线性（pow 2.2）strided 平均（≤64k 样本/mesh）写入
+proxy.base_color[0..2]；收集器零改动。收集侧新增前 10 mesh albedo 日志。
+数据链注：编辑器生产路径将来应从材质系统同源注入（本轮为测试链）。
+
+**实测**（SPGI_CAM=0,5,-4,-35,10 + SponzaLM + BAKE，density 12 重烘）：
+1. 收集日志：per-mesh 彩色（mesh_0 叶簇 (0.053,0.046,0.029) 偏暖绿暗、
+   mesh_1 植物土盆黄主导、mesh_2 花瓶红棕——注入链可见）；
+2. 页差（pre/post 同 packing）：显著变化纹素 **红主导 82%**
+   （832835:10852:1281）——红帷幕反弹红定量坐实；均值亮度 105→52
+   （白→真实 albedo 的物理量级修正，旧白 albedo 烘焙偏亮 ~2×）；
+3. ON 上屏（GAIN=5 曝光匹配消费侧既有旋钮——实时链 50× 直射放大
+   [C2.1] vs 烘焙物理单位的尺度差，均值 54.2≈修前 53.1）：阴影区
+   R-B=+8、地板带 +11~+13；修复前间接蓝调（back-arch B>R+21）——
+   色相反转即彩色反弹；
+4. OFF 零影响 0.00%（max 5）；TestLightmapBaking/TestAssetPipeline 全绿。
+
+**遗留**：方案 B（per-texel 贴图采样，贴图花纹参与反弹——UV0 在
+RHIMeshAsset，成本=收集期解码+双线性）；金属度未参与（链/旗杆反弹
+按漫反射处理）；GAIN=5 为显示尺度匹配而非物理修正（正解=bake 输出
+对齐实时单位制，另行立项）。
