@@ -45,7 +45,9 @@ vertex LightmapUvVertexOut lightmap_uv_vertex(
 fragment float4 lightmap_uv_fragment(
     LightmapUvVertexOut in [[stage_in]])
 {
-    // xy = atlas UV（含实体 scale/bias），z = 有效位，w = 1。
+    // xy = atlas UV（含实体 scale/bias），z = 有效位。
     // RT 清零（z=0）= 该像素无 lightmap——composite 据此走原路径。
-    return float4(in.atlasUV, 1.0, 1.0);
+    // w = 本 pass 重绘深度（[[position]].z，[0,1]）——2026-10-20 §9 取证
+    // 插桩：composite 不读 w；DumpUvRT 用它与 GBuffer 深度差分定位偏移。
+    return float4(in.atlasUV, 1.0, in.position.z);
 }

@@ -612,6 +612,12 @@ void LightmapModule::AddUVPrePass(rendergraph::RenderGraph& graph, const FrameIn
     if (!LightmapEnabledByEnv() || !HasActiveLightmap() || entities_.empty()) return;
     if (!inputs.gbuffer_depth_rg.IsValid()) return;
 
+    // §9 取证：记录本帧 GBuffer 深度的物理句柄（DumpUvRT 与 UV RT .w 的
+    // 重绘深度逐像素差分用）。
+    if (auto* res = graph.GetResource(inputs.gbuffer_depth_rg)) {
+        gbuffer_depth_phys_ = res->GetPhysicalHandle();
+    }
+
     // ImportTexture（非 ImportResource）：携带 desc 注册为 Texture 类型，
     // 避免 RG 瞬态别名池复用本纹理内存（同 DeferredOutput 修复——
     // fusion 抑制模式下图集布局变化时实测被场景色覆写）。
@@ -661,7 +667,16 @@ void LightmapModule::AddUVPrePass(rendergraph::RenderGraph& graph, const FrameIn
             const DescriptorSetHandle sets[] = {uv_ds_};
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, uv_layout_, 0, 1, sets, 0, nullptr);
             cmd->BindIndexBuffer(indices_ib_, DataFormat::R32_UInt, 0);
-            for (const auto& e : entities_) {
+            // §9 取证旋钮：PRIMAL_LIGHTMAP_UVONLY=<实体序号> 只绘该实体
+            // （配 UVDUMP/DEPTHALWAYS 做逐实体深度差分——DEPTHALWAYS 下
+            // 全实体绘会被后绘远面覆盖污染直方图）。
+            static const long uvOnly = [] {
+                const char* e = std::getenv("PRIMAL_LIGHTMAP_UVONLY");
+                return e ? std::atol(e) : -1L;
+            }();
+            for (size_t ei = 0; ei < entities_.size(); ++ei) {
+                if (uvOnly >= 0 && (long)ei != uvOnly) continue;
+                const auto& e = entities_[ei];
                 UvPushConstants push{};
                 push.view_proj = inputs.view_projection;
                 push.position_offset = e.position_offset;
@@ -894,6 +909,94 @@ void LightmapModule::DumpUvRT(const FrameInputs& inputs) {
         << " floorUV=(" << fU << "," << fV << ")"
         << " wall=(" << halfToFloat(p[sWall]) << "," << halfToFloat(p[sWall + 1]) << ")"
         << std::endl;
+
+    // §9 取证：GBuffer 深度读回 + 与 UV RT .w（重绘深度）逐像素差分分桶。
+    // delta = redraw_z - gb_z：>0 即 LessEqual 拒绝量。分桶维度：幅度（相对
+    // gb_z）× 屏幕纵向三带（近场/中场/远场代理）。DEPTHALWAYS=1 时全部
+    // 重绘落盘（含被拒像素），差分图完整。
+    if (gbuffer_depth_phys_ != handles::INVALID_RESOURCE) {
+        BufferDesc dbd{};
+        dbd.size = (u64)w * h * 4;
+        dbd.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+        dbd.memoryUsage = GPUMemoryUsage::Readback;
+        ResourceHandle dstage = device_->CreateBuffer(dbd);
+        if (dstage != handles::INVALID_RESOURCE) {
+            auto dch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+            auto* dc = GetCommandBuffer(dch);
+            if (dc) {
+                dc->Begin();
+                BufferTextureCopyRegion dr{};
+                dr.bufferOffset = 0;
+                dr.imageSubresource = {0, 0, 1};
+                dr.imageOffset = {0, 0, 0};
+                dr.imageExtent = {w, h, 1};
+                dc->CopyTextureToBuffer(gbuffer_depth_phys_, dstage, &dr, 1);
+                dc->End();
+                QueueSubmitInfo ds{};
+                ds.cmdBuffer = dch;
+                SyncHandle dfence = device_->CreateSync();
+                ds.signalFence = dfence;
+                device_->Submit(ds);
+                device_->WaitForSync(dfence, UINT32_MAX);
+                device_->DestroySync(dfence);
+            }
+            device_->DestroyCommandBuffer(dch);
+            const f32* dp = static_cast<const f32*>(device_->MapBuffer(dstage));
+            if (dp) {
+                // 幅度桶（相对深度差）× 纵向三带。
+                constexpr int kBands = 3, kBuckets = 7;
+                u64 hist[kBands][kBuckets] = {};
+                u64 bandCount[kBands] = {};
+                f32 bandMaxDelta[kBands] = {};
+                const f32 edges[kBuckets] = {1e-7f, 1e-6f, 1e-5f, 1e-4f, 1e-3f, 1e-2f};
+                for (u64 y = 0; y < h; ++y) {
+                    const int band = (int)(y * kBands / h);
+                    for (u64 x = 0; x < w; ++x) {
+                        const u64 i = y * w + x;
+                        if (halfToFloat(p[i * 4 + 2]) <= 0.5f) continue;
+                        const f32 rz = halfToFloat(p[i * 4 + 3]);  // 重绘深度
+                        const f32 gz = dp[i];
+                        if (gz <= 0.f || gz >= 1.f || rz <= 0.f || rz >= 1.f) continue;
+                        const f32 rel = (rz - gz) / gz;
+                        int b = 0;
+                        while (b < kBuckets - 1 && rel > edges[b]) ++b;
+                        ++hist[band][b];
+                        ++bandCount[band];
+                        if (rel > bandMaxDelta[band]) bandMaxDelta[band] = rel;
+                    }
+                }
+                const char* bandNames[kBands] = {"top", "mid", "bot"};
+                const char* bNames[kBuckets] = {"<=1e-7", "1e-6", "1e-5", "1e-4",
+                                                "1e-3", "1e-2", ">1e-2"};
+                for (int band = 0; band < kBands; ++band) {
+                    std::string rows;
+                    for (int b = 0; b < kBuckets; ++b) {
+                        if (b) rows += ",";
+                        rows += std::to_string(hist[band][b]);
+                    }
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[Lightmap][UVDIFF] " << bandNames[band]
+                        << " n=" << bandCount[band]
+                        << " maxRel=" << bandMaxDelta[band]
+                        << " buckets(<=1e-7,1e-6,1e-5,1e-4,1e-3,1e-2,>1e-2)=" << rows
+                        << std::endl;
+                }
+                // 探针像素的绝对深度对照。
+                auto probeZ = [&](const char* tag, u64 idx) {
+                    PRIMAL_LOG_STREAM(Info, "Render")
+                        << "[Lightmap][UVDIFF] " << tag
+                        << " redraw=" << halfToFloat(p[idx + 3])
+                        << " gb=" << dp[idx / 4]
+                        << std::endl;
+                };
+                probeZ("center", sCenter);
+                probeZ("floorProbe", sFloor);
+                probeZ("wall", sWall);
+                device_->UnmapBuffer(dstage);
+            }
+            device_->DestroyBuffer(dstage);
+        }
+    }
     device_->UnmapBuffer(stage);
     device_->DestroyBuffer(stage);
 

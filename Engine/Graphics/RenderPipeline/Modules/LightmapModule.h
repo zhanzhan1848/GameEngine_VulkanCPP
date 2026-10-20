@@ -148,6 +148,8 @@ private:
     rhi::ResourceHandle output_tex_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle uv_rt_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle uv_black_tex_{rhi::handles::INVALID_RESOURCE};  // 1×1 z=0
+    // §9 取证：本帧 GBuffer 深度物理句柄（AddUVPrePass 记录，DumpUvRT 差分）。
+    rhi::ResourceHandle gbuffer_depth_phys_{rhi::handles::INVALID_RESOURCE};
     // 编码器切换 flush 用 16B 哑元对（互斥态 UV pass 后 16B 拷贝）。
     rhi::ResourceHandle flush_src_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle flush_dst_{rhi::handles::INVALID_RESOURCE};
