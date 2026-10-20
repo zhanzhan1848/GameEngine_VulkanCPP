@@ -18,6 +18,7 @@
 
 #include "LightmapBaker.h"
 #include "LightmapAtlasPacker.h"
+#include "LightmapPagePng.h"
 
 #include "CommonHeaders.h"
 #include "Graphics/Utilities/BVH.hpp"
@@ -26,6 +27,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
 #include <filesystem>
 #include <cstring>
 #include <cstdio>
@@ -599,6 +601,21 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
         result.error = "failed to write " + path;
         result.entries.clear();
         return result;
+    }
+    // 可视化导出（用户需求 3）：lightmap_page.png —— Reinhard+gamma2.2 的
+    // LDR 视图 + per-mesh 1px 白框。失败只打日志不阻断（查看产物非数据链）。
+    {
+        std::vector<std::uint32_t> rectFlat;
+        rectFlat.reserve(rects.size() * 4);
+        for (const auto& r : rects) rectFlat.insert(rectFlat.end(), {r.x, r.y, r.w, r.h});
+        // Vec3 为标准布局 {x,y,z}——reinterpret 为 float 三元组。
+        static_assert(std::is_standard_layout_v<Vec3> && sizeof(Vec3) == 12,
+                      "accum reinterpret to float triple requires standard-layout Vec3");
+        WriteLightmapPagePng(dir + "/lightmap_page.png",
+                             reinterpret_cast<const float*>(accum.data()),
+                             atlasW, atlasH,
+                             rectFlat.empty() ? nullptr : rectFlat.data(),
+                             (std::uint32_t)rectFlat.size() / 4);
     }
     progress.Report(5, 1, 1);
 

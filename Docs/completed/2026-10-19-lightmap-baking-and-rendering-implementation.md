@@ -270,6 +270,46 @@ render 直连附件写入不可见）；②Metal 端（非 MoltenVK）未复验�
 RGPassType::Copy 产生真实 blit 编码器（16B CopyBuffer），若未来 RHI 把
 小拷贝优化为 no-op 需复验。
 
+## 6.6 互斥转正 + 相机默认位姿 + 烘焙页可视化（2026-10-20 v4）
+
+**需求 1：互斥转正默认**（用户定调"按正常逻辑，Lumen 不能和 lightmap
+共存"）：lmMutex = IsActive() && !PRIMAL_LIGHTMAP_COEXIST（两站点）。
+MUTEX env 门控撤销；COEXIST=1 保留作 A/B 诊断。零影响不变式保持：
+无烘焙 ⇒ IsActive=false ⇒ lmMutex=false ⇒ Lumen 照常。
+验收（frame 360）：默认 ON（裸跑）与 OFF 全帧 82% 差异=Lumen 关闭效应，
+墙区直射-only；COEXIST=1 回归 168,860 暖池≈参照 170,260、池心
+(148,131,99) 逐值同；OFF（同位姿）121,488≈HEAD 基线 120,640、墙
+(22,18,13)≈(22,17,13)（帧间噪声内）。
+
+**需求 2：相机默认 (0,5,0)/(0,0,0) + 可改变/可操控**：裸跑默认即此
+（TestVulkanSponzaRenderGraph L2056，sponza_reference 为 opt-in env、
+SPGI_CAM 仅覆盖初始化不锁操控）。操控链走查：WASD+鼠标 =
+camera_.Update(dt)（L2252）、方向键 yaw/pitch（L2076-2097）、R 重置
+(0,5,0)+(0,0,0)+TAA 历史清空（L2115-2124）——均仅受 SPGI_CAM_LOCK
+（测量锁定）门控，默认开。SPGI_CAM 程序化换位姿验证："0,5,-4,-35,10"
+marker 覆盖 86,554px、DEBUG=3 绿带 15,384px 经 composite 可见。
+**如实报告**：默认位姿 (0,5,0) 水平朝 +X 下 UVLM 地板近乎侧对（远场），
+marker 仅 6,917px（地平线细条 y[0,10]），烘焙带可见性弱；最近可行
+位姿数据 = 0,5,-4,-35,10（覆盖 ×12.5）。**e2e 配方自本轮起**：验收
+采集用默认位姿（无 SPGI_CAM）；需要烘焙带入画的判据采集用
+SPGI_CAM="0,5,-4,-35,10"（替代旧 0,6.5,-3,-42,0）。
+
+**需求 3：烘焙页可视化 PNG**：BakeLightmaps 落盘 LMAP 后同步导出
+output_dir/lightmap_page.png（新文件 Engine/Graphics/Baking/
+LightmapPagePng.{h,cpp}）：HDR→LDR = Reinhard（c/(1+c)）+ gamma 2.2，
+per-mesh packer rect 叠 1px 白框；stb_image_write 以
+STB_IMAGE_WRITE_STATIC 引入（内部链接——EngineTest 多 TU 自带 stb
+实现且链接 libEngine，外部链接会重复定义）。导出失败仅打日志不阻断。
+编辑器 CLI scene.bake_lightmaps 把 PNG 一并 TaskRegistry.AddArtifact
+（kind=lightmap-page-png），Description 同步（schema 快照已重生成，
+64 项 Cli 测试全绿）。
+PIL 验收：PNG 1024×1024=图集尺寸；白框完整（顶行/左列逐像素白）；
+矩形内均值 (87.2,85.9,83.2)、max 230 非全黑（整页均值≈0 系本场景
+1 mesh、覆盖率 0.2%——非缺陷）。
+
+**验收汇总**：单测 TestLightmapBaking ALL PASSED（14 项）；
+/tmp/lm_agent/v4_*.ppm 为本轮全部证据。
+
 ## 7. 集成协议
 
 与 fluid 线（主树未提交改动）在 `FusionCompositeModule.cpp`、`StandardRenderPipeline.cpp` 相遇：

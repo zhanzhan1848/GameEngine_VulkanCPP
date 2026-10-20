@@ -3745,8 +3745,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     // ========================================================================
-    // Lightmap 互斥判定（2026-10-20 v3.1）：lmMutex = lightmap 激活（env 开 +
-    // 页已载 + 有实体）且 PRIMAL_LIGHTMAP_MUTEX=1。激活时本帧整个 Lumen GI
+    // Lightmap 互斥判定（2026-10-20 v4 转正）：lmMutex = lightmap 激活
+    //（env 开 + 页已载 + 有实体）——用户定调"按正常逻辑，Lumen 不能和
+    // lightmap 共存"，互斥即默认；PRIMAL_LIGHTMAP_COEXIST=1 保留并存旧
+    // 形态作 A/B 诊断。激活时本帧整个 Lumen GI
     // 区不挂（Step 4.5 volume / Step 5 SC / Step 6 DDGI / Step 6.7 WRC /
     // Step 7 SC-DDGI / Step 8 SSGI / Step 8.5 SSR / Step 9 SPGI+GIGather /
     // Step 10 fusion 全部让路），composite 以 deferred 直射输出为底图——
@@ -3758,11 +3760,12 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // AddUVPrePass 内互斥态追加 16B dummy 拷贝 pass（非 render 编码器切入
     // 即恢复；二分证据：refl_specular(Compute) 单块放开即恢复、fusion 两
     // render pass 放开仍死）。并存态零影响（不挂 flush，v2 图形状原样）。
+    // 零影响不变式：无烘焙场景 IsActive=false ⇒ lmMutex=false ⇒ Lumen 照常。
     // ========================================================================
     const bool lmMutex = [&] {
         if (!lightmap_module_) return false;
         if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
-        return lightmap_module_->IsActive() && std::getenv("PRIMAL_LIGHTMAP_MUTEX") != nullptr;
+        return lightmap_module_->IsActive() && std::getenv("PRIMAL_LIGHTMAP_COEXIST") == nullptr;
     }();
 
     // ========================================================================
@@ -4434,10 +4437,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         fusionOut = fusion_module_->AddPasses(graph, fusionIn);
     }
 
-    // Lightmap 独立消费级。默认（并存，v2 语义）：底图 = fusion 输出，
-    // lightmap 像素替换为烘焙完整光照。PRIMAL_LIGHTMAP_MUTEX=1（互斥）：
-    // Lumen 区缺席，底图 = deferred 直射输出。无页/无实体时
-    // AddCompositePass 返回无效句柄（零影响）。
+    // Lightmap 独立消费级。默认（互斥，v4）：Lumen 区缺席，底图 = deferred
+    // 直射输出，lightmap 像素替换为烘焙完整光照。PRIMAL_LIGHTMAP_COEXIST=1
+    //（并存诊断）：底图 = fusion 输出。无页/无实体时 AddCompositePass
+    // 返回无效句柄（零影响）。
     RGResourceHandle lightmapOutRG;
     if (lightmap_module_) {
         LightmapModule::FrameInputs lmComp;
@@ -5466,15 +5469,16 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
         auto deferredOut = deferred_module_->AddPasses(graph, deferredIn);
 
-        // Lightmap 互斥判定（v3.1，twin 站点同步，见 BuildRenderGraph Step 4
-        // 后同名块含根因定罪与修复说明）：lmMutex 时 Lumen 区整体不挂，
-        // composite 以 deferred 直射输出为底图，UV pass 后追加编码器切换
-        // flush（FrameInputs::encoder_flush）。默认并存
-        // （PRIMAL_LIGHTMAP_MUTEX=1 启用互斥）。UpdateFrame 幂等。
+        // Lightmap 互斥判定（v4 转正，twin 站点同步，见 BuildRenderGraph
+        // Step 4 后同名块含根因定罪与修复说明）：lightmap 激活即互斥（用户
+        // 定调"Lumen 不能和 lightmap 共存"），Lumen 区整体不挂、composite
+        // 以 deferred 直射输出为底图、UV pass 后追加编码器切换 flush
+        //（FrameInputs::encoder_flush）。PRIMAL_LIGHTMAP_COEXIST=1 保留并存
+        // 旧形态作 A/B 诊断。UpdateFrame 幂等。
         const bool lmMutex = [&] {
             if (!lightmap_module_) return false;
             if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
-            return lightmap_module_->IsActive() && std::getenv("PRIMAL_LIGHTMAP_MUTEX") != nullptr;
+            return lightmap_module_->IsActive() && std::getenv("PRIMAL_LIGHTMAP_COEXIST") == nullptr;
         }();
 
         // P1-B（sponza-gap-audit §4.2）: 世界空间定点 HDR 探针（RWCB 路径，
@@ -6180,7 +6184,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
 
         // Lightmap 独立消费级（twin 站点同步，见 BuildRenderGraph 同名块：
-        // 默认并存消费 fusion 输出；MUTEX 时 deferred 直射为底图）。
+        // 默认互斥（deferred 直射为底图）；COEXIST=1 时消费 fusion 输出）。
         RGResourceHandle lightmapOutRG;
         if (lightmap_module_) {
             LightmapModule::FrameInputs lmComp;

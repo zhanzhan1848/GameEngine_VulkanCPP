@@ -56,6 +56,7 @@ add_executable(TestLightmapBaking
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/Baking/LightmapAtlasPacker.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/Baking/LightmapContainer.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/Baking/LightmapBaker.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Baking/LightmapPagePng.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/Utilities/BVH.cpp
     ${CMAKE_SOURCE_DIR}/Engine/JobSystem/JobSystem.cpp
     ${CMAKE_SOURCE_DIR}/Engine/JobSystem/JobScheduler.cpp

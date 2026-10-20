@@ -39,7 +39,9 @@ public class LightmapCommands
 
     [CliCommand("scene.bake_lightmaps",
         Description = "烘焙当前激活场景的静态间接光到 lightmap（CPU 路径追踪，后台长任务；" +
-                      "task.list/task.status 查进度，产物 lightmap.lmap 自动加载进运行时）。" +
+                      "task.list/task.status 查进度，产物 lightmap.lmap 自动加载进运行时；" +
+                      "output_dir 同步导出 lightmap_page.png 可视化视图：HDR→LDR 为 " +
+                      "Reinhard+gamma2.2，per-mesh 矩形白框，便于人工查看）。" +
                       "atlas_size 单位像素（默认 1024）；samples 每纹素采样数（默认 64）；" +
                       "bounces 间接反弹次数（默认 2）；texel_density 纹素/米（默认 16，" +
                       "注意大尺度场景需调低）；denoise 双边滤波开关；output_dir 产物目录" +
@@ -113,7 +115,12 @@ public class LightmapCommands
             {
                 // 成功：把产物登记为任务 artifact；页面已在引擎侧加载
                 //（BakeSceneLightmaps 内部 LoadLightmap），无需二次推送。
+                // lightmap_page.png 为烘焙侧同步导出的可视化视图
+                //（Reinhard+gamma2.2 + per-mesh 白框），一并登记便于查看。
                 TaskRegistry.AddArtifact(task, lmapPath, "lightmap");
+                var pagePngPath = Path.Combine(dir, "lightmap_page.png");
+                if (File.Exists(pagePngPath))
+                    TaskRegistry.AddArtifact(task, pagePngPath, "lightmap-page-png");
                 TaskRegistry.Complete(task, true);
                 // 场景级持久化：UI 线程写文档模型（ViewModelBase 通知 +
                 // IsDirty）；页面本身已在引擎侧加载，场景重载时由
