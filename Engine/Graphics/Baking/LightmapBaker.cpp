@@ -37,7 +37,9 @@ namespace primal::graphics::baking {
 
 LightmapBakeSettings DefaultLightmapBakeSettings() {
     LightmapBakeSettings s{};
-    s.atlas_size = 2048;
+    // 2026-10-21 精度轮：2048→4096（用户"纹理精度太低"；密度阶梯同步
+    // 扩 32/48，纹素量 ×4、烘焙耗时 ~×4——见 §15 取舍记录）。
+    s.atlas_size = 4096;
     s.samples_per_texel = 64;   // spp 基线（用户定调：路径追踪 64spp）
     s.bounces = 3;
     s.texel_density = 16.0f;

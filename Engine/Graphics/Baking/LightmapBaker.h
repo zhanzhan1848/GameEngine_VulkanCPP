@@ -21,7 +21,7 @@ namespace primal::graphics::baking {
 
 // ---- ABI 镜像（EngineDLL 直接按字节传入；改动=破坏 ABI，禁止）----
 struct LightmapBakeSettings {
-    std::uint32_t atlas_size;        // 方形页边长（texel），默认 2048
+    std::uint32_t atlas_size;        // 方形页边长（texel），默认 4096（2026-10-21 精度轮）
     std::uint32_t samples_per_texel; // 路径追踪每纹素样本数（spp），默认 64
     std::uint32_t bounces;           // 间接反弹次数，默认 3
     float texel_density;             // 纹素/米，默认 16

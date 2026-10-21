@@ -2411,16 +2411,19 @@ void TestVulkanSponzaRenderGraph::Run() {
             std::cerr << "[Lightmap][e2e] per-texel albedo textures registered: "
                       << lmBakeAlbedoTex_.size() << std::endl;
             auto lmSettings = primal::graphics::baking::DefaultLightmapBakeSettings();
-            lmSettings.atlas_size = 2048;
+            // 2026-10-21 精度轮：2048→4096 + 阶梯上限扩 32/48（用户"纹理
+            // 精度太低"）。纹素量 ×4、烘焙耗时 ~×4（§15 实测记录）。
+            lmSettings.atlas_size = 4096;
             lmSettings.samples_per_texel = 64;  // 用户基线 spp
             lmSettings.bounces = 3;
-            // 密度自适应阶梯：从 8 纹素/米减半直到全部 chart 装进 2048 页
+            // 密度自适应阶梯：从 48 纹素/米减半直到全部 chart 装进 4096 页
             //（下限 0.02 级——覆盖厘米级源网格的极端面积）。
             std::snprintf(lmSettings.output_dir, sizeof(lmSettings.output_dir), "%s",
                           "/tmp/lm_e2e_bake");
             bool lmOk = false;
             std::string lmErr;
-            for (float density : {16.0f, 12.0f, 10.0f, 8.0f, 4.0f, 2.0f, 1.0f,
+            for (float density : {48.0f, 32.0f, 16.0f, 12.0f, 10.0f, 8.0f, 4.0f,
+                                  2.0f, 1.0f,
                                   0.5f, 0.25f, 0.125f, 0.0625f, 0.03f, 0.02f}) {
                 lmSettings.texel_density = density;
                 lmErr.clear();

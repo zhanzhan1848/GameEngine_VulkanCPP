@@ -205,8 +205,8 @@ void TestContractSizes() {
     CHECK(sizeof(LightmapBakeSettings) == 280, "settings ABI size 280");
     CHECK(sizeof(LightmapMeshEntry) == 104, "mesh entry size 104");
     const auto def = DefaultLightmapBakeSettings();
-    // v2 路径追踪：spp 默认 64（用户基线）。
-    CHECK(def.atlas_size == 2048 && def.samples_per_texel == 64 && def.bounces == 3 &&
+    // v2 路径追踪：spp 默认 64（用户基线）；精度轮 atlas 默认 4096。
+    CHECK(def.atlas_size == 4096 && def.samples_per_texel == 64 && def.bounces == 3 &&
               def.texel_density == 16.0f && def.denoise == 1 && def.dilation_px == 8,
           "default settings values");
 }
