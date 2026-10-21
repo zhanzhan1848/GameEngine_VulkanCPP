@@ -273,10 +273,11 @@ BakeMesh MakeQuad(const std::string& name, float cx, float cy, float cz, float h
 }
 
 // 解析解场景：地板 1×1（albedo 0.5）+ 天花板 4×4@y=1（emissive 1.0，朝下）。
-// 地板中心 bounce-1 出射 = ρ/π × E；E = πL·F，F = 4×(1/2π)[W/√(1+W²)·atan(T/√(1+W²))
+// 地板中心 bounce-1 间接辐照度 E = πL·F，F = 4×(1/2π)[W/√(1+W²)·atan(T/√(1+W²))
 // + T/√(1+T²)·atan(W/√(1+T²))]（点源正对矩形中心，四象限各延展 w=t=2、
-// h=1 → W=T=2 → F=0.83112 → E=2.6108 → 期望 ρE/π = 0.41558；
-// 与径向数值积分 ∫2πr/(1+r²)² 下限 2.513 + 角落增量交叉验证）。
+// h=1 → W=T=2 → F=0.83112 → E=2.6108。v3 语义（2026-10-21 架构轮）：页存
+// E_ind（不含纹素自身 albedo/π 乘——运行时 GBuffer albedo 调制），期望从
+// v2 的 ρE/π=0.41558 改为 E=2.6108；与径向数值积分交叉验证见 v2 注）。
 void TestBakerAnalytic() {
     const float floorAlbedo[3] = {0.5f, 0.5f, 0.5f};
     const float ceilingAlbedo[3] = {0.0f, 0.0f, 0.0f};
@@ -315,10 +316,15 @@ void TestBakerAnalytic() {
     const std::uint32_t cx = floorEntry->rect_x + floorEntry->rect_w / 2;
     const std::uint32_t cy = floorEntry->rect_y + floorEntry->rect_h / 2;
     const float got = HalfToFloat(page.texels_rgba16f[(cy * page.width + cx) * 4 + 1]);
-    CHECK(std::abs(got - 0.41558f) < 0.02f,
-          "analytic bounce-1 center value (got " + std::to_string(got) + ", want 0.41558)");
+    CHECK(std::abs(got - 2.6108f) < 0.13f,
+          "analytic bounce-1 indirect irradiance (got " + std::to_string(got) +
+              ", want 2.6108)");
+    // v3 有效性通道：栅格化纹素 A=1。
+    CHECK(page.texels_rgba16f[(cy * page.width + cx) * 4 + 3] == 0x3C00,
+          "rasterized texel alpha == 1.0");
 
-    // v2 完整光照：天花板存储自身 Le（≈1）+ 间接（albedo 0 → ≈0）。
+    // v3 间接辐照度语义：天花板不再存自身 Le（旧全光语义断言废弃）——
+    // 存"到达天花板的间接辐照"：无灯、天空 0、地板非发光 → ≈0。
     const LightmapMeshEntry* ceilEntry = nullptr;
     for (const auto& e : c.entries)
         if (e.GetName() == "ceiling") ceilEntry = &e;
@@ -326,8 +332,9 @@ void TestBakerAnalytic() {
         const std::uint32_t kx = ceilEntry->rect_x + ceilEntry->rect_w / 2;
         const std::uint32_t ky = ceilEntry->rect_y + ceilEntry->rect_h / 2;
         const float ceilGot = HalfToFloat(page.texels_rgba16f[(ky * page.width + kx) * 4 + 1]);
-        CHECK(ceilGot > 0.95f && ceilGot < 1.05f,
-              "ceiling stores own emissive (got " + std::to_string(ceilGot) + ")");
+        CHECK(ceilGot < 0.05f,
+              "ceiling stores incoming indirect only (~0 here; got " +
+                  std::to_string(ceilGot) + ")");
     }
 }
 
@@ -392,11 +399,18 @@ void TestBakerDilation() {
     const std::uint32_t cy = floorEntry->rect_y + floorEntry->rect_h / 2;
     CHECK(HalfToFloat(page.texels_rgba16f[(cy * page.width + cx) * 4 + 1]) > 0.1f,
           "floor interior nonzero");
+    // v3 有效性通道契约：栅格化纹素 A=1.0；扩张填充纹素 A=0.5（若角落
+    // 恰落入其他 rect 被栅格化则 1.0——一并接受 ≥0.5）。
+    CHECK(page.texels_rgba16f[(cy * page.width + cx) * 4 + 3] == 0x3C00,
+          "interior alpha == 1.0");
     if (floorEntry->rect_x >= 2 && floorEntry->rect_y >= 2) {
         const std::uint32_t ox = floorEntry->rect_x - 2;
         const std::uint32_t oy = floorEntry->rect_y - 2;
         CHECK(HalfToFloat(page.texels_rgba16f[(oy * page.width + ox) * 4 + 1]) > 0.01f,
               "dilation ring nonzero at rect corner -2px");
+        const std::uint16_t ringA = page.texels_rgba16f[(oy * page.width + ox) * 4 + 3];
+        CHECK(ringA == 0x3800 || ringA == 0x3C00,
+              "dilation ring alpha 0.5 (dilated) or 1.0 (rasterized)");
     }
 }
 
@@ -440,8 +454,9 @@ void TestBakerTraceOnly() {
     CHECK(got < 0.01f, "occluded floor indirect ~0 (got " + std::to_string(got) + ")");
 }
 
-// v2 PT：天空直照回归——无灯、无遮挡，地板 = alb×L̄（余弦加权天空）。
-// 期望 ≈ 0.8×Mix(horizon,zenith,2/3)_g ≈ 0.40。
+// v2 PT → v3 语义：天空直照回归——无灯、无遮挡，地板存 E_ind = π·L̄
+//（余弦加权天空的平均辐射 × π；v2 为 alb·L̄）。期望 ≈ π·Mix(horizon,
+// zenith, 2/3)_g = π·0.50 ≈ 1.57。
 void TestBakerSkyDirect() {
     const float albedo[3] = {0.8f, 0.8f, 0.8f};
     const float emissive0[3] = {0, 0, 0};
@@ -466,13 +481,15 @@ void TestBakerSkyDirect() {
     const std::uint32_t cx = e.rect_x + e.rect_w / 2;
     const std::uint32_t cy = e.rect_y + e.rect_h / 2;
     const float got = HalfToFloat(page.texels_rgba16f[(cy * page.width + cx) * 4 + 1]);
-    CHECK(got > 0.25f && got < 0.6f,
-          "sky-lit floor ~0.4 (got " + std::to_string(got) + ")");
+    CHECK(got > 1.30f && got < 1.85f,
+          "sky-lit floor stores pi*mean(L) ~1.57 (got " + std::to_string(got) + ")");
 }
 
 // v1.1：trace-only 遮挡面一阶直射反弹。同解析测试几何（F=0.83112），
 // 板朝下、方向光自下而上照亮板底 → 地板收到板反弹的间接光。
-// 期望 ≈ 0.5/π×(0.5/π×5)×0.83112 ≈ 0.105。
+// v3 语义：存 E = π·(alb/π)·5·P_lit = 2.5·P_lit，P_lit = F(4×4 板 0.83112)
+// − F(1×1 地板自遮挡 0.2395) = 0.5916 → 名义 ≈ 1.48（v2 值 = ρE/π ≈
+// 0.24 量级——新界与之无交集，语义回归可检出）。
 void TestBakerBlockerBounce() {
     const float albedo[3] = {0.5f, 0.5f, 0.5f};
     const float emissive0[3] = {0, 0, 0};
@@ -507,17 +524,18 @@ void TestBakerBlockerBounce() {
     const std::uint32_t cx = e.rect_x + e.rect_w / 2;
     const std::uint32_t cy = e.rect_y + e.rect_h / 2;
     const float got = HalfToFloat(page.texels_rgba16f[(cy * page.width + cx) * 4 + 1]);
-    CHECK(got > 0.05f, "bounced floor indirect present (got " + std::to_string(got) + ")");
-    CHECK(got < 0.25f, "bounced floor indirect bounded (got " + std::to_string(got) + ")");
+    CHECK(got > 1.0f, "bounced floor indirect present (got " + std::to_string(got) + ")");
+    CHECK(got < 2.0f, "bounced floor indirect bounded (got " + std::to_string(got) + ")");
 }
 
 
-// §14 方案 B：per-texel 贴图采样 albedo。条纹贴图（左半红右半蓝）+
-// 已知 UV → 采样出的 texel albedo 随位置变化（方差>0 且方向正确）。
-// 天光-only 烘焙下出射 ≈ albedo/π × sky——页内左/右半分别红/蓝主导。
+// §14 方案 B（v3 语义改写，2026-10-21 架构轮）：per-texel 贴图采样 albedo
+// 不再调制存储值（存 E_ind，反照率调制延后到 composite 端 GBuffer albedo）。
+// 本测由"条纹影响出射"改为锁定新不变式：天光-only 下条纹页的 E 在
+// 左/右半同色均匀（与纹素自身 albedo 解耦），量级 ≈ π·L̄ 每通道。
 void TestBakerTexelAlbedoVariance() {
     const float albedo[3] = {0.5f, 0.5f, 0.5f};
-    const float emissive0[3] = {0, 0, 0};
+    const float emissive0[3] = {0.0f, 0.0f, 0.0f};
     BakeScene scene;
     BakeMesh floor = MakeQuad("floor", 0, 0, 0, 0.5f, +1, true, albedo, emissive0);
     // 8×2 条纹：x<4 红 (255,0,0)，x>=4 蓝 (0,0,255)——材质 UV 与 lightmap
@@ -536,7 +554,7 @@ void TestBakerTexelAlbedoVariance() {
     floor.albedo_tex_h = 2;
     floor.material_uvs = matUvs;
     scene.meshes.push_back(floor);
-    scene.sky.intensity = 1.0f;  // 天光-only：出射 ∝ albedo
+    scene.sky.intensity = 1.0f;  // 天光-only：E 与纹素自身 albedo 无关
 
     LightmapBakeSettings s = DefaultLightmapBakeSettings();
     s.atlas_size = 64;
@@ -562,12 +580,16 @@ void TestBakerTexelAlbedoVariance() {
         ((e.rect_y + e.rect_h / 2) * page.width + e.rect_x + e.rect_w * 3 / 4) * 4 + 0]);
     const float blueR = HalfToFloat(page.texels_rgba16f[
         ((e.rect_y + e.rect_h / 2) * page.width + e.rect_x + e.rect_w * 3 / 4) * 4 + 2]);
-    CHECK(redL > blueL * 2.0f + 0.01f,
-          "left half red-dominant (r=" + std::to_string(redL) + " b=" + std::to_string(blueL) + ")");
-    CHECK(blueR > redR * 2.0f + 0.01f,
-          "right half blue-dominant (r=" + std::to_string(redR) + " b=" + std::to_string(blueR) + ")");
-    CHECK(std::abs(redL - redR) + std::abs(blueL - blueR) > 0.05f,
-          "texel albedo variance across mesh");
+    // v3：E 在红半/蓝半一致（自身 albedo 不进存储值）。
+    CHECK(std::abs(redL - redR) < 0.08f,
+          "E albedo-independent across halves (r=" + std::to_string(redL) +
+              "/" + std::to_string(redR) + ")");
+    CHECK(std::abs(blueL - blueR) < 0.08f,
+          "E albedo-independent across halves (b=" + std::to_string(blueL) +
+              "/" + std::to_string(blueR) + ")");
+    CHECK(redL > 0.6f && blueL > 1.2f,
+          "sky irradiance magnitude per channel (r=" + std::to_string(redL) +
+              " b=" + std::to_string(blueL) + ")");
 }
 
 } // namespace

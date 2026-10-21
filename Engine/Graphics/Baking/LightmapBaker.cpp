@@ -5,9 +5,11 @@
 //   1 pack     —— 纹素需求 → MaxRects → per-mesh 矩形 + scale/bias
 //   2 raster   —— UV 空间逐三角形栅格化：每有效纹素存世界 pos/normal/albedo
 //   3 build    —— 全场景世界三角形 BVH（utl::BVH）
-//   4 bounce0  —— 直射（阴影射线）+ 自发光 → 0 阶出射（仅作迭代源，不落盘）
-//   5 bounces  —— 每纹素 N 条余弦加权半球射线 gather 上一阶出射；
-//                 ray miss = 天空辐射。k 阶出射累入最终产物（Indirect-Only）
+//   4/5 path   —— 每纹素 N 条完整路径（v3 间接辐照度语义，2026-10-21
+//                 架构轮）：首跳余弦半球射线——纹素顶点自身不做直射 NEE、
+//                 不乘 albedo、不计自发射（直射与 albedo 调制留实时链）；
+//                 天空 miss / 命中面自发光 / ≥1 弹顶点 NEE 累入间接辐照度
+//                 E_ind。合成端 final = deferred直射 + albedo·E_ind/π·gain。
 //   6 filter   —— 5×5 联合双边（可选）
 //   7 dilate   —— N 迭代 3×3 最近值扩张（矩形内）
 //   8 encode   —— f16 → LMAP 落盘 + per-mesh 清单
@@ -390,7 +392,9 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                             s.normal = faceN;
                         }
                         // §14 方案 B：贴图齐备时逐 texel 重心插值 UV0 → 双线性
-                        // 采样（贴图花纹参与反弹）；否则回退 per-mesh 平均。
+                        // 采样。v3 间接辐照度语义下纹素自身 albedo 不再调制
+                        // 存储值（运行时 GBuffer albedo 负责）；此处保留采样
+                        // 结果供 DIAG 取证/后续扩展，无贴图回退 per-mesh 平均。
                         if (m.albedo_texture && m.material_uvs) {
                             const float mu = m.material_uvs[ia * 2] * w0 +
                                              m.material_uvs[ib * 2] * w1 +
@@ -440,10 +444,19 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
     bvh.Build(bvhVerts, bvhIndices);
     progress.Report(2, 1, 1);  // build 完成并入 trace 阶段上报
 
-    // ---- 4/5：路径追踪积分（v2，2026-10-20 用户定调）----
-    // 每纹素 spp 条完整路径：顶点 NEE（太阳/点/聚光含阴影射线）+ 自发光
-    // 命中 + 天空 miss + 余弦半球 BSDF 采样，depth≥2 俄罗斯轮盘。产物 =
-    // 表面完整出射辐亮度（直射+多弹间接），运行时独立消费、不依赖动态 GI。
+    // ---- 4/5：路径追踪积分（v3 间接辐照度语义，2026-10-21 架构轮）----
+    // 产物 = 纹素间接辐照度 E_ind：入射到纹素表面的一切非解析直射辐照——
+    // ≥1 弹路径 + 天空（含首跳直视天空）。估计器推导：
+    //   E_ind = ∫ L_ind(ω)·cosθ dω；余弦半球采样 pdf = cosθ/π
+    //   ⇒ 无偏估计 E_ind = π · mean_s(L_ind)。
+    // 单样本 L_ind 的路径贡献（纹素顶点 = depth 0，自身不折叠 albedo、
+    // 不做 NEE、不计自发射——直射由实时 deferred 渲染、albedo 调制由
+    // composite 端 GBuffer albedo 完成，故烘焙值与纹素自身反照率无关）：
+    //   首跳 miss         → L_ind += Sky(d)              （天空直照）
+    //   首跳/后继命中     → L_ind += Le(hit)             （面发光体）
+    //   ≥1 弹顶点 NEE     → L_ind += alb_hit·E_direct/π  （解析光反弹）
+    //   后继 BSDF 散射    → throughput ×= alb_hit（余弦采样 f·cos/pdf = alb）
+    // depth≥2 俄罗斯轮盘照旧。合成端：final = deferred直射 + albedo·E_ind/π·gain。
     const std::uint32_t texelCount = atlasW * atlasH;
     const std::uint32_t maxDepth = std::max(1u, settings.bounces);  // 散射事件数
     const std::uint32_t spp = std::max(1u, settings.samples_per_texel);
@@ -479,19 +492,22 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
             for (std::uint32_t i = s0; i < e; ++i) {
                 const TexelSample& ts = texels[i];
                 if (!ts.valid) continue;
-                const BakeMesh& self = *allMeshes[ts.mesh_index];
                 Vec3 sum{0, 0, 0};
                 for (std::uint32_t s = 0; s < spp; ++s) {
                     Rng rng(HashTexel(i, s + 1));
                     Vec3 beta{1, 1, 1};
-                    // 顶点 0 = 纹素自身：自发光即表面出射的一部分。
-                    Vec3 col{self.emissive[0], self.emissive[1], self.emissive[2]};
+                    // v3：纹素顶点无自发射计入（发射面由实时链/emissive 渲染；
+                    // 烘焙只回答"到达纹素的间接辐照度"）。
+                    Vec3 col{0, 0, 0};
                     Vec3 o = ts.pos, n = ts.normal;
                     Vec3 alb{ts.albedo[0], ts.albedo[1], ts.albedo[2]};
                     for (std::uint32_t depth = 0; depth <= maxDepth; ++depth) {
-                        // 顶点 NEE：f·E = albedo/π × 直射辐照（含阴影射线）。
-                        const Vec3 E = DirectIrradiance(scene, bvh, Add(o, Scale(n, 1e-3f)), n);
-                        col = Add(col, Mul(beta, Scale(Mul(alb, E), invPi)));
+                        // 顶点 NEE：仅 depth≥1——depth 0 是纹素自身，其直射
+                        // 辐照由实时 deferred 链渲染（v2 的顶点 0 NEE 项移除）。
+                        if (depth > 0) {
+                            const Vec3 E = DirectIrradiance(scene, bvh, Add(o, Scale(n, 1e-3f)), n);
+                            col = Add(col, Mul(beta, Scale(Mul(alb, E), invPi)));
+                        }
                         if (depth == maxDepth) break;  // 末顶点只收 NEE 不再延伸
                         // 俄罗斯轮盘（depth≥2）：吞吐量低的路径提前终止。
                         if (depth >= 2) {
@@ -501,7 +517,10 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                             beta = Scale(beta, 1.0f / pCont);
                         }
                         // 余弦半球 BSDF 采样；漫反射权重 f·cos/pdf = albedo。
-                        beta = Mul(beta, alb);
+                        // depth==0（纹素自身）不折叠 albedo：存 E 而非
+                        // albedo·E/π——反照率调制延后到 composite 端由
+                        // GBuffer albedo（真实材质纹理）逐像素完成。
+                        if (depth > 0) beta = Mul(beta, alb);
                         Vec3 t, bi2;
                         Onb(n, t, bi2);
                         const Vec3 local = CosineHemisphere(rng);
@@ -526,7 +545,8 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                     }
                     sum = Add(sum, col);
                 }
-                accum[i] = Scale(sum, 1.0f / (float)spp);
+                // E_ind = π · mean(L_ind)（估计器推导见本阶段头注释）。
+                accum[i] = Scale(sum, 3.14159265f / (float)spp);
                 // [DIAG] PRIMAL_LIGHTMAP_TRACE_TEXEL=<idx>：单纹素分解。
                 if (const char* te = std::getenv("PRIMAL_LIGHTMAP_TRACE_TEXEL")) {
                     const std::uint32_t ti = (std::uint32_t)std::atoi(te);
@@ -611,6 +631,12 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
     }
 
     // ---- 7 dilate：矩形内扩张 ----
+    // v3 有效性通道（§15.4 z=-8 整屏黑修复）：扩张会消费 valid 位，先快照
+    // 栅格化原始命中。编码时 A = 1.0（栅格化）/ 0.5（dilation 填充值）/
+    // 0.0（从未命中——chart 内未栅格化空区/UVLM 越界逃逸）；composite 对
+    // A<阈值不加间接（退化为纯直射底图，绝不黑）。
+    std::vector<std::uint8_t> rasterized(texelCount);
+    for (std::uint32_t i = 0; i < texelCount; ++i) rasterized[i] = texels[i].valid ? 1u : 0u;
     for (std::uint32_t it = 0; it < settings.dilation_px; ++it) {
         std::vector<Vec3> next = accum;
         std::vector<bool> validNow(texelCount);
@@ -653,7 +679,9 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
         page.texels_rgba16f[i * 4 + 0] = FloatToHalfBits(accum[i].x);
         page.texels_rgba16f[i * 4 + 1] = FloatToHalfBits(accum[i].y);
         page.texels_rgba16f[i * 4 + 2] = FloatToHalfBits(accum[i].z);
-        page.texels_rgba16f[i * 4 + 3] = 0x3C00;  // A=1（未来存遮罩/权重）
+        // A = 有效性：1.0 栅格化 / 0.5 dilation 填充 / 0.0 空（见 dilate 注）。
+        page.texels_rgba16f[i * 4 + 3] =
+            rasterized[i] ? 0x3C00 : (texels[i].valid ? 0x3800 : 0x0000);
     }
     c.pages.push_back(std::move(page));
     c.entries = result.entries;
