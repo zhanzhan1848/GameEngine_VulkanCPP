@@ -893,7 +893,9 @@ frame 400 capture（PPM 1280x720）+ composite 输出 HDR 读回
   仰视机位 LM ON 廊顶 clip 4.24% vs OFF 0.00%；图集直读 E max=17.17
   = π×5.5（§17 天空积分自证），top-mesh meanE 6.5 = albedo_floor×E_floor
   ≈0.35×17——**地板 bounce 全半球贡献的物理正确量级**（廊顶法线朝下，
-  其半球 ray 全部命中地板）。composite 后处理各级廊顶带 61-65 不变
+  其半球 ray 全部命中地板）。[§20.5 勘误：仰视顶带亮 texel skyShare
+  0.884——亮源是拱上方开放区的天空直照而非地板 bounce；0.35×17
+  的数字巧合不构成因果。]composite 后处理各级廊顶带 61-65 不变
   （A0-A4）——与后处理无关已证。**"地平以下天空"嫌疑否证**：SKYBELOW=0
   重烘 A/B 同位姿画面 |diff|=0.0009/255（图集统计 p75 2.62→0.50 有差异
   但变化 texel 在用户机位不可见——向下逃逸 ray 仅存在于开放边缘/背面）。
@@ -910,7 +912,9 @@ frame 400 capture（PPM 1280x720）+ composite 输出 HDR 读回
 - **⑤ 间接区一格格 = 数据分辨率（26 tex/m 装箱上限），非采样器模式**。
   composite 采样器 Linear/Linear+Clamp（无 mip 可言——纹理单层）。
   FFT：间接 ROI 检出 26.7px/27px 强周期峰（谱峰/中位 199.8）= 4cm
-  texel 网格投影。A9 blur A/B（图集 3x3 高斯低通变体）：35.3% 像素
+  texel 网格投影。[§20.4 勘误：该 36px 峰在 OFF（无 lightmap）帧同样
+  存在（ratio 193）——实为材质/几何周期，非 texel 网格；格子主体
+  是 E 内容 texel 尺度真实变化，采样柔化上限 7%。]A9 blur A/B（图集 3x3 高斯低通变体）：35.3% 像素
   变化（有效），但几何周期仍主导频谱——格感=密度上限（§18 装箱
   26 tex/m 封顶），主修路径=8192 页或 baker 内建低通（工具已验证：
   /tmp/lm_pp/blur_lmap.py 免重烘生成变体）。
@@ -967,3 +971,162 @@ Container 的 fopen("wb") 截断写穿透 inode——§18 原页（cc182af3425ef
   消融级 vs E0 修复 vs OFF 参考；仰视 LM ON/OFF；blur A/B）。
 - 交付页：/tmp/lm_e2e_bake/lightmap.lmap = below0 版（cp 自
   lightmap_below0.lmap）；测试探针机位复现用 SPGI_CAM 同 §19 头。
+
+---
+
+## §20 用户四问 + Lumen 必答项（2026-10-22 凌晨）
+
+基线：e53585fa（§19 后）。取证工具 = baker 天空分量插桩
+（PRIMAL_LIGHTMAP_SKYSPLIT=1：trace 内并行累 sky 分量页，同 RNG 同路径
+零差分噪声；与主页同 filter/dilate/flood 管线）+ 泄漏审计
+（PRIMAL_LIGHTMAP_MISSDUMP=AABB：首跳 miss 率+首条方向落盘）+
+UVDUMP=3（uv_rt 全帧 bin）+ PRIMAL_LIGHTMAP_SPP/OUTDIR 快烘旋钮。
+快烘页 16spp/26texel-density/4096/SKYBELOW=0（与交付页同 rect 布局，
+实测逐条目一致）；烘 14min（64spp 同参数 51min）。
+
+### 20.1 任务1：暗区间接为何天空主导——真可见天，非泄漏
+
+- **天空贡献分解**（total/sky 两页差分，/tmp/lm_q4/sky_sharemap.png）：
+  全场有效亮 texel（E>0.02）**91.2% skyShare>0.9**；屏幕深暗桶
+  （composite luma∈(0.0005,0.05)，§19 同定义，q1_cama uvrt+DUMPFRAME
+  映射回 texel）lit 组 **88.5% skyShare≥0.7（p50 0.989）**——暗区
+  间接光确实几乎全部来自天空。
+- **泄漏审计**（走道 AABB 66.4 万 texel 首跳 16spp）：mean miss 率
+  6.6%；高 miss（>0.3）texel 的 miss 射线 clearance 反查（KDTree 三角
+  中心最近距，沿途 0.2-25m 采样）：**真开放（>0.5m）2158 vs 贴缝
+  （<0.2m）4 = 泄漏嫌疑 0.2%**。miss 方向 73% 向上、方位角峰指向
+  **-z 走廊远端开口**（Sponza 无门无顶的开放建筑）。BVH 相交为
+  Möller–Trumbore 无背面拒绝（双面）——"单面墙背面被穿过"不成立。
+- **结论（修或解释）**：无几何/BVH/trace 侧 bug 可修。暗区泛蓝 =
+  **真可见天的小立体角直照**（E 0.01-0.13 → 有效天空立体角仅
+  0.1-1.5% 半球——远端开口/拱上方），物理正确。
+- **暗桶 B/R 复测（重新定义后）**：全桶 0.903，构成分解——**80.5%
+  桶像素 texel E≈0（深廊真低间接+chart 无效），纯直射底透传，色温
+  由 deferred 暗部 fill 决定（B/R 0.968）**；lit 桶 92.2% 天空主导组
+  composite B/R 0.594（暗材质×天空/弹后天空染色）、反弹组 0.383。
+  §19"暗桶 B/R 1.055=zenith 血统"细化修正：泛蓝第一根源是 deferred
+  fill 占比，非"暗区间接被天空染色"。
+
+### 20.2 任务2（必答）：Lumen 暗区同样天空主导
+
+OFF 模式（PRIMAL_LIGHTMAP=0）+ GI_LADDER_FRAME=380（FusionComposite
+CSV，暗区 ROI 0.02-0.42×0.25-0.95，n=64512）：
+
+| 量 | 值 |
+|---|---|
+| direct(lum) | 0.004（阴影直射≈0） |
+| ddgi(lum) | mean 3.48 p50 3.13（B/R **0.999**） |
+| spgi(lum) | mean 8.10 p50 7.89（B/R **1.000**） |
+| 构成（能量归一） | direct 0% + **DDGI 30% + SPGI 70%** |
+| albedo（桶内材质） | R 0.275 / B 0.130（暖红墙） |
+
+- **定论：Lumen 暗区间接是天空主导，无"反弹主导"可言**——探针辐照度
+  B/R 严格 1.0 中性（天空 EvaluateSkyBase 积分色；若是地板/墙反弹
+  主导会被 albedo 染暖 B/R≈0.6），量级横跨天空均值 5.48 的 0.7-1.9
+  倍带（DDGI 31% 像素落在天空档±1.5）。
+- **OFF 画面暗桶 B/R 0.804 的"暖"来自材质 albedo 调制（R/B≈2.1），
+  不是反弹暖光**——与 ON 泛蓝同源同桶不同色的原因是两系统对 albedo
+  的乘法位置一致而间接光色不同（Lumen 探针中性 vs 我们暗桶 80% 走
+  deferred fill）。
+- **架构级解释**：DDGI 探针按体积网格放置（可在几何外/开放空间），
+  SPGI 屏幕探针 trace 同样 miss 取天空——暗区像素从"看得见天的探针"
+  插值取光，天然绕过"表面是否几何可见天"的约束。我们的 baker 从
+  纹素表面发射（起点必在表面），几何正确时深廊 E≈0。**两个系统的
+  暗区都由天空主导；差别仅在于天空能量到达暗区的路径（探针插值
+  平滑 vs 表面可见性硬约束）。**
+
+### 20.3 任务3：狮子死黑——真值低（物理），非 marker/chart 缺陷
+
+- 定位：Lion_Albedo.png = 材质 sponza:Material__301 → mesh
+  sponza:sponza_377/378（右墙 x∈[12.2,13.0] / 左墙 x∈[-14.3,-13.5]，
+  y∈[0.8,2.65]，z≈-1）= LMAP mesh_385..388。
+- chart 诊断（交付页直读，lion_probe.py）：A1 78-85%/A0.5 15-22%/
+  **A0 = 0%（chart 无空区）**；E(lum) mean 0.035-0.046、p50 0.011-
+  0.018、max 0.68-0.81（对照地板 2.66、全场 p90 8.84）；B/R 0.41-0.53
+  （暖=反弹，看不见天——与 20.1 一致：侧墙拱间凹龛背阴）。
+- 复现（CAM 0,1.7,-0.9,0,90 正对右墙狮子）：ON 中央最暗 40px 窗
+  mean 48.1/**min 12**（近黑轮廓可辨）；OFF 同窗 mean 41.5/min 26。
+  ON 比 OFF 更暗但两态都不是 0。
+- **判别结论：E 真值低**（背阴位置直射 NEE=0 + 凸浮雕自遮挡 + 侧墙
+  拱间凹龛无天空可见 → 间接仅剩微弱反弹 0.02 档）。非 §19 ④ 深度
+  失败家族（A/markers 健康）、非 chart 空区（A0=0）。合成链正常：
+  albedo×0.017/π×gain4 ≈ 0.007 HDR → 2.88 曝光 ×255 ≈ 5/255 + 
+  deferred fill ≈ 画面 12/255——数字对账闭合。**物理正确，不修**；
+  对比图 /tmp/lm_q4/cmp_lion_crops.png。
+
+### 20.4 任务4：TAA 亚纹素抖动 + 4-tap——已实现，量化收益 ≤7%
+
+- 实现：LightmapComposite.frag/.metal + LightmapModule push 常量
+  8B→16B（filterMode+frameIndex）。PRIMAL_LIGHTMAP_FILTER：
+  0=旧行为 / 1=亚纹素时域抖动（hash(pixel,frame)±0.5texel，TAA 时域
+  累积=lightmap 时域超采样）/ 2=4-tap 足迹（±0.5texel 角采样，A>0.25
+  加权）/ 3=组合。**默认 3**（env 可回退）。build_spv.sh 同命令部署。
+- **A/B 量化（CAM_A frame400，交付页）**：间接区阶梯指标（|dx| mean/
+  p99，墙暗 ROI）f0 6.73/68.0 → w3 6.24/64.0 = **仅降 7%**；FFT 周期
+  段（15-60px）能量占比四档全同 4.3%。
+- **§19 ⑤ FFT 归因纠正**：36.1px 强周期峰在 **OFF（无 lightmap）帧
+  同 ROI 同样存在（ratio 192.9，地板 325）——它是材质/几何周期
+  （墙砖贴图重复），不是 texel 网格**。纯间接贡献（GAIN4−GAIN0 差分）
+  的周期族 29-58px 为斜视角 texel 投影渐变谱 + 拱廊光照真实结构周期，
+  无全局单峰。**采样域柔化对"格子"的收益上限即此（E 内容在 texel
+  尺度有真实变化：chart 边界/岛屿间隙/MC 噪声残差）——根治 =
+  8192 页或 baker 内建低通（§19 blur 工具先例），超出本轮"不升
+  分辨率"约束，如实交付**。
+- jw2/w3 变体检：±0.25 足迹（f2/f3）几乎无效（3%），加宽到 ±0.5
+  后 7%；jitter 使 28.4% 像素 >2/255 微变（静态噪声柔化）。
+
+### 20.5 任务5：廊顶亮 = 天空直照主导（§19 ③ 归因修正）
+
+仰视 CAM_UP=(0,1.7,0,22,0) 顶部带 marker→texel（921,226 texel）：
+- 构成 mesh：拱 sponza_17（Arch）、砖墙 sponza_06/36、旗帜 Fabric——
+  不是 ceiling 材质 mesh（sponza_08/19 E mean 仅 0.02-0.06）。
+- 交付页 E(lum) mean 1.06、p90 3.51、max 17.13（=π×5.5 天空满开口
+  自证）；亮 texel（E>0.5，26.9 万个）E mean 3.376。
+- **skyShare（快烘 16spp 分解）：亮 texel 0.884（p50 0.969）——廊顶
+  亮度 88% 来自天空直照**（Sponza 无顶开放，拱廊上沿/檐口直接见天），
+  **12% 地板 bounce**。§19 ③ "top-mesh meanE 6.5 = albedo_floor×
+  E_floor 地板 bounce 物理量级"的定性被数据推翻——6.5 档 E 的 texel
+  是天空直照（skyShare 0.88）非地板反弹；数字巧合（0.35×17≈6）不
+ 构成因果。材质侧：ceiling albedo (0.41,0.33,0.20) 中亮不是亮源；
+  出射 = alb×E/π×gain4，E 主导。OFF（Lumen）仰视同位置同样天空主导
+  （§20.2 架构同因），A7/A8 差异 = 单位与增益链不同。
+
+### 20.6 验收与回归
+
+| 项 | 结果 |
+|---|---|
+| OFF 零影响（双运行，新 spv） | 低频(32×) MAD **0.027** < 3.5 PASS（max 29） |
+| FILTER=0 vs §19 G_final | 低频 MAD **0.002**（max 2/255）——push 常量扩展零回归 |
+| TestLightmapBaking | **Passed**（3.89s，baker sky/miss 插桩无破坏） |
+| 快烘 vs 交付页 rect 布局 | 逐条目一致（MaxRects 确定性自证） |
+| GLSL/Metal composite | build_spv.sh 命令编译通过；Metal 同步（±0.5 足迹/抖动同式） |
+
+### 20.7 坑位（本轮新增）
+
+1. **sky 页保存访问已 move 的 page**：`c.pages.push_back(std::move
+   (page))` 后再读 `page.texels_rgba16f[i*4+3]` → SIGSEGV（KERN_INVALID
+   at 0x6，crash 报告 BakeLightmaps 帧）——A 位按 rasterized/valid
+   同式重算，禁止引用被 move 对象。
+2. **烘焙与渲染采集并行互踩**：两次快烘在 collect 后死灭（无 crash
+   报告、无 jetsam）——全屏 Vulkan 窗口 ×2 并行时主线程 displayLink
+   回调链不稳定。长烘独占跑（第三次成功），采集与烘焙不并行。
+3. **GLSL 分离纹理**：textureSize(texture2D) 需 GL_EXT 扩展 → 用
+   combined sampler2D 的 textureSize；sampler2D(tex,sampler) 构造必须
+   point of use（不能做函数参数传）。
+4. 交付页保护：快烘必须 PRIMAL_LIGHTMAP_OUTDIR 指向别处（§19.4
+   fopen("wb") 截断覆盖族——本轮 env 化落地）。
+
+### 20.8 产物与清理
+
+- 快烘取证页（16spp sky split）分析后已清（重建：PRIMAL_LIGHTMAP_
+  BAKE=1 SPP=16 SKYSPLIT=1 SKYBELOW=0 OUTDIR=... MISSDUMP=-6,0,-13,6,5,3，
+  ~14min）；missrays.txt.gz（60.8 万行审计证据）+ miss_audit_sel.npy
+  保留于 /tmp/lm_q4/skybake/。
+- 对比图：sky_sharemap.png（天空贡献热图）、cmp_lion_crops.png
+  （狮子 ON/OFF）、/tmp/lm_q4/{q1_cama,q5_up,f0..f3,w2,w3,g0,off1,
+  off2}/ref.ppm（A/B 帧证据，2.7MB/帧）。
+- 工具：/tmp/lm_q4/{parse_model,lion_probe,sky_share,audit_miss,
+  bucket_br,task2_lumen,task5_ceiling,fft_grid}.py + capture_q4.sh +
+  ab_filter.sh。
+- /tmp/lm_q4 保留 91MB（工具+证据帧+审计压缩件）；uvrt/composite
+  bin（29MB/个×6）已清。

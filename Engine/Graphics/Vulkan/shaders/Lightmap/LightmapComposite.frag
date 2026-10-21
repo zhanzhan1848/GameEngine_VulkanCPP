@@ -41,9 +41,49 @@ layout(set = 0, binding = 4) uniform texture2D gbufferAlbedo;
 layout(push_constant) uniform LightmapParams {
     float indirectGain;
     float debugMode;
+    // [§20 任务4] 采样柔化：bit0 = 亚纹素时域抖动（hash(pixel,frame) 偏移
+    // ±0.5 texel → TAA 时域累积 = 对 lightmap 的时域超采样，静止视角等效
+    // 柔化 26.7px texel 格）；bit1 = 4-tap 纹素足迹低通（±0.25 texel 四点
+    // 均值，无时域依赖）。frameIndex 为抖动种子。
+    float filterMode;
+    float frameIndex;
 } params;
 
 const float kInvPi = 0.3183098861837907;
+
+// 整数 hash → [0,1)²（亚纹素抖动；同帧同像素确定、跨帧变化）。
+vec2 Jitter2D(vec2 fragPx, float frameIdx) {
+    uint h = uint(fragPx.x) * 1973u + uint(fragPx.y) * 9277u + uint(frameIdx) * 26699u;
+    h = h * (h * h * 15631u + 2579u);
+    return vec2(float(h & 65535u), float((h >> 16) & 65535u)) / 65535.0 - vec2(0.5);
+}
+
+// lightmap 采样（filterMode：bit0 抖动 / bit1 4-tap 足迹）。返回 rgb=加权
+// E_ind、a=有效 tap 的 A 均值（全无效 tap 时 a<=0.25 → 调用方透传）。
+// sampler2D 组合须在 point of use 构造（Vulkan 分离式规则），函数内自取。
+vec4 SampleLightmap(vec2 atlasUv, vec2 fragPx) {
+    const float fm = floor(params.filterMode + 0.5);
+    const bool jitterOn = (fm == 1.0) || (fm == 3.0);
+    const bool tap4On = (fm == 2.0) || (fm == 3.0);
+    vec2 tx = 1.0 / vec2(textureSize(sampler2D(lightmapTex, defaultSampler), 0));
+    vec2 jit = jitterOn ? Jitter2D(fragPx, params.frameIndex) * tx : vec2(0.0);
+    vec2 base = atlasUv + jit;
+    if (!tap4On) {
+        return texture(sampler2D(lightmapTex, defaultSampler), base);
+    }
+    vec4 c0 = texture(sampler2D(lightmapTex, defaultSampler), base + vec2(-0.5, -0.5) * tx);
+    vec4 c1 = texture(sampler2D(lightmapTex, defaultSampler), base + vec2( 0.5, -0.5) * tx);
+    vec4 c2 = texture(sampler2D(lightmapTex, defaultSampler), base + vec2(-0.5,  0.5) * tx);
+    vec4 c3 = texture(sampler2D(lightmapTex, defaultSampler), base + vec2( 0.5,  0.5) * tx);
+    // 只平均 A>0.25 的 tap（空区不拖黑——同单 tap 语义）。
+    vec4 sum = vec4(0.0);
+    float n = 0.0;
+    if (c0.a > 0.25) { sum += c0; n += 1.0; }
+    if (c1.a > 0.25) { sum += c1; n += 1.0; }
+    if (c2.a > 0.25) { sum += c2; n += 1.0; }
+    if (c3.a > 0.25) { sum += c3; n += 1.0; }
+    return n > 0.0 ? sum / n : vec4(0.0, 0.0, 0.0, 0.0);
+}
 
 void lightmap_composite() {
     vec3 base = texture(sampler2D(indirectIn, defaultSampler), inUv).rgb;
@@ -74,7 +114,8 @@ void lightmap_composite() {
         // E_ind（不含直射 NEE、不含纹素自身 albedo）；出射间接辐射亮度 =
         // albedo·E/π（Lambert BRDF）。albedo 取 GBuffer 逐像素反照率——
         // 间接项被真实材质纹理调制（v2 整像素替换丢纹理细节的修复）。
-        vec4 lm = texture(sampler2D(lightmapTex, defaultSampler), uvMarker.xy);
+        // §20 任务4：SampleLightmap = 亚纹素抖动/4-tap 足迹（filterMode）。
+        vec4 lm = SampleLightmap(uvMarker.xy, gl_FragCoord.xy);
         if (lm.a > 0.25) {
             vec3 albedo = texture(sampler2D(gbufferAlbedo, defaultSampler), inUv).rgb;
             result = base + albedo * lm.rgb * (params.indirectGain * kInvPi);

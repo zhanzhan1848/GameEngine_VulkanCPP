@@ -2416,6 +2416,12 @@ void TestVulkanSponzaRenderGraph::Run() {
             lmSettings.atlas_size = 4096;
             lmSettings.samples_per_texel = 64;  // 用户基线 spp
             lmSettings.bounces = 3;
+            // [§20 取证] PRIMAL_LIGHTMAP_SPP：快烘旋钮（天空分量分解/泄漏
+            // 审计用低 spp——统计量收敛即可，不必 51 分钟全档）。
+            if (const char* sp = std::getenv("PRIMAL_LIGHTMAP_SPP")) {
+                const int v = std::atoi(sp);
+                if (v >= 4 && v <= 512) lmSettings.samples_per_texel = (u32)v;
+            }
             // 密度自适应阶梯：从 48 纹素/米减半直到全部 chart 装进 4096 页
             //（下限 0.02 级——覆盖厘米级源网格的极端面积）。
             // §18：补 26/24/20 档——bbox 收紧后档间差距 4×，粗档会在 32
@@ -2423,6 +2429,13 @@ void TestVulkanSponzaRenderGraph::Run() {
             // 装箱富余试探（util ~0.83），失败自动落 24。
             std::snprintf(lmSettings.output_dir, sizeof(lmSettings.output_dir), "%s",
                           "/tmp/lm_e2e_bake");
+            // [§20] PRIMAL_LIGHTMAP_OUTDIR：取证烘输出目录（默认不变——
+            // 快烘变体必须指向别处，否则 SaveLightmapContainer fopen("wb")
+            // 截断覆盖交付页，§19.4 事故的根因族）。
+            if (const char* od = std::getenv("PRIMAL_LIGHTMAP_OUTDIR")) {
+                std::snprintf(lmSettings.output_dir, sizeof(lmSettings.output_dir),
+                              "%s", od);
+            }
             bool lmOk = false;
             std::string lmErr;
             for (float density : {48.0f, 32.0f, 26.0f, 24.0f, 20.0f, 16.0f, 12.0f,

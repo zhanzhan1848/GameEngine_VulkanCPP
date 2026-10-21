@@ -212,7 +212,7 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
         PushConstantRange pcRange{};
         pcRange.stageFlags = ShaderStage::Pixel;
         pcRange.offset = 0;
-        pcRange.size = 8;  // float gain + float debugMode
+        pcRange.size = 16;  // gain + debugMode + filterMode + frameIndex（§20 任务4）
         plDesc.pushConstantRangeCount = 1;
         plDesc.pushConstantRanges = &pcRange;
         plDesc.setLayoutCount = 1;
@@ -889,6 +889,17 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
                 else if (d[0] == '3') debugMode = 3.0f;
                 else if (d[0] == '4') debugMode = 4.0f;
             }
+            // [§20 任务4] PRIMAL_LIGHTMAP_FILTER：间接采样柔化（默认 3 =
+            // 抖动+4-tap 组合，FFT A/B 定优后转正；0=旧单 tap 线性采样）。
+            //   1 = 亚纹素时域抖动（hash(pixel,frame)，TAA 时域累积=对
+            //       lightmap 超采样，静止视角柔化 26 tex/m 格感）
+            //   2 = 4-tap ±0.25 texel 足迹低通（无时域依赖）
+            //   3 = 1+2 组合
+            float filterMode = 3.0f;
+            if (const char* f = std::getenv("PRIMAL_LIGHTMAP_FILTER")) {
+                const float v = (float)std::atoi(f);
+                if (v >= 0.0f && v <= 3.0f) filterMode = v;
+            }
             // 无实体时绑 z=0 占位页（全像素走原路径/debug 分支）。
             const ResourceHandle uvTex = HasEntities() ? uv_rt_ : uv_black_tex_;
             // [诊断] PRIMAL_LIGHTMAP_SWAPUV=1：交换 b1/b2 纹理。配 DEBUG=3
@@ -916,7 +927,8 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             cmd->BindGraphicsPipeline(composite_pipeline_);
             const DescriptorSetHandle sets[] = {composite_ds_[slot]};
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, composite_layout_, 0, 1, sets, 0, nullptr);
-            const float pushParams[2] = {gain, debugMode};
+            const float pushParams[4] = {gain, debugMode, filterMode,
+                                         (float)inputs.frame_index};
             cmd->PushConstants(composite_layout_, ShaderStage::Pixel, 0, sizeof(pushParams),
                                pushParams);
             cmd->Draw(3, 0, 1, 0);
@@ -1063,6 +1075,19 @@ void LightmapModule::DumpUvRT(const FrameInputs& inputs) {
     // atlas UV 双线性采样页 A 通道（与 composite 同采样语义），A≤0.25 计
     // 落空（该像素无间接补光——z=-8 整屏暗的直接成因度量）。
     const int uvDumpLevel = std::atoi(std::getenv("PRIMAL_LIGHTMAP_UVDUMP"));
+    // [§20 取证] UVDUMP=3：uv_rt 全帧 RGBA16F 落盘（/tmp/lm_q4/uvrt_f<frame>.bin）
+    // ——Python 后处理把屏幕暗桶像素映射回 atlas texel（天空占比统计/热图）。
+    if (uvDumpLevel >= 3) {
+        std::system("mkdir -p /tmp/lm_q4");
+        const std::string path = "/tmp/lm_q4/uvrt_f" + std::to_string(inputs.frame_index) + ".bin";
+        if (FILE* mf = std::fopen(path.c_str(), "wb")) {
+            std::fwrite(p, 8, (size_t)w * h, mf);
+            std::fclose(mf);
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[Lightmap][UVDUMP] full uvrt " << w << "x" << h << " -> " << path
+                << std::endl;
+        }
+    }
     u64 markerVoid = 0, markerN = 0;
     if (uvDumpLevel >= 2 && !page_a_.empty() && page_w_ && page_h_ &&
         page_a_.size() == (size_t)page_w_ * (size_t)page_h_) {

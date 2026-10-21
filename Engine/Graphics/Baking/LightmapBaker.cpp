@@ -614,6 +614,33 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
     const std::uint32_t spp = std::max(1u, settings.samples_per_texel);
     std::vector<Vec3> accum(texelCount);
 
+    // [2026-10-21 §20 取证] PRIMAL_LIGHTMAP_SKYSPLIT=1：并行累加"天空分量"
+    // 页（一切深度 miss 天空贡献 × 同 beta；NEE/emissive 不入）——一次烘焙
+    // 同时产出 total/sky 两页，差分即反弹分量（同 RNG 同路径，零差分噪声）。
+    // 产物 <output_dir>/lightmap_sky.lmap（A 通道语义同主页）。
+    const bool skySplit = [] {
+        const char* e = std::getenv("PRIMAL_LIGHTMAP_SKYSPLIT");
+        return e && e[0] == '1';
+    }();
+    std::vector<Vec3> skyAccum(skySplit ? texelCount : 0);
+    // [2026-10-21 §20 泄漏审计] PRIMAL_LIGHTMAP_MISSDUMP=x0,y0,z0,x1,y1,z1：
+    // AABB 内 texel 的首跳 sky-miss 统计行（miss 率 + 首条 miss 方向）写
+    // <output_dir>/missrays.txt——Python 反查"射线从哪条缝出去/是否真可见天"。
+    // 每行：texel px py pos(3) normal(3) missRate firstMissDir(3)。
+    struct MissAudit {
+        bool on = false;
+        float bmin[3], bmax[3];
+    } missAudit{};
+    if (const char* a = std::getenv("PRIMAL_LIGHTMAP_MISSDUMP")) {
+        if (std::sscanf(a, "%f,%f,%f,%f,%f,%f", &missAudit.bmin[0], &missAudit.bmin[1],
+                        &missAudit.bmin[2], &missAudit.bmax[0], &missAudit.bmax[1],
+                        &missAudit.bmax[2]) == 6) {
+            missAudit.on = true;
+        }
+    }
+    std::mutex missMutex;
+    std::string missRows;
+
     // 命中面属性（重心位置/法线插值 + 双面翻转）——路径任意顶点复用。
     auto hitSurface = [](const BakeMesh* m, std::uint32_t v0, std::uint32_t v1,
                          std::uint32_t v2, float u, float v, const Vec3& rayDir,
@@ -641,16 +668,26 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
             const std::uint32_t s0 = b * per;
             const std::uint32_t e = std::min(texelCount, s0 + per);
             const float invPi = 1.0f / 3.14159265f;
+            std::string localMiss;
+            char line[512];
             for (std::uint32_t i = s0; i < e; ++i) {
                 const TexelSample& ts = texels[i];
                 if (!ts.valid) continue;
                 Vec3 sum{0, 0, 0};
+                Vec3 skySum{0, 0, 0};
+                std::uint32_t miss0 = 0;             // 首跳 sky-miss 计数
+                Vec3 firstMissDir{0, 0, 0};
+                const bool auditTexel = missAudit.on &&
+                    ts.pos.x >= missAudit.bmin[0] && ts.pos.x <= missAudit.bmax[0] &&
+                    ts.pos.y >= missAudit.bmin[1] && ts.pos.y <= missAudit.bmax[1] &&
+                    ts.pos.z >= missAudit.bmin[2] && ts.pos.z <= missAudit.bmax[2];
                 for (std::uint32_t s = 0; s < spp; ++s) {
                     Rng rng(HashTexel(i, s + 1));
                     Vec3 beta{1, 1, 1};
                     // v3：纹素顶点无自发射计入（发射面由实时链/emissive 渲染；
                     // 烘焙只回答"到达纹素的间接辐照度"）。
                     Vec3 col{0, 0, 0};
+                    Vec3 skyCol{0, 0, 0};
                     Vec3 o = ts.pos, n = ts.normal;
                     Vec3 alb{ts.albedo[0], ts.albedo[1], ts.albedo[2]};
                     for (std::uint32_t depth = 0; depth <= maxDepth; ++depth) {
@@ -682,7 +719,13 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                         ray.t_min = 1e-3f;
                         utl::BVH::HitInfo hit;
                         if (!bvh.Intersect(ray, hit)) {
-                            col = Add(col, Mul(beta, SkyRadiance(scene.sky, d)));
+                            const Vec3 skyC = SkyRadiance(scene.sky, d);
+                            col = Add(col, Mul(beta, skyC));
+                            skyCol = Add(skyCol, Mul(beta, skyC));
+                            if (depth == 0) {
+                                ++miss0;
+                                if (miss0 == 1) firstMissDir = d;
+                            }
                             break;
                         }
                         if (hit.triangle_index >= triRefs.size()) break;
@@ -696,9 +739,26 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                         alb = Vec3{hm->albedo[0], hm->albedo[1], hm->albedo[2]};
                     }
                     sum = Add(sum, col);
+                    skySum = Add(skySum, skyCol);
                 }
                 // E_ind = π · mean(L_ind)（估计器推导见本阶段头注释）。
                 accum[i] = Scale(sum, 3.14159265f / (float)spp);
+                if (skySplit) skyAccum[i] = Scale(skySum, 3.14159265f / (float)spp);
+                if (auditTexel) {
+                    // 首跳 miss 率 + 首条 miss 方向（AABB 内 texel 泄漏审计行）。
+                    std::snprintf(line, sizeof(line),
+                        "%u %u %.3f %.3f %.3f %.3f %.3f %.3f %.4f %.3f %.3f %.3f\n",
+                        i % atlasW, i / atlasW, ts.pos.x, ts.pos.y, ts.pos.z,
+                        ts.normal.x, ts.normal.y, ts.normal.z,
+                        (float)miss0 / (float)spp, firstMissDir.x, firstMissDir.y,
+                        firstMissDir.z);
+                    localMiss += line;
+                    if (localMiss.size() > (1u << 20)) {
+                        std::lock_guard<std::mutex> lk(missMutex);
+                        missRows += localMiss;
+                        localMiss.clear();
+                    }
+                }
                 // [DIAG] PRIMAL_LIGHTMAP_TRACE_TEXEL=<idx>：单纹素分解。
                 if (const char* te = std::getenv("PRIMAL_LIGHTMAP_TRACE_TEXEL")) {
                     const std::uint32_t ti = (std::uint32_t)std::atoi(te);
@@ -738,23 +798,29 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                             << " hit=" << hits << " hitNEE>0=" << neeHit << std::endl;
                     }
                 }
-            }
-            progress.Report(2, b + 1, blocks);
-        });
-    }
+                }
+                progress.Report(2, b + 1, blocks);
+                if (!localMiss.empty()) {
+                    std::lock_guard<std::mutex> lk(missMutex);
+                    missRows += localMiss;
+                }
+            });
+        }
 
     // ---- 6 filter：5×5 联合双边（可选） ----
     if (settings.denoise) {
         std::vector<Vec3> filtered(texelCount);
+        std::vector<Vec3> skyFiltered(skySplit ? texelCount : 0);
         const std::uint32_t blocks = 64;
         const std::uint32_t per = (texelCount + blocks - 1) / blocks;
         ParallelBlocks(blocks, [&](std::uint32_t b) {
             const std::uint32_t s = b * per;
             const std::uint32_t e = std::min(texelCount, s + per);
             for (std::uint32_t i = s; i < e; ++i) {
-                if (!texels[i].valid) { filtered[i] = accum[i]; continue; }
+                if (!texels[i].valid) { filtered[i] = accum[i];
+                    if (skySplit) skyFiltered[i] = skyAccum[i]; continue; }
                 const std::int32_t x = (std::int32_t)(i % atlasW), y = (std::int32_t)(i / atlasW);
-                Vec3 sum{0, 0, 0};
+                Vec3 sum{0, 0, 0}, skySum2{0, 0, 0};
                 float wsum = 0;
                 for (std::int32_t dy = -2; dy <= 2; ++dy) {
                     for (std::int32_t dx = -2; dx <= 2; ++dx) {
@@ -770,14 +836,18 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                         const float range = std::exp(-(dc * dc) / (2.0f * 0.2f * 0.2f));
                         const float w = spatial * range;
                         sum = Add(sum, Scale(accum[ni], w));
+                        if (skySplit) skySum2 = Add(skySum2, Scale(skyAccum[ni], w));
                         wsum += w;
                     }
                 }
                 filtered[i] = wsum > 1e-6f ? Scale(sum, 1.0f / wsum) : accum[i];
+                if (skySplit)
+                    skyFiltered[i] = wsum > 1e-6f ? Scale(skySum2, 1.0f / wsum) : skyAccum[i];
             }
             progress.Report(3, b + 1, blocks);
         });
         accum = std::move(filtered);
+        if (skySplit) skyAccum = std::move(skyFiltered);
     } else {
         progress.Report(3, 1, 1);
     }
@@ -791,13 +861,14 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
     for (std::uint32_t i = 0; i < texelCount; ++i) rasterized[i] = texels[i].valid ? 1u : 0u;
     for (std::uint32_t it = 0; it < settings.dilation_px; ++it) {
         std::vector<Vec3> next = accum;
+        std::vector<Vec3> skyNext = skySplit ? skyAccum : std::vector<Vec3>{};
         std::vector<bool> validNow(texelCount);
         for (std::uint32_t i = 0; i < texelCount; ++i) validNow[i] = texels[i].valid;
         for (std::uint32_t y = 0; y < atlasH; ++y) {
             for (std::uint32_t x = 0; x < atlasW; ++x) {
                 const std::uint32_t i = y * atlasW + x;
                 if (validNow[i]) continue;
-                Vec3 sum{0, 0, 0};
+                Vec3 sum{0, 0, 0}, skySum2{0, 0, 0};
                 std::uint32_t n = 0;
                 for (std::int32_t dy = -1; dy <= 1; ++dy) {
                     for (std::int32_t dx = -1; dx <= 1; ++dx) {
@@ -807,16 +878,19 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                         const std::uint32_t ni = (std::uint32_t)ny * atlasW + (std::uint32_t)nx;
                         if (!validNow[ni]) continue;
                         sum = Add(sum, accum[ni]);
+                        if (skySplit) skySum2 = Add(skySum2, skyAccum[ni]);
                         ++n;
                     }
                 }
                 if (n > 0) {
                     next[i] = Scale(sum, 1.0f / (float)n);
+                    if (skySplit) skyNext[i] = Scale(skySum2, 1.0f / (float)n);
                     texels[i].valid = true;  // 下一迭代继续向外扩
                 }
             }
         }
         accum = std::move(next);
+        if (skySplit) skyAccum = std::move(skyNext);
     }
     progress.Report(4, settings.dilation_px, settings.dilation_px);
 
@@ -858,7 +932,7 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
         for (size_t head = 0; head < queue.size(); ++head) {
             const std::uint32_t i = queue[head];
             const std::int32_t x = (std::int32_t)(i % atlasW), y = (std::int32_t)(i / atlasW);
-            Vec3 sum{0, 0, 0};
+            Vec3 sum{0, 0, 0}, skySum2{0, 0, 0};
             std::uint32_t n = 0;
             for (std::int32_t dy = -1; dy <= 1; ++dy)
                 for (std::int32_t dx = -1; dx <= 1; ++dx) {
@@ -877,10 +951,12 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                     }
                     if (!texels[ni].valid) continue;
                     sum = Add(sum, accum[ni]);
+                    if (skySplit) skySum2 = Add(skySum2, skyAccum[ni]);
                     ++n;
                 }
             if (n > 0) {
                 accum[i] = Scale(sum, 1.0f / (float)n);
+                if (skySplit) skyAccum[i] = Scale(skySum2, 1.0f / (float)n);
                 texels[i].valid = true;
                 ++filled;
             }
@@ -907,6 +983,49 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
     }
     c.pages.push_back(std::move(page));
     c.entries = result.entries;
+
+    // [§20 取证] 天空分量页（SKYSPLIT）：与主页同 filter/dilate/flood 管线、
+    // 同 A 有效性——差分 total−sky = NEE/emissive 反弹分量（同 RNG 零噪声）。
+    {
+        std::string skyDir = settings.output_dir[0]
+                                 ? std::string(settings.output_dir) : std::string(".");
+        if (skySplit) {
+            LightmapContainer sc;
+            sc.atlas_count = 1;
+            LightmapPageData spage;
+            spage.width = atlasW;
+            spage.height = atlasH;
+            spage.texels_rgba16f.resize((size_t)atlasW * atlasH * 4);
+            for (std::uint32_t i = 0; i < texelCount; ++i) {
+                spage.texels_rgba16f[i * 4 + 0] = FloatToHalfBits(skyAccum[i].x);
+                spage.texels_rgba16f[i * 4 + 1] = FloatToHalfBits(skyAccum[i].y);
+                spage.texels_rgba16f[i * 4 + 2] = FloatToHalfBits(skyAccum[i].z);
+                // 注意：主页 page 已被 move 走（上面 push_back(std::move(page))）
+                // ——A 位按同一式重算（rasterized 快照 + flood 后 valid），禁止
+                // 引用已 move 对象（首版即此 SIGSEGV：空 vector 下标访问）。
+                spage.texels_rgba16f[i * 4 + 3] =
+                    rasterized[i] ? 0x3C00 : (texels[i].valid ? 0x3800 : 0x0000);
+            }
+            sc.pages.push_back(std::move(spage));
+            sc.entries = result.entries;
+            const std::string skyPath = skyDir + "/lightmap_sky.lmap";
+            if (SaveLightmapContainer(skyPath, sc)) {
+                PRIMAL_LOG_STREAM(Info, "Render")
+                    << "[Lightmap][bake] sky split page: " << skyPath << std::endl;
+            }
+        }
+        // [§20 泄漏审计] miss 射线统计行落盘（首跳 miss 率 + 首条方向）。
+        if (missAudit.on) {
+            const std::string mpath = skyDir + "/missrays.txt";
+            if (FILE* mf = std::fopen(mpath.c_str(), "wb")) {
+                std::fwrite(missRows.data(), 1, missRows.size(), mf);
+                std::fclose(mf);
+                PRIMAL_LOG_STREAM(Info, "Render")
+                    << "[Lightmap][bake] missrays: ~" << missRows.size() / 80
+                    << " rows -> " << mpath << std::endl;
+            }
+        }
+    }
 
     std::string dir = settings.output_dir[0] ? std::string(settings.output_dir) : std::string(".");
     std::error_code ec;

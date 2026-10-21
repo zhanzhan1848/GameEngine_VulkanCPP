@@ -26,9 +26,40 @@ struct LightmapVertexOut {
 struct LightmapParams {
     float indirectGain;
     float debugMode;
+    // [§20 任务4] 与 Vulkan 版同步：bit0 亚纹素时域抖动 / bit1 4-tap 足迹。
+    float filterMode;
+    float frameIndex;
 };
 
-constant float kInvPi = 0.3183098861837907;
+const constant float kInvPi = 0.3183098861837907;
+
+float2 Jitter2D(float2 fragPx, float frameIdx) {
+    uint h = uint(fragPx.x) * 1973u + uint(fragPx.y) * 9277u + uint(frameIdx) * 26699u;
+    h = h * (h * h * 15631u + 2579u);
+    return float2(float(h & 65535u), float((h >> 16) & 65535u)) / 65535.0 - 0.5;
+}
+
+float4 SampleLightmap(texture2d<float> lm, sampler s, float2 atlasUv, float2 fragPx,
+                      float filterMode, float frameIdx) {
+    const float fm = floor(filterMode + 0.5);
+    const bool jitterOn = (fm == 1.0) || (fm == 3.0);
+    const bool tap4On = (fm == 2.0) || (fm == 3.0);
+    const float2 tx = 1.0 / float2(lm.get_width(), lm.get_height());
+    const float2 jit = jitterOn ? Jitter2D(fragPx, frameIdx) * tx : float2(0.0);
+    const float2 base = atlasUv + jit;
+    if (!tap4On) return lm.sample(s, base);
+    float4 c0 = lm.sample(s, base + float2(-0.5, -0.5) * tx);
+    float4 c1 = lm.sample(s, base + float2( 0.5, -0.5) * tx);
+    float4 c2 = lm.sample(s, base + float2(-0.5,  0.5) * tx);
+    float4 c3 = lm.sample(s, base + float2( 0.5,  0.5) * tx);
+    float4 sum = float4(0.0);
+    float n = 0.0;
+    if (c0.a > 0.25) { sum += c0; n += 1.0; }
+    if (c1.a > 0.25) { sum += c1; n += 1.0; }
+    if (c2.a > 0.25) { sum += c2; n += 1.0; }
+    if (c3.a > 0.25) { sum += c3; n += 1.0; }
+    return n > 0.0 ? sum / n : float4(0.0);
+}
 
 fragment float4 lightmap_composite_fragment(
     LightmapVertexOut in [[stage_in]],
@@ -62,7 +93,9 @@ fragment float4 lightmap_composite_fragment(
         result = lm * params.indirectGain;
     } else if (uvMarker.z > 0.5) {
         // 正常态：间接辐照度叠加（lm.rgb = E_ind，出射间接 = albedo·E/π）。
-        float4 lm = lightmapTex.sample(s, uvMarker.xy);
+        // §20 任务4：SampleLightmap = 亚纹素抖动/4-tap 足迹（filterMode）。
+        float4 lm = SampleLightmap(lightmapTex, s, uvMarker.xy, in.position.xy,
+                                   params.filterMode, params.frameIndex);
         if (lm.a > 0.25) {
             float3 albedo = gbufferAlbedo.sample(s, in.uv).rgb;
             result = base + albedo * lm.rgb * (params.indirectGain * kInvPi);
