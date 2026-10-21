@@ -455,8 +455,9 @@ void TestBakerTraceOnly() {
 }
 
 // v2 PT → v3 语义：天空直照回归——无灯、无遮挡，地板存 E_ind = π·L̄
-//（余弦加权天空的平均辐射 × π；v2 为 alb·L̄）。期望 ≈ π·Mix(horizon,
-// zenith, 2/3)_g = π·0.50 ≈ 1.57。
+//（余弦加权天空的平均辐射 × π；v2 为 alb·L̄）。§17 天空对齐 EvaluateSkyBase
+//（pow0.45 曲线）后期望 = π·[hor + (zen−hor)·∫pow(cos,0.45)cos dω/π]，
+// G 通道 = π·(4.20+1.56×0.8163) ≈ 17.2（v2/§16 旧蓝梯度时为 π·0.50≈1.57）。
 void TestBakerSkyDirect() {
     const float albedo[3] = {0.8f, 0.8f, 0.8f};
     const float emissive0[3] = {0, 0, 0};
@@ -481,8 +482,8 @@ void TestBakerSkyDirect() {
     const std::uint32_t cx = e.rect_x + e.rect_w / 2;
     const std::uint32_t cy = e.rect_y + e.rect_h / 2;
     const float got = HalfToFloat(page.texels_rgba16f[(cy * page.width + cx) * 4 + 1]);
-    CHECK(got > 1.30f && got < 1.85f,
-          "sky-lit floor stores pi*mean(L) ~1.57 (got " + std::to_string(got) + ")");
+    CHECK(got > 15.5f && got < 19.0f,
+          "sky-lit floor stores pi*mean(L) ~17.2 (got " + std::to_string(got) + ")");
 }
 
 // v1.1：trace-only 遮挡面一阶直射反弹。同解析测试几何（F=0.83112），

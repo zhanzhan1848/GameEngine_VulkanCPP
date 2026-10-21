@@ -184,8 +184,9 @@ struct TexelSample {
 // ---------- 光照求值 ----------
 
 inline Vec3 SkyRadiance(const BakeSky& sky, const Vec3& dir) {
-    if (dir.y <= 0.0f) return {0, 0, 0};
-    const float t = std::min(1.0f, dir.y);
+    // §17：与运行时 EvaluateSkyBase 同曲线——pow(up,0.45) 混合；地平以下
+    // 返回地平色（运行时 clamp(up,0,1) 语义：向下射线带回暖地平 proxy）。
+    const float t = std::pow(std::min(1.0f, std::max(0.0f, dir.y)), 0.45f);
     const Vec3 c = Mix({sky.horizon[0], sky.horizon[1], sky.horizon[2]},
                        {sky.zenith[0], sky.zenith[1], sky.zenith[2]}, t);
     return Scale(c, sky.intensity);

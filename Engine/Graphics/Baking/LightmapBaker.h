@@ -76,10 +76,19 @@ struct BakeLight {
 };
 
 struct BakeSky {
-    float zenith[3] = {0.35f, 0.45f, 0.65f};
-    float horizon[3] = {0.55f, 0.60f, 0.70f};
+    // §17 观感轮（2026-10-21）：与运行时解析天空 EvaluateSkyBase
+    //（Vulkan/shaders/Lumen/ShaderLib/SkyAtmosphere.glsl）逐位对齐。
+    // 旧默认 zenith(0.35,0.45,0.65)/horizon(0.55,0.60,0.70) 是冷蓝梯度
+    //（B/R 1.86/1.27），与运行时暖地平(4.40,4.20,3.80)/淡蓝天顶
+    //(5.50,5.76,6.00)（B/R 0.86/1.09）色温相反——间接光区蓝纱的根因。
+    // 数值域同步统一到运行时 GI-miss HDR 档：天空与太阳 NEE（强度 5.0）
+    // 的相对比例恢复一致（旧值天空比太阳暗 7 倍，反弹构成失真）。
+    float zenith[3] = {5.50f, 5.76f, 6.00f};
+    float horizon[3] = {4.40f, 4.20f, 3.80f};
     float intensity = 1.0f;
-    // v1 模型：上方向天空梯度（n.y 混合 zenith/horizon）；地面以下无天空。
+    // v1 模型：上方向天空梯度（pow(up,0.45) 混合 zenith/horizon，与
+    // EvaluateSkyBase 同曲线）；地平以下返回地平色（同运行时 clamp(up,0,1)
+    // 语义——向下射线带回暖地平 proxy，不再是旧的黑）。
 };
 
 struct BakeScene {

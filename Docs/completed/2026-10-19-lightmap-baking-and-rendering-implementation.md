@@ -687,3 +687,94 @@ dylib——直接用树内二进制跑。
 lightmap_page.png；/tmp/lm_arch/{on_*,off_*,old_v2_*}.ppm、
 cmp_default_v2_vs_v3.png、cmp_z4_v2_vs_v3.png（左 v2 右 v3）、
 lm_metrics.py、logs/。v2 交付页仍在 /tmp/lm_opt/atlas4096_skyi2。
+
+## 17. 观感轮（2026-10-21 晚）：间接区蓝纱（天空色温对齐）+ 室内渐亮（曝光适应定罪）
+
+**用户两反馈**：① 间接光区域有一层蓝色泛光；② 进入室内间接光"逐渐变亮"。
+
+### 17.1 问题 ① 判别链（蓝纱）
+
+- **a 图集量化**（atlas_br.py，lmap=32B header+104B×mesh+f16 RGBA——
+  .h 注释"40B"与实际 8×u32=32B 不符，按文件大小反推实证）：
+  E_ind 亮区（天光主导 p90+）B/R p50=**1.465**，RGB(1.97,2.32,3.02)——
+  烘焙天空色直接透出页数据。
+- **a 上屏探针**：中亮度间接区（40-70 百分位）B/R ON 0.87(z4)/
+  **1.94(z8)**/1.04(default) vs OFF 0.69/0.75/0.74——ON 系统性偏蓝。
+- **b bloom A/B**：PRIMAL_BLOOM_INTENSITY=0 vs 默认 4.0，z8 中亮度区
+  **逐位一致**（R14.3 G21.4 B28.6）——非 bloom 载体（BloomPass threshold
+  =3.0 HDR，间接合成 ~0.5 不进亮通；直射 12.5 两态同进与 lightmap 无关）。
+- **c 双重计入**：DeferredLighting.frag `IBL_DIFFUSE_INTENSITY=0`（编译期
+  常数）——deferred 无环境漫反射，无 diffuse 重复计能；`IBL_SPECULAR_
+  INTENSITY=0.35` 环境镜面两态同在，非 lightmap 引入。
+- **根因**：BakeSky 旧默认 zenith(0.35,0.45,0.65)/horizon(0.55,0.60,0.70)
+  （B/R 1.86/1.27，冷蓝、峰值 ~0.65）与运行时解析天空 EvaluateSkyBase
+  （horizon(4.40,4.20,3.80) 暖 B/R 0.86 / zenith(5.50,5.76,6.00) B/R 1.09）
+  **色温方向相反 + 数值域差 ~7 倍**（天空比太阳 NEE 5.0 暗 7 倍，反弹
+  构成失真）。
+
+### 17.2 修复（烘焙天空与运行时逐位对齐）
+
+- `LightmapBaker.h` BakeSky 默认 = EvaluateSkyBase 逐位镜像；
+  `LightmapBaker.cpp` SkyRadiance 混合曲线 pow(up,0.45) + 地平以下返回
+  地平色（对齐运行时 clamp(up,0,1) 语义）；collector PRIMAL_LIGHTMAP_
+  SKYINT 默认 2.0→1.0（§15 的 ×2.0 是 v2 暗天空时代的补暗校准，依据
+  已废；env 保留微调，≠1 时才乘）。
+- 单测 TestBakerSkyDirect 期望重算：余弦加权 ∫pow(cos,0.45)cos dω/π
+  =2/2.45=0.8163 → E_g=π·(4.20+1.56×0.8163)≈**17.2**，界(15.5,19.0)；
+  TestLightmapBaking ALL PASSED。
+- 重烘 4096/64spp/3bounce density16 = **1250s**，SHA16
+  **deff7de4b70e6c57**；旧页归档 /tmp/lm_polish/atlas_v3_oldsky
+  （SHA16 b8d2ef5ebf8c6001）。
+
+### 17.3 验收（新页 vs 旧页 vs OFF）
+
+- 图集：亮区 B/R **1.465→0.955**（冷蓝→微暖），E_ind 亮区均值
+  2.44→15.39（HDR 档对齐运行时 GI-miss 域）。
+- 上屏阴影区（<p35，B/R p50）：z4 **0.889→0.750，OFF 参考 0.756——
+  与 OFF 几乎一致（验收线达标）**；中亮度区 z4 0.869→0.749（OFF 0.610，
+  残余=烘焙解析天空与 sunset env 固有色差）。
+- 亮度：z4 mean 39.48→**70.96**（OFF 64.20——ON 与 OFF 量级首次匹配，
+  旧页暗 38%）；z4 近黑 2.01%→1.53%；lapvar 206.6→233.5（纹理细节保持）。
+- **z8 新旧逐位一致（mean 28.91 完全相同）**：该位姿大部分像素落 chart
+  空区（§16 遗留），A≤0.25 门控纯透传 base、与页内容无关——解释性复核，
+  非回归。
+- OFF 零影响：同批双运行低频(32×) MAD=**0.194**<3.5 地板；mean
+  64.23/64.05 vs §16 基线 64.20。
+- 视觉复核：cmp_z4_old_new_off.png（AI 视觉确认旧页阴影区冷蓝纱清晰
+  可见、新页暖调恢复接近 OFF、残余为绿旗材质真实反弹色）。
+
+### 17.4 问题 ② 定罪（室内渐亮）
+
+- **预检**：LightmapModule（UV pass/composite）零 history/accumulation
+  ——逐帧静态，无时域累积嫌疑。
+- **实验**：SPONZA_CAM_SCRIPT=1（f360 切镜）+ 收敛窗 340-419 逐帧
+  SPONZA_CAPTURE_DIR 序列 + PRIMAL_TONE_ADAPT_LOG=1 曝光采样，三态：
+  - **ON**（新页）：cut 后 29.59→29.27 **平坦**（无渐变）；log2Lum 恒
+    **-6.0 = minLogLum 钳制下限**（avgLum<0.0156），曝光恒打满 2.88。
+  - **OFF**：cut 后 86.59→61.81 渐变收敛 ~50 帧（τ_down=1.0s 签名）；
+    log2Lum -1.996→-1.167、effExp 0.18→0.10。
+  - **ON+TONE_ADAPT=0**：5.29→5.37 平坦（固定曝光画面仅 5.4/255——
+    适应把 ON 拉亮 5.5 倍）。
+- **结论：机制=自动曝光时域适应（EyeAdaptation，τ_up 0.3s/τ_down 1.0s，
+  默认开），非 lightmap 时域 bug**——OFF 同机制有渐变（切到亮场渐暗、
+  对称成立）。如实向用户解释；可选 PRIMAL_TONE_ADAPT=0 回固定曝光。
+- **ON 特有放大因素**：ON 场景 HDR avgLum 贴适应下限（<0.0156 vs OFF
+  0.25-0.44，差一个数量级以上）——chart 空区 74.7% 像素（§16 unwrap
+  遗留）无间接照亮拉低全图均值；场景亮度在钳制临界带波动时曝光持续
+  大幅调整，"渐亮"观感被放大。新页下仍贴下限——**问题①的标定修复
+  不足以完全收敛适应幅度，根治=修 unwrap/chart 空区覆盖（遗留项）**；
+  可选缓解=评估 minLogLum 下限上调（-6→-4 限最大曝光 0.72，但改变
+  OFF 观感，需独立门禁轮评估）。
+
+### 17.5 证据与产物
+
+- /tmp/lm_polish/：atlas_br{,_new}.txt、screen_br.txt、bloom_ab.txt、
+  shadow_new.txt、accept_out.txt、curve_{on,off,noadapt}.txt（三态
+  收敛曲线）、cmp_{z4_old_new_off,z8_old_new,default_new}.png、
+  on_new_{default,z4,z8}.ppm、off_z4_new_{a,b}.ppm、on_z8_bloom0.ppm、
+  atlas_v3_oldsky/（旧页归档）、atlas_br.py/shadow_probe.py/accept.py/
+  adapt_curve.py；seq_* 序列 ppm 已清（曲线数据留存 curve_*.txt）。
+- 日志：/tmp/lm_arch/logs/{bake_skyalign,seq_on,seq_off,seq_on_noadapt,
+  on_z8_bloom0,off_z4_new_a,off_z4_new_b}.log。
+- 新交付页：/tmp/lm_e2e_bake/lightmap.lmap（4096 E_ind 对齐天空页，
+  SHA16 deff7de4b70e6c57）+ lightmap_page.png。

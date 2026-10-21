@@ -144,20 +144,20 @@ bool CollectBakeScene(const RenderScene& renderScene, CollectedBakeScene& out,
     PRIMAL_LOG_STREAM(Info, "Render")
         << "[Lightmap][collect] meshes=" << out.scene.meshes.size()
         << " lights=" << out.scene.lights.size();
-    // §15 远平面暗带根因修复（2026-10-21）：烘焙天空是暗程序梯度
-    //（BakeSky 默认峰值 ~0.65），而运行时天空为 HDR 环境贴图——天空主导
-    // 的远场区域（atrium 深处/背阴拱）烘焙值系统性偏暗，上屏即"贴着远
-    // 平面移动的黑影"。天空辐射整体校准 ×2.0（远场 ON 17.6→~28 vs OFF
-    // 25.6/255，GAIN=5 不变；太阳 NEE 走 RenderLight 单位不受影响）。
-    // PRIMAL_LIGHTMAP_SKYINT 可调（1.0 = 修复前行为）；HDR env 方向采样
-    // 入烘焙为后续项（见 §15 遗留）。
+    // §17 观感轮（2026-10-21）：BakeSky 默认值已与运行时解析天空
+    // EvaluateSkyBase 逐位对齐（色温 + HDR 档，见 LightmapBaker.h §17 注释）
+    // ——v2 时代为远平面暗带引入的 ×2.0 校准（§15）依据已变：当时烘焙
+    // 天空峰值 ~0.65 需 ×2 补暗，现在默认即为运行时 GI-miss 同域数值，
+    // 无缩放。PRIMAL_LIGHTMAP_SKYINT 保留为微调旋钮（默认 1.0 = 恒等）。
     {
-        float skyInt = 2.0f;
+        float skyInt = 1.0f;
         if (const char* e = std::getenv("PRIMAL_LIGHTMAP_SKYINT")) {
             const float v = std::atof(e);
             if (v > 0.0f && v <= 100.0f) skyInt = v;
         }
-        out.scene.sky.intensity *= skyInt;
+        if (skyInt != 1.0f) {
+            out.scene.sky.intensity *= skyInt;
+        }
         PRIMAL_LOG_STREAM(Info, "Render")
             << "[Lightmap][collect] sky intensity calibrated x" << skyInt
             << " -> " << out.scene.sky.intensity << std::endl;
