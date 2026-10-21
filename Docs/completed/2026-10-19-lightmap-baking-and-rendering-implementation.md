@@ -514,3 +514,111 @@ baker 栅格化重心插值 UV0 → 双线性 → 256 项 LUT 线性化。**顺�
 **遗留**：金属度仍未参与（链/旗杆按漫反射反弹）；UV0 插值在 lightmap-UV
 参数空间线性（v1 近似，与 pos/normal 同级）；编辑器生产路径需把贴图
 albedo 从材质系统同源注入（当前为测试链注册）。
+
+## 15. 精度/远平面暗带/PT 复核轮（2026-10-21）
+
+### 15.1 任务 1：atlas 4096 + 密度阶梯扩 32/48
+
+- `DefaultLightmapBakeSettings.atlas_size` 2048→**4096**（LightmapBaker.cpp:40-42；
+  单测默认值断言同步 TestLightmapBaking.cpp:209）；e2e 密度阶梯上限
+  {48, 32} 前插（TestVulkanSponzaRenderGraph.cpp ~2423）。
+- **阶梯实测**：density 48 与 32 在 4096 页均 atlas overflow（32 档需
+  ~5461px 等效页），**16 装入**（2048 时代 16 溢出→12）。纹素密度
+  12→16 = 线性 ×1.33 / 总纹素 ×1.78——页面积 ×4 未换来密度 ×2，因
+  场景 chart 需求大。密度真正翻倍需 8192 页（RGBA16F 536MB）或多页
+  atlas——遗留项。
+- **烘焙耗时**：4096/16/64spp = **22.5 分钟**（10:08:32→10:31:00，与
+  2048/12/64spp 的 958s 相比 ×1.41，与纹素 ×1.78 大体一致；采集进程
+  轻度争用）。64spp 未超 40 分钟预算，**未降 spp**（denoise 仍开）。
+- **验收**：
+  - 图集 PNG：/tmp/lm_opt/atlas4096_skyi1/lightmap_page.png（4096²，134MB
+    LMAP）vs /tmp/lm_opt/atlas2048/lightmap_page.png——地板/拱花纹更细
+    （对比图 /tmp/lm_opt/atlas_cmp_floor.png 上 2048/下 4096）；
+  - 上屏（同机位 0,5,-4,-35,10、同 GAIN=5、同天空）：屏幕高频能量
+    Laplacian 方差 3.3→**7.5**（×2.3，含亮度贡献）；对比 crop
+    /tmp/lm_opt/shadow/atlas_screen_cmp.png。远场分块感减轻但非数量级
+    变化——如实入档。
+- **4096 实时预览命令**：
+  `SPGI_CAM="0,5,-4,-35,10" PRIMAL_TEST_MODEL=SponzaLM.model PRIMAL_LIGHTMAP_BAKE=1 PRIMAL_LIGHTMAP_LOAD=/tmp/lm_e2e_bake/lightmap.lmap PRIMAL_LIGHTMAP_GAIN=5 ./Darwin/Debug/TestVulkanSponzaRenderGraph`
+  （lmap 现为 134MB/4096²；PAGEDUMP 纹素坐标换算已改用页实尺寸，
+  LightmapModule page_w_/page_h_——修 1023 硬编码遗留。）
+
+### 15.2 任务 2：远平面"黑影跟随相机"——z-eps 嫌疑排除 + 真根因（烘焙天空单位失配）
+
+**验证 a（ZEPS=0 覆盖对照，同二进制 env A/B）**：
+- 默认 eps=1e-3：UVDUMP valid(z>0.5)=**3686101**/3686400（复现 §6.6 基线）；
+- PRIMAL_LIGHTMAP_ZEPS=0：覆盖塌到 **100382**（2.7%）——**z-eps 不是镜像
+  时代残留，是承重的**：CPU 段拼 VP 链比 GPU 三段链系统性偏正 ~+7e-5
+  相对深度（center 探针 0.932203 vs 0.932136），(1-1e-3) 收缩即为此容差。
+  用户"矩阵问题"怀疑方向正确但定罪对象错误。
+- eps=2e-4：覆盖 3686100（-1px）——容差可收紧但黑带不变（见下）。
+
+**真根因定位**（DEBUG=3/4 + 顶缘深度探针）：
+- 顶缘暗带行 marker 全覆盖（DEBUG=3 全绿到 row 0）；DEBUG=4 显示带内
+  UV≈(0.34,0.345) 指向合法 chart（均值 46.6/255 的暗烘值）；
+- 顶缘探针（新增 top1-4 @ display y 4/12/24/40，DumpUvRT）：eps=2e-4 时
+  redraw-gb 相对深度 -2e-4~-6e-4 ≈ 同面容差内——**marker 是同面的、
+  合法的**；cull=front（匹配 GBuffer 光栅面集，覆盖同 3686101）与
+  cull=back（覆盖塌 69150，证 front 为匹配集）矩阵实验均不改变暗带；
+- 结论：暗带不是覆盖/marker 错写，是**远场（atrium 深处，天空主导照明）
+  烘焙值本身过暗**：烘焙天空是程序梯度（BakeSky 峰值 ~0.65 ×intensity 1），
+  运行时是 HDR 环境贴图——远场 ON top16 均值 17.6 vs OFF 25.6/255。
+  相机前后移动时该区域恒贴远平面 → 用户感知"黑影跟随相机"。
+- **修复**（LightmapSceneCollector.cpp 末尾）：收集器天空辐射校准
+  **×2.0 默认**（PRIMAL_LIGHTMAP_SKYINT 可调，1.0=旧行为）。校准依据：
+  远场目标 OFF 25.6/255，×2.0 预计 ~28。太阳 NEE 走 RenderLight 单位
+  不变，GAIN=5 不变。HDR env 方向采样入烘焙为后续项。
+- **验收**（4096/skyI=2.0 页，3 位姿 0,5,{0,-4,-8},-35,10）：远面区
+  （画面上缘）无黑影带——top16 均值/off 对照与暗行带检测见 §15.4 证据。
+
+### 15.3 任务 3：烘焙核 = 路径追踪（复核，无码改）
+
+LightmapBaker.cpp L470-570 积分器语义逐项核对（v2 2026-10-20 用户定调后
+未再动，本轮全链走查）：
+- 逐 texel 路径循环：L477-482（spp 条路径/texel，种子 HashTexel(texel,s)）；
+- 顶点 NEE：L491-492 每路径顶点 DirectIrradiance（L191-230，方向光/点/
+  聚光均含 IntersectAny 阴影射线），贡献 β·(alb·E)/π——Lambert f=alb/π
+  与辐照度 E（内含唯一 ndotl）各一次，**无重复 cos/π**；
+- 余弦半球 BSDF 采样：L108-115（pdf=cosθ/π），L502-507 权重
+  f·cos/pdf = albedo 精确成立（无残余因子）；
+- 天空 miss：L511-514 β·L_sky（SkyRadiance L182-188，地平线以下 0）；
+- 自发光命中：L486（顶点 0 自发光）+ L520-521（命中面 β·Le）——解析灯
+  与自发光材质互斥，无 NEE/命中双重计入；
+- 俄罗斯轮盘：L495-500（depth≥2，q=max(albedo 分量)，pCont=clamp
+  q∈[0.05,0.95]，存活 β/=pCont——无偏补偿）；
+- 吞吐量 β：L484 初始化 1，L502 散射 ×alb，L499 轮盘 ÷pCont，miss/
+  自发光/NEE 一律 ×β；
+- 命中面属性：hitSurface L451-468 重心 (1-u-v,u,v) 与 BVH Möller–
+  Trumbore（BVH.cpp:399+）约定一致；法线对射线取反（L467 双面薄板）；
+  自相交防护：沿法线偏移 1e-3 + ray.t_min=1e-3（L508-509）。
+**结论：语义为带 NEE 的单向路径追踪，未发现偏差，零码改。**
+
+### 15.4 暗带验收实测（4096/skyI=2.0 页，3 位姿 0,5,{0,-4,-8},-35,10）
+
+- **烘焙 2（skyI=2.0 默认，4096/16/64spp）**：10:32:00→10:54:07 = **22.1 分钟**
+  （与 skyI=1 的 22.5min 持平——天空缩放零成本）；
+- **z=0**：top16 均值 60.1→**72.5**（+20%），暗行带 无→无；
+- **z=-4**：top16 均值 17.6→**22.8**（+29%，与页暗区 +30% 一致）；暗行带
+  （均值<25，上缘）行 0-53 → **行 0-10**（残余为远端地板/墙交界真实
+  几何暗部，OFF 同位置也暗）；
+- **z=-8**：整屏纯黑——**独立预存缺陷**（昨夜 2048 基线页同样全黑，
+  OFF 正常 48-66）：该位姿整屏 marker 采样集中在 U[0.05,0.27]×
+  V[0.11,0.39] 一段 chart 的**未栅格化空区**（该区域页 25.4% 非黑，
+  探针 UV 均 (0,0,0)，且不在 rect 边缘——空区在 rect 内部或 UVLM
+  越界逃逸，待分型）。CULL=front 不改变（非背面问题）。取证链
+  logs/pose-8_{after_skyi2,off,dbg3,dbg4,uvdump,cullfront}.log +
+  shadow/pose-8_*.ppm。**遗留**：UVLM 值域审计（越界→marker 出 rect）
+  与 chart 空区成因（unwrap 岛外浪费）分型。
+- 对比图：shadow/band_strip_z{0,-4}.png（上 before/下 after 顶缘 60 行）、
+  band_fix_z{0,-4}.png（整帧）。
+
+### 15.5 证据与回归汇总
+
+- 单测 TestLightmapBaking ALL PASSED（15 项，含 TestBakerTexelAlbedoVariance）；
+- OFF 零影响：同批双运行（新二进制）低频(32×) MAD=**0.038** < 3.5 方差地板；
+- 关键产物：/tmp/lm_opt/{atlas2048,atlas4096_skyi1,atlas4096_skyi2}/
+  {lightmap.lmap,lightmap_page.png}（逐 SHA 已录）；对比图 atlas_cmp_floor.png、
+  atlas_screen_cmp.png、shadow/ 位姿序列；日志 logs/uvdump_*.log、
+  logs/mx_*.log、logs/probe_top_*.log、logs/bake4096*.log、logs/pose-8_*.log。
+- skyI=2 交付页：/tmp/lm_opt/atlas4096_skyi2（lmap SHA16 2ebb4c41529dc43f，PNG f7beaa0142b0243c）；skyI=1 对照页 eda8024289b948c7/869681b86fb298a8；
+- 交付配置 UVDUMP 覆盖（4096/skyI2/默认 env，z=-8 位姿）：3686318/3686400（99.98%——非 z=-4 判据位姿的数字，判据位姿矩阵已录 3686101/3686100）。
