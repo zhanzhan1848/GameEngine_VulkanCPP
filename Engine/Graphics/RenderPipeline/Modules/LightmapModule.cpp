@@ -384,6 +384,7 @@ void LightmapModule::Shutdown() {
     lightmap_tex_ = output_tex_ = uv_rt_ = uv_black_tex_ = albedo_white_tex_ =
         handles::INVALID_RESOURCE;
     page_w_ = page_h_ = 0;
+    page_a_.clear();
     positions_sb_ = uvs_sb_ = indices_ib_ = handles::INVALID_RESOURCE;
     sampler_ = handles::INVALID_SAMPLER;
     composite_pipeline_ = uv_pipeline_ = handles::INVALID_PIPELINE;
@@ -434,6 +435,7 @@ void LightmapModule::ClearLightmap() {
         device_->DestroyTexture(lightmap_tex_);
     lightmap_tex_ = handles::INVALID_RESOURCE;
     page_w_ = page_h_ = 0;
+    page_a_.clear();
     entities_.clear();
     entryScaleBias_.clear();
     matchedEntities_.clear();
@@ -462,6 +464,20 @@ bool LightmapModule::LoadLightmap(const std::string& path) {
     }
     page_w_ = page.width;
     page_h_ = page.height;
+    // §18：A 通道 CPU 镜像（UVDUMP=2 marker 落空区统计）。f16 位级转 f32
+    //（与 DumpUvRT halfToFloat 同式）。
+    page_a_.resize((size_t)page.width * page.height);
+    {
+        const u16* src = page.texels_rgba16f.data() + 3;
+        for (size_t i = 0; i < page_a_.size(); ++i, src += 4) {
+            const u32 expo = (*src & 0x7C00u) >> 10, man = *src & 0x03FFu;
+            u32 bits;
+            if (expo == 0) bits = 0;
+            else if (expo == 31) bits = 0x7F800000u | (man << 13);
+            else bits = ((expo - 15u + 127u) << 23) | (man << 13);
+            std::memcpy(&page_a_[i], &bits, 4);
+        }
+    }
 
     entryScaleBias_.clear();
     entities_.clear();
@@ -978,6 +994,37 @@ void LightmapModule::DumpUvRT(const FrameInputs& inputs) {
             if (y < minY) minY = y;
             if (y > maxY) maxY = y;
         }
+    }
+    // §18 验收②（UVDUMP=2）：marker 采样落空区统计——每个 valid marker 的
+    // atlas UV 双线性采样页 A 通道（与 composite 同采样语义），A≤0.25 计
+    // 落空（该像素无间接补光——z=-8 整屏暗的直接成因度量）。
+    const int uvDumpLevel = std::atoi(std::getenv("PRIMAL_LIGHTMAP_UVDUMP"));
+    u64 markerVoid = 0, markerN = 0;
+    if (uvDumpLevel >= 2 && !page_a_.empty() && page_w_ && page_h_ &&
+        page_a_.size() == (size_t)page_w_ * (size_t)page_h_) {
+        const auto bilinearA = [&](f32 u, f32 v) {
+            const f32 fx = u * (f32)page_w_ - 0.5f, fy = v * (f32)page_h_ - 0.5f;
+            const s32 x0 = (s32)std::floor(fx), y0 = (s32)std::floor(fy);
+            const f32 tx = fx - (f32)x0, ty = fy - (f32)y0;
+            const auto fetch = [&](s32 xx, s32 yy) {
+                xx = std::clamp(xx, 0, (s32)page_w_ - 1);
+                yy = std::clamp(yy, 0, (s32)page_h_ - 1);
+                return page_a_[(u64)yy * page_w_ + xx];
+            };
+            const f32 a = fetch(x0, y0) * (1 - tx) + fetch(x0 + 1, y0) * tx;
+            const f32 b = fetch(x0, y0 + 1) * (1 - tx) + fetch(x0 + 1, y0 + 1) * tx;
+            return a * (1 - ty) + b * ty;
+        };
+        for (u64 i = 0; i < total; ++i) {
+            if (halfToFloat(p[i * 4 + 2]) <= 0.5f) continue;
+            ++markerN;
+            if (bilinearA(halfToFloat(p[i * 4 + 0]), halfToFloat(p[i * 4 + 1])) <= 0.25f)
+                ++markerVoid;
+        }
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[Lightmap][UVDUMP] markerInVoid=" << markerVoid << "/" << markerN
+            << " (" << (markerN ? 100.0 * (double)markerVoid / (double)markerN : 0.0)
+            << "%) — bilinear A<=0.25 at marker UV" << std::endl;
     }
     // 定点采样（显示 1280x720 标定 → render 等比）：中心 / 地板池 (431,416)
     // / 墙区 (200,300)。x 按 1280 归一（720 是 y 基准——首轮曾误用致样点

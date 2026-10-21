@@ -778,3 +778,74 @@ lm_metrics.py、logs/。v2 交付页仍在 /tmp/lm_opt/atlas4096_skyi2。
   on_z8_bloom0,off_z4_new_a,off_z4_new_b}.log。
 - 新交付页：/tmp/lm_e2e_bake/lightmap.lmap（4096 E_ind 对齐天空页，
   SHA16 deff7de4b70e6c57）+ lightmap_page.png。
+
+## 18. chart 空区覆盖轮（2026-10-21 深夜）：bbox×精确密度装箱 + 洪泛填充
+
+**任务**：74.7% 空区（§16/§17 遗留）→ <30%；主嫌疑"UVLM 岛屿 bbox 不满
+[0,1]² 而装箱按整块分配"。先诊断后动手。
+
+### 18.1 诊断（PRIMAL_LIGHTMAP_UV_AUDIT=1——baker 新增审计早退通道，collect+pack+raster 后打印逐 mesh UVLM 值域/覆盖率并跳过 trace）
+
+- **主嫌疑否证**：393 mesh 岛屿 bbox ≈ 整块 [0,1]²（ΣbboxArea=391.03/393，
+  sx/sy≈0.999，越界引用 0）——xatlas 类展开把每 mesh 归一化到满幅，
+  "bbox 只占一部分"不成立。
+- **两真构成**：
+  1. 岛屿只填自身 bbox 的 ~66%（fill p25/p50/p75 = 0.57/0.65/0.75，
+     min 0.055）→ rect 内 34% 空区（旧装箱实测 rect 覆盖率 0.75 =
+     fill 0.66 × 1.3 假满铺系数的余量）；
+  2. **页 71.7% 从未分配**（density16 pack_util 仅 0.283）——密度阶梯
+     32→16 档间 4× 跳变，32 溢出直接掉回 16，页利用率腰斩是 74.7%
+     空区的主项。
+- raster 无"丢洞"：覆盖率与 fill 一致，缝隙全为岛屿间真实 bbox 间隙。
+
+### 18.2 修复（纯 C++，零 shader/ABI 改动）
+
+1. **rect = 岛屿 bbox × 精确密度**（LightmapBaker.cpp pack 段）：
+   k = density·sqrt(A_world/A_island)（texel/UV 单位，两轴一致 = 保
+   aspect）；w=sx·k、h=sy·k（长宽比 = bbox 长宽比）；栅格化命中数 =
+   A·density² 与 unwrap 缩放解耦、精确达标。旧"世界面积×1.3 假满铺
+   [0,1]²"仅留作退化 UV（零面积岛/零值域）回退。
+2. **uv' = (uv-min)/size 归一 → rect**：LMAP scale/bias 写同一仿射
+   （scale = rect/(size·page)，bias = rect/page − min·scale）——运行时
+   UV pre-pass 读同 scale/bias，烘焙/运行自动一致；UVLM 越界逃逸也被
+   bbox 归一结构性收编。
+3. **洪泛填充**（dilate 后新增阶段）：rect 内残留无效纹素多源 BFS 填满
+   （取已有效 8 邻均值，A=0.5 padding 语义与 dilation 一致，源/目标均限
+   rect 内防跨 mesh 泄漏）——marker 落岛屿间隙时得到近旁表面扩散的
+   间接估计而非纯直射透传。
+4. **密度阶梯补 26/24/20 档**（TestVulkanSponzaRenderGraph.cpp）：
+   48/32 均因单 mesh 溢出（mesh_391@48、mesh_18@32），落点 16→**26**
+   （pack_util 0.83，rect 合计 13.9M/16.7M）。
+5. **UVDUMP=2**（LightmapModule）：页 A 通道 CPU 镜像（LoadLightmap
+   填充）+ marker UV 双线性采样 → markerInVoid 统计（验收②度量）。
+
+**坑位**：①洪泛首轮把"入队无效邻居"放在有效性 continue 之后 = 死代码，
+BFS 退化成只填种子环 77K 纹素（页空区 30.48% 勉强贴线、floor mesh_389
+rect 内仍 13.8% 空）——先入队再跳过无效源，修正后填 2.35M、rect 内空区
+0/393 mesh；②烘焙期间 relink 同树二进制 = 运行中进程 SIGBUS（-25min），
+长烘改用同目录副本 .s18 启动；③macOS hang watchdog 会杀长烘进程（主线程
+同步烘 = 窗口挂起 50min；spindump hang 报告取证）——caffeinate -ims
+包裹后稳定跑完；④"30 分钟 audit 跑完整个阶梯"比 20 分钟单密度烘快得多，
+调参轮先 audit 后 bake。
+
+### 18.3 验收（新页 density26，烘焙 51min/64spp/3bounce，纹素 9.35M）
+
+| 验收项 | 结果 |
+|---|---|
+| ① A 构成 | void 74.66%→**16.96%**（A=1 55.73%/A=0.5 27.31%）；rect 内空区 **0/393** mesh。PASS |
+| ② marker 落空区 | markerInVoid：z8 **0**/3686318、z4 **0**/3686101（双线性 A≤0.25）。PASS |
+| ③ z=-8 mean>45 | 28.91 **逐位不变**（vs §17 页 MAD=0.000）——marker 全有效但可见走廊 E_ind≈0（深廊无光真值；§16 ④ mesh_389 p50=0 同证）；纯黑 0.000%。**目标未达且前提被否证**：残余差距（OFF 62.7）= 烘焙解析天空 vs Lumen 天空 HDR 单位差（ON avgLum 0.020 vs OFF 0.25-0.44，12×）——独立标定项（HDR env 采样入烘），非覆盖缺陷 |
+| ④ avgLum 不贴下限 | z4 log2Lum 恒 -6.0 → mean **-5.64**（贴下限 1/286 采样，avgLum 0.0156→0.0202）；z8 仍贴（E=0 同因）。minLogLum(-6→-4) 评估：封顶 effExp 2.88→0.72，ON 各位姿现靠 2.0-2.9 曝光才匹配 OFF 观感（z4 72.5 vs OFF 64.1），上调即整体回退 ~1/3 亮度——**不动**，根因是 HDR 单位差非适应参数 |
+| ⑤ 回归 | z4 70.96→72.53、z0 62.90→81.81、default 77.83→83.92（lapvar 219-1168 纹理保持）；OFF 双运行低频 MAD=**0.705**<3.5 地板（mean 64.14/64.05）；TestLightmapBaking ALL PASSED（15 项） |
+| ⑥ 密度上探 | 16→**26 tex/m**（阶梯自然上探，如实报告）；烘焙 21→51min（纹素 4.22M→9.35M） |
+
+### 18.4 证据与产物
+
+- 交付页：/tmp/lm_e2e_bake/lightmap.lmap SHA16 **cc182af3425ef7a9** +
+  lightmap_page.png；§17 页备份 /tmp/lm_void/lightmap_pre18.lmap
+  （deff7de4b70e6c57）。
+- 对比图：cmp_atlas18.png（图集 74.7%→17.0% 空）、cmp_z4_17_18_off.png
+  （z4 §17/§18/OFF 三联）、cmp_z8_17_18.png（z8 逐位一致取证）。
+- 工具：/tmp/lm_void/{atlas_a_stats.py,tone_stats18.py,capture_matrix18.sh,
+  atlas_cmp18.py}；日志 {audit_old,audit_new,bake18b..d}.log + logs/
+  {on_*,off_z4_*,uvdump_z*,tone_z*}.log + on_*.ppm/off_z4_*.ppm。

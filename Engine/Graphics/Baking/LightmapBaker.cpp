@@ -295,19 +295,105 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
     }
     progress.Report(0, (std::uint32_t)allMeshes.size(), (std::uint32_t)allMeshes.size());
 
+    // §18 UV bbox 收紧：每 bakeable mesh 的 UVLM 值域统计（仅索引引用
+    // 顶点——未引用顶点可能带垃圾 UV）。实测（SponzaLM，393 mesh）：
+    // xatlas 类展开把每 mesh 归一化到整块 [0,1]²（bboxArea 和 ≈ 0.995/
+    // mesh），但岛屿只填充自身 bbox 的 ~66%（p25/p50/p75 = 0.57/0.65/
+    // 0.75）——"分配了但没有任何三角形光栅化到"的座位由两部分构成：
+    //   a) 装箱按世界面积×1.3 系数假满铺 [0,1]² → rect 内 1-fill≈34% 空区；
+    //   b) 密度阶梯过粗（16 装下 32 装不下）→ 页面 71.7% 从未分配
+    //      （74.7% 空区的主项，§16/§17 遗留）。
+    // 修复：rect = 岛屿 bbox × 精确密度（k = density·sqrt(A/island)，长宽
+    // 比 = bbox 长宽比——保 aspect 且两轴密度一致），uv' = (uv-min)/size
+    // 归一后映射 rect；LMAP scale/bias 写同一仿射（运行时 UV pre-pass 自动
+    // 一致）。岛屿间 bbox 内隙由洪泛填充（A=0.5 padding 语义，dilate 后）。
+    struct UvStats {
+        float minU = 0.0f, minV = 0.0f, maxU = 0.0f, maxV = 0.0f;
+        std::uint32_t oor = 0;      // 索引顶点引用中 u/v ∉ [0,1] 的次数
+        double islandArea = 0.0;    // 三角形 UV 有向面积绝对值和
+        bool usable = false;        // 岛屿面积/两轴值域均非退化
+    };
+    std::vector<UvStats> uvStats(bakeable.size());
+    const bool uvAuditOn = [] {
+        const char* a = std::getenv("PRIMAL_LIGHTMAP_UV_AUDIT");
+        return a && std::atoi(a) != 0;
+    }();
+    for (size_t i = 0; i < bakeable.size(); ++i) {
+        const BakeMesh& m = *allMeshes[bakeable[i]];
+        UvStats& st = uvStats[i];
+        st.minU = st.minV = 1e30f;
+        st.maxU = st.maxV = -1e30f;
+        for (std::uint32_t t = 0; t + 2 < m.index_count; t += 3) {
+            const std::uint32_t iv[3] = {m.indices[t], m.indices[t + 1],
+                                         m.indices[t + 2]};
+            float us[3], vs[3];
+            for (int k = 0; k < 3; ++k) {
+                us[k] = m.lightmap_uvs[iv[k] * 2];
+                vs[k] = m.lightmap_uvs[iv[k] * 2 + 1];
+                st.minU = std::min(st.minU, us[k]);
+                st.maxU = std::max(st.maxU, us[k]);
+                st.minV = std::min(st.minV, vs[k]);
+                st.maxV = std::max(st.maxV, vs[k]);
+                if (us[k] < 0.0f || us[k] > 1.0f || vs[k] < 0.0f || vs[k] > 1.0f)
+                    ++st.oor;
+            }
+            const float eu = (us[1] - us[0]) * (vs[2] - vs[0]) -
+                             (vs[1] - vs[0]) * (us[2] - us[0]);
+            st.islandArea += 0.5 * std::abs((double)eu);
+        }
+        st.usable = st.islandArea > 1e-12 &&
+                    (st.maxU - st.minU) > 1e-9f && (st.maxV - st.minV) > 1e-9f;
+        if (uvAuditOn) {
+            const std::uint32_t triCount = m.index_count / 3;
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[Lightmap][uv-audit] name=" << m.name
+                << " tris=" << triCount
+                << " uvbbox=[" << st.minU << "," << st.minV << "," << st.maxU
+                << "," << st.maxV << "]"
+                << " sx=" << (st.maxU - st.minU) << " sy=" << (st.maxV - st.minV)
+                << " bboxArea=" << ((double)(st.maxU - st.minU) * (st.maxV - st.minV))
+                << " islandArea=" << st.islandArea
+                << " fill=" << (st.islandArea > 0.0
+                    ? st.islandArea / std::max(1e-30,
+                          (double)(st.maxU - st.minU) * (st.maxV - st.minV))
+                    : 0.0)
+                << " oor=" << st.oor << "/" << (triCount * 3) << std::endl;
+        }
+    }
+
     // ---- 1 pack：纹素需求 → 矩形 ----
+    // §18：rect 尺寸按岛屿 bbox × 精确密度——k = density·sqrt(A/island)
+    //（texel/UV 单位，两轴一致：长宽比 = bbox 长宽比，保 aspect），栅格化
+    // 命中数 = island·k² = A·density²（表面密度精确达标，与 unwrap 缩放
+    // 无关）。旧式（世界面积×1.3 假满铺 [0,1]²）仅作退化 UV 回退。
     const std::uint32_t atlasW = settings.atlas_size, atlasH = settings.atlas_size;
     const std::uint32_t margin = settings.dilation_px * 2;  // 两侧各留一倍扩张
+    // 每 mesh 的 UV→rect 仿射参数：uv_norm = (uv-min)/size（identity 回退
+    // min=0,size=1——与旧映射逐位一致）。
+    struct UvXform { float minU, sx, minV, sy; };
+    std::vector<UvXform> uvX(bakeable.size(), UvXform{0.0f, 1.0f, 0.0f, 1.0f});
     std::vector<PackRequest> reqs;
     reqs.reserve(bakeable.size());
     for (size_t i = 0; i < bakeable.size(); ++i) {
-        // 需求纹素数 = 面积 × 密度² × 利用率系数 1.3（chart 间隙补偿）。
-        const double texels = meshAreas[i] * (double)settings.texel_density *
-                              (double)settings.texel_density * 1.3;
-        double side = std::sqrt(texels);
-        side = std::max(4.0, std::min((double)atlasW, side));
-        reqs.push_back({static_cast<std::uint32_t>(i), (std::uint32_t)side,
-                        (std::uint32_t)side});
+        double w = 0.0, h = 0.0;
+        const UvStats& st = uvStats[i];
+        if (st.usable) {
+            const double k = (double)settings.texel_density *
+                             std::sqrt(meshAreas[i] / st.islandArea);
+            w = (double)(st.maxU - st.minU) * k;
+            h = (double)(st.maxV - st.minV) * k;
+            uvX[i] = {st.minU, st.maxU - st.minU, st.minV, st.maxV - st.minV};
+        } else {
+            // 退化 UV（零面积岛屿/零值域）：旧整块方形请求 + 恒等映射。
+            const double texels = meshAreas[i] * (double)settings.texel_density *
+                                  (double)settings.texel_density * 1.3;
+            w = h = std::sqrt(texels);
+        }
+        const auto clampSide = [&](double s) {
+            return std::max(4.0, std::min((double)atlasW, std::floor(s)));
+        };
+        reqs.push_back({static_cast<std::uint32_t>(i),
+                        (std::uint32_t)clampSide(w), (std::uint32_t)clampSide(h)});
     }
     MaxRectsPacker packer(atlasW);
     const auto packed = packer.Pack(reqs, margin);
@@ -329,17 +415,29 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
         LightmapMeshEntry e;
         e.SetName(allMeshes[bakeable[p.id]]->name);
         e.atlas_index = 0;
-        e.scale_x = (float)p.w / (float)atlasW;
-        e.scale_y = (float)p.h / (float)atlasH;
-        e.bias_x = (float)p.x / (float)atlasW;
-        e.bias_y = (float)p.y / (float)atlasH;
+        // uv_atlas = ((uv-min)/size)·(rect/page) + rect/page
+        //            = uv·scale + bias（§18 bbox 收紧；运行时 UV pre-pass
+        //            读同一 scale/bias——烘焙/运行自动一致）。identity
+        //            xform（退化回退）时与旧式逐位相同。
+        const UvXform& xf = uvX[p.id];
+        e.scale_x = (float)p.w / (xf.sx * (float)atlasW);
+        e.scale_y = (float)p.h / (xf.sy * (float)atlasH);
+        e.bias_x = (float)p.x / (float)atlasW - xf.minU * e.scale_x;
+        e.bias_y = (float)p.y / (float)atlasH - xf.minV * e.scale_y;
         e.rect_x = p.x; e.rect_y = p.y; e.rect_w = p.w; e.rect_h = p.h;
         result.entries.push_back(e);
     }
 
     {
         const std::uint32_t meshCount = (std::uint32_t)bakeable.size();
+        // §18 审计：每 mesh 栅格化命中数（各 mesh 独占槽位，无竞争）。
+        const bool uvAuditOn = [] {
+            const char* a = std::getenv("PRIMAL_LIGHTMAP_UV_AUDIT");
+            return a && std::atoi(a) != 0;
+        }();
+        std::vector<std::uint64_t> rasterHits(uvAuditOn ? bakeable.size() : 0, 0);
         ParallelBlocks(meshCount, [&](std::uint32_t mi) {
+            std::uint64_t localHits = 0;
             const BakeMesh& m = *allMeshes[bakeable[mi]];
             const MeshRect& r = rects[mi];
             for (std::uint32_t t = 0; t + 2 < m.index_count; t += 3) {
@@ -351,9 +449,14 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                 const float ua = m.lightmap_uvs[ia * 2], va = m.lightmap_uvs[ia * 2 + 1];
                 const float ub = m.lightmap_uvs[ib * 2], vb = m.lightmap_uvs[ib * 2 + 1];
                 const float uc = m.lightmap_uvs[ic * 2], vc = m.lightmap_uvs[ic * 2 + 1];
-                // rect 内 texel 空间坐标（uv∈[0,1] → rect 全域）。
+                // rect 内 texel 空间坐标（uv 归一到岛屿 bbox 后 → rect 全域；
+                // §18——与 LMAP scale/bias 同一仿射，烘焙/运行一致）。
+                const UvXform& xf = uvX[mi];
                 auto toRect = [&](float u, float v) {
-                    return std::pair<float, float>{(float)r.x + u * (float)r.w, (float)r.y + v * (float)r.h};
+                    const float un = (u - xf.minU) / xf.sx;
+                    const float vn = (v - xf.minV) / xf.sy;
+                    return std::pair<float, float>{(float)r.x + un * (float)r.w,
+                                                   (float)r.y + vn * (float)r.h};
                 };
                 const auto [ax, ay] = toRect(ua, va);
                 const auto [bx, by] = toRect(ub, vb);
@@ -380,6 +483,7 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                         TexelSample& s = texels[idx];
                         if (s.valid) continue;  // 先到先得（UV 不重叠前提）
                         s.valid = true;
+                        ++localHits;
                         s.mesh_index = bakeable[mi];  // allMeshes 索引
                         const Vec3 p = Add(Add(Scale(pa, w0), Scale(pb, w1)), Scale(pc, w2));
                         s.pos = p;
@@ -413,8 +517,45 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
                     }
                 }
             }
+            if (!rasterHits.empty()) rasterHits[mi] = localHits;
             progress.Report(1, mi + 1, meshCount);
         });
+        if (uvAuditOn) {
+            double sumRect = 0.0, sumHits = 0.0, sumBbox = 0.0, sumIsland = 0.0;
+            for (size_t i = 0; i < bakeable.size(); ++i) {
+                const MeshRect& r = rects[i];
+                const double rectArea = (double)r.w * r.h;
+                sumRect += rectArea;
+                sumHits += (double)rasterHits[i];
+                const UvStats& st = uvStats[i];
+                const double bboxArea =
+                    (double)(st.maxU - st.minU) * (st.maxV - st.minV);
+                sumBbox += bboxArea;
+                sumIsland += st.islandArea;
+                PRIMAL_LOG_STREAM(Info, "Render")
+                    << "[Lightmap][uv-audit] name=" << allMeshes[bakeable[i]]->name
+                    << " rect=" << r.w << "x" << r.h << "@" << r.x << "," << r.y
+                    << " rectArea=" << rectArea
+                    << " hits=" << rasterHits[i]
+                    << " cov=" << (rectArea > 0.0 ? (double)rasterHits[i] / rectArea : 0.0)
+                    << std::endl;
+            }
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[Lightmap][uv-audit] SUMMARY density=" << settings.texel_density
+                << " pack_util=" << packer.Utilization()
+                << " meshes=" << bakeable.size()
+                << " sum_rect=" << sumRect
+                << " sum_hits=" << sumHits
+                << " page=" << atlasW << "x" << atlasH
+                << " page_raster_frac=" << (sumHits / ((double)atlasW * atlasH))
+                << " sum_bbox=" << sumBbox << " sum_island=" << sumIsland
+                << " mean_fill=" << (sumBbox > 0.0 ? sumIsland / sumBbox : 0.0)
+                << std::endl;
+            // 早退：审计只到 raster 为止——返回错误让密度阶梯继续/终止，
+            // 不做 BVH/trace（省 ~20 分钟积分）。
+            result.error = "[uv-audit] early exit after raster (trace skipped)";
+            return result;
+        }
     }
 
     // ---- 3 build：全场景 BVH + 三角形→mesh 映射 ----
@@ -668,6 +809,76 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
         accum = std::move(next);
     }
     progress.Report(4, settings.dilation_px, settings.dilation_px);
+
+    // §18 洪泛填充：rect 内仍未覆盖的纹素（岛屿间 bbox 间隙——"分配了
+    // 但没有任何三角形光栅化到"座位的 rect 内部分）以 dilation 同语义
+    //（A=0.5 padding）多源 BFS 填满：每纹素取已有效 8 邻域均值，源/目标
+    // 均限 rect 内（不跨 mesh 泄漏）。marker 采样落间隙时得到近旁表面
+    // 扩散的间接估计而非纯直射透传（§15.4/§16 z=-8 位姿暗的主修项）。
+    {
+        std::vector<std::uint8_t> inRect((size_t)texelCount, 0);
+        for (const auto& r : rects) {
+            const std::uint32_t y1 = std::min(atlasH, r.y + r.h);
+            const std::uint32_t x1 = std::min(atlasW, r.x + r.w);
+            for (std::uint32_t y = r.y; y < y1; ++y)
+                for (std::uint32_t x = r.x; x < x1; ++x)
+                    inRect[(size_t)y * atlasW + x] = 1;
+        }
+        std::vector<std::uint8_t> queued((size_t)texelCount, 0);
+        std::vector<std::uint32_t> queue;
+        queue.reserve(texelCount / 4);
+        // 种子：rect 内无效、且 8 邻域存在 rect 内有效纹素（扫描序确定）。
+        for (std::uint32_t i = 0; i < texelCount; ++i) {
+            if (!inRect[i] || texels[i].valid) continue;
+            const std::int32_t x = (std::int32_t)(i % atlasW), y = (std::int32_t)(i / atlasW);
+            bool seed = false;
+            for (std::int32_t dy = -1; dy <= 1 && !seed; ++dy)
+                for (std::int32_t dx = -1; dx <= 1 && !seed; ++dx) {
+                    if (!dx && !dy) continue;
+                    const std::int32_t nx = x + dx, ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= (std::int32_t)atlasW ||
+                        ny >= (std::int32_t)atlasH)
+                        continue;
+                    const std::uint32_t ni = (std::uint32_t)ny * atlasW + (std::uint32_t)nx;
+                    if (inRect[ni] && texels[ni].valid) seed = true;
+                }
+            if (seed) { queued[i] = 1; queue.push_back(i); }
+        }
+        std::uint64_t filled = 0;
+        for (size_t head = 0; head < queue.size(); ++head) {
+            const std::uint32_t i = queue[head];
+            const std::int32_t x = (std::int32_t)(i % atlasW), y = (std::int32_t)(i / atlasW);
+            Vec3 sum{0, 0, 0};
+            std::uint32_t n = 0;
+            for (std::int32_t dy = -1; dy <= 1; ++dy)
+                for (std::int32_t dx = -1; dx <= 1; ++dx) {
+                    if (!dx && !dy) continue;
+                    const std::int32_t nx = x + dx, ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= (std::int32_t)atlasW ||
+                        ny >= (std::int32_t)atlasH)
+                        continue;
+                    const std::uint32_t ni = (std::uint32_t)ny * atlasW + (std::uint32_t)nx;
+                    if (!inRect[ni]) continue;
+                    // 先入队再跳过无效源：入队条件含 !valid，若放在有效性
+                    // continue 之后是死代码（首轮实测洪泛只填了种子环 77K）。
+                    if (!queued[ni] && !texels[ni].valid) {
+                        queued[ni] = 1;
+                        queue.push_back(ni);
+                    }
+                    if (!texels[ni].valid) continue;
+                    sum = Add(sum, accum[ni]);
+                    ++n;
+                }
+            if (n > 0) {
+                accum[i] = Scale(sum, 1.0f / (float)n);
+                texels[i].valid = true;
+                ++filled;
+            }
+        }
+        PRIMAL_LOG_STREAM(Info, "Render")
+            << "[Lightmap][bake] flood fill: " << filled << " texels (A=0.5)"
+            << std::endl;
+    }
 
     // ---- 8 encode + save ----
     LightmapContainer c;

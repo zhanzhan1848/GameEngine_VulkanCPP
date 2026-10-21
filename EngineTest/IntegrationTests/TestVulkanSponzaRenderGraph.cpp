@@ -2418,12 +2418,15 @@ void TestVulkanSponzaRenderGraph::Run() {
             lmSettings.bounces = 3;
             // 密度自适应阶梯：从 48 纹素/米减半直到全部 chart 装进 4096 页
             //（下限 0.02 级——覆盖厘米级源网格的极端面积）。
+            // §18：补 26/24/20 档——bbox 收紧后档间差距 4×，粗档会在 32
+            // 溢出时直接掉回 16、页利用率腰斩（74.7% 空区主项）。26 档为
+            // 装箱富余试探（util ~0.83），失败自动落 24。
             std::snprintf(lmSettings.output_dir, sizeof(lmSettings.output_dir), "%s",
                           "/tmp/lm_e2e_bake");
             bool lmOk = false;
             std::string lmErr;
-            for (float density : {48.0f, 32.0f, 16.0f, 12.0f, 10.0f, 8.0f, 4.0f,
-                                  2.0f, 1.0f,
+            for (float density : {48.0f, 32.0f, 26.0f, 24.0f, 20.0f, 16.0f, 12.0f,
+                                  10.0f, 8.0f, 4.0f, 2.0f, 1.0f,
                                   0.5f, 0.25f, 0.125f, 0.0625f, 0.03f, 0.02f}) {
                 lmSettings.texel_density = density;
                 lmErr.clear();

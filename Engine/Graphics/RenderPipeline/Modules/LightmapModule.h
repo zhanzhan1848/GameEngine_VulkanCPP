@@ -159,6 +159,9 @@ private:
     // PAGEDUMP 纹素坐标换算用——2026-10-21 修 1023 硬编码遗留）。
     u32 page_w_ = 0;
     u32 page_h_ = 0;
+    // 页 A 通道 CPU 镜像（§18：UVDUMP=2 的"marker 采样落空区"验收统计用；
+    // LoadLightmap 填充，debug 页为空——语义见 LightmapContainer A 通道）。
+    std::vector<f32> page_a_;
     rhi::ResourceHandle output_tex_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle uv_rt_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle uv_black_tex_{rhi::handles::INVALID_RESOURCE};  // 1×1 z=0
