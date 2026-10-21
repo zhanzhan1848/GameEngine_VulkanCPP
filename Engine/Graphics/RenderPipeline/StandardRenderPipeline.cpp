@@ -4576,7 +4576,11 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // T4.6.5 followup: TAAPass now has working SPIR-V (Vulkan) + MSL (Metal)
         // shaders, triple-buffered history with resize handling, so jitter is
         // safe to enable on both platforms.
-        gpuDraw.SetJitterEnabled(taa_jitter_enabled_);
+        // [2026-10-21 §19 后处理消融] TAA_OFF=1：跳过 TAA（jitter 同关），
+        // 后处理链退化为 composite→(bloom)→tonemap——与 RWCB 路径的既有
+        // TAA_OFF 分支同语义（逐级消融归因矩阵旋钮）。
+        const bool taaOffMain = std::getenv("TAA_OFF") != nullptr;
+        gpuDraw.SetJitterEnabled(taa_jitter_enabled_ && !taaOffMain);
         // TAA — velocity from GBuffer MRT (NDC-space, matches TAA.comp expectation).
         auto velTAA = graph.ImportResource("GBufferVelocity_TAA", gpuDraw.GetGBufferVelocity());
         // Depth reprojection: curr/prev depth + view-projection pair. Active on
@@ -4599,9 +4603,14 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 taaDepthPtr = &taaDepth;
             }
         }
-        auto taaOut = PostProcess::AddTAAPass(graph, postProcessInputRG, velTAA,
-            render_width_, render_height_, static_cast<u32>(frameCount_), taaDepthPtr);
-        RGResourceHandle hdrClean = taaOut.output;
+        RGResourceHandle hdrClean;
+        if (taaOffMain) {
+            hdrClean = postProcessInputRG;  // TAA_OFF：旁路累积，直读链上输入
+        } else {
+            auto taaOut = PostProcess::AddTAAPass(graph, postProcessInputRG, velTAA,
+                render_width_, render_height_, static_cast<u32>(frameCount_), taaDepthPtr);
+            hdrClean = taaOut.output;
+        }
         taaResolvedColor = hdrClean;
 
         // Bloom owns independent per-frame images (BloomPass.cpp), so it can

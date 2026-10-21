@@ -849,3 +849,121 @@ rect 内仍 13.8% 空）——先入队再跳过无效源，修正后填 2.35M�
 - 工具：/tmp/lm_void/{atlas_a_stats.py,tone_stats18.py,capture_matrix18.sh,
   atlas_cmp18.py}；日志 {audit_old,audit_new,bake18b..d}.log + logs/
   {on_*,off_z4_*,uvdump_z*,tone_z*}.log + on_*.ppm/off_z4_*.ppm。
+
+---
+
+## §19 用户五观感问题 + 后处理逐级消融归因（2026-10-21）
+
+机位 CAM_A=(0,1.7,0,0,0)（走道平视）/ CAM_UP=(0,1.7,0,22,0)（仰视廊顶），
+frame 400 capture（PPM 1280x720）+ composite 输出 HDR 读回
+（PRIMAL_LIGHTMAP_DUMPFRAME，2560x1440 RGBA16F，预 TAA）。基线页 =
+§18 交付（26 tex/m，SHA16 cc182af3425ef7a9）。曝光日志
+（PRIMAL_TONE_ADAPT_LOG）：log2Lum 恒 **-6.0（贴适应态下限）**，avgLum
+0.015625，ubo_exposure 0.10，**effective_exposure=2.88**。
+
+### 19.1 消融矩阵（同位姿同帧，A0 全默认为参照）
+
+| 级 | 配置 | 深暗桶 B/R* | 深暗桶 lum | 直射区贴白% | 廊顶带 lum | meanL |
+|---|---|---|---|---|---|---|
+| 数据 | composite HDR（预 TAA） | **1.055** | — | —（HDR>3 占 0.89%） | — | 0.133 |
+| A0 | 默认 | 1.015 | 42.66 | **54.36** | 62.97 | 79.06 |
+| A1 | TAA_OFF | 0.996 | 40.50 | 52.95 | 61.45 | 77.16 |
+| A2 | PRIMAL_BLOOM=1（默认本关） | =A0 | =A0 | 55.37 | 65.18 | 79.69 |
+| A3 | PRIMAL_TONE_ADAPT=0 | 1.010 | 5.60 | **0.00** | 16.94 | 13.30 |
+| A4 | PRIMAL_TONE_SAT=1 | 0.998 | =A0 | 54.42 | =A0 | 79.06 |
+| A6 | LM OFF（Lumen 参考） | **0.804** | 56.23 | **0.01** | 95.95 | 64.08 |
+| 仰视 | A7 LM ON vs A8 OFF | darkBR 1.05/0.81 | — | **4.24 / 0.00** | 108.3/96.1 | 71.3/67.8 |
+
+*深暗桶 = A0 composite HDR luma∈(0.0005,0.05) 的固定像素集（684k/720p，
+占帧 53%）——数据侧 B/R 1.055；桶内 B/R 在后处理各级均 ≈1.0，无放大。
+
+### 19.2 六问题归因结论
+
+- **① 暗间接区泛蓝 = 数据导致（后处理无关已证）**。深暗桶 B/R 数据侧
+  1.055（天空 zenith B/R=1.09 血统——暗区间接光由天空主导），后处理
+  各级 0.996-1.015 不放大反而微降；TAA/bloom/sat 合计 <±0.02。
+  2.88× 自适应曝光的"贡献"是把 0.005 级蓝偏提到可见亮度（可见性放大，
+  非色偏制造）。OFF 参考 0.804。
+- **② 直射过曝 = 混合：数据（单位差触发）+ 自适应曝光（执行）**。
+  LM 互斥态 avgLum 贴 -6 下限（§18 12× 天空单位差的直接后果）→
+  effExp 2.88 → 直射区贴白 54.36%；A3 固定曝光即归 0.00%（执行者），
+  但整帧回暗 6×（meanL 79→13）不可用——真修复在数据侧增益（19.3）。
+  TAA/bloom/sat 对贴白贡献 ≤1.4%。
+- **③ 廊顶异常亮 = 混合：物理路径数据（主导）+ 单位差曝光（执行）**。
+  仰视机位 LM ON 廊顶 clip 4.24% vs OFF 0.00%；图集直读 E max=17.17
+  = π×5.5（§17 天空积分自证），top-mesh meanE 6.5 = albedo_floor×E_floor
+  ≈0.35×17——**地板 bounce 全半球贡献的物理正确量级**（廊顶法线朝下，
+  其半球 ray 全部命中地板）。composite 后处理各级廊顶带 61-65 不变
+  （A0-A4）——与后处理无关已证。**"地平以下天空"嫌疑否证**：SKYBELOW=0
+  重烘 A/B 同位姿画面 |diff|=0.0009/255（图集统计 p75 2.62→0.50 有差异
+  但变化 texel 在用户机位不可见——向下逃逸 ray 仅存在于开放边缘/背面）。
+  执行侧与②同链：E 1× 单位 ×2.88 曝光 → 仰视廊顶贴白。GAIN=4 后
+  仰视 clip 4.24%→3.71%（F2，曝光回落部分抵消增益抬升）——廊顶物理
+  亮度本身保留，观感由 gain 平衡。
+- **④ 移动突变黑面：未复现**。CAM_SCRIPT 慢移（200-238）/快转
+  （240-298）/横移（300-358）序列逐帧 newBlack（L<4 且前帧>20）全部
+  0.000%；静止帧 UVDIFF 全帧 maxRel=0（重绘与 GBuffer 逐位同面，
+  z-eps 1e-3 收缩充分）；markerInVoid 0.0016%。四项现有嫌疑中深度
+  失配无证据，指向用户特定位姿/WASD 速度或 TAA history 失效瞬态——
+  待用户提供复现位姿后按 UVDUMP 移动窗取证。本轮不动 eps（放宽有
+  遮挡错误风险且无失败证据）。
+- **⑤ 间接区一格格 = 数据分辨率（26 tex/m 装箱上限），非采样器模式**。
+  composite 采样器 Linear/Linear+Clamp（无 mip 可言——纹理单层）。
+  FFT：间接 ROI 检出 26.7px/27px 强周期峰（谱峰/中位 199.8）= 4cm
+  texel 网格投影。A9 blur A/B（图集 3x3 高斯低通变体）：35.3% 像素
+  变化（有效），但几何周期仍主导频谱——格感=密度上限（§18 装箱
+  26 tex/m 封顶），主修路径=8192 页或 baker 内建低通（工具已验证：
+  /tmp/lm_pp/blur_lmap.py 免重烘生成变体）。
+- **⑥ GAIN=0 阴影残光 = 直射链既有行为（83%）+ TAA（17%）+ bloom（0.3%）**。
+  纯阴影集（C0 HDR 最暗 5%）：LDR 残光 mean 9.98；+bloom 10.01
+  （+0.3%）；+TAA_OFF 8.31（-17%）；HDR 数据底 0.0005（B/R 0.93，
+  deferred 直射链暗部 fill，lmMutex 门控清单已核：froxel/volume/SC/
+  DDGI/WRC/SSGI 全关）。OFF 模式同区域 61.1（Lumen GI 正常照亮）——
+  GAIN=0 残光 << OFF，验收达标；非 lightmap 引入（两态共用 deferred）。
+
+### 19.3 修复与默认值建议
+
+- **数据侧（已实施）**：`PRIMAL_LIGHTMAP_GAIN` 默认 **1.0→4.0**
+  （LightmapModule.cpp，env 可覆盖回 1.0）——机制：E 抬 4× → avgLum
+  离开 -6 下限 → effEff 回落 → 直射不过曝 + 暗区提亮。本质 = §18 12×
+  单位差的运行时增益补偿（E 全量级由 baker 天空 1× 单位主导，
+  max=π×5.5=17.2 自证）。实测（above 页 E0）：贴白 54.36%→0.00%、
+  深暗桶 lum 42.7→56.6（OFF 参考 56.2）、darkBR 1.015→0.896
+  （OFF 0.804）。交付页（below0）同增益 F3/G_final：贴白 0.49%、
+  darkBR 1.101、mid 49.66。PRIMAL_TONE_EV=-1 亦可消过曝但暗区偏暗
+  （36.2 vs 56.6），留作备选。
+- **③ baker 侧**：PRIMAL_LIGHTMAP_SKYBELOW 旋钮落地（默认保持 §17
+  行为；0=物理零）。A/B 已证画面等价（19.4）——不改默认；交付页用
+  below0 版（图集更物理：虚假下半球分量移除，p75 2.62→0.50）。
+- **后处理侧**：不动引擎 tonemap 常量（§18 已评估 minLogLum 不动）；
+  bloom 保持默认关（A2 证明开启仅 +0.2% 贴白）；TAA_OFF/SAT 等
+  消融旋钮本轮已接（主路径 TAA_OFF 与 RWCB 分支同语义）。
+
+### 19.4 ③ SKYBELOW=0 重烘 A/B
+
+重烘（4096/64spp/3bounce，density 阶梯 48/32 溢出落 26 同 §18；副本
+二进制+caffeinate -ims）：图集统计 p75 2.62→**0.50**（中低档 E 大幅下移
+——below-horizon 虚假分量集中在开放边缘 texel）、p95 14.9→13.5、
+max 17.17 不变（全开天空不受影响，π×5.5 自证）、E B/R median
+0.42→0.26（更暖：暖地平色移除后剩余 bounce 光主导）。**同位姿画面
+A/B：|diff|=0.0009/255（近零）**——below-horizon 天空对用户机位可见
+表面无贡献，③ 的 baker 嫌疑否证；廊顶 E=地板 bounce 物理路径。
+
+**事故记录（磁盘纪律）**：above 备份与输出用硬链接后，SaveLightmap
+Container 的 fopen("wb") 截断写穿透 inode——§18 原页（cc182af3425ef7a9）
+物理丢失。恢复路径：SKYBELOW 不设重烘（~51-110min）即逐参数复现。
+本轮全部 above 页渲染数据（A0-A9/C/E 系列）均在丢失前采集完毕。
+
+### 19.5 证据与产物
+
+- 工具：/tmp/lm_pp/{lmap_stats.py,metrics.py,cross_metrics.py,
+  blur_lmap.py,run_matrix.sh,run_extra.sh,rebake.sh}
+- 采集：/tmp/lm_pp/{A0..A9,B0_move,D0_fast,C0-C3,E0-E2}（PPM+HDR bin+日志）
+- 曝光：[ToneAdapt] log2Lum=-6 avgLum=0.015625 effExp=2.88（A0 log）
+- 终验：G_final（交付默认=below0 页+GAIN4）clip 0.49%/darkBR 1.101/
+  mid 49.66；G_off 与 A6 双 OFF 低频 MAD **3.18<3.5 地板**（零影响达标）；
+  TestLightmapBaking ALL PASSED。
+- 对比图：/tmp/lm_pp/cmp_{ablation,uplook,blur}.png（A0 问题画面 vs
+  消融级 vs E0 修复 vs OFF 参考；仰视 LM ON/OFF；blur A/B）。
+- 交付页：/tmp/lm_e2e_bake/lightmap.lmap = below0 版（cp 自
+  lightmap_below0.lmap）；测试探针机位复现用 SPGI_CAM 同 §19 头。

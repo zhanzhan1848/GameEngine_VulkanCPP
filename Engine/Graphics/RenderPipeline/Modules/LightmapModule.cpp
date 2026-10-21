@@ -869,10 +869,15 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
-            // 间接增益独立旋钮（PRIMAL_LIGHTMAP_GAIN，默认 1.0 = 物理恒等；
-            // v3 语义：仅作用于间接叠加项 albedo·E_ind/π·gain——直射底图
-            // 不受影响），不进入任何 Lumen 回路。
-            float gain = 1.0f;
+            // 间接增益（PRIMAL_LIGHTMAP_GAIN，v3 语义：仅作用于间接叠加项
+            // albedo·E_ind/π·gain——直射底图不受影响），不进入任何 Lumen 回路。
+            // §19 标定（2026-10-21）：E 全量级由 baker 天空 1× 单位主导
+            //（图集 max=π×5.5=17.2 自证），与运行时直射/显示档存在 §18 记录
+            // 的 ~12× 单位差——gain=1 时 avgLum 贴适应下限（log2Lum=-6，
+            // effExp=2.88 打满）→ 直射区贴白 54.4%。默认 1.0→4.0：E0 实测
+            // 贴白 54.4%→0.00%，深暗桶亮度 42.7→56.6（OFF 参考 56.2），
+            // darkBR 1.015→0.896（OFF 0.804）——与 OFF 观感对齐。env 可覆盖。
+            float gain = 4.0f;
             if (const char* g = std::getenv("PRIMAL_LIGHTMAP_GAIN")) {
                 const float v = static_cast<float>(std::atof(g));
                 if (v >= 0.0f && v <= 8.0f) gain = v;
@@ -915,6 +920,65 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             cmd->PushConstants(composite_layout_, ShaderStage::Pixel, 0, sizeof(pushParams),
                                pushParams);
             cmd->Draw(3, 0, 1, 0);
+
+            // [2026-10-21 §19 后处理消融] PRIMAL_LIGHTMAP_DUMPFRAME：一次性
+            // 读回 composite 输出（预 TAA 的 HDR RGBA16F，f16 位级）到
+            // /tmp/lm_pp/composite_f<frame>.bin——归因矩阵的"数据侧"证据
+            //（B/R、间接/直射量级、内亮 E 均在 HDR 线性域度量，后处理各级
+            // 的 LDR 域由 SPONZA_CAPTURE 的 PPM 对照）。时序同 UVDUMP：触发
+            // 帧 ≥360，读到的是 ≥3 帧前已 fence 完成的内容（静态场景等价）。
+            if (std::getenv("PRIMAL_LIGHTMAP_DUMPFRAME") &&
+                output_tex_ != handles::INVALID_RESOURCE && inputs.frame_index >= 360) {
+                static bool s_frameDumped = false;
+                if (!s_frameDumped) {
+                    s_frameDumped = true;
+                    const u32 w = inputs.render_width, h = inputs.render_height;
+                    BufferDesc bd{};
+                    bd.size = (u64)w * h * 8;
+                    bd.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+                    bd.memoryUsage = GPUMemoryUsage::Readback;
+                    ResourceHandle stage = device_->CreateBuffer(bd);
+                    if (stage != handles::INVALID_RESOURCE) {
+                        auto ch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                        auto* c2 = GetCommandBuffer(ch);
+                        if (c2) {
+                            c2->Begin();
+                            BufferTextureCopyRegion region{};
+                            region.bufferOffset = 0;
+                            region.imageSubresource = {0, 0, 1};
+                            region.imageOffset = {0, 0, 0};
+                            region.imageExtent = {w, h, 1};
+                            c2->CopyTextureToBuffer(output_tex_, stage, &region, 1);
+                            c2->End();
+                            QueueSubmitInfo sb{};
+                            sb.cmdBuffer = ch;
+                            SyncHandle sf = device_->CreateSync();
+                            sb.signalFence = sf;
+                            device_->Submit(sb);
+                            device_->WaitForSync(sf, UINT32_MAX);
+                            device_->DestroySync(sf);
+                            device_->DestroyCommandBuffer(ch);
+                            std::system("mkdir -p /tmp/lm_pp");
+                            const std::string path =
+                                "/tmp/lm_pp/composite_f" +
+                                std::to_string(inputs.frame_index) + ".bin";
+                            FILE* out = std::fopen(path.c_str(), "wb");
+                            if (out) {
+                                const void* p = device_->MapBuffer(stage);
+                                if (p) {
+                                    std::fwrite(p, 8, (size_t)w * h, out);
+                                    device_->UnmapBuffer(stage);
+                                }
+                                std::fclose(out);
+                                PRIMAL_LOG_STREAM(Info, "Render")
+                                    << "[Lightmap][DUMPFRAME] " << w << "x" << h
+                                    << " -> " << path << std::endl;
+                            }
+                        }
+                        device_->DestroyBuffer(stage);
+                    }
+                }
+            }
 
             // 一次性 UV RT 读回（PRIMAL_LIGHTMAP_UVDUMP[=frame]，取证用）：
             // 把 uv_rt_ 内容读回 CPU，统计 z>0.5 有效像素数并抽样 3 点——

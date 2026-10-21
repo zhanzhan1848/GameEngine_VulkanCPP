@@ -186,6 +186,16 @@ struct TexelSample {
 inline Vec3 SkyRadiance(const BakeSky& sky, const Vec3& dir) {
     // §17：与运行时 EvaluateSkyBase 同曲线——pow(up,0.45) 混合；地平以下
     // 返回地平色（运行时 clamp(up,0,1) 语义：向下射线带回暖地平 proxy）。
+    // [2026-10-21 §19 ③ 廊顶异常亮取证/修复] PRIMAL_LIGHTMAP_SKYBELOW：
+    //   未设/1 = §17 行为（地平以下返回地平色——面朝下表面的向下逃逸
+    //   bounce ray 全按 ~4.4 计，E_ind 含虚假下半球分量）；
+    //   0     = 物理零（向下逃逸 = 无贡献，§17 前行为）。
+    //   取证 A/B：同图集直读 E 分布对比；若廊顶/天花板 E 回物理量级即坐实。
+    static const bool s_belowZero = [] {
+        const char* e = std::getenv("PRIMAL_LIGHTMAP_SKYBELOW");
+        return e && e[0] == '0' && e[1] == '\0';
+    }();
+    if (s_belowZero && dir.y < 0.0f) return Vec3{0, 0, 0};
     const float t = std::pow(std::min(1.0f, std::max(0.0f, dir.y)), 0.45f);
     const Vec3 c = Mix({sky.horizon[0], sky.horizon[1], sky.horizon[2]},
                        {sky.zenith[0], sky.zenith[1], sky.zenith[2]}, t);
