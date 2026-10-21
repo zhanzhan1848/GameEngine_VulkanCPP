@@ -270,9 +270,20 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
         // 管线偏差）。PRIMAL_LIGHTMAP_DEPTHALWAYS=1 为取证旋钮：跳过深度比较
         // （遮挡关系错误但覆盖计数不失真），用于分离"深度等值性失配"与
         // "几何绘制缺失"两类覆盖失效。
-        pd.depthFunc = std::getenv("PRIMAL_LIGHTMAP_DEPTHALWAYS")
-            ? ComparisonFunc::Always : ComparisonFunc::LessEqual;
-        pd.cullMode = CullMode::None;              // 烘焙面双面
+            pd.depthFunc = std::getenv("PRIMAL_LIGHTMAP_DEPTHALWAYS")
+                ? ComparisonFunc::Always : ComparisonFunc::LessEqual;
+            // [2026-10-21 远平面黑带轮] 裁剪实验旋钮 PRIMAL_LIGHTMAP_CULL=
+            // none/front/back（默认 none = 原形态）。假设：UV pass 双面直绘
+            // 在 z-eps 松弛内让背面/次表面过测并在后绘覆盖 marker（远平面
+            // 相对深度拥挤处成带）。与 GBuffer 光栅化集对齐的裁剪（考虑
+            // Y 翻转导致的绕序反转）应消除该带——由 UVDUMP 覆盖 + 黑带
+            // 采集裁决后定默认值。
+            pd.cullMode = [] {
+                const char* c = std::getenv("PRIMAL_LIGHTMAP_CULL");
+                if (c && c[0] == 'f') return CullMode::Front;
+                if (c && c[0] == 'b') return CullMode::Back;
+                return CullMode::None;               // 烘焙面双面（原形态）
+            }();
         pd.topology = PrimitiveTopology::TriangleList;
         pd.vertexAttributes.clear();               // 顶点拉取
         pd.vertexBindings.clear();
@@ -361,6 +372,7 @@ void LightmapModule::Shutdown() {
     if (composite_pipeline_ != handles::INVALID_PIPELINE) device_->DestroyPipeline(composite_pipeline_);
     if (uv_pipeline_ != handles::INVALID_PIPELINE) device_->DestroyPipeline(uv_pipeline_);
     lightmap_tex_ = output_tex_ = uv_rt_ = uv_black_tex_ = handles::INVALID_RESOURCE;
+    page_w_ = page_h_ = 0;
     positions_sb_ = uvs_sb_ = indices_ib_ = handles::INVALID_RESOURCE;
     sampler_ = handles::INVALID_SAMPLER;
     composite_pipeline_ = uv_pipeline_ = handles::INVALID_PIPELINE;
@@ -402,6 +414,7 @@ void LightmapModule::RegisterDebugLightmap() {
         PRIMAL_LOG_STREAM(Error, "Render") << "[Lightmap] debug gradient texture failed" << std::endl;
         return;
     }
+    page_w_ = page_h_ = 256;
     PRIMAL_LOG_STREAM(Info, "Render") << "[Lightmap] debug gradient page registered (256x256)" << std::endl;
 }
 
@@ -409,6 +422,7 @@ void LightmapModule::ClearLightmap() {
     if (device_ && lightmap_tex_ != handles::INVALID_RESOURCE)
         device_->DestroyTexture(lightmap_tex_);
     lightmap_tex_ = handles::INVALID_RESOURCE;
+    page_w_ = page_h_ = 0;
     entities_.clear();
     entryScaleBias_.clear();
     matchedEntities_.clear();
@@ -435,6 +449,8 @@ bool LightmapModule::LoadLightmap(const std::string& path) {
         lightmap_tex_ = handles::INVALID_RESOURCE;
         return false;
     }
+    page_w_ = page.width;
+    page_h_ = page.height;
 
     entryScaleBias_.clear();
     entities_.clear();
@@ -1056,6 +1072,13 @@ void LightmapModule::DumpUvRT(const FrameInputs& inputs) {
                 probeZXY("bot1", dispIdx(640, 446));
                 probeZXY("bot2", dispIdx(640, 560));
                 probeZXY("bot3", dispIdx(640, 680));
+                // [2026-10-21 远平面黑带轮] 上缘探针（display y 4/12/24/40
+                // @ x 640）：远面 marker 的重绘深度与 GBuffer 是否同面——
+                // 同面 delta≈-eps_rel，异面（slack 内远表面）更负。
+                probeZXY("top1", dispIdx(640, 4));
+                probeZXY("top2", dispIdx(640, 12));
+                probeZXY("top3", dispIdx(640, 24));
+                probeZXY("top4", dispIdx(640, 40));
                 // [DIAG] PRIMAL_LIGHTMAP_DUMPPAIR：.w 与 gb 深度场各导出
                 // 灰度 PPM（/tmp/lm_mirror/{uvw,gbw}.ppm）供视觉对照。
                 if (std::getenv("PRIMAL_LIGHTMAP_DUMPPAIR")) {
@@ -1134,7 +1157,8 @@ void LightmapModule::DumpUvRT(const FrameInputs& inputs) {
                 BufferTextureCopyRegion pr{};
                 pr.bufferOffset = 0;
                 pr.imageSubresource = {0, 0, 1};
-                pr.imageOffset = {(s32)(fU * 1023), (s32)(fV * 1023), 0};
+                pr.imageOffset = {(s32)(fU * (f32)(page_w_ - 1)),
+                                  (s32)(fV * (f32)(page_h_ - 1)), 0};
                 pr.imageExtent = {1, 1, 1};
                 c3->CopyTextureToBuffer(lightmap_tex_, stage2, &pr, 1);
                 c3->End();
@@ -1148,7 +1172,8 @@ void LightmapModule::DumpUvRT(const FrameInputs& inputs) {
                 device_->DestroyCommandBuffer(ch2);
                 if (const u16* q = static_cast<const u16*>(device_->MapBuffer(stage2))) {
                     PRIMAL_LOG_STREAM(Info, "Render")
-                        << "[Lightmap][PAGEDUMP] page(" << (u32)(fU * 1023) << "," << (u32)(fV * 1023)
+                        << "[Lightmap][PAGEDUMP] page(" << (u32)(fU * (page_w_ - 1))
+                        << "," << (u32)(fV * (page_h_ - 1))
                         << ") rgb=(" << halfToFloat(q[0]) << "," << halfToFloat(q[1])
                         << "," << halfToFloat(q[2]) << ")" << std::endl;
                     device_->UnmapBuffer(stage2);

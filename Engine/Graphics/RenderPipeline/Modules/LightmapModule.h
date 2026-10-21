@@ -145,6 +145,10 @@ private:
     rhi::ShaderHandle uv_fs_{rhi::handles::INVALID_SHADER};
 
     rhi::ResourceHandle lightmap_tex_{rhi::handles::INVALID_RESOURCE};
+    // 当前页尺寸（LoadLightmap/RegisterDebugLightmap 记录；DumpUvRT 的
+    // PAGEDUMP 纹素坐标换算用——2026-10-21 修 1023 硬编码遗留）。
+    u32 page_w_ = 0;
+    u32 page_h_ = 0;
     rhi::ResourceHandle output_tex_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle uv_rt_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle uv_black_tex_{rhi::handles::INVALID_RESOURCE};  // 1×1 z=0
