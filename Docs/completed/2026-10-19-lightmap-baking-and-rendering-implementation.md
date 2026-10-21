@@ -622,3 +622,68 @@ LightmapBaker.cpp L470-570 积分器语义逐项核对（v2 2026-10-20 用户定
   logs/mx_*.log、logs/probe_top_*.log、logs/bake4096*.log、logs/pose-8_*.log。
 - skyI=2 交付页：/tmp/lm_opt/atlas4096_skyi2（lmap SHA16 2ebb4c41529dc43f，PNG f7beaa0142b0243c）；skyI=1 对照页 eda8024289b948c7/869681b86fb298a8；
 - 交付配置 UVDUMP 覆盖（4096/skyI2/默认 env，z=-8 位姿）：3686318/3686400（99.98%——非 z=-4 判据位姿的数字，判据位姿矩阵已录 3686101/3686100）。
+
+## 16. v3 架构轮（2026-10-21 下午）：烘焙改间接辐照度 + 合成改叠加
+
+**用户四问题**（同一根因链：v2 整像素替换——烘焙存完整出射辐亮度，albedo
+已乘入且被 16 tex/m 低频页拖平）：纹理无细节 / 地板光照不对 / 远平面死黑
+（含 z=-8 整屏黑预存缺陷）/ 直射间接无区分。
+
+**架构处方（经典正解）**：
+- **baker 存间接辐照度 E_ind**（≥1 弹 + 天空；不含顶点 0 直射 NEE、不含
+  自发射、不乘纹素自身 albedo/π）。估计器：E_ind = π·mean(L_ind)，余弦
+  半球采样 pdf=cos/π；单样本贡献 = 首跳 Sky/命中 Le + ≥1 弹顶点
+  alb·E_direct/π，首跳不折叠 albedo（推导入 LightmapBaker.cpp 注释）。
+- **composite 改叠加**：final = deferred直射底图 + GBufferAlbedo ×
+  lm.rgb / π × gain（binding 4 新增 GBuffer albedo，fusionIn 同源先例；
+  Metal 槽位 = binding 直映 texture(4)）。纹理细节/直射锐影走实时链，
+  间接 = 低频烘焙信号被逐像素真实材质纹理调制。
+- **页 A 通道 = 有效性**（1 栅格化 / 0.5 dilation 填充 / 0 空区）；
+  composite 对 a≤0.25 不加间接（退化为纯直射，绝不黑——§15.4 z=-8
+  整屏黑的解）。旧全光页 A 恒 1，兼容。
+- 互斥不变（lightmap 激活 ⇒ Lumen 区全关）；PRIMAL_LIGHTMAP_GAIN 语义
+  = 仅间接增益，默认 1.0 物理恒等（GAIN=2 实测仅 +1.6 mean——深影区
+  E≈0 无数据可救，增益不值得偏离物理，保留 env 可调）。
+
+**验收数据**（SponzaLM 4096/64spp/3bounce 烘焙 17min@density16；
+/tmp/lm_arch；同机位 v2 基线 = 旧二进制+§15 skyI2 页重采）：
+
+| 位姿 | 版本 | mean | 近黑<8 | 拉普拉斯方差 | 暗行<25 |
+|---|---|---|---|---|---|
+| 默认(0,5,0) | v2 | 38.87 | 31.21% | 366.4 | 178 |
+| 默认 | **v3** | **77.83** | **4.66%** | **1041.7 (2.85×)** | **0** |
+| 判据 z=-4 | v2 | 25.99 | 29.55% | **2.9（全平）** | 295 |
+| 判据 z=-4 | **v3** | **39.48** | **2.01%** | **206.6 (71×)** | **0** |
+| z=-8 | v2 | 整屏纯黑（§15.4） | 100% | — | — |
+| z=-8 | **v3** | 28.91 | 0 纯黑/42%<8 | 24.6 | 0 死黑带 |
+| z=0 | v3 | 62.90 | 0.24% | 402.3 | 0 |
+
+- ① 纹理细节：判据位姿 lapvar 2.9→206.6（71×），默认位姿 2.85×；
+  视觉复核（参考截图平光感消失，石缝/雕花/地砖清晰）。
+- ② 直射/间接区分：太阳直射区锐利实时阴影 + 阴影区烘焙软补光（AI 视觉
+  复核确认"strong direct/indirect separation, sharp shadow boundary"）。
+- ③ 4 位姿零纯黑像素（lum≤1 全 0%）、零暗行带；z=-8 从整屏黑恢复为
+  带纹理光照（残余：该位姿大部分像素落 chart 空区/深廊真低间接 → 无
+  间接补光、比 OFF(Lumen 62.7) 暗——§15.4 UVLM/unwrap 质量遗留，
+  alpha 门控按处方降级为纯直射，绝不黑）。
+- ④ 地板：E 量级合理（mesh_389 lit 区 E.g mean 0.554/p95 1.84，
+  p50=0 深廊无光真值），albedo 调制后纹理可见。
+- ⑤ OFF 零影响：同批双运行低频(32×) MAD=0.268 < 3.5 地板；单测
+  TestLightmapBaking ALL PASSED（E 语义重算期望：解析 0.41558→2.6108、
+  天空 0.40→1.57、blocker 0.105→~1.36 界(1.0,2.0)、ceiling 全光断言
+  改为"只存入射间接≈0"、条纹测改锁"E 与自身 albedo 解耦"）。
+- UVDUMP 覆盖（z=-8 位姿）：3686318/3686400=99.98% 不变。
+- 页数据验证：A=1 21.2% / A=0.5 4.1% / A=0 74.7%（原始 u16 0x3C00/
+  0x3800/0x0000 直读）。
+
+**坑位**：①e2e LOAD 分支嵌套在 BAKE 检查内——PRIMAL_LIGHTMAP_LOAD
+必须与 PRIMAL_LIGHTMAP_BAKE=1 同设（LOAD 优先跳烘），漏设 BAKE 时
+LOAD 静默无效（本轮曾致一轮"假 ON"采集，靠 loaded-log 计数发现）；
+②Metal 绑定槽位 = binding 序号直映（binding 4 → texture(4)，sampler
+不占位）；③stash 切换重建旧基线二进制时 /tmp 副本缺 @executable_path
+dylib——直接用树内二进制跑。
+
+**产物**：/tmp/lm_e2e_bake/lightmap.lmap（4096 E_ind 页）+ 
+lightmap_page.png；/tmp/lm_arch/{on_*,off_*,old_v2_*}.ppm、
+cmp_default_v2_vs_v3.png、cmp_z4_v2_vs_v3.png（左 v2 右 v3）、
+lm_metrics.py、logs/。v2 交付页仍在 /tmp/lm_opt/atlas4096_skyi2。
