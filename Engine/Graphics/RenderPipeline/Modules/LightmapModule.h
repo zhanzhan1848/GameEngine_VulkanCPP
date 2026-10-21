@@ -22,8 +22,10 @@ class RenderScene;
 // v3 互斥（用户定调："开 lightmap ⇒ Lumen GI 完全关闭"）：lightmap 激活时
 // StandardRenderPipeline 两个渲染站点以 lmMutex 门控把整个 Lumen GI 区
 // （SC/DDGI/WRC/SC-DDGI/SSGI/SSR/SPGI/GIGather/fusion/volume）整体不挂，
-// composite 以 deferred 直射输出为底图——lightmap 像素替换为烘焙完整光照，
-// 其余像素 = 直射-only。PRIMAL_LIGHTMAP_COEXIST=1 保留旧并存形态作诊断。
+// composite 以 deferred 直射输出为底图——lightmap 像素叠加烘焙间接辐照度
+// （v3 架构轮 2026-10-21：final = 直射底图 + albedo·E_ind/π·gain，直射/
+// 纹理细节走实时链，间接为低频烘焙信号），其余像素 = 直射-only。
+// PRIMAL_LIGHTMAP_COEXIST=1 保留旧并存形态作诊断。
 //
 // 运行时链路：
 //   LoadLightmap(path)      —— LMAP 容器 → RGBA16F 页上传 + per-mesh 清单
@@ -32,9 +34,11 @@ class RenderScene;
 //                              为命中实体构建世界空间顶点/UV/索引缓冲
 //   AddUVPrePass(graph, in) —— 静态几何按实体直绘（深度 LessEqual 只读），
 //                              输出逐像素 atlas UV RT
-//   AddCompositePass(...)   —— 独立消费级：UV RT 有效像素整像素替换为烘焙
-//                              完整光照（直射+间接，离线路径追踪产物），
-//                              无效像素透传底图。与 Lumen 动态 GI 零耦合。
+//   AddCompositePass(...)   —— 独立消费级（v3 间接辐照度叠加）：UV RT
+//                              有效像素 final = base + albedo·E_ind/π·gain
+//                              （albedo = GBuffer 逐像素反照率，材质纹理
+//                              细节保留；页 A 有效性不足/无 marker 像素纯
+//                              透传底图）。与 Lumen 动态 GI 零耦合。
 class LightmapModule {
 public:
     struct FrameInputs {
@@ -52,6 +56,12 @@ public:
         // UV pre-pass 帧输入。
         math::m4x4 view_projection{};
         rendergraph::RGResourceHandle gbuffer_depth_rg{};
+        // v3 间接辐照度合成（2026-10-21 架构轮）：GBuffer 反照率（逐像素
+        // 真实材质纹理）调制间接项——final = base + albedo·E_ind/π·gain。
+        // rg 句柄有效时 composite 声明 Read（屏障）；物理句柄无效时模块
+        // 绑 1×1 白占位（albedo=1，间接项不失活）。
+        rhi::ResourceHandle gbuffer_albedo_tex{rhi::handles::INVALID_RESOURCE};
+        rendergraph::RGResourceHandle gbuffer_albedo_rg{};
     };
 
     // full_screen_vs：与 fusion 共用的全屏三角形 VS（blit_vs_）。
@@ -152,6 +162,9 @@ private:
     rhi::ResourceHandle output_tex_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle uv_rt_{rhi::handles::INVALID_RESOURCE};
     rhi::ResourceHandle uv_black_tex_{rhi::handles::INVALID_RESOURCE};  // 1×1 z=0
+    // 1×1 白 albedo 占位（gbuffer_albedo_tex 缺失时 binding 4 兜底——
+    // albedo=1 使间接项 ≈ 纯 lm 增益，不失活）。
+    rhi::ResourceHandle albedo_white_tex_{rhi::handles::INVALID_RESOURCE};
     // §9 取证：本帧 GBuffer 深度物理句柄（AddUVPrePass 记录，DumpUvRT 差分）。
     rhi::ResourceHandle gbuffer_depth_phys_{rhi::handles::INVALID_RESOURCE};
     // 编码器切换 flush 用 16B 哑元对（互斥态 UV pass 后 16B 拷贝）。

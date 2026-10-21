@@ -4506,15 +4506,22 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     // Lightmap 独立消费级。默认（互斥，v4）：Lumen 区缺席，底图 = deferred
-    // 直射输出，lightmap 像素替换为烘焙完整光照。PRIMAL_LIGHTMAP_COEXIST=1
-    //（并存诊断）：底图 = fusion 输出。无页/无实体时 AddCompositePass
-    // 返回无效句柄（零影响）。
+    // 直射输出，lightmap 像素叠加烘焙间接辐照度（v3 架构轮：final = base +
+    // albedo·E_ind/π·gain，albedo = GBuffer 反照率——纹理细节/直射阴影走
+    // 实时链）。PRIMAL_LIGHTMAP_COEXIST=1（并存诊断）：底图 = fusion 输出。
+    // 无页/无实体时 AddCompositePass 返回无效句柄（零影响）。
     RGResourceHandle lightmapOutRG;
     if (lightmap_module_) {
         LightmapModule::FrameInputs lmComp;
         lmComp.frame_index = static_cast<u32>(frameCount_);
         lmComp.render_width = render_width_;
         lmComp.render_height = render_height_;
+        // v3 albedo 调制输入：GBuffer 反照率（物理句柄 + RG 读声明用句柄；
+        // rg 无效（非 RG GBuffer 路径）时按 deferred 同款名导入）。
+        lmComp.gbuffer_albedo_tex = gpuDraw.GetGBufferAlbedo();
+        lmComp.gbuffer_albedo_rg = gbufferAlbedoRG.IsValid()
+            ? gbufferAlbedoRG
+            : graph.ImportResource("GBufferAlbedo_LM", gpuDraw.GetGBufferAlbedo());
         if (lmMutex) {
             lmComp.scene_color_tex = deferredOut.deferred_output_tex;
             lightmapOutRG = lightmap_module_->AddCompositePass(graph, lmComp,
@@ -6252,13 +6259,18 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
 
         // Lightmap 独立消费级（twin 站点同步，见 BuildRenderGraph 同名块：
-        // 默认互斥（deferred 直射为底图）；COEXIST=1 时消费 fusion 输出）。
+        // 默认互斥（deferred 直射为底图）；COEXIST=1 时消费 fusion 输出；
+        // v3 架构轮 = 间接辐照度叠加，albedo = GBuffer 反照率调制）。
         RGResourceHandle lightmapOutRG;
         if (lightmap_module_) {
             LightmapModule::FrameInputs lmComp;
             lmComp.frame_index = static_cast<u32>(frameCount_);
             lmComp.render_width = render_width_;
             lmComp.render_height = render_height_;
+            lmComp.gbuffer_albedo_tex = gpuDraw.GetGBufferAlbedo();
+            lmComp.gbuffer_albedo_rg = gbufferAlbedoRG.IsValid()
+                ? gbufferAlbedoRG
+                : graph.ImportResource("GBufferAlbedo_LM", gpuDraw.GetGBufferAlbedo());
             if (lmMutex) {
                 lmComp.scene_color_tex = deferredOut.deferred_output_tex;
                 lightmapOutRG = lightmap_module_->AddCompositePass(graph, lmComp,

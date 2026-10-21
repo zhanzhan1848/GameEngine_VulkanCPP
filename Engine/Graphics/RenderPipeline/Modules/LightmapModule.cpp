@@ -196,15 +196,17 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
         return false;
     }
 
-    // --- composite 全屏管线（0 indirect / 1 lightmap / 2 uvRT / 3 sampler；
-    //     gain/debug 走 push 常量，见 shader 头注释）---
+    // --- composite 全屏管线（0 indirect / 1 lightmap / 2 uvRT / 3 sampler /
+    //     4 gbufferAlbedo——v3 间接辐照度合成的 albedo 调制源；gain/debug
+    //     走 push 常量，见 shader 头注释）---
     {
-        DescriptorSetLayoutBinding bindings[4];
+        DescriptorSetLayoutBinding bindings[5];
         bindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};
         bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};
         bindings[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};
         bindings[3] = {3, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr};
-        composite_set_layout_ = device->CreateDescriptorSetLayout({4, bindings});
+        bindings[4] = {4, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};
+        composite_set_layout_ = device->CreateDescriptorSetLayout({5, bindings});
 
         PipelineLayoutDesc plDesc{};
         PushConstantRange pcRange{};
@@ -319,6 +321,13 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
             const std::vector<u16> zero{0, 0, 0, 0};
             UploadRGBA16F(device_, uv_black_tex_, zero, 1, 1);
         }
+        // 1×1 白 albedo 占位（binding 4 兜底：gbuffer_albedo 缺失时 albedo=1，
+        // 间接项退化为纯 lm 增益——不失活）。
+        albedo_white_tex_ = device->CreateTexture(d);
+        if (albedo_white_tex_ != handles::INVALID_RESOURCE) {
+            const std::vector<u16> white{0x3C00, 0x3C00, 0x3C00, 0x3C00};
+            UploadRGBA16F(device_, albedo_white_tex_, white, 1, 1);
+        }
     }
     {
         // 编码器切换 flush 哑元对（16B；见 FrameInputs::encoder_flush 注）。
@@ -352,6 +361,7 @@ void LightmapModule::Shutdown() {
     if (output_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(output_tex_);
     if (uv_rt_ != handles::INVALID_RESOURCE) device_->DestroyTexture(uv_rt_);
     if (uv_black_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(uv_black_tex_);
+    if (albedo_white_tex_ != handles::INVALID_RESOURCE) device_->DestroyTexture(albedo_white_tex_);
     if (flush_src_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(flush_src_);
     if (flush_dst_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(flush_dst_);
     if (positions_sb_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(positions_sb_);
@@ -371,7 +381,8 @@ void LightmapModule::Shutdown() {
     if (uv_layout_ != handles::INVALID_PIPELINE_LAYOUT) device_->DestroyPipelineLayout(uv_layout_);
     if (composite_pipeline_ != handles::INVALID_PIPELINE) device_->DestroyPipeline(composite_pipeline_);
     if (uv_pipeline_ != handles::INVALID_PIPELINE) device_->DestroyPipeline(uv_pipeline_);
-    lightmap_tex_ = output_tex_ = uv_rt_ = uv_black_tex_ = handles::INVALID_RESOURCE;
+    lightmap_tex_ = output_tex_ = uv_rt_ = uv_black_tex_ = albedo_white_tex_ =
+        handles::INVALID_RESOURCE;
     page_w_ = page_h_ = 0;
     positions_sb_ = uvs_sb_ = indices_ib_ = handles::INVALID_RESOURCE;
     sampler_ = handles::INVALID_SAMPLER;
@@ -814,6 +825,9 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
     // 无效（pre-pass 未加），composite 绑占位页。
     const rendergraph::RGResourceHandle uvReadRG = uv_rt_rg_;
     const bool uvValid = HasEntities() && uvReadRG.IsValid();
+    // GBuffer albedo 的 RG 依赖（v3 albedo 调制）：有效则声明 Read——RG
+    // 解析 ShaderResource 屏障（deferred/fusion 已读过，此处收敛状态）。
+    const rendergraph::RGResourceHandle albedoReadRG = inputs.gbuffer_albedo_rg;
 
     struct CompositeData {
         rendergraph::RGResourceHandle output;
@@ -821,10 +835,11 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
     graph.AddPass<CompositeData>("LightmapComposite",
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::PostProcess,
-        [scene_color_rg, outRG, uvReadRG, uvValid](CompositeData& data, rendergraph::RenderGraphBuilder& builder) {
+        [scene_color_rg, outRG, uvReadRG, uvValid, albedoReadRG](CompositeData& data, rendergraph::RenderGraphBuilder& builder) {
             builder.SideEffect();
             builder.Read(scene_color_rg, ResourceState::ShaderResource);
             if (uvValid) builder.Read(uvReadRG, ResourceState::ShaderResource);
+            if (albedoReadRG.IsValid()) builder.Read(albedoReadRG, ResourceState::ShaderResource);
             data.output = builder.Write(outRG, ResourceState::RenderTarget);
 
             rendergraph::RGRenderPassDesc rpDesc;
@@ -838,8 +853,9 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
-            // 增益独立旋钮（PRIMAL_LIGHTMAP_GAIN，默认 1.0）：烘焙页自身的
-            // 显示增益，不进入任何 Lumen 回路。
+            // 间接增益独立旋钮（PRIMAL_LIGHTMAP_GAIN，默认 1.0 = 物理恒等；
+            // v3 语义：仅作用于间接叠加项 albedo·E_ind/π·gain——直射底图
+            // 不受影响），不进入任何 Lumen 回路。
             float gain = 1.0f;
             if (const char* g = std::getenv("PRIMAL_LIGHTMAP_GAIN")) {
                 const float v = static_cast<float>(std::atof(g));
@@ -861,14 +877,21 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             ResourceHandle b1Tex = lightmap_tex_;
             ResourceHandle b2Tex = uvTex;
             if (std::getenv("PRIMAL_LIGHTMAP_SWAPUV")) std::swap(b1Tex, b2Tex);
-            DescData params[4] = {
+            // binding 4 = GBuffer albedo（v3 albedo 调制）；缺失绑 1×1 白
+            //（albedo=1，间接项退化为纯 lm 增益——不失活）。
+            const ResourceHandle albedoTex =
+                inputs.gbuffer_albedo_tex != handles::INVALID_RESOURCE
+                    ? inputs.gbuffer_albedo_tex
+                    : albedo_white_tex_;
+            DescData params[5] = {
                 {0, DescriptorType::SampledImage, inputs.scene_color_tex},
                 {1, DescriptorType::SampledImage, b1Tex},
                 {2, DescriptorType::SampledImage, b2Tex},
                 {3, DescriptorType::Sampler, static_cast<ResourceHandle>(sampler_)},
+                {4, DescriptorType::SampledImage, albedoTex},
             };
             const u32 slot = inputs.frame_index % 3;
-            UpdateDesc(device_, composite_ds_[slot], params, 4);
+            UpdateDesc(device_, composite_ds_[slot], params, 5);
             cmd->BindGraphicsPipeline(composite_pipeline_);
             const DescriptorSetHandle sets[] = {composite_ds_[slot]};
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, composite_layout_, 0, 1, sets, 0, nullptr);
