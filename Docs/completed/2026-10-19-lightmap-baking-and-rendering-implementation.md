@@ -1195,3 +1195,47 @@ CSV，暗区 ROI 0.02-0.42×0.25-0.95，n=64512）：
   ab_filter.sh。
 - /tmp/lm_q4 保留 91MB（工具+证据帧+审计压缩件）；uvrt/composite
   bin（29MB/个×6）已清。
+
+## 23. §23 8192 图集高密度烘焙——格感根治轮（2026-10-22，正式烘跨代理时间盒，验证分两段）
+
+**目标**（用户点名）：8192 页根治间接光格感。§20 已证 15-60px 周期段主体为材质/几何周期
+（OFF 帧同在），E 内容部分 = texel 尺度真实变化；8192 只压缩 texel 相关部分——本节如实
+分账，不假报"根治"。v3 架构（E_ind+GAIN4+DARKTINT+LP 默认 1）不动。
+
+**设置改动**（commit 1465475c，仅 e2e 调用点常量，baker 契约零改动）：
+- `TestVulkanSponzaRenderGraph.cpp` lmSettings：atlas 4096→**8192**；密度阶梯前置
+  **52 档**（4096@26 等比档：面积×4、密度×2、固定 px margin 相对开销减半）。
+- 快烘实测落位 **density=52**（阶梯第一档直落，未降档）；texel 物理尺寸 3.85cm→**1.92cm**。
+- 单测 TestLightmapBaking 通过；OFF 双跑（新二进制 PRIMAL_LIGHTMAP=0）低频 MAD
+  **0.017**（地板 3.5）、>8px 差异 **0.00%**——零影响维持（/tmp/lm_8k/OFF1,2）。
+
+**预检与外推**（16spp 快烘 → 64spp 正式烘）：
+- 内存实测：peak footprint **17.8GB**（CPU 侧 ~4.7GB=TexelSample 2.95G+accum 0.8G+
+  f16 页 0.5G+PNG 0.2G；其余 ~12G 为 GPU/驱动归属，4096 时代同样存在）——48GB 机器
+  可行。PNG 导出 8192（37.6MB）正常。
+- 快烘 16spp 全程 **56min**（init/rasterize ≈10.5min + trace/后处理 ≈45.8min）；
+  阶段拆分外推 64spp = **~3.2h**，raw ×4 上界 3.7h。§18 斜率（21→51min，纹素
+  4.22M→9.35M）交叉验证成立。
+
+**早期信号（快烘 16spp 页 vs 4096 交付页，配对 126 同名 chart，同法 FFT）**：
+- 页域等物理带（4096 的 15-60px ↔ 8192 的 30-120px）：0.0648→0.0435（**-33%**）；
+- texel 尺度带（2-8px 页空间）：0.0080→0.0021（E 内容 2-8px 能量占比 -74%）；
+- 注意：快烘含 16spp MC 噪声（抬高高频），正式页预期更优；绝对值与本工具自建口径
+  绑定，与 §21 的 0.218/0.193 不可直接比，仅同法 A/B 有效。
+
+**事故与处置**（首轮正式烘）：误加 PRIMAL_LIGHTMAP_UV_AUDIT=1——该标志是"raster 后
+早退、跳过 trace"的诊断模式，阶梯把早退当失败全档下探到 0.02（4 分钟内发现）。
+杀进程、核实交付页 SHA 33fe5703ef25cc28 未损、去掉标志重启。教训：长跑加 env 标志
+前必须核对失败语义（"early exit after raster"字符串在 LightmapBaker.cpp 有明示）。
+
+**正式烘（64spp/3bounce/52tex/m/8192）**：脱离代理生命周期（副本二进制 /tmp/lm_8k/
+bake_bin + caffeinate -ims + nohup，ppid=1）；watchdog 见 `density=..-> OK` 后自灭并落
+t_done。输出 = 交付路径 /tmp/lm_e2e_bake/lightmap.lmap；4096 旧页备份
+/tmp/lm_8k/backup4096.lmap（cp 逐字节，SHA 核对）。
+
+**接手（烘完成后一键验证）**：`/tmp/lm_8k/verify_8k.sh`——页域配对 FFT A/B、LOAD 双
+位姿（判据 0,5,-4,-35,10 + 室内 -6,1.6,-8,0,45）采集 + camera FFT A/B + crop 并排
+（cmp_*.png）+ markerInVoid（4096 基线 0/3686101=0%）+ PNG 导出核对。基线已备：
+base4096_pj/base4096_in/OFF1/OFF2 + fft_page.py/fft_cam.py/cmp_*.py。
+判据（§19 口径）：camera FFT 15-60px 段 texel 峰（26.7px→预期 ~13px 移位/消峰）、
+等物理带能量降、crop 视觉柔化、markerInVoid 不回归（≤0.002% 档）、PNG 8192 完整。
