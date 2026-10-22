@@ -2411,9 +2411,11 @@ void TestVulkanSponzaRenderGraph::Run() {
             std::cerr << "[Lightmap][e2e] per-texel albedo textures registered: "
                       << lmBakeAlbedoTex_.size() << std::endl;
             auto lmSettings = primal::graphics::baking::DefaultLightmapBakeSettings();
-            // 2026-10-21 精度轮：2048→4096 + 阶梯上限扩 32/48（用户"纹理
-            // 精度太低"）。纹素量 ×4、烘焙耗时 ~×4（§15 实测记录）。
-            lmSettings.atlas_size = 4096;
+            // 2026-10-22 §23 高密度轮：4096→8192 + 阶梯上探 52（用户点名
+            // 根治间接光格感）。§18 4096 落 26 tex/m（texel ~3.8cm），8192
+            // 面积 ×4 同余量可容 2× 密度 = 52（texel ~1.9cm）。纹素量再 ×4、
+            // 烘焙耗时 ~×4（§15/§18 斜率：4096/26tex/64spp = 51min 基准）。
+            lmSettings.atlas_size = 8192;
             lmSettings.samples_per_texel = 64;  // 用户基线 spp
             lmSettings.bounces = 3;
             // [§20 取证] PRIMAL_LIGHTMAP_SPP：快烘旋钮（天空分量分解/泄漏
@@ -2422,11 +2424,11 @@ void TestVulkanSponzaRenderGraph::Run() {
                 const int v = std::atoi(sp);
                 if (v >= 4 && v <= 512) lmSettings.samples_per_texel = (u32)v;
             }
-            // 密度自适应阶梯：从 48 纹素/米减半直到全部 chart 装进 4096 页
+            // 密度自适应阶梯：从 52 纹素/米下探直到全部 chart 装进 8192 页
             //（下限 0.02 级——覆盖厘米级源网格的极端面积）。
-            // §18：补 26/24/20 档——bbox 收紧后档间差距 4×，粗档会在 32
-            // 溢出时直接掉回 16、页利用率腰斩（74.7% 空区主项）。26 档为
-            // 装箱富余试探（util ~0.83），失败自动落 24。
+            // §18：26/24/20 档为 4096 时代装箱富余试探（util ~0.83）。
+            // §23：52 = 4096@26 的等比档（面积 ×4、密度 ×2、装箱余量更
+            // 宽——固定 px margin 相对开销减半）；失败自动落 48。
             std::snprintf(lmSettings.output_dir, sizeof(lmSettings.output_dir), "%s",
                           "/tmp/lm_e2e_bake");
             // [§20] PRIMAL_LIGHTMAP_OUTDIR：取证烘输出目录（默认不变——
@@ -2438,7 +2440,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             }
             bool lmOk = false;
             std::string lmErr;
-            for (float density : {48.0f, 32.0f, 26.0f, 24.0f, 20.0f, 16.0f, 12.0f,
+            for (float density : {52.0f, 48.0f, 32.0f, 26.0f, 24.0f, 20.0f, 16.0f, 12.0f,
                                   10.0f, 8.0f, 4.0f, 2.0f, 1.0f,
                                   0.5f, 0.25f, 0.125f, 0.0625f, 0.03f, 0.02f}) {
                 lmSettings.texel_density = density;
