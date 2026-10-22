@@ -334,6 +334,47 @@ texel 级双机位分解（texel_shadow.py，p1/p3 微移机位 composite.bin+uv
 单测沿用 §20 全绿（本轮无 baker 契约变化）。交付页 /tmp/lm_e2e_bake/lightmap.lmap
 （LP 应用版，4096/393 entries）。
 
+## 22. §22 deferred 阴影矩阵/法线审计——无约定 bug，错位=纹素量化+normal-offset 包络（2026-10-22）
+
+**任务**：验证用户主张——红框区域黑斑"因法线或矩阵问题导致"（边界悬空于几何、相对太阳方向错位）。
+**结论：矩阵/法线无 bug**（证据链如下）；错位形态 = 级联纹素量化 + B17 normal-offset/slope-bias 的
+标准代价 + 半分辨率 vis，全部在可计算包络内。不修（修=改 acne/泄漏权衡，非正确性）。
+
+**代码级审计（全部一致）**：
+1. CPU 级联构造 `ShadowMapModule.cpp ComputeCascadeVP`：RH `CreateLookAtMatrix`（forward→-Z）
+   × `CreateOrthographicMatrix`（z∈[0,1]，Vulkan/Metal 深度域，`RHIMath.h:379-389`）；
+   场景质心 texel 对齐；near/far 按包围盒。无 Y/手性歧义。
+2. 光栅端 `Nanite/ShadowDepth.wgsl`（naga→SPIR-V）：`spirv-dis ShadowDepth.spv` 实测
+   `OpFNegate gl_Position.y`（component 1）存在 —— 消费端 `ShadowFilter.comp projectToCascade`
+   的 `sc.y=0.5-0.5y` 与之严格互补；GBuffer.spv 同样含 FNegate，与 filter/DeferredLighting 的
+   `ndc.y=1-2uv.y` 世界重建互补。
+3. 符号链：`light_direction={0.549,-0.768,0.329}` 为传播方向；DeferredLighting `lightPos=-D`
+   （StandardRenderPipeline.cpp:3690）、ShadowFilter `LtoLight=-light_dir`——两侧一致。
+4. 法线：GBuffer RT1 世界法线 `*0.5+0.5` 写、两消费端 `*2-1` 对称解码；quality-7 NdotL 哨兵
+   复核地板中亮（≈0.77 预期）、背光拱腹暗、面向 -Z 的右侧墙受光——与 toLight 分量一致。
+5. shadow map clear=1.0 + Clamp 采样（越界读 lit）；CullMode::None；D32→R32 blit 直拷。
+
+**实证（SPGI_CAM=0,5,-4,-35,10 判据机位，/tmp/lm_shadow）**：
+- **太阳转 90° 对照（PRIMAL_LIGHT_DIR=0.3,-0.7,-0.5）**：亮带与全部黑斑跟随太阳旋转迁移
+  ——黑斑是真实遮挡（旗帜/拱圈），非固定世界伪影；镜像/偏移类矩阵 bug 被排除（此类 bug
+  使阴影相对太阳错位或钉死世界坐标，二者均未发生）。
+- **PCSS vs HARD（SHADOW_QUALITY=0 全链 1-tap）**：vis 逐像素 diff mean 0.03、>40 为 0——
+  物理太阳角径 0.5357° 下 lightSizeUV≈1-4 纹素，PCSS≈硬比较；黑斑在硬比较下原样存在，
+  与软化核无关。
+- **map↔接收器对账（quality 3 vs 4 哨兵逐像素，地板带+级联0窗内子集 n=28.5k）**：
+  98.1% 像素 map 深度-接收器深度 = +2LSB 中位（含 +0.001 光栅 bias）；1.9% 阴影像素
+  间隙 -2LSB（≈1.1wu，旗帜布/拱圈壁厚量级）——测量通道噪声底本身 ≈±2LSB（8bit vis
+  量化+半分辨率双线性+显示舍入），即查询 UV 与光栅化对齐到噪声底（±1.1wu）。
+  镜像/偏移查询会使大比例样本以宽散间隙落在接收器前方（未发生）。
+- **错位量级对账（中景=cascade2，texel 0.088wu；31px/wu@20wu）**：旗帜根部 10-15px 间隙
+  ≈ normal-offset(1.83texel=0.16wu)+slope-bias 侧移(0.16wu)=0.32wu≈10px 包络 ✓；
+  地板斑块阶梯 2-4px ≈ texel 量化+半分辨率 vis(1px)+PCSS 最小 2 纹素核 ✓。
+  §21 相机微移跳变 = 级联盒边界（bounds 选择、质心定心）既有结论，同源不矛盾。
+
+**DUMP_MATRIX=2 诊断扩展**：`ShadowMapModule.cpp` 的 TEMP-DIAG 在 =2 时增打级联 1-3 VP
+（cascade0 保持每帧旧行为），供后续 §12 式 CPU 复刻对账；env 门控，无行为改动。
+OFF 双跑（无 env）捕获逐字节一致；TestLightmapBaking 全绿。
+
 ## 7. 集成协议
 
 与 fluid 线（主树未提交改动）在 `FusionCompositeModule.cpp`、`StandardRenderPipeline.cpp` 相遇：

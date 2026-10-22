@@ -385,14 +385,22 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
 
         outputs.shadow_matrix[cascade] = lightVP;
 
-        // TEMP-DIAG: CPU 侧矩阵字节真值（PRIMAL_DUMP_MATRIX=1）
-        if (cascade == 0 && std::getenv("PRIMAL_DUMP_MATRIX")) {
-            std::fprintf(stderr, "[MATRIX] cascade0 columns:");
-            for (int c = 0; c < 4; ++c)
-                std::fprintf(stderr, " (%.4f,%.4f,%.4f,%.4f)",
-                             lightVP.columns[c][0], lightVP.columns[c][1],
-                             lightVP.columns[c][2], lightVP.columns[c][3]);
-            std::fprintf(stderr, "\n");
+        // TEMP-DIAG: CPU 侧矩阵字节真值（PRIMAL_DUMP_MATRIX=1）。
+        // §22 阴影审计：PRIMAL_DUMP_MATRIX=2 额外输出级联 1-3（仅首帧，
+        // cascade0 每帧保持旧行为），供 CPU 复刻 world→shadowUV 对账。
+        if (std::getenv("PRIMAL_DUMP_MATRIX")) {
+            static bool diagAllOnce[4] = {false, false, false, false};
+            const bool all = std::getenv("PRIMAL_DUMP_MATRIX")[0] == '2';
+            const bool print = (cascade == 0) || (all && !diagAllOnce[cascade]);
+            if (print) {
+                if (all) diagAllOnce[cascade] = true;
+                std::fprintf(stderr, "[MATRIX] cascade%u columns:", cascade);
+                for (int c = 0; c < 4; ++c)
+                    std::fprintf(stderr, " (%.6f,%.6f,%.6f,%.6f)",
+                                 lightVP.columns[c][0], lightVP.columns[c][1],
+                                 lightVP.columns[c][2], lightVP.columns[c][3]);
+                std::fprintf(stderr, "\n");
+            }
         }
 
         if (cache_hit) continue;
