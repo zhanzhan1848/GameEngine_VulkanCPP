@@ -334,6 +334,19 @@ texel 级双机位分解（texel_shadow.py，p1/p3 微移机位 composite.bin+uv
 单测沿用 §20 全绿（本轮无 baker 契约变化）。交付页 /tmp/lm_e2e_bake/lightmap.lmap
 （LP 应用版，4096/393 entries）。
 
+## 22.5 §23 收官（2026-10-23 凌晨，主会话接手完成）
+
+**正式烘（64spp/3bounce/52tex/m/8192）完成并验证**。过程：首轮 18:11 启动后
+23:41 被静默 SIGKILL（无崩溃/Jetsam 报告，5.5h 未出页，死因不明）；主会话以
+快烘 16spp 页先行交付验证（视觉复核格感基本消除），23:46 重启正式烘
+（caffeinate -w PID 防睡眠 + 副本二进制），~3.2h 出页。
+**验收（verify_8k.sh 全量）**：页 536,911,816B ✓；双位姿 markerInVoid=0 ✓；
+页域 FFT：等物理带 0.0648→0.0435（**-33%**）、texel 带 0.0080→0.0020（**-75%**）
+（与 16spp 快烘页几乎同值——双边降噪使 16spp 页域已达 64spp 水平，正式页
+价值在相机域噪声收敛：15-60px 段 16spp 曾 +64% → 64spp +12%≈基线）；
+PNG 8192 导出 36.5MB ✓。4096 旧页备份 /tmp/lm_8k/backup4096.lmap、
+16spp 页备份 quick16_backup.lmap。交接页=/tmp/lm_e2e_bake/lightmap.lmap。
+
 ## 22. §22 deferred 阴影矩阵/法线审计——无约定 bug，错位=纹素量化+normal-offset 包络（2026-10-22）
 
 **任务**：验证用户主张——红框区域黑斑"因法线或矩阵问题导致"（边界悬空于几何、相对太阳方向错位）。
