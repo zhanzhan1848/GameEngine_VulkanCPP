@@ -29,9 +29,13 @@ struct LightmapParams {
     // [§20 任务4] 与 Vulkan 版同步：bit0 亚纹素时域抖动 / bit1 4-tap 足迹。
     float filterMode;
     float frameIndex;
+    // [§21 问题2a] 与 Vulkan 版同步：无有效间接暗像素暖化强度（0=关）。
+    float darkTint;
 };
 
 const constant float kInvPi = 0.3183098861837907;
+
+float Luma3(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
 float2 Jitter2D(float2 fragPx, float frameIdx) {
     uint h = uint(fragPx.x) * 1973u + uint(fragPx.y) * 9277u + uint(frameIdx) * 26699u;
@@ -74,6 +78,7 @@ fragment float4 lightmap_composite_fragment(
 
     float3 base = indirectIn.sample(s, in.uv).rgb;
     float3 result = base;
+    bool hasIndirect = false;
 
     const float4 uvMarker = lightmapUV.sample(s, in.uv);
     // 诊断档先于合成分支判断（与 Vulkan 版同坑：z>0.5 会吞掉诊断路径）。
@@ -98,9 +103,18 @@ fragment float4 lightmap_composite_fragment(
                                    params.filterMode, params.frameIndex);
         if (lm.a > 0.25) {
             float3 albedo = gbufferAlbedo.sample(s, in.uv).rgb;
-            result = base + albedo * lm.rgb * (params.indirectGain * kInvPi);
+            float3 indirect = albedo * lm.rgb * (params.indirectGain * kInvPi);
+            result = base + indirect;
+            // [§21 问题2a] 有效间接判据（同 Vulkan 版，A/B 定参 3e-3）。
+            if (Luma3(indirect) > 3e-3) hasIndirect = true;
         }
         // A<=0.25：纯透传底图，绝不加黑。
+    }
+    // [§21 问题2a] 无有效间接的暗像素暖化（同 Vulkan 版公式/参数）。
+    if (params.darkTint > 0.0 && !hasIndirect && params.debugMode < 0.5) {
+        float w = 1.0 - smoothstep(0.004, 0.05, Luma3(base));
+        result = base * mix(float3(1.0), float3(1.0, 0.94, 0.74),
+                            clamp(params.darkTint, 0.0, 1.0) * w);
     }
     return float4(result, 1.0);
 }

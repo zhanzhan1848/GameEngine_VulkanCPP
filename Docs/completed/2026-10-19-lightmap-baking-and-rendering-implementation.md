@@ -310,6 +310,30 @@ PIL 验收：PNG 1024×1024=图集尺寸；白框完整（顶行/左列逐像素
 **验收汇总**：单测 TestLightmapBaking ALL PASSED（14 项）；
 /tmp/lm_agent/v4_*.ppm 为本轮全部证据。
 
+## 21. §21 视角相关黑度 + 室内泛蓝/格子缓解（2026-10-22，代理中断由主会话收尾）
+
+**问题 1：相机微移改变黑度（用户疑法线）——定论：deferred 直射侧，与 lightmap 无关**。
+texel 级双机位分解（texel_shadow.py，p1/p3 微移机位 composite.bin+uvrt.bin）：
+跳变暗 texel 子集（3.8%）**base（deferred 直射）0.0043→0.0755（17×）而 shadowVis 仅
+0.060→0.069、marker/E 逐 texel 稳定**——驱动=阴影求值随相机视差变化（PCSS 级联
+边界/半影，cascade extents 12/30/90/270m，相机距墙 ~11.6m 恰在首两级交界），
+非法线（着色法线不随相机变）、非 marker 闪烁、非 E 值。两模式共用同一 deferred
+直射链，OFF 同在。不修（引擎既有行为，超出 lightmap 范围）。
+
+**问题 2a：室内泛蓝——DARKTINT 落地**。composite 内无有效间接暗像素暖化
+（PRIMAL_LIGHTMAP_DARKTINT 默认 1.0，tint (1,0.94,0.74)，暗度 smoothstep(0.004,0.05)
+权重，push 20B 第 5 参；间接项 Luma>3e-3 豁免；不动 Lumen/deferred 共用文件）。
+实测：判据位姿暗区 B/R **1.956→0.853**（OFF 参考 0.804）；CAM_A 暗桶 p50 0.904→0.862。
+
+**问题 2b：格感——烘焙级低通落地（诚实收益）**。baker PRIMAL_LIGHTMAP_LP（默认 1，
+分离二项式核，tap 源=同 rect 内 A==1.0，A 语义不动）+ 离线同式工具 lp_lmap.py 已应用
+到交付页（备份 /tmp/lm_q5/pre21_backup.lmap）。FFT 15-60px 周期段 0.218→0.193（-12%
+——§20 已证该段主体为材质/几何周期，E 内容部分就这么多；8192 页仍是根治项）。
+
+**零影响**：新二进制（含 DARKTINT/LP）OFF 双运行低频 MAD **0.02**、>8 像素 0.0%。
+单测沿用 §20 全绿（本轮无 baker 契约变化）。交付页 /tmp/lm_e2e_bake/lightmap.lmap
+（LP 应用版，4096/393 entries）。
+
 ## 7. 集成协议
 
 与 fluid 线（主树未提交改动）在 `FusionCompositeModule.cpp`、`StandardRenderPipeline.cpp` 相遇：

@@ -47,9 +47,16 @@ layout(push_constant) uniform LightmapParams {
     // 均值，无时域依赖）。frameIndex 为抖动种子。
     float filterMode;
     float frameIndex;
+    // [§21 问题2a] darkTint：无有效间接项的暗像素暖化强度（0=关）。
+    // §20.1 定论：暗桶 80.5% texel E≈0 → base 裸露 deferred 暗部 fill
+    // （IBL 环境镜面，B/R 0.968 中性偏蓝）；OFF 参考 0.804（暖材质调制）。
+    // 该 tint 仅作用于 lightmap 合成路径（不动 Lumen/deferred 共用文件）。
+    float darkTint;
 } params;
 
 const float kInvPi = 0.3183098861837907;
+
+float Luma3(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
 // 整数 hash → [0,1)²（亚纹素抖动；同帧同像素确定、跨帧变化）。
 vec2 Jitter2D(vec2 fragPx, float frameIdx) {
@@ -88,6 +95,7 @@ vec4 SampleLightmap(vec2 atlasUv, vec2 fragPx) {
 void lightmap_composite() {
     vec3 base = texture(sampler2D(indirectIn, defaultSampler), inUv).rgb;
     vec3 result = base;
+    bool hasIndirect = false;
 
     const vec4 uvMarker = texture(sampler2D(lightmapUV, defaultSampler), inUv);
     // 诊断档必须先于合成分支判断：否则 z>0.5 像素永远进不了诊断路径
@@ -118,9 +126,25 @@ void lightmap_composite() {
         vec4 lm = SampleLightmap(uvMarker.xy, gl_FragCoord.xy);
         if (lm.a > 0.25) {
             vec3 albedo = texture(sampler2D(gbufferAlbedo, defaultSampler), inUv).rgb;
-            result = base + albedo * lm.rgb * (params.indirectGain * kInvPi);
+            vec3 indirect = albedo * lm.rgb * (params.indirectGain * kInvPi);
+            result = base + indirect;
+            // [§21 问题2a] "有效间接"判据：叠加项已达可见量级（HDR 3e-3
+            // ≈ 曝光后 >12/255；低于此的暖化不受间接豁免——A/B 实测 1e-4
+            // 阈值使暗桶 70% 像素豁免、B/R 仅 1.101→1.066）。
+            if (Luma3(indirect) > 3e-3) hasIndirect = true;
         }
         // A<=0.25（未栅格化空区/越界逃逸）：纯透传底图，绝不加黑。
+    }
+    // [§21 问题2a] PRIMAL_LIGHTMAP_DARKTINT（push: darkTint，默认 1.0，
+    // 0=关）：无有效间接的暗像素对 base 做暖化。A/B 定参（§21）：暗桶
+    // 无间接组 base B/R 实测 1.40-1.58（水面/织物/暗墙 IBL fill，比 §20.1
+    // 的 0.968 更蓝），tint (1.0,0.94,0.74) 全强度下暗带 B/R 1.101→
+    // ~0.86（OFF 参考 0.804，验收线 ≤0.90）。暗度权重 smoothstep
+    // (0.004,0.05)：HDR >0.05（LDR ≈75+）w→0，中亮调零影响。
+    if (params.darkTint > 0.0 && !hasIndirect && params.debugMode < 0.5) {
+        float w = 1.0 - smoothstep(0.004, 0.05, Luma3(base));
+        result = base * mix(vec3(1.0), vec3(1.0, 0.94, 0.74),
+                            clamp(params.darkTint, 0.0, 1.0) * w);
     }
     outColor = vec4(result, 1.0);
 }

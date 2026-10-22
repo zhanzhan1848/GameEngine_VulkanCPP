@@ -966,6 +966,87 @@ LightmapBakeResult BakeLightmaps(const BakeScene& scene,
             << std::endl;
     }
 
+    // ---- 7.5 lowpass：分离低通（§21 问题2b）----
+    // PRIMAL_LIGHTMAP_LP=<radius>（默认 1，0=关）：格感主修项——§20.4 定论
+    // 采样域柔化上限 7%（格感 = E 内容在 texel 尺度真实变化），把低通做进
+    // 烘焙页本身。分离二项式核（radius=1 → [1,2,1]，2 → [1,4,6,4,1]），
+    // 两次各向异性 pass：
+    //   目标 = rasterized texel（A 将编码 1.0 的座位）；
+    //   tap 源 = 同 rect 内 rasterized 邻居（rect = mesh 装箱矩形——跨 chart
+    //   不渗色；dilate/flood 填充值不作源，岛屿间隙不稀释真值）；
+    //   A 通道语义不动（有效性仍 = rasterized/flood/void 三档）。
+    // 交付页免重烘的同式离线工具见 /tmp/lm_q5/lp_lmap.py（§21 先例
+    // /tmp/lm_pp/blur_lmap.py 的 rect/A==1.0 加强版）。
+    {
+        const char* lpEnv = std::getenv("PRIMAL_LIGHTMAP_LP");
+        const std::int32_t lpRadius = lpEnv ? std::atoi(lpEnv) : 1;
+        if (lpRadius > 0 && lpRadius <= 4) {
+            // rect 归属表（rects 互不重叠——MaxRects 装箱契约）。
+            std::vector<std::int32_t> rectId((size_t)texelCount, -1);
+            for (size_t ri = 0; ri < rects.size(); ++ri) {
+                const auto& r = rects[ri];
+                const std::uint32_t y1 = std::min(atlasH, r.y + r.h);
+                const std::uint32_t x1 = std::min(atlasW, r.x + r.w);
+                for (std::uint32_t y = r.y; y < y1; ++y)
+                    for (std::uint32_t x = r.x; x < x1; ++x)
+                        rectId[(size_t)y * atlasW + x] = (std::int32_t)ri;
+            }
+            // 二项式核 C(2r, k)。
+            const int kTaps = lpRadius * 2 + 1;
+            float kern[9];
+            for (int k = 0; k < kTaps; ++k) {
+                float c = 1.0f;
+                for (int j = 0; j < k; ++j)
+                    c = c * (float)(2 * lpRadius - j) / (float)(j + 1);
+                kern[k] = c;
+            }
+            for (int pass = 0; pass < 2; ++pass) {  // 0=水平 1=垂直
+                std::vector<Vec3> blurred = accum;   // 快照源（同 pass 内互不可见）
+                std::vector<Vec3> skyBlurred =
+                    skySplit ? skyAccum : std::vector<Vec3>{};
+                const std::int32_t dx = pass == 0 ? 1 : 0;
+                const std::int32_t dy = pass == 0 ? 0 : 1;
+                const std::uint32_t blocks = 64;
+                const std::uint32_t per = (texelCount + blocks - 1) / blocks;
+                ParallelBlocks(blocks, [&](std::uint32_t b) {
+                    const std::uint32_t s = b * per;
+                    const std::uint32_t e = std::min(texelCount, s + per);
+                    for (std::uint32_t i = s; i < e; ++i) {
+                        if (!rasterized[i]) continue;
+                        const std::int32_t x = (std::int32_t)(i % atlasW);
+                        const std::int32_t y = (std::int32_t)(i / atlasW);
+                        const std::int32_t rid = rectId[i];
+                        Vec3 sum{0, 0, 0}, skySum2{0, 0, 0};
+                        float wsum = 0;
+                        for (int k = 0; k < kTaps; ++k) {
+                            const std::int32_t nx = x + dx * (k - lpRadius);
+                            const std::int32_t ny = y + dy * (k - lpRadius);
+                            if (nx < 0 || ny < 0 || nx >= (std::int32_t)atlasW ||
+                                ny >= (std::int32_t)atlasH)
+                                continue;
+                            const std::uint32_t ni =
+                                (std::uint32_t)ny * atlasW + (std::uint32_t)nx;
+                            if (rectId[ni] != rid || !rasterized[ni]) continue;
+                            const float w = kern[k];
+                            sum = Add(sum, Scale(accum[ni], w));
+                            if (skySplit) skySum2 = Add(skySum2, Scale(skyAccum[ni], w));
+                            wsum += w;
+                        }
+                        if (wsum > 1e-6f) {
+                            blurred[i] = Scale(sum, 1.0f / wsum);
+                            if (skySplit) skyBlurred[i] = Scale(skySum2, 1.0f / wsum);
+                        }
+                    }
+                });
+                accum = std::move(blurred);
+                if (skySplit) skyAccum = std::move(skyBlurred);
+            }
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[Lightmap][bake] lowpass: radius " << lpRadius
+                << " (rasterized-only, same-rect taps)" << std::endl;
+        }
+    }
+
     // ---- 8 encode + save ----
     LightmapContainer c;
     c.atlas_count = 1;

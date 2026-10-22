@@ -212,7 +212,7 @@ bool LightmapModule::Initialize(RHIDeviceBase* device, rhi::ShaderHandle full_sc
         PushConstantRange pcRange{};
         pcRange.stageFlags = ShaderStage::Pixel;
         pcRange.offset = 0;
-        pcRange.size = 16;  // gain + debugMode + filterMode + frameIndex（§20 任务4）
+        pcRange.size = 20;  // gain + debugMode + filterMode + frameIndex + darkTint（§21 问题2a）
         plDesc.pushConstantRangeCount = 1;
         plDesc.pushConstantRanges = &pcRange;
         plDesc.setLayoutCount = 1;
@@ -900,6 +900,16 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
                 const float v = (float)std::atoi(f);
                 if (v >= 0.0f && v <= 3.0f) filterMode = v;
             }
+            // [§21 问题2a] PRIMAL_LIGHTMAP_DARKTINT：无有效间接暗像素暖化
+            //（composite 内，不动 Lumen/deferred 共用文件）。默认 1.0：暗桶
+            // 80.5% texel E≈0 裸露 deferred fill（B/R 0.968 中性偏蓝，§20.1），
+            // tint (1,0.95,0.87) 全强度把暗桶 B/R 拉到 ≈0.84（OFF 参考 0.804，
+            // 验收线 ≤0.90）；0=关闭（回 §20 行为）。A/B 定默认见 §21。
+            float darkTint = 1.0f;
+            if (const char* t = std::getenv("PRIMAL_LIGHTMAP_DARKTINT")) {
+                const float v = static_cast<float>(std::atof(t));
+                if (v >= 0.0f && v <= 1.0f) darkTint = v;
+            }
             // 无实体时绑 z=0 占位页（全像素走原路径/debug 分支）。
             const ResourceHandle uvTex = HasEntities() ? uv_rt_ : uv_black_tex_;
             // [诊断] PRIMAL_LIGHTMAP_SWAPUV=1：交换 b1/b2 纹理。配 DEBUG=3
@@ -927,8 +937,8 @@ rendergraph::RGResourceHandle LightmapModule::AddCompositePass(
             cmd->BindGraphicsPipeline(composite_pipeline_);
             const DescriptorSetHandle sets[] = {composite_ds_[slot]};
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, composite_layout_, 0, 1, sets, 0, nullptr);
-            const float pushParams[4] = {gain, debugMode, filterMode,
-                                         (float)inputs.frame_index};
+            const float pushParams[5] = {gain, debugMode, filterMode,
+                                         (float)inputs.frame_index, darkTint};
             cmd->PushConstants(composite_layout_, ShaderStage::Pixel, 0, sizeof(pushParams),
                                pushParams);
             cmd->Draw(3, 0, 1, 0);
