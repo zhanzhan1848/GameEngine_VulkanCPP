@@ -71,7 +71,11 @@ const float DIRECT_INTENSITY   = 50.0;   // 2026-09-10 十七: 用户实验 20�
 // 注意此处 IBL cube 是独立加载的 HDR 环境，与解析天空未做单位统一；后续
 // 校准只动 IBL_SPECULAR_INTENSITY，不回退 diffuse 门。
 const float IBL_DIFFUSE_INTENSITY  = 0.0;
-const float IBL_SPECULAR_INTENSITY = 0.35;
+// 2026-10-23（用户定调）：环境镜面 IBL 归零——lightmap 互斥态下它曾是
+// E≈0 暗区的唯一光（§20"暗部 fill"，B/R≈0.97-1.58 的残蓝来源，§21
+// DARKTINT 即为补偿它）。归零后无直射+无间接的暗区=物理真黑。
+// 注意：Lumen（OFF）态同受影响——其暗部失去环境镜面光泽。
+const float IBL_SPECULAR_INTENSITY = 0.0;
 const float SHADOW_AMBIENT_SCALE = 0.05;
 // P2（sponza-gap-reaudit §4.6）: 环境镜面遮挡与日光阴影分离。旧式把太阳
 // shadowVisibility 直接乘进 IBL specular（mix(0.05,1,vis)），阴影内环境镜面
