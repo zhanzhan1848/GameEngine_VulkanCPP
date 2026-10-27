@@ -337,6 +337,7 @@ public static class Serializer
                     PrimalEditor_Avalonia.Components.ColliderComponent collider => JsonSerializer.SerializeToElement(collider, SceneDocument.JsonOptions),
                     PrimalEditor_Avalonia.Components.RigidBodyComponent rigidBody => JsonSerializer.SerializeToElement(rigidBody, SceneDocument.JsonOptions),
                     PrimalEditor_Avalonia.Components.ParticleFXComponent particleFx => JsonSerializer.SerializeToElement(particleFx, SceneDocument.JsonOptions),
+                    PrimalEditor_Avalonia.Components.GameplayRulesComponent gameplayRules => JsonSerializer.SerializeToElement(gameplayRules, SceneDocument.JsonOptions),
                     _ => throw new NotSupportedException($"Unknown component type: {component.GetType().Name}")
                 };
                 var componentDoc = new ComponentDocument
@@ -378,6 +379,7 @@ public static class Serializer
             PrimalEditor_Avalonia.Components.ColliderComponent => "collider",
             PrimalEditor_Avalonia.Components.RigidBodyComponent => "rigidbody",
             PrimalEditor_Avalonia.Components.ParticleFXComponent => "particleFX",
+            PrimalEditor_Avalonia.Components.GameplayRulesComponent => "gameplayRules",
             _ => throw new NotSupportedException($"Unknown component type: {component.GetType().Name}")
         };
     }
@@ -489,6 +491,7 @@ public static class Serializer
             "collider" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.ColliderComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "rigidbody" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.RigidBodyComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             "particlefx" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.ParticleFXComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
+            "gameplayrules" => JsonSerializer.Deserialize<PrimalEditor_Avalonia.Components.GameplayRulesComponent>(componentDoc.Data.GetRawText(), SceneDocument.JsonOptions),
             _ => throw new NotSupportedException($"Unknown component type discriminator: '{componentDoc.Type}'")
         };
     }

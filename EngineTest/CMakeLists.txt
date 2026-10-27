@@ -19,6 +19,7 @@ set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build architectures for macOS"
 # 包含子目录
 add_subdirectory(UnitTests)
 add_subdirectory(NavigationTests)
+add_subdirectory(GameplayTests)
 add_subdirectory(AudioTests)
 add_subdirectory(PhysicsTests)
 add_subdirectory(IntegrationTests)

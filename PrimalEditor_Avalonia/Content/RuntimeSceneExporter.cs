@@ -120,6 +120,7 @@ public static class RuntimeSceneExporter
             AppendPhysics(sb, entity);
             AppendAudio(sb, ctx, entity);
             AppendNavigation(sb, entity);
+            AppendGameplay(sb, entity);
             // pfx Player 接通（2026-10-15）：.pfx_emitter JSON 资产行（portable 复制进
             // _assets/）。暴露参数覆盖不随行（名字→Murmur3 哈希在引擎侧）——S1 声明。
             var pfxComponent = entity.GetComponent<Components.ParticleFXComponent>();
@@ -429,6 +430,103 @@ public static class RuntimeSceneExporter
             return;
         }
         sb.AppendLine($"navagent {Fmt(nav.Radius)} {Fmt(nav.Height)} {Fmt(nav.Speed)}");
+    }
+
+    /// <summary>
+    /// gameplay S1（gameplay-rules.md）：玩法规则行——状态机块（statemachine/
+    /// smstate/smtrans/smguard/smend，机器在 Player 侧原子提交）+ 独立触发器
+    /// （smtrigger）。谓词封闭文法与 Player ParseGameplayPredicate 一致：
+    ///   prop &lt;entity|self&gt; &lt;key&gt; &lt;op&gt; &lt;value&gt;
+    ///   dist &lt;a|self&gt; &lt;b|self&gt; &lt;op&gt; &lt;meters&gt;
+    ///   timer &lt;op&gt; &lt;seconds&gt;
+    ///   count &lt;event&gt; &lt;op&gt; &lt;n&gt;
+    /// 名字/键/事件名含空格时跳过该条并警告（行协议按空格切 token）。
+    /// </summary>
+    private static void AppendGameplay(StringBuilder sb, GameEntity entity)
+    {
+        var rules = entity.GetComponent<GameplayRulesComponent>();
+        if (rules == null) return;
+
+        var bad = false;
+        System.Action<string> warn = (what) =>
+        {
+            PrimalEditor_Avalonia.Common.Logger.Warning(
+                $"[Run] gameplay {what}, entity '{entity.Name}' skipped");
+        };
+
+        if (rules.States.Count > 0)
+        {
+            foreach (var st in rules.States)
+                if (string.IsNullOrWhiteSpace(st) || st.Contains(' ')) { warn($"state name '{st}'"); bad = true; }
+            if (string.IsNullOrWhiteSpace(rules.InitialState) ||
+                !rules.States.Contains(rules.InitialState))
+            { warn("initial state missing from States"); bad = true; }
+            if (!bad)
+            {
+                sb.AppendLine($"statemachine {rules.InitialState}");
+                foreach (var st in rules.States) sb.AppendLine($"smstate {st}");
+                int writtenTransitions = 0;   // 包内转移下标（跳过非法行时不递增——guard 引用包内序号）
+                for (int i = 0; i < rules.Transitions.Count; i++)
+                {
+                    var t = rules.Transitions[i];
+                    if (string.IsNullOrWhiteSpace(t.From) || string.IsNullOrWhiteSpace(t.To) ||
+                        t.From.Contains(' ') || t.To.Contains(' ') ||
+                        (!string.IsNullOrEmpty(t.Event) && t.Event.Contains(' ')))
+                    { warn($"transition #{i} name invalid"); continue; }
+                    var ev = string.IsNullOrEmpty(t.Event) ? "-" : t.Event;
+                    var manualTok = t.Manual ? " manual" : "";
+                    sb.AppendLine($"smtrans {t.From} {t.To} {ev}{manualTok}");
+                    var transIdx = writtenTransitions++;
+                    foreach (var g in t.Guards)
+                    {
+                        var tokens = PredicateTokens(g);
+                        if (tokens == null) { warn($"guard of transition #{i} invalid"); continue; }
+                        sb.AppendLine($"smguard {transIdx} {tokens}");
+                    }
+                }
+                sb.AppendLine("smend");
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(rules.InitialState))
+        {
+            warn("InitialState set but States empty — machine section skipped");
+        }
+
+        foreach (var tr in rules.Triggers)
+        {
+            if (string.IsNullOrWhiteSpace(tr.Event) || tr.Event.Contains(' '))
+            { warn($"trigger event '{tr.Event}' invalid"); continue; }
+            var tokens = PredicateTokens(tr.Predicate);
+            if (tokens == null) { warn($"trigger '{tr.Event}' predicate invalid"); continue; }
+            var mode = tr.Mode == "refire" ? "refire" : "once";
+            sb.AppendLine($"smtrigger {mode} {tr.Event} {tokens}");
+        }
+    }
+
+    /// <summary>谓词 → 行协议 token 串；封闭集外/名字含空格返回 null。</summary>
+    private static string? PredicateTokens(GameplayPredicate p)
+    {
+        string op = p.Op is "lt" or "lte" or "gt" or "gte" or "eq" or "neq" ? p.Op : null!;
+        if (op == null) return null;
+        bool NameOk(string n) => !string.IsNullOrEmpty(n) && !n.Contains(' ');
+        switch (p.Kind)
+        {
+            case "prop":
+                if (!NameOk(p.Key)) return null;
+                var a = string.IsNullOrEmpty(p.EntityA) || p.EntityA == "self" ? "self" : p.EntityA;
+                if (a != "self" && !NameOk(a)) return null;
+                return $"prop {a} {p.Key} {op} {Fmt(p.Value)}";
+            case "dist":
+                if (!NameOk(p.EntityA) || !NameOk(p.EntityB)) return null;
+                return $"dist {p.EntityA} {p.EntityB} {op} {Fmt(p.Value)}";
+            case "timer":
+                return $"timer {op} {Fmt(p.Value)}";
+            case "count":
+                if (!NameOk(p.Key)) return null;
+                return $"count {p.Key} {op} {Fmt(p.Value)}";
+            default:
+                return null;
+        }
     }
 
     /// <summary>单次导出状态：普通导出只拼行；portable 导出同时收集要复制进

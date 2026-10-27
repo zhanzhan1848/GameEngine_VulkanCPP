@@ -327,3 +327,15 @@ EDITOR_INTERFACE void DestroyEntity(u32 entity_id)
 	if (entity_id == id::invalid_id) return;
 	game_entity::remove(game_entity::entity_id{ entity_id });
 }
+
+// gameplay S1：实体当前位置只读（宿主/测试断言用——如 PrimalPlayer 的行为
+// 验收与 gameplay E2E 的门位移检查）。无效实体返回 0，out 未写。
+EDITOR_INTERFACE u32 GetEntityPosition(u32 entity_id, f32* out_pos3)
+{
+	if (entity_id == id::invalid_id || !out_pos3) return 0;
+	const game_entity::entity e{ game_entity::entity_id{ entity_id } };
+	if (!game_entity::is_alive(e.get_id())) return 0;
+	const auto p = e.Get<component::Transform>().position();
+	out_pos3[0] = p.x; out_pos3[1] = p.y; out_pos3[2] = p.z;
+	return 1;
+}

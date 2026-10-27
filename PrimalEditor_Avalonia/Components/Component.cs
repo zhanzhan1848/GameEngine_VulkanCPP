@@ -10,6 +10,7 @@ namespace PrimalEditor_Avalonia.Components;
 [JsonDerivedType(typeof(MaterialOverrideComponent), typeDiscriminator: "materialOverride")]
 [JsonDerivedType(typeof(ColliderComponent), typeDiscriminator: "collider")]
 [JsonDerivedType(typeof(RigidBodyComponent), typeDiscriminator: "rigidbody")]
+[JsonDerivedType(typeof(GameplayRulesComponent), typeDiscriminator: "gameplayRules")]
 public abstract class Component : ViewModelBase
 {
     [JsonPropertyName("IsEnabled")]

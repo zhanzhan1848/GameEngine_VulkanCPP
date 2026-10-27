@@ -24,6 +24,7 @@
 #include "../Engine/Scripting/NavLua.h"
 #include "../Engine/Scripting/AudioLua.h"
 #include "../Engine/Scripting/CharacterLua.h"
+#include "../Engine/Scripting/GameLua.h"
 
 // audio S2：EngineDLL AudioAPI 导出（同 dylib 内直链——extern "C" 转换单元可见）
 extern "C" {
@@ -225,6 +226,9 @@ void register_script_globals(void* lua_state)
     primal::scripting::g_audio_bridge.set_group = &AudioSetGroupGain;
     primal::scripting::g_audio_bridge.set_master = &AudioSetMasterGain;
     primal::scripting::register_audio_table(L);
+    // gameplay S1：玩法规则受控写入口（game.state.get/transition——同一
+    // gameplay::runtime 运行态，宿主 ABI 与脚本共用单份实现）
+    primal::scripting::register_game_table(L);
 }
 
 // ---------------------------------------------------------------------------

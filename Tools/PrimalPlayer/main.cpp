@@ -20,6 +20,7 @@
 
 #include "player_window.h"
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cfloat>
@@ -51,6 +52,20 @@ struct PlayerWavInfo {
     std::uint64_t data_bytes, frame_count;
 };
 static_assert(sizeof(PlayerWavInfo) == 32, "PlayerWavInfo 布局锁");
+
+// gameplay S1：谓词 POD 镜像（140B，static_assert 锁尺寸——宿主不依赖引擎头；
+// 字段语义/枚举值见 EngineDLL/GameplayAPI.h：kind 0 prop/1 dist/2 timer/3 count，
+// op 0 lt/1 lte/2 gt/3 gte/4 eq/5 neq；entity_a==""或"self"=所属实体）。
+struct PlayerGameplayPredicate {
+    std::uint8_t  kind, op;
+    std::uint16_t reserved;
+    char          entity_a[32];
+    char          entity_b[32];
+    char          key[64];
+    float         value;
+    float         spare;
+};
+static_assert(sizeof(PlayerGameplayPredicate) == 140, "PlayerGameplayPredicate 布局锁");
 
 // ----------------------------------------------------------------------------
 // EngineDLL C ABI —— 函数声明镜像（非 POD 内存镜像，与 primal-engine 同纪律；
@@ -139,6 +154,23 @@ std::uint32_t PhysicsSetRunning(std::uint32_t running);
 std::uint32_t NavigationBake(const float* positions, std::uint32_t position_count,
                              const std::uint32_t* indices, std::uint32_t index_count,
                              const float* profile4);
+// gameplay S1：EngineDLL GameplayAPI——玩法规则骨架（状态机/触发器；行协议
+// 构建器语义见 EngineDLL/GameplayAPI.h，格式契约见 RuntimeSceneExporter.cs）。
+void          GameplayClear(void);
+const char*   GameplayLastError(void);
+std::uint32_t GameplayRegisterNamedEntity(unsigned long long entity, const char* name);
+std::uint32_t GameplayMachineBegin(unsigned long long entity, const char* initial_state);
+std::uint32_t GameplayMachineAddState(const char* name);
+std::uint32_t GameplayMachineAddTransition(const char* from, const char* to,
+                                           const char* event_or_null, std::uint32_t manual);
+std::uint32_t GameplayMachineAddGuard(std::uint32_t transition_index,
+                                      const void* predicate_pod);
+std::uint32_t GameplayMachineEnd(void);
+std::uint32_t GameplayTriggerAdd(unsigned long long entity, const void* predicate_pod,
+                                 const char* event_name, std::uint32_t mode);
+std::uint32_t GameplayGetState(unsigned long long entity, char* out_state, std::uint32_t cap);
+std::uint32_t GameplayFrameCount(void);
+std::uint32_t GameplayTraceRecordCount(void);
 std::uint32_t AudioParseWavHeader(const void* data, std::uint64_t size, PlayerWavInfo* out);
 
 std::uint64_t CreateRenderTarget(std::uint32_t width, std::uint32_t height, std::uint32_t format);
@@ -222,6 +254,15 @@ struct RuntimeEntity {
     // physics S2：`character <radius> <height> <speed> <mass>`——Lua character 表驱动
     bool has_character = false;
     float char_radius = 0.4f, char_height = 1.8f, char_speed = 4.f, char_mass = 80.f;
+    // gameplay S1：状态机+触发器行协议（statemachine/smstate/smtrans/smguard/
+    // smtrigger/smend）。机器在 smend 原子提交；触发器独立于机器存在。
+    bool has_machine = false;
+    bool sm_open = false;      // 解析期：statemachine..smend 块状态
+    std::string sm_initial;
+    std::vector<std::string> sm_states;
+    std::vector<std::array<std::string, 4>> sm_trans;   // from, to, event（""=不发）, manual?
+    std::vector<std::pair<std::uint32_t, PlayerGameplayPredicate>> sm_guards; // (转移下标, 谓词)
+    std::vector<std::pair<PlayerGameplayPredicate, std::pair<std::string, std::uint32_t>>> sm_triggers; // (谓词, (事件, mode))
 };
 
 // 渲染相机最终选择：主相机 > 第一个场景相机 > 默认机位。
@@ -313,6 +354,68 @@ std::string ParseQuoted(const std::string& rest)
     return rest.substr(a + 1, b - a - 1);
 }
 
+// --- gameplay S1 谓词行解析 ---
+// 封闭文法（空格切 token；实体名/键/事件名不含空格——与 script param 键同款约束）：
+//   prop <entity|self> <key> <op> <value>      属性比较（state.entities.<id>.<key>）
+//   dist <entityA|self> <entityB|self> <op> <meters>   两实体距离
+//   timer <op> <seconds>                        机器=当前状态停留；独立触发器=创建以来
+//   count <event> <op> <n>                      事件计数（机器按状态进入以来）
+//   op ∈ lt lte gt gte eq neq
+bool ParseGameplayPredicate(const std::string& rest, PlayerGameplayPredicate& out,
+                            std::string& err)
+{
+    std::vector<std::string> tok;
+    {
+        std::istringstream iss(rest);
+        std::string t;
+        while (iss >> t) tok.push_back(t);
+    }
+    auto op_of = [](const std::string& o, std::uint8_t& code) {
+        if (o == "lt") code = 0; else if (o == "lte") code = 1;
+        else if (o == "gt") code = 2; else if (o == "gte") code = 3;
+        else if (o == "eq") code = 4; else if (o == "neq") code = 5;
+        else return false;
+        return true;
+    };
+    auto copy_str = [](const std::string& v, char* dst, size_t cap) {
+        std::snprintf(dst, cap, "%s", v.c_str());
+    };
+    out = PlayerGameplayPredicate{};
+
+    if (tok.empty()) { err = "empty predicate"; return false; }
+    if (tok[0] == "prop" && tok.size() == 5) {
+        out.kind = 0;
+        if (!op_of(tok[3], out.op)) { err = "bad op '" + tok[3] + "'"; return false; }
+        copy_str(tok[1], out.entity_a, sizeof(out.entity_a));
+        copy_str(tok[2], out.key, sizeof(out.key));
+        out.value = std::strtof(tok[4].c_str(), nullptr);
+        return true;
+    }
+    if (tok[0] == "dist" && tok.size() == 5) {
+        out.kind = 1;
+        if (!op_of(tok[3], out.op)) { err = "bad op '" + tok[3] + "'"; return false; }
+        copy_str(tok[1], out.entity_a, sizeof(out.entity_a));
+        copy_str(tok[2], out.entity_b, sizeof(out.entity_b));
+        out.value = std::strtof(tok[4].c_str(), nullptr);
+        return true;
+    }
+    if (tok[0] == "timer" && tok.size() == 3) {
+        out.kind = 2;
+        if (!op_of(tok[1], out.op)) { err = "bad op '" + tok[1] + "'"; return false; }
+        out.value = std::strtof(tok[2].c_str(), nullptr);
+        return true;
+    }
+    if (tok[0] == "count" && tok.size() == 4) {
+        out.kind = 3;
+        if (!op_of(tok[2], out.op)) { err = "bad op '" + tok[2] + "'"; return false; }
+        copy_str(tok[1], out.key, sizeof(out.key));
+        out.value = std::strtof(tok[3].c_str(), nullptr);
+        return true;
+    }
+    err = "unknown predicate form '" + rest + "'";
+    return false;
+}
+
 bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
 {
     FILE* f = std::fopen(path.c_str(), "rb");
@@ -341,7 +444,9 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
     char line[4096];
     bool in_entity = false;
     RuntimeEntity current;
+    int line_no = 1;   // gameplay：错误定位到契约行（其他行型不用）
     while (std::fgets(line, sizeof(line), f)) {
+        ++line_no;
         std::string text = Trim(line);
         if (text.empty() || text[0] == '#') continue;
         auto space = text.find(' ');
@@ -354,7 +459,15 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
             continue;
         }
         if (key == "end") {
-            if (in_entity) out.entities.push_back(current);
+            if (in_entity) {
+                if (current.sm_open) {
+                    std::fprintf(stderr, "[player] line %d: statemachine block not closed "
+                                 "by smend — machine discarded (entity '%s')\n",
+                                 line_no, current.name.c_str());
+                    current.sm_open = false;
+                }
+                out.entities.push_back(current);
+            }
             in_entity = false;
             continue;
         }
@@ -596,6 +709,89 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
                 current.camera_is_main = v[4] != 0.f;
             }
         }
+        // ---- gameplay S1：状态机/触发器行（错误定位到契约行）----
+        else if (key == "statemachine") {
+            if (current.sm_open) {
+                std::fprintf(stderr, "[player] line %d: statemachine already open (entity '%s')\n",
+                             line_no, current.name.c_str());
+            } else if (current.has_machine) {
+                std::fprintf(stderr, "[player] line %d: duplicate statemachine (entity '%s')\n",
+                             line_no, current.name.c_str());
+            } else {
+                current.sm_open = true;
+                current.sm_initial = Trim(rest);
+            }
+        } else if (key == "smstate") {
+            if (!current.sm_open) {
+                std::fprintf(stderr, "[player] line %d: smstate outside statemachine block\n", line_no);
+            } else {
+                current.sm_states.push_back(Trim(rest));
+            }
+        } else if (key == "smtrans") {
+            if (!current.sm_open) {
+                std::fprintf(stderr, "[player] line %d: smtrans outside statemachine block\n", line_no);
+            } else {
+                std::istringstream iss(rest);
+                std::string from, to, event, manual_tok;
+                iss >> from >> to >> event >> manual_tok;   // event/manual 可缺省；"-" = 不发事件
+                if (from.empty() || to.empty()) {
+                    std::fprintf(stderr, "[player] line %d: smtrans needs <from> <to> [event|-] [manual]\n", line_no);
+                } else {
+                    current.sm_trans.push_back({ from, to, event == "-" ? "" : event,
+                                                 manual_tok == "manual" ? "manual" : "" });
+                }
+            }
+        } else if (key == "smguard") {
+            if (!current.sm_open) {
+                std::fprintf(stderr, "[player] line %d: smguard outside statemachine block\n", line_no);
+            } else {
+                std::istringstream iss(rest);
+                std::uint32_t idx = 0;
+                std::string idx_tok, pred_text;
+                iss >> idx_tok >> pred_text;
+                if (idx_tok.empty() || pred_text.empty()) {
+                    std::fprintf(stderr, "[player] line %d: smguard needs <transIdx> <predicate...>\n", line_no);
+                } else {
+                    idx = static_cast<std::uint32_t>(std::strtoul(idx_tok.c_str(), nullptr, 10));
+                    pred_text = Trim(rest.substr(rest.find(pred_text, idx_tok.size())));
+                    PlayerGameplayPredicate pred;
+                    std::string err;
+                    if (!ParseGameplayPredicate(pred_text, pred, err))
+                        std::fprintf(stderr, "[player] line %d: smguard %s\n", line_no, err.c_str());
+                    else
+                        current.sm_guards.push_back({ idx, pred });
+                }
+            }
+        } else if (key == "smtrigger") {
+            // `smtrigger <once|refire> <event> <predicate...>`（机器块外）
+            if (current.sm_open) {
+                std::fprintf(stderr, "[player] line %d: smtrigger inside statemachine block "
+                             "(triggers are standalone)\n", line_no);
+            } else {
+                std::istringstream iss(rest);
+                std::string mode_tok, event, first;
+                iss >> mode_tok >> event >> first;
+                if (mode_tok.empty() || event.empty() || first.empty()) {
+                    std::fprintf(stderr, "[player] line %d: smtrigger needs <once|refire> <event> <predicate...>\n", line_no);
+                } else {
+                    const std::uint32_t mode = mode_tok == "refire" ? 1u : 0u;
+                    const std::string pred_text = Trim(rest.substr(rest.find(first, mode_tok.size() + event.size())));
+                    PlayerGameplayPredicate pred;
+                    std::string err;
+                    if (!ParseGameplayPredicate(pred_text, pred, err))
+                        std::fprintf(stderr, "[player] line %d: smtrigger %s\n", line_no, err.c_str());
+                    else
+                        current.sm_triggers.push_back({ pred, { event, mode } });
+                }
+            }
+        } else if (key == "smend") {
+            if (!current.sm_open) {
+                std::fprintf(stderr, "[player] line %d: smend without statemachine\n", line_no);
+            } else {
+                current.sm_open = false;
+                current.has_machine = true;
+            }
+        }
     }
     std::fclose(f);
 
@@ -696,6 +892,10 @@ std::uint32_t InjectScene(RuntimeScene& scene,
                           std::vector<std::uint64_t>& out_mesh_entities,
                           std::vector<std::uint64_t>& out_script_handles)
 {
+    // gameplay S1：清空上一场景的玩法规则运行态（机器/触发器/名字表/trace）。
+    // 与"同 guid scene.load 不重建原生实体"的编辑器语义无关——这里是 Player
+    // 的一次性注入，包级原子重置。
+    GameplayClear();
     UpdateSceneEnvironment(scene.env);
 
     ChosenCamera chosen{};
@@ -837,6 +1037,12 @@ std::uint32_t InjectScene(RuntimeScene& scene,
         const float scl[3]{1.f, 1.f, 1.f};
         SetEntityTransform(entity, pos, rot, scl);
         chosen.entity_id = entity;
+    }
+    // gameplay S1：名字表登记（谓词按名惰性解析；在全部实体创建后统一登记，
+    // 与实体在包中的出现顺序解耦）。无名实体不参与名字引用。
+    for (const auto& e : scene.entities) {
+        if (e.name.empty() || e.engine_entity == kInvalidEntityId) continue;
+        GameplayRegisterNamedEntity(e.engine_entity, e.name.c_str());
     }
     // v2：脚本挂载（scripting S1）。mesh 实体用注册时的引擎 id，其余用上一
     // 循环回填的 id；坏脚本/缺文件由 ScriptAPI 报 stderr 并返回哨兵，宿主继续。
@@ -1042,6 +1248,41 @@ std::uint32_t InjectScene(RuntimeScene& scene,
         g_scene_joints.push_back({ jid, jr.entity_a + "-" + jr.entity_b });
         std::fprintf(stderr, "[player] joint %llu created ('%s'-'%s')\n",
                      (unsigned long long)jid, jr.entity_a.c_str(), jr.entity_b.c_str());
+    }
+
+    // gameplay S1：玩法规则注入——机器原子提交（Begin..End，语义错误整组
+    // 丢弃并报实体名+LastError）+ 独立触发器。构建顺序固定：先机器后触发器
+    //（确定事件订阅序）；解释器在 PipelineTick 的 script 段之后推进。
+    for (const auto& e : scene.entities) {
+        if (e.engine_entity == kInvalidEntityId) continue;
+        if (e.has_machine) {
+            auto fail = [&](const char* stage) {
+                std::fprintf(stderr, "[player] gameplay machine %s failed (entity '%s'): %s\n",
+                             stage, e.name.c_str(), GameplayLastError());
+            };
+            bool ok = GameplayMachineBegin(e.engine_entity, e.sm_initial.c_str()) == 0;
+            if (!ok) fail("begin");
+            for (const auto& st : e.sm_states) {
+                if (ok && GameplayMachineAddState(st.c_str()) != 0) { ok = false; fail("add_state"); }
+            }
+            for (const auto& tr : e.sm_trans) {
+                if (ok && GameplayMachineAddTransition(
+                        tr[0].c_str(), tr[1].c_str(),
+                        tr[2].empty() ? nullptr : tr[2].c_str(),
+                        tr[3] == "manual" ? 1u : 0u) != 0) { ok = false; fail("add_transition"); }
+            }
+            for (const auto& g : e.sm_guards) {
+                if (ok && GameplayMachineAddGuard(g.first, &g.second) != 0) { ok = false; fail("add_guard"); }
+            }
+            if (ok && GameplayMachineEnd() != 0) fail("end");
+        }
+        for (const auto& t : e.sm_triggers) {
+            if (GameplayTriggerAdd(e.engine_entity, &t.first,
+                                   t.second.first.c_str(), t.second.second) != 0) {
+                std::fprintf(stderr, "[player] gameplay trigger add failed (entity '%s'): %s\n",
+                             e.name.c_str(), GameplayLastError());
+            }
+        }
     }
 
     // sequence S1：序列轨按实体名绑定引擎实体（目标不在场景 → 跳过并记日志）。

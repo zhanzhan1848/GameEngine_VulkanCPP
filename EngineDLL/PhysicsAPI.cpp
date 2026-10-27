@@ -9,6 +9,7 @@
 #include "CommonHeaders.h"
 #include "Simulation/SimulationAPI.h"
 #include "Navigation/NavigationRuntime.h"
+#include "Gameplay/GameplayRuntime.h"
 #include "ParticleFX/core/PfxSystem.h"
 #include "ParticleFX/interop/PhysicsQuery.h"
 #include "ParticleFX/interop/PhysicsBindings.h"
@@ -186,12 +187,16 @@ EDITOR_INTERFACE u32 PhysicsSetRunning(u32 running)
 }
 
 // 宿主每帧在渲染前调用（PrimalPlayer / 编辑器视口 / 测试）。
-// 帧内顺序契约（scripting S1 冻结 + navigation S1 扩展）：script → nav →
-// physics → pfx → bindings——脚本先产出意图（entity.set_position/rotation 写
-// 变换、nav.move_to 建任务、事件发射），导航随后推进并把步进结果回写实体
+// 帧内顺序契约（scripting S1 冻结 + navigation S1 扩展 + gameplay S1 冻结项）：
+// script → gameplay → nav → physics → pfx → bindings——脚本先产出意图
+//（entity.set_position/rotation 写变换、nav.move_to 建任务、事件发射并 drain），
+// gameplay 解释器随后按契约求值（触发器/自动转移在本 tick 发射的事件下帧
+// drain 被脚本消费——一帧确定性延迟是契约）；导航推进并把步进结果回写实体
 // transform，物理步进与粒子消费其后；到期回收产生的 death 事件下帧被消费者
-// 拉取。nav 段无任务时零成本；navagent 实体不应再挂 dynamic rigidbody
-//（两个驱动源写同一 transform，编辑器侧约束）。
+// 拉取。nav/gameplay 段无实例时零成本；navagent 实体不应再挂 dynamic
+// rigidbody（两个驱动源写同一 transform，编辑器侧约束）。
+// gameplay 段的插入位置是 gameplay-rules.md S1 冻结项（script frame_tick 之后、
+// 物理步进之前），它直接决定确定性回放语义——勿动。
 // script 段有 is_initialized 守卫：编辑器进程无脚本组件时从不调
 // ScriptEnsureSystems，而 frame_tick 入口的 check_main_thread 断言
 // g_initialized——无守卫时编辑器视口首帧即 SIGABRT（2026-10-12 实测）。
@@ -199,6 +204,7 @@ EDITOR_INTERFACE void PipelineTick(f32 dt_seconds)
 {
     if (primal::script::is_initialized())
         primal::script::frame_tick(dt_seconds);
+    primal::gameplay::runtime::tick(dt_seconds);
     primal::navigation::runtime::tick(dt_seconds);
     simulation::step(dt_seconds);
     pfx::tick(dt_seconds);
