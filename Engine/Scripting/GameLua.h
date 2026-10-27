@@ -59,7 +59,28 @@ inline int lua_game_state_transition(lua_State* L)
     return 2;
 }
 
-// game.task.complete / game.task.fail 由 S2 任务契约接入（同文件追加）。
+// game.task.complete("id") / game.task.fail("id")（S2）：受控终局——非终态
+// 时生效（trace cause=lua + 结局事件），终态后幂等失败。
+inline int lua_game_task_finish(lua_State* L, bool complete)
+{
+    const char* id = luaL_checkstring(L, 1);
+    const u64 entity = lua_self_entity(L);
+    std::string detail;
+    const gameplay::gp_error err =
+        entity == 0 ? gameplay::gp_error::no_machine
+                    : gameplay::runtime::task_force(entity, id, complete, detail);
+    if (err == gameplay::gp_error::ok) {
+        lua_pushboolean(L, 1);
+        return 1;
+    }
+    lua_pushboolean(L, 0);
+    if (detail.empty()) detail = gameplay::to_string(err);
+    lua_pushstring(L, detail.c_str());
+    return 2;
+}
+
+inline int lua_game_task_complete(lua_State* L) { return lua_game_task_finish(L, true); }
+inline int lua_game_task_fail(lua_State* L)    { return lua_game_task_finish(L, false); }
 
 inline void register_game_table(lua_State* L)
 {
@@ -68,6 +89,10 @@ inline void register_game_table(lua_State* L)
     lua_pushcfunction(L, &lua_game_state_get);       lua_setfield(L, -2, "get");
     lua_pushcfunction(L, &lua_game_state_transition);lua_setfield(L, -2, "transition");
     lua_setfield(L, -2, "state");
+    lua_newtable(L);                                        // game.task
+    lua_pushcfunction(L, &lua_game_task_complete);   lua_setfield(L, -2, "complete");
+    lua_pushcfunction(L, &lua_game_task_fail);       lua_setfield(L, -2, "fail");
+    lua_setfield(L, -2, "task");
     lua_setglobal(L, "game");
 }
 

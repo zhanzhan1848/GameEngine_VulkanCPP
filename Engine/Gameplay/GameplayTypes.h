@@ -36,6 +36,14 @@ enum class trigger_mode : u8 {
     refire = 1,  // 谓词回落后重新武装（再上升沿再触发）
 };
 
+// 任务结局（S2）：active 从创建起算；completed/failed 终态（事件/条件/Lua
+// 三路来源，先到先得，trace 记 cause）。
+enum class task_state : u8 {
+    active    = 0,
+    completed = 1,
+    failed    = 2,
+};
+
 // 求值三态：谓词越界/名字未注册/属性缺失 → unknown（按 false 处理），
 // 并在 trace 里记一条 warn——"谓词越界有确定语义"的落点。
 enum class eval_status : u8 { false_v = 0, true_v, unknown };

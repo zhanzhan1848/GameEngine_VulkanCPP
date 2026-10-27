@@ -31,6 +31,11 @@ public sealed class GameplayRulesComponent : Component
     [JsonPropertyName("Triggers")]
     public System.Collections.Generic.List<GameplayTrigger> Triggers { get; set; } = new();
 
+    /// <summary>任务（S2）：目标+完成/失败条件，复用同一封闭谓词集；
+    /// 终态先到先得（条件全真 or Lua game.task.complete/fail）。</summary>
+    [JsonPropertyName("Tasks")]
+    public System.Collections.Generic.List<GameplayTask> Tasks { get; set; } = new();
+
     public override IMSComponent GetMultiselectionComponent(MSEntity msEntity) =>
         new MSGameplayRules(msEntity, this);
 }
@@ -69,6 +74,20 @@ public sealed class GameplayTrigger
 
     [JsonPropertyName("Predicate")]
     public GameplayPredicate Predicate { get; set; } = new();
+}
+
+/// <summary>任务契约：Id 业务身份；Complete/Fail 各为 AND 条件集。
+/// timer/count 谓词按任务创建以来计（与机器的状态作用域区分）。</summary>
+public sealed class GameplayTask
+{
+    [JsonPropertyName("Id")]
+    public string Id { get; set; } = "";
+
+    [JsonPropertyName("Complete")]
+    public System.Collections.Generic.List<GameplayPredicate> Complete { get; set; } = new();
+
+    [JsonPropertyName("Fail")]
+    public System.Collections.Generic.List<GameplayPredicate> Fail { get; set; } = new();
 }
 
 /// <summary>

@@ -501,6 +501,29 @@ public static class RuntimeSceneExporter
             var mode = tr.Mode == "refire" ? "refire" : "once";
             sb.AppendLine($"smtrigger {mode} {tr.Event} {tokens}");
         }
+
+        // 任务块（S2）：task/taskcond/taskend。timer/count 作用域=任务创建以来。
+        foreach (var task in rules.Tasks)
+        {
+            if (string.IsNullOrWhiteSpace(task.Id) || task.Id.Contains(' '))
+            { warn($"task id '{task.Id}' invalid"); continue; }
+            if (task.Complete.Count == 0 && task.Fail.Count == 0)
+            { warn($"task '{task.Id}' has no conditions"); continue; }
+            sb.AppendLine($"task {task.Id}");
+            foreach (var g in task.Complete)
+            {
+                var tokens = PredicateTokens(g);
+                if (tokens == null) { warn($"task '{task.Id}' complete condition invalid"); continue; }
+                sb.AppendLine($"taskcond complete {tokens}");
+            }
+            foreach (var g in task.Fail)
+            {
+                var tokens = PredicateTokens(g);
+                if (tokens == null) { warn($"task '{task.Id}' fail condition invalid"); continue; }
+                sb.AppendLine($"taskcond fail {tokens}");
+            }
+            sb.AppendLine("taskend");
+        }
     }
 
     /// <summary>谓词 → 行协议 token 串；封闭集外/名字含空格返回 null。</summary>

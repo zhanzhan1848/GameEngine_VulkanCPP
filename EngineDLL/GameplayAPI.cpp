@@ -72,6 +72,34 @@ EDITOR_INTERFACE unsigned int GameplayMachineEnd(void)
     return (unsigned int)gameplay::runtime::machine_end();
 }
 
+EDITOR_INTERFACE unsigned int GameplayTaskBegin(unsigned long long entity, const char* task_id)
+{
+    return (unsigned int)gameplay::runtime::task_begin((u64)entity, task_id);
+}
+
+EDITOR_INTERFACE unsigned int GameplayTaskAddCondition(unsigned int kind,
+                                                       const gameplay_predicate_pod* pred)
+{
+    if (!pred) return (unsigned int)gameplay::gp_error::invalid_argument;
+    return (unsigned int)gameplay::runtime::task_add_condition((u8)kind, from_pod(*pred));
+}
+
+EDITOR_INTERFACE unsigned int GameplayTaskEnd(void)
+{
+    return (unsigned int)gameplay::runtime::task_end();
+}
+
+EDITOR_INTERFACE unsigned int GameplayTaskGetState(unsigned long long entity, const char* task_id,
+                                                   unsigned int* out_state)
+{
+    if (!out_state) return (unsigned int)gameplay::gp_error::invalid_argument;
+    gameplay::task_state st{};
+    if (!gameplay::runtime::task_get((u64)entity, task_id, st))
+        return (unsigned int)gameplay::gp_error::no_machine;
+    *out_state = (unsigned int)st;
+    return (unsigned int)gameplay::gp_error::ok;
+}
+
 EDITOR_INTERFACE unsigned int GameplayTriggerAdd(unsigned long long entity,
                                                  const gameplay_predicate_pod* pred,
                                                  const char* event_name,

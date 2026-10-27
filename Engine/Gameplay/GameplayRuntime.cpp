@@ -29,6 +29,8 @@ constexpr u32 kMaxTransitions   = 256;
 constexpr u32 kMaxGuardsPerEdge = 16;
 constexpr u32 kMaxTriggers      = 256;
 constexpr u32 kMaxMachines      = 256;
+constexpr u32 kMaxTasks         = 256;
+constexpr u32 kMaxCondsPerTask  = 16;
 constexpr u32 kTraceCapacity    = 65536;
 
 struct transition_def {
@@ -56,6 +58,24 @@ struct machine_instance {
     std::unordered_set<std::string>     referenced; // 订阅的事件名集合
 };
 
+struct task_instance {
+    u64                       owner = 0;
+    std::string               id;
+    task_state                state = task_state::active;
+    f32                       age = 0.f;
+    std::vector<gp_predicate> complete_preds;   // AND
+    std::vector<gp_predicate> fail_preds;       // AND
+    std::unordered_map<std::string, u32> counts;        // 任务创建以来事件计数
+    std::unordered_set<std::string>     referenced;
+};
+
+struct task_builder {
+    u64                       owner = 0;
+    std::string               id;
+    std::vector<gp_predicate> complete_preds;
+    std::vector<gp_predicate> fail_preds;
+};
+
 struct trigger_instance {
     u64                       owner = 0;
     gp_predicate              pred;
@@ -79,6 +99,10 @@ struct runtime_state {
     std::vector<trigger_instance> triggers;              // 声明序
     bool                          has_builder = false;
     machine_def                   builder;
+    // ---- 任务（S2）----
+    std::vector<task_instance>   tasks;                 // 声明序（确定性遍历）
+    bool                          task_building = false;
+    task_builder                  task_builder_state;
     std::unordered_map<std::string, u64> name_to_entity;
     std::unordered_map<u64, std::string> entity_to_name;
     std::unordered_map<std::string, subscription_slot> name_subs;
@@ -180,6 +204,8 @@ void subscribe_name(const std::string& name)
                     if (m.referenced.count(captured)) ++m.counts[captured];
                 for (auto& t : rr.triggers)
                     if (t.referenced.count(captured)) ++t.counts[captured];
+                for (auto& k : rr.tasks)
+                    if (k.referenced.count(captured)) ++k.counts[captured];
             });
     }
     ++slot.refs;
@@ -208,10 +234,12 @@ bool compare(f32 lhs, f32 rhs, compare_op op)
     return false;
 }
 
-// ctx_machine/ctx_trigger 二选一非空（timer/count 的作用域归属）。
+// ctx_machine/ctx_trigger/ctx_task 至多一个非空（timer/count 的作用域归属：
+// 机器=当前状态进入以来；触发器/任务=创建以来）。
 eval_status eval_predicate(const gp_predicate& p, u64 owner,
                            const machine_instance* ctx_machine,
-                           const trigger_instance* ctx_trigger)
+                           const trigger_instance* ctx_trigger,
+                           const task_instance* ctx_task = nullptr)
 {
     switch (p.kind) {
         case predicate_kind::property: {
@@ -227,7 +255,12 @@ eval_status eval_predicate(const gp_predicate& p, u64 owner,
             if (v.tag == script::StateValue::Tag::Number)      lhs = (f32)v.n;
             else if (v.tag == script::StateValue::Tag::Bool)   lhs = v.b ? 1.f : 0.f;
             else {
-                warn_once(owner, "property_missing=entities." + std::to_string(target) + "." + p.key);
+                // warn 文本不得含数值 id（generation 位跨重建不同——回放逐位
+                // 比对要求 trace 只引用稳定名字）。
+                auto& rr = rt();
+                const auto it = rr.entity_to_name.find(target);
+                const std::string label = it != rr.entity_to_name.end() ? it->second : std::string("?");
+                warn_once(owner, "property_missing=entities." + label + "." + p.key);
                 return eval_status::unknown;
             }
             return compare(lhs, p.value, p.op) ? eval_status::true_v : eval_status::false_v;
@@ -251,12 +284,14 @@ eval_status eval_predicate(const gp_predicate& p, u64 owner,
         }
         case predicate_kind::timer: {
             const f32 t = ctx_machine ? ctx_machine->time_in_state
-                                      : (ctx_trigger ? ctx_trigger->age : 0.f);
+                          : ctx_trigger ? ctx_trigger->age
+                          : ctx_task    ? ctx_task->age : 0.f;
             return compare(t, p.value, p.op) ? eval_status::true_v : eval_status::false_v;
         }
         case predicate_kind::event_count: {
             const auto* counts = ctx_machine ? &ctx_machine->counts
-                                             : (ctx_trigger ? &ctx_trigger->counts : nullptr);
+                          : ctx_trigger ? &ctx_trigger->counts
+                          : ctx_task    ? &ctx_task->counts : nullptr;
             if (!counts) return eval_status::unknown;
             auto it = counts->find(p.key);
             const f32 n = (f32)(it != counts->end() ? it->second : 0u);
@@ -267,9 +302,10 @@ eval_status eval_predicate(const gp_predicate& p, u64 owner,
 }
 
 bool eval_bool(const gp_predicate& p, u64 owner,
-               const machine_instance* m, const trigger_instance* t)
+               const machine_instance* m, const trigger_instance* t,
+               const task_instance* k = nullptr)
 {
-    return eval_predicate(p, owner, m, t) == eval_status::true_v;  // unknown → false
+    return eval_predicate(p, owner, m, t, k) == eval_status::true_v;  // unknown → false
 }
 
 // 收集谓词里引用的事件名（count 谓词的 key）。
@@ -308,6 +344,9 @@ void clear()
     r.machines.clear();
     r.machine_by_entity.clear();
     r.triggers.clear();
+    r.tasks.clear();
+    r.task_building = false;
+    r.task_builder_state = {};
     r.has_builder = false;
     r.builder = {};
     r.name_to_entity.clear();
@@ -465,7 +504,114 @@ void tick(f32 dt)
         t.prev = v;
     }
 
+    // 任务（S2）：先完成集后失败集（全 AND），终态先到先得；结局事件
+    // gameplay.task.<id>.completed/.failed，payload 同触发器（entity=<名>）。
+    for (auto& k : r.tasks) {
+        if (k.state != task_state::active) continue;
+        k.age += dt;
+        // 空集不构成结局（vacuous truth 不适用：没有失败条件 = 不会条件失败）。
+        bool all = !k.complete_preds.empty();
+        for (const auto& g : k.complete_preds)
+            if (!eval_bool(g, k.owner, nullptr, nullptr, &k)) { all = false; break; }
+        if (all) {
+            k.state = task_state::completed;
+            trace_push(trace_kind::task_completed, k.owner,
+                       "task=" + k.id + "|entity=" + owner_label(k.owner) + "|cause=cond");
+            emit_string_event(("gameplay.task." + k.id + ".completed").c_str(), k.owner);
+            continue;
+        }
+        all = !k.fail_preds.empty();
+        for (const auto& g : k.fail_preds)
+            if (!eval_bool(g, k.owner, nullptr, nullptr, &k)) { all = false; break; }
+        if (all) {
+            k.state = task_state::failed;
+            trace_push(trace_kind::task_failed, k.owner,
+                       "task=" + k.id + "|entity=" + owner_label(k.owner) + "|cause=cond");
+            emit_string_event(("gameplay.task." + k.id + ".failed").c_str(), k.owner);
+        }
+    }
+
     ++r.frame;
+}
+
+// ==== 任务（S2）====
+
+gp_error task_begin(u64 entity, const char* task_id)
+{
+    auto& r = rt();
+    if (r.task_building) { set_error("task_begin: builder already open"); return gp_error::busy; }
+    if (!task_id || !task_id[0]) { set_error("task_begin: empty task id"); return gp_error::invalid_argument; }
+    for (const auto& k : r.tasks)
+        if (k.owner == entity && k.id == task_id) {
+            set_error("task_begin: duplicate task id");
+            return gp_error::already_exists;
+        }
+    if (r.tasks.size() >= kMaxTasks) { set_error("task_begin: task capacity"); return gp_error::overflow; }
+    r.task_building = true;
+    r.task_builder_state = {};
+    r.task_builder_state.owner = entity;
+    r.task_builder_state.id = task_id;
+    return gp_error::ok;
+}
+
+gp_error task_add_condition(u8 kind, const gp_predicate& pred)
+{
+    auto& r = rt();
+    if (!r.task_building) { set_error("task_add_condition: no task builder open"); return gp_error::not_building; }
+    if (kind > 1) { set_error("task_add_condition: kind must be 0 (complete) or 1 (fail)"); return gp_error::invalid_argument; }
+    auto& list = kind == 0 ? r.task_builder_state.complete_preds : r.task_builder_state.fail_preds;
+    if (list.size() >= kMaxCondsPerTask) { set_error("task_add_condition: condition capacity"); return gp_error::overflow; }
+    list.push_back(pred);
+    return gp_error::ok;
+}
+
+gp_error task_end()
+{
+    auto& r = rt();
+    if (!r.task_building) { set_error("task_end: no task builder open"); return gp_error::not_building; }
+    task_instance k;
+    k.owner = r.task_builder_state.owner;
+    k.id = r.task_builder_state.id;
+    k.complete_preds = std::move(r.task_builder_state.complete_preds);
+    k.fail_preds = std::move(r.task_builder_state.fail_preds);
+    for (auto& g : k.complete_preds) collect_referenced(g, k.referenced);
+    for (auto& g : k.fail_preds)   collect_referenced(g, k.referenced);
+    r.task_building = false;
+    r.task_builder_state = {};
+    r.tasks.push_back(std::move(k));
+    for (auto& name : r.tasks.back().referenced) subscribe_name(name);
+    return gp_error::ok;
+}
+
+bool task_get(u64 entity, const char* task_id, task_state& out)
+{
+    auto& r = rt();
+    if (!task_id) return false;
+    for (const auto& k : r.tasks)
+        if (k.owner == entity && k.id == task_id) { out = k.state; return true; }
+    return false;
+}
+
+gp_error task_force(u64 entity, const char* task_id, bool complete, std::string& out_detail)
+{
+    auto& r = rt();
+    if (!task_id || !task_id[0]) { set_error("task_force: empty task id"); return gp_error::invalid_argument; }
+    for (auto& k : r.tasks) {
+        if (k.owner != entity || k.id != task_id) continue;
+        if (k.state != task_state::active) {
+            out_detail = "already_" + std::string(k.state == task_state::completed ? "completed" : "failed");
+            return gp_error::already_exists;
+        }
+        k.state = complete ? task_state::completed : task_state::failed;
+        trace_push(complete ? trace_kind::task_completed : trace_kind::task_failed, k.owner,
+                   "task=" + k.id + "|entity=" + owner_label(k.owner) + "|cause=lua");
+        emit_string_event((std::string("gameplay.task.") + k.id +
+                           (complete ? ".completed" : ".failed")).c_str(), k.owner);
+        out_detail.clear();
+        return gp_error::ok;
+    }
+    out_detail = "no_task";
+    return gp_error::no_machine;
 }
 
 u32 frame_count() { return rt().frame; }

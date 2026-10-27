@@ -7,6 +7,7 @@ function M:begin_play()
     end)
     bus.on("door.opened", function(payload)
         entity.set_position(0, 3, -2)
+        state.entities[entity_id].opened = 1
         file.write("save://door_opened.txt", "opened")
     end)
 end

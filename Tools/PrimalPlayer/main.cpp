@@ -67,6 +67,15 @@ struct PlayerGameplayPredicate {
 };
 static_assert(sizeof(PlayerGameplayPredicate) == 140, "PlayerGameplayPredicate 布局锁");
 
+// gameplay S2：trace 记录 POD 镜像（120B；语义见 EngineDLL/GameplayAPI.h——
+// detail 为 NUL 结尾 "k=v|k=v"，entity 已含在 detail 的 entity=<名> 里）。
+struct PlayerGameplayTraceRecord {
+    std::uint32_t frame, kind;
+    unsigned long long entity;
+    char detail[104];
+};
+static_assert(sizeof(PlayerGameplayTraceRecord) == 120, "PlayerGameplayTraceRecord 布局锁");
+
 // ----------------------------------------------------------------------------
 // EngineDLL C ABI —— 函数声明镜像（非 POD 内存镜像，与 primal-engine 同纪律；
 // 符号存在性由链接期 dyld 校验）。
@@ -169,8 +178,14 @@ std::uint32_t GameplayMachineEnd(void);
 std::uint32_t GameplayTriggerAdd(unsigned long long entity, const void* predicate_pod,
                                  const char* event_name, std::uint32_t mode);
 std::uint32_t GameplayGetState(unsigned long long entity, char* out_state, std::uint32_t cap);
+std::uint32_t GameplayTaskBegin(unsigned long long entity, const char* task_id);
+std::uint32_t GameplayTaskAddCondition(std::uint32_t kind, const void* predicate_pod);
+std::uint32_t GameplayTaskEnd(void);
+std::uint32_t GameplayTaskGetState(unsigned long long entity, const char* task_id,
+                                   std::uint32_t* out_state);
 std::uint32_t GameplayFrameCount(void);
 std::uint32_t GameplayTraceRecordCount(void);
+std::uint32_t GameplayTraceGetRecord(std::uint32_t index, void* out_record_pod);
 std::uint32_t AudioParseWavHeader(const void* data, std::uint64_t size, PlayerWavInfo* out);
 
 std::uint64_t CreateRenderTarget(std::uint32_t width, std::uint32_t height, std::uint32_t format);
@@ -263,6 +278,12 @@ struct RuntimeEntity {
     std::vector<std::array<std::string, 4>> sm_trans;   // from, to, event（""=不发）, manual?
     std::vector<std::pair<std::uint32_t, PlayerGameplayPredicate>> sm_guards; // (转移下标, 谓词)
     std::vector<std::pair<PlayerGameplayPredicate, std::pair<std::string, std::uint32_t>>> sm_triggers; // (谓词, (事件, mode))
+    // gameplay S2：任务块（task/taskcond/taskend；条件复用封闭谓词文法）
+    struct SmTaskCond { std::uint8_t kind; PlayerGameplayPredicate pred; };  // 0 complete 1 fail
+    struct SmTask { std::string id; std::vector<SmTaskCond> conds; };
+    std::vector<SmTask> sm_tasks;
+    bool task_open = false;
+    SmTask task_cur;
 };
 
 // 渲染相机最终选择：主相机 > 第一个场景相机 > 默认机位。
@@ -465,6 +486,12 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
                                  "by smend — machine discarded (entity '%s')\n",
                                  line_no, current.name.c_str());
                     current.sm_open = false;
+                }
+                if (current.task_open) {
+                    std::fprintf(stderr, "[player] line %d: task block not closed "
+                                 "by taskend — task discarded (entity '%s')\n",
+                                 line_no, current.name.c_str());
+                    current.task_open = false;
                 }
                 out.entities.push_back(current);
             }
@@ -790,6 +817,45 @@ bool LoadRuntimeScene(const std::string& path, RuntimeScene& out)
             } else {
                 current.sm_open = false;
                 current.has_machine = true;
+            }
+        }
+        // ---- gameplay S2：任务块 ----
+        else if (key == "task") {
+            if (current.task_open) {
+                std::fprintf(stderr, "[player] line %d: task block already open\n", line_no);
+            } else {
+                current.task_open = true;
+                current.task_cur = RuntimeEntity::SmTask{};
+                current.task_cur.id = Trim(rest);
+            }
+        } else if (key == "taskcond") {
+            // `taskcond <complete|fail> <predicate...>`
+            if (!current.task_open) {
+                std::fprintf(stderr, "[player] line %d: taskcond outside task block\n", line_no);
+            } else {
+                std::istringstream iss(rest);
+                std::string kind_tok, first;
+                iss >> kind_tok >> first;
+                if (kind_tok.empty() || first.empty()) {
+                    std::fprintf(stderr, "[player] line %d: taskcond needs <complete|fail> <predicate...>\n", line_no);
+                } else {
+                    const std::uint8_t kind = kind_tok == "fail" ? 1u : 0u;
+                    const std::string pred_text = Trim(rest.substr(rest.find(first, kind_tok.size())));
+                    PlayerGameplayPredicate pred;
+                    std::string err;
+                    if (!ParseGameplayPredicate(pred_text, pred, err))
+                        std::fprintf(stderr, "[player] line %d: taskcond %s\n", line_no, err.c_str());
+                    else
+                        current.task_cur.conds.push_back({ kind, pred });
+                }
+            }
+        } else if (key == "taskend") {
+            if (!current.task_open) {
+                std::fprintf(stderr, "[player] line %d: taskend without task\n", line_no);
+            } else {
+                current.task_open = false;
+                current.sm_tasks.push_back(current.task_cur);
+                current.task_cur = RuntimeEntity::SmTask{};
             }
         }
     }
@@ -1283,6 +1349,22 @@ std::uint32_t InjectScene(RuntimeScene& scene,
                              e.name.c_str(), GameplayLastError());
             }
         }
+        for (const auto& k : e.sm_tasks) {
+            if (GameplayTaskBegin(e.engine_entity, k.id.c_str()) != 0) {
+                std::fprintf(stderr, "[player] gameplay task begin failed (entity '%s'): %s\n",
+                             e.name.c_str(), GameplayLastError());
+                continue;
+            }
+            for (const auto& c : k.conds) {
+                if (GameplayTaskAddCondition(c.kind, &c.pred) != 0) {
+                    std::fprintf(stderr, "[player] gameplay task cond failed (entity '%s'): %s\n",
+                                 e.name.c_str(), GameplayLastError());
+                }
+            }
+            if (GameplayTaskEnd() != 0)
+                std::fprintf(stderr, "[player] gameplay task end failed (entity '%s'): %s\n",
+                             e.name.c_str(), GameplayLastError());
+        }
     }
 
     // sequence S1：序列轨按实体名绑定引擎实体（目标不在场景 → 跳过并记日志）。
@@ -1422,6 +1504,9 @@ int main(int argc, char** argv)
     std::uint32_t render_mode = 3; // Deferred+Shadow+AO+GI（编辑器默认档一致）
     std::uint32_t editor_mode = 0; // 0=真 runtime 路径；1=编辑器路径（--editor-mode 诊断旗标）
     std::string input_bindings_path; // --input-bindings：显式映射文件（默认包旁 input.bindings）
+    // gameplay S2：dry-run 固定步长模式（--dryrun N --trace-out <csv>）。
+    long dryrun_frames = 0;
+    std::string trace_out_path;
     RecordConfig record;
 
     for (int i = 1; i < argc; ++i) {
@@ -1441,10 +1526,15 @@ int main(int argc, char** argv)
         else if (std::strcmp(argv[i], "--record-frames") == 0 && next()) record.max_frames = std::atol(argv[i]);
         else if (std::strcmp(argv[i], "--record-every") == 0 && next()) record.stride = std::atol(argv[i]);
         else if (std::strcmp(argv[i], "--record-metrics") == 0 && next()) record.metrics_path = argv[i];
+        // gameplay S2：dry-run——固定 dt=1/60 跑 N 帧后落 trace CSV 并正常退出
+        //（确定性：同包同帧数两轮 CSV 逐位一致；供 gameplay.dryrun 命令消费）。
+        else if (std::strcmp(argv[i], "--dryrun") == 0 && next()) dryrun_frames = std::atol(argv[i]);
+        else if (std::strcmp(argv[i], "--trace-out") == 0 && next()) trace_out_path = argv[i];
         else {
             std::fprintf(stderr, "[player] unknown arg: %s\n", argv[i]);
             std::fprintf(stderr, "usage: PrimalPlayer --scene <pkg> [--width W] [--height H] [--fixed] [--debug] [--mode 0..3] [--editor-mode 0|1]\n");
             std::fprintf(stderr, "                   [--record <dir>] [--record-frames N] [--record-every N] [--record-metrics <file.csv>]\n");
+            std::fprintf(stderr, "                   [--dryrun N] [--trace-out <file.csv>]\n");
             return 2;
         }
     }
@@ -1756,6 +1846,7 @@ int main(int argc, char** argv)
             last_frame_time = frame_now;
             if (dt < 0.f) dt = 0.f;
             if (dt > 0.1f) dt = 0.1f;
+            if (dryrun_frames > 0) dt = 1.f / 60.f;   // gameplay S2：固定步长=确定性回放
             PipelineTick(dt);
         }
 
@@ -1990,6 +2081,30 @@ int main(int argc, char** argv)
         }
 
         if (!windowed && --remaining_frames <= 0) break;
+        if (dryrun_frames > 0 && rendered_frames >= dryrun_frames) {
+            std::fprintf(stderr, "[player] dryrun complete: %ld frames\n", rendered_frames);
+            break;
+        }
+    }
+
+    // gameplay S2：trace CSV（确定性回放比对口径：index/frame/kind/detail——
+    // detail 已含 entity=<稳定名>，不含数值 id）。
+    if (dryrun_frames > 0 && !trace_out_path.empty()) {
+        FILE* tf = std::fopen(trace_out_path.c_str(), "w");
+        if (!tf) {
+            std::fprintf(stderr, "[player] trace-out open failed: %s\n", trace_out_path.c_str());
+        } else {
+            const std::uint32_t n = GameplayTraceRecordCount();
+            std::fprintf(tf, "# gameplay trace v1 frames=%u records=%u\n",
+                         GameplayFrameCount(), n);
+            for (std::uint32_t i = 0; i < n; ++i) {
+                PlayerGameplayTraceRecord rec{};
+                if (GameplayTraceGetRecord(i, &rec) != 0u) break;
+                std::fprintf(tf, "%u,%u,%u,%s\n", i, rec.frame, rec.kind, rec.detail);
+            }
+            std::fclose(tf);
+            std::fprintf(stderr, "[player] trace-out: %u records → %s\n", n, trace_out_path.c_str());
+        }
     }
 
     if (metrics_file) std::fclose(metrics_file);

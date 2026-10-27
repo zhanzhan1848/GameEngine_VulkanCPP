@@ -44,6 +44,11 @@ std::uint32_t GameplayTriggerAdd(unsigned long long entity, const void* predicat
 std::uint32_t GameplayGetState(unsigned long long entity, char* out_state, std::uint32_t cap);
 std::uint32_t GameplayTraceRecordCount(void);
 std::uint32_t GameplayTraceGetRecord(unsigned int index, void* out_record_pod);
+std::uint32_t GameplayTaskBegin(unsigned long long entity, const char* task_id);
+std::uint32_t GameplayTaskAddCondition(std::uint32_t kind, const void* predicate_pod);
+std::uint32_t GameplayTaskEnd(void);
+std::uint32_t GameplayTaskGetState(unsigned long long entity, const char* task_id,
+                                   std::uint32_t* out_state);
 std::uint32_t GetEntityPosition(std::uint32_t entity_id, float* out_pos3);
 }
 
@@ -92,6 +97,7 @@ struct RunResult {
     float door_y = 0.f;
     bool opened  = false;
     bool closed  = false;
+    bool task_completed = false;
 };
 
 RunResult run_round(const std::string& lua_path)
@@ -125,6 +131,16 @@ RunResult run_round(const std::string& lua_path)
     check(GameplayMachineAddGuard(1, &away) == 0, "guard dist Player-Button gte 5");
     check(GameplayMachineEnd() == 0, "door machine end");
 
+    // S2：门任务——完成=脚本属性 opened gte 1（door.opened 处理器写入）。
+    check(GameplayTaskBegin(door, "open_door") == 0, "task begin open_door");
+    PredicatePod opened_pred;
+    opened_pred.kind = 0; opened_pred.op = 3;   // prop, gte
+    std::snprintf(opened_pred.entity_a, sizeof(opened_pred.entity_a), "self");
+    std::snprintf(opened_pred.key, sizeof(opened_pred.key), "opened");
+    opened_pred.value = 1.f;
+    check(GameplayTaskAddCondition(0, &opened_pred) == 0, "task complete cond");
+    check(GameplayTaskEnd() == 0, "task end");
+
     // 按钮触发器：dist Button Player lt 2 → button.near
     PredicatePod near_pred;
     near_pred.kind = 1; near_pred.op = 0;   // dist, lt
@@ -144,7 +160,12 @@ RunResult run_round(const std::string& lua_path)
         set_player_x(x);
         PipelineTick(1.f / 60.f);
         if (f == 45) { GameplayGetState(door, state_buf, sizeof(state_buf)); res.opened = std::string(state_buf) == "open"; }
-        if (f == 119) { GameplayGetState(door, state_buf, sizeof(state_buf)); res.closed = std::string(state_buf) == "closed"; }
+        if (f == 119) {
+            GameplayGetState(door, state_buf, sizeof(state_buf));
+            res.closed = std::string(state_buf) == "closed";
+            std::uint32_t tstate = 99;
+            res.task_completed = GameplayTaskGetState(door, "open_door", &tstate) == 0 && tstate == 1;
+        }
     }
 
     float door_pos3[3] = {};
@@ -207,6 +228,8 @@ return M
     check(r1.closed, "door auto-closed when far (guard dist gte 5)");
     check(r1.door_y > kDoorOpenY - 0.01f, "door lifted by Lua handler");
     check(r2.opened && r2.closed && r2.door_y > kDoorOpenY - 0.01f, "second round behaves identically");
+    check(r1.task_completed, "door task completed via property condition");
+    check(r2.task_completed, "second round task completed too");
 
     // ---- 回放确定性：同输入同帧序同事件流（entity id 含 generation 位，比较
     //      kind+frame+detail）----
@@ -230,6 +253,7 @@ return M
     check(i_open > i_trig, "open transition after trigger");
     check(i_close > i_open, "auto close after open");
     check(find_idx(r1, "|2|") == i_open, "open transition is state_lua kind");
+    check(find_idx(r1, "task=open_door") > i_open, "task completed after open");
 
     std::cout << (failures ? "[TestGameplayE2E] FAILED\n" : "[TestGameplayE2E] ALL PASS\n");
     return failures ? 1 : 0;

@@ -1,5 +1,5 @@
 {
-  "$version": "6f4ab4b62e65750d",
+  "$version": "a5c843f6df073803",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -392,6 +392,95 @@
           "required": false
         }
       ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.apply",
+      "channel": "editor",
+      "description": "人确认后原子生效提案（确认门的执行动作；由人发起，AI 不得调用）。文件：备份原件到 proposals/<name>/backup-<时间戳>/ 后覆盖；规则 patch：按实体名替换/追加 GameplayRulesComponent（文档模型+UndoRedo，前像记入 manifest 供跨会话回滚）。建议先 gameplay.dryrun 看证据（有 verdict 记录时返回里带 evidence）。失败：NOT_FOUND（提案不存在）、INVALID_PARAMS（已 applied / patch 实体不在场景）。原子性：任一文件复制失败即整体中止（已备份未覆盖的不动），已覆盖部分回滚。",
+      "example": "{\"name\":\"door-faster\"}",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.dryrun",
+      "channel": "editor",
+      "description": "对提案跑固定步长（1/60）dry-run 出行为证据。导出当前场景包到临时目录，把提案 Lua 覆盖进包旁同名相对路径（Player 解析包相对优先），并（若有）把规则patch 应用到场景克隆后导出——激活场景与项目文件零改动。启动 PrimalPlayer --dryrun frames --trace-out，等进程退出（timeoutSec 预算，超时杀进程并在 verdict 标记）。产物：trace.csv（确定性口径 index/frame/kind/detail，两轮逐位一致）+ verdict.json（证据指针/预算与实际值/事件直方图）。失败：NOT_FOUND（提案不存在）、INVALID_PARAMS（帧数/超时非法、提案已 applied）、ENGINE_ERROR（Player 缺失/退出码非 0——细节看 stderr.log）。",
+      "example": "{\"name\":\"door-faster\",\"frames\":150,\"timeoutSec\":120}",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "frames",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "timeoutSec",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.propose",
+      "channel": "editor",
+      "description": "登记一份玩法提案（AI 产出的唯一进入形式——不直接生效）。filesCsv 为逗号分隔的文件条目，两种形态：'路径'（绝对或项目相对——apply 落点=其项目相对路径，适合替换既有脚本）或 '源|目标'（源任意可达路径，目标=项目相对 .lua——变体放临时处不留工作区）。文件复制进提案 files/ 下按目标路径存档。rulesPatchJson 可选：JSON 数组 [{entity:'实体名',rules:{InitialState/States/Transitions/Triggers/Tasks 字段}}]——apply 时按实体名替换/追加 GameplayRulesComponent（文档模型+Undo）。同名提案覆盖（重新提案）。失败：NOT_READY（无项目/场景）、INVALID_PARAMS（名/文件非法）、NOT_FOUND（文件不存在）。",
+      "example": "{\"name\":\"door-faster\",\"filesCsv\":\"/tmp/door_v2.lua|Content/Scripts/door.lua\"}",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "filesCsv",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "rulesPatchJson",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.rollback",
+      "channel": "editor",
+      "description": "回滚已 applied 的提案：文件从备份恢复（无原作的删除）；规则 patch 按前像恢复（文档模型+Undo 记录恢复动作）。幂等边界：提案未 applied 返回 INVALID_PARAMS。回滚后状态回 proposed（可再改再验）。",
+      "example": "{\"name\":\"door-faster\"}",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.status",
+      "channel": "editor",
+      "description": "列出全部提案与状态（proposed/applied）、文件数、是否有 dry-run 证据。附目录位置。只读。",
+      "example": "{}",
+      "params": [],
       "returns": "object"
     },
     {

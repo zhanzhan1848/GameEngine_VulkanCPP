@@ -45,6 +45,18 @@ gp_error machine_end();
 gp_error trigger_add(u64 entity, const gp_predicate& pred,
                      const char* event_name, trigger_mode mode);
 
+// ---- 任务契约（S2）：目标+完成/失败条件，复用同一封闭谓词集 ----
+// 条件求值作用域：timer/count 按任务创建以来计（与机器的状态作用域区分）。
+// 终态先到先得：每 tick 先查完成集（全真）再查失败集（全真）。
+gp_error task_begin(u64 entity, const char* task_id);
+// kind：0 = 完成条件，1 = 失败条件（同集多条为 AND）。
+gp_error task_add_condition(u8 kind, const gp_predicate& pred);
+gp_error task_end();
+// 查询：实体无此任务返回 false。
+bool task_get(u64 entity, const char* task_id, task_state& out);
+// Lua 受控终局（game.task.complete/fail）：非终态时生效并记 trace cause=lua。
+gp_error task_force(u64 entity, const char* task_id, bool complete, std::string& out_detail);
+
 // ---- 每帧推进（PipelineTick 的 script 段之后调用；无实例时零成本）----
 void tick(f32 dt);
 u32  frame_count();  // 已完成的 gameplay tick 数

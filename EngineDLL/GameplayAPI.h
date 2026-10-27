@@ -67,6 +67,17 @@ EDITOR_INTERFACE unsigned int GameplayMachineAddGuard(unsigned int transition_in
                                                       const gameplay_predicate_pod* pred);
 EDITOR_INTERFACE unsigned int GameplayMachineEnd(void);
 
+// ---- 任务（S2）----
+// 条件集复用封闭谓词；终态先到先得（cond/Lua 两路）。state：0 active、
+// 1 completed、2 failed（gameplay::task_state 逐位对应）。
+EDITOR_INTERFACE unsigned int GameplayTaskBegin(unsigned long long entity, const char* task_id);
+EDITOR_INTERFACE unsigned int GameplayTaskAddCondition(unsigned int kind /*0 complete 1 fail*/,
+                                                       const gameplay_predicate_pod* pred);
+EDITOR_INTERFACE unsigned int GameplayTaskEnd(void);
+// 返回错误码；成功时 out_state 填 task_state 数值。找不到返回 6 (no_machine)。
+EDITOR_INTERFACE unsigned int GameplayTaskGetState(unsigned long long entity, const char* task_id,
+                                                   unsigned int* out_state);
+
 // ---- 独立触发器 ----
 // mode: 0 once（首次上升沿后永久解除），1 refire（回落后重新武装）。
 EDITOR_INTERFACE unsigned int GameplayTriggerAdd(unsigned long long entity,

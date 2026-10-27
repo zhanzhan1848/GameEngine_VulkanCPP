@@ -5,7 +5,8 @@
 foreach(gp_test
     TestGameplayMachine
     TestGameplayPredicates
-    TestGameplayTrace)
+    TestGameplayTrace
+    TestGameplayTask)
     add_executable(${gp_test} ${gp_test}.cpp)
     target_include_directories(${gp_test} PRIVATE
         ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)

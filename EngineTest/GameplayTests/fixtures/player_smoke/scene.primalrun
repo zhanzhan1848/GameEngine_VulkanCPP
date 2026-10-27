@@ -28,6 +28,9 @@ smtrans closed open door.opened manual
 smtrans open closed door.closed
 smguard 1 dist Player Button gte 5
 smend
+task open_door
+taskcond complete prop self opened gte 1
+taskend
 end
 entity
 name "Cam"
