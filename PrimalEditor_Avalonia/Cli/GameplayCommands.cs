@@ -482,6 +482,36 @@ public sealed class GameplayCommands
         return new { rolledBack = true, proposal = name, filesRestored = restored, rulesRestored };
     }
 
+    [CliCommand("gameplay.review.open",
+        Description = "打开共创回路决定面窗口（S3 确认面的 UI 壳）：逐提案三个动作——" +
+                      "批准生效（=gameplay.apply）/ 驳回（必填原因，回喂 AI）/ 重新取证（=dryrun）。" +
+                      "只调参数不在此窗（人经 Inspector/组件命令改 L0 数值+Undo）。幂等：已开则置前。" +
+                      "失败：NOT_READY（无项目/UI 未就绪）。",
+        Example = "{}")]
+    public object ReviewOpen()
+    {
+        var (_, _) = RequireProject();
+        if (EditorServices.MainWindow == null)
+            throw CliError.NotReady("主窗口未就绪", "编辑器完全启动后重试");
+        var opened = Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            Gameplay.GameplayReviewWindow? found = null;
+            var desktop = Avalonia.Application.Current?.ApplicationLifetime
+                as Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime;
+            if (desktop != null)
+                foreach (var w in desktop.Windows)
+                    if (w is Gameplay.GameplayReviewWindow existing) { found = existing; break; }
+            if (found != null) { found.Activate(); found.Refresh(); }
+            else
+            {
+                var win = new Gameplay.GameplayReviewWindow();
+                win.Show(EditorServices.MainWindow);
+            }
+            return true;
+        }).GetAwaiter().GetResult();
+        return new { opened, window = "GameplayReviewWindow", decisionSurface = new[] { "approve", "reject+reason", "re-evidence" } };
+    }
+
     [CliCommand("gameplay.status",
         Description = "列出全部提案与状态（proposed/applied）、文件数、是否有 dry-run 证据。" +
                       "附目录位置。只读。",

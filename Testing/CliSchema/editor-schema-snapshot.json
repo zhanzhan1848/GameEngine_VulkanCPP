@@ -1,5 +1,5 @@
 {
-  "$version": "cd42bb93e3275085",
+  "$version": "8e11875e74f1a12f",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -606,6 +606,14 @@
           "required": true
         }
       ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.review.open",
+      "channel": "editor",
+      "description": "打开共创回路决定面窗口（S3 确认面的 UI 壳）：逐提案三个动作——批准生效（=gameplay.apply）/ 驳回（必填原因，回喂 AI）/ 重新取证（=dryrun）。只调参数不在此窗（人经 Inspector/组件命令改 L0 数值+Undo）。幂等：已开则置前。失败：NOT_READY（无项目/UI 未就绪）。",
+      "example": "{}",
+      "params": [],
       "returns": "object"
     },
     {

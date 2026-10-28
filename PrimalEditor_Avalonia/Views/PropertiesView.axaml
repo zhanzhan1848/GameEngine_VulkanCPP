@@ -420,6 +420,23 @@
                         ToolTip.Tip="把行集写回组件 Parameters（唯一事实源，可 Undo），并销毁重建引擎脚本实例"/>
             </StackPanel>
 
+            <!-- 玩法规则（gameplay S1-S4）：契约 JSON 编辑段；应用 = 替换组件（文档模型+Undo） -->
+            <StackPanel IsVisible="{Binding HasGameplayRulesComponent}" Spacing="6">
+                <Separator Margin="0,12"/>
+                <TextBlock Text="GAMEPLAY RULES" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"
+                           ToolTip.Tip="L0 契约（状态机/触发器/任务）；JSON 与场景序列化同一 schema——AI 可读可 diff，人改数值全程 Undo"/>
+                <TextBox Text="{Binding GameplayRulesJsonEditor, Mode=TwoWay}" FontSize="11"
+                         FontFamily="Menlo,Consolas,monospace" MinHeight="140" AcceptsReturn="True"
+                         TextWrapping="NoWrap" ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                         Watermark="InitialState / States / Transitions / Triggers / Tasks（JSON）"/>
+                <TextBlock Text="{Binding GameplayJsonError}" FontSize="10" Foreground="IndianRed"
+                           TextWrapping="Wrap" IsVisible="{Binding GameplayJsonError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"/>
+                <Button Content="应用契约（文档模型+Undo）" Command="{Binding GameplayApplyJsonCommand}"
+                        Padding="8,2" HorizontalAlignment="Left"
+                        ToolTip.Tip="解析 JSON → 替换 GameplayRulesComponent（可 editor.undo 回滚）；非法 JSON 拒绝且组件不动"/>
+            </StackPanel>
+
             <StackPanel IsVisible="{Binding HasMeshRendererComponent}" Spacing="6">
                 <Separator Margin="0,12"/>
 

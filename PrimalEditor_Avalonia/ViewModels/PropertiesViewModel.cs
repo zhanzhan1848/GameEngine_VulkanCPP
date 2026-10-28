@@ -243,6 +243,121 @@ public class PropertiesViewModel : ViewModelBase
 
     private static System.Action<string>? PfxOpenEditorCallbackStatic;
 
+    // ---- 玩法规则（gameplay S1-S4：契约 JSON 编辑段）----
+    // L0 契约是结构化数据（状态/转移/guard/触发器/任务）——Inspector 以
+    // JSON 文本编辑（与序列化格式同一 schema，AI 可读可 diff）；应用 = 解析
+    // →替换组件（文档模型+Undo）→ MarkProjectDirty。非法 JSON 拒绝并回显错误，
+    // 组件不被破坏（人改数值与 AI 改行为正交的编辑面）。
+    public bool HasGameplayRulesComponent => SingleSelection.Count == 1 &&
+        SingleSelection[0].GetComponent<PrimalEditor_Avalonia.Components.GameplayRulesComponent>() != null;
+
+    public PrimalEditor_Avalonia.Components.GameplayRulesComponent? GameplayRules
+    {
+        get
+        {
+            return SingleSelection.Count == 1
+                ? SingleSelection[0].GetComponent<PrimalEditor_Avalonia.Components.GameplayRulesComponent>()
+                : null;
+        }
+    }
+
+    private string _gameplayJsonError = "";
+    public string GameplayJsonError
+    {
+        get => _gameplayJsonError;
+        private set { _gameplayJsonError = value; OnPropertyChanged(nameof(GameplayJsonError)); }
+    }
+
+    /// <summary>契约 JSON（读=组件序列化；写仅经 ApplyGameplayJsonCommand）。</summary>
+    public string GameplayRulesJson
+    {
+        get
+        {
+            var rules = GameplayRules;
+            if (rules == null) return "";
+            return System.Text.Json.JsonSerializer.Serialize(
+                new
+                {
+                    rules.InitialState,
+                    rules.States,
+                    rules.Transitions,
+                    rules.Triggers,
+                    rules.Tasks,
+                },
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+        }
+    }
+
+    private RelayCommand? _gameplayApplyJsonCommand;
+    public System.Windows.Input.ICommand GameplayApplyJsonCommand => _gameplayApplyJsonCommand ??= new RelayCommand(_ =>
+    {
+        GameplayJsonError = "";
+        var entity = SingleSelection.Count == 1 ? SingleSelection[0] : null;
+        var old = GameplayRules;
+        if (entity == null) return;
+        string json;
+        try { json = System.Text.Json.JsonSerializer.Serialize(
+            System.Text.Json.JsonDocument.Parse(GameplayRulesJsonEditor).RootElement); }
+        catch (System.Text.Json.JsonException ex)
+        {
+            GameplayJsonError = $"JSON 非法：{ex.Message}（组件未动）";
+            return;
+        }
+        PrimalEditor_Avalonia.Components.GameplayRulesComponent? parsed;
+        try
+        {
+            parsed = System.Text.Json.JsonSerializer.Deserialize<
+                PrimalEditor_Avalonia.Components.GameplayRulesComponent>(json,
+                GameProject.Documents.SceneDocument.JsonOptions);
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            GameplayJsonError = $"契约字段非法：{ex.Message}（组件未动）";
+            return;
+        }
+        if (parsed == null) { GameplayJsonError = "反序列化为空（组件未动）"; return; }
+        var newJson = System.Text.Json.JsonSerializer.Serialize(parsed,
+            GameProject.Documents.SceneDocument.JsonOptions);
+        var oldJson = old != null
+            ? System.Text.Json.JsonSerializer.Serialize(old, GameProject.Documents.SceneDocument.JsonOptions)
+            : null;
+
+        if (old != null) entity.Components.Remove(old);
+        entity.Components.Add(parsed);
+        var we = Cli.EditorServices.WorldEditor;
+        we?.UndoRedo.Add(new Common.DelegateAction("gameplay.rules.edit",
+            () =>
+            {
+                entity.Components.Remove(parsed);
+                if (old != null && !entity.Components.Contains(old)) entity.Components.Add(old);
+            },
+            () =>
+            {
+                if (old != null) entity.Components.Remove(old);
+                if (!entity.Components.Contains(parsed)) entity.Components.Add(parsed);
+            }));
+        we?.MarkProjectDirty();
+        OnPropertyChanged(nameof(GameplayRulesJson));
+    });
+
+    /// <summary>编辑框文本（与 GameplayRulesJson 分离——用户可中途非法）。</summary>
+    private string _gameplayJsonEditor = "";
+    public string GameplayRulesJsonEditor
+    {
+        get => _gameplayJsonEditor;
+        set { _gameplayJsonEditor = value; OnPropertyChanged(nameof(GameplayRulesJsonEditor)); }
+    }
+
+    /// <summary>选中实体变化时同步编辑框初值。</summary>
+    public void RefreshGameplaySection()
+    {
+        _gameplayJsonEditor = GameplayRulesJson;
+        GameplayJsonError = "";
+        OnPropertyChanged(nameof(GameplayRulesJsonEditor));
+        OnPropertyChanged(nameof(HasGameplayRulesComponent));
+        OnPropertyChanged(nameof(GameplayRulesJson));
+    }
+
     // ---- Lua 脚本（scripting S1 收官：Inspector 参数编辑段）----
     // 语义与 CLI script.set-param 一致：Parameters 是唯一事实源（文档模型），
     // 应用 = 快照旧值 → 写新字典 → UndoRedo → SyncEntity 销毁重建引擎实例
@@ -1228,6 +1343,7 @@ public class PropertiesViewModel : ViewModelBase
         OnPropertyChanged(nameof(HasLuaScriptComponent));
         OnPropertyChanged(nameof(LuaScriptAssetName));
         OnPropertyChanged(nameof(LuaParamRows));
+        RefreshGameplaySection();
         // Section visibility alone is not enough: without these the Preset
         // combo / Spawn Rate / Enabled keep the values they had before the
         // emitter existed (empty / 0 / unchecked) after re-selection.
