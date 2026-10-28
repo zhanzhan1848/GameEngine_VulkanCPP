@@ -1,5 +1,5 @@
 {
-  "$version": "a5c843f6df073803",
+  "$version": "257c0f6c0cfbb76a",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -409,6 +409,48 @@
       "returns": "object"
     },
     {
+      "verb": "gameplay.autonomy.get",
+      "channel": "editor",
+      "description": "读自治政策（只读）。manual=每提案必审（默认）；sandbox=审政策不审个案（回路在 maxFramesPerDryrun/timeoutSecPerDryrun/allowedPathPrefixes 预算内可自主 dryrun+apply，受 maxAutoAppliesPerSession 上限约束；世代级回滚恒需人）。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.autonomy.set",
+      "channel": "editor",
+      "description": "写自治政策（人批准预算与约束=政策审的核心动作）。mode=manual|sandbox；sandbox 必须显式给 allowedPathPrefixes（逗号分隔项目相对前缀，如 Content/Scripts/NPC）与 maxAutoAppliesPerSession>0，否则 INVALID_PARAMS（空政策不构成授权）。预算字段同 get 的说明。",
+      "example": "{\"mode\":\"sandbox\",\"allowedPathPrefixesCsv\":\"Content/Scripts/NPC\",\"maxAutoAppliesPerSession\":5}",
+      "params": [
+        {
+          "name": "mode",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "allowedPathPrefixesCsv",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "maxAutoAppliesPerSession",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "maxFramesPerDryrun",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "timeoutSecPerDryrun",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
       "verb": "gameplay.dryrun",
       "channel": "editor",
       "description": "对提案跑固定步长（1/60）dry-run 出行为证据。导出当前场景包到临时目录，把提案 Lua 覆盖进包旁同名相对路径（Player 解析包相对优先），并（若有）把规则patch 应用到场景克隆后导出——激活场景与项目文件零改动。启动 PrimalPlayer --dryrun frames --trace-out，等进程退出（timeoutSec 预算，超时杀进程并在 verdict 标记）。产物：trace.csv（确定性口径 index/frame/kind/detail，两轮逐位一致）+ verdict.json（证据指针/预算与实际值/事件直方图）。失败：NOT_FOUND（提案不存在）、INVALID_PARAMS（帧数/超时非法、提案已 applied）、ENGINE_ERROR（Player 缺失/退出码非 0——细节看 stderr.log）。",
@@ -457,6 +499,25 @@
           "name": "rulesPatchJson",
           "type": "string",
           "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.reject",
+      "channel": "editor",
+      "description": "驳回提案并把原因回喂给 AI 迭代（人的决定面之一，与 apply/只调参数 并列——单次确认 ≤3 个决定）。reason 必填（回喂的上下文核心）；manifest 记 rejected + reason + 时间，状态回可重提（同名 re-propose 即迭代，历史 verdict 保留）。返回反馈包：原因 + 最近 verdict 指针 + 当前契约摘要（实体→规则组件 JSON），AI 拿它迭代不丢上下文。失败：NOT_FOUND（提案不存在）、INVALID_PARAMS（reason 为空）。",
+      "example": "{\"name\":\"door-faster\",\"reason\":\"开门太快，破坏探索节奏；保留触发距离\"}",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": true
         }
       ],
       "returns": "object"

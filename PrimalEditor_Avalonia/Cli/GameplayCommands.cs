@@ -367,6 +367,9 @@ public sealed class GameplayCommands
         var manifest = LoadManifest(projectDir, name);
         if (manifest.Status == "applied")
             throw CliError.InvalidParams($"提案 '{name}' 已 applied", "如需重应用先 gameplay.rollback");
+        if (manifest.Status == "rejected")
+            throw CliError.InvalidParams($"提案 '{name}' 已被驳回",
+                "迭代请同名 re-propose（覆盖历史），直接 apply 被驳回状态拦住");
 
         // 1) 备份 + 覆盖文件（staged→move 保原子；任一失败回滚已 move 的）。
         var backupDir = Path.Combine(ProposalDir(projectDir, name),
