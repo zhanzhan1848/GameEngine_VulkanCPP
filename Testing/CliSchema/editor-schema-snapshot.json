@@ -1,5 +1,5 @@
 {
-  "$version": "257c0f6c0cfbb76a",
+  "$version": "cd42bb93e3275085",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -451,6 +451,30 @@
       "returns": "object"
     },
     {
+      "verb": "gameplay.diversity",
+      "channel": "editor",
+      "description": "行为流 n-gram 重复率度量（多样性只作下限约束：repeatRate 须低于阈值，不追求最小化——防 Goodhart）。输入一个或多个（逗号分隔）trace CSV（--dryrun 产物；绝对或项目相对路径）：跨运行计算实体的动作流（trace 中 entity=<名> 的记录序），n 默认 3。跨运行重复率=跨文件重复 n-gram 占比；单文件时=文件内重复占比。返回逐实体 {ngrams, distinct, repeatRate} 与总体值。threshold 给定时 repeatRate ≥ threshold 记 gate=false（门禁判不过——证据门可据此拦截重复行为）。",
+      "example": "{\"tracesCsv\":\"a.csv,b.csv\",\"n\":3,\"threshold\":0.6}",
+      "params": [
+        {
+          "name": "tracesCsv",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "n",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "threshold",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
       "verb": "gameplay.dryrun",
       "channel": "editor",
       "description": "对提案跑固定步长（1/60）dry-run 出行为证据。导出当前场景包到临时目录，把提案 Lua 覆盖进包旁同名相对路径（Player 解析包相对优先），并（若有）把规则patch 应用到场景克隆后导出——激活场景与项目文件零改动。启动 PrimalPlayer --dryrun frames --trace-out，等进程退出（timeoutSec 预算，超时杀进程并在 verdict 标记）。产物：trace.csv（确定性口径 index/frame/kind/detail，两轮逐位一致）+ verdict.json（证据指针/预算与实际值/事件直方图）。失败：NOT_FOUND（提案不存在）、INVALID_PARAMS（帧数/超时非法、提案已 applied）、ENGINE_ERROR（Player 缺失/退出码非 0——细节看 stderr.log）。",
@@ -470,6 +494,68 @@
           "name": "timeoutSec",
           "type": "integer",
           "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.generation.list",
+      "channel": "editor",
+      "description": "列 NPC 的世代链（generation/parent/proposal/rulesHash 摘要/证据与记忆指针）。npc 省略=列全部 NPC。只读。",
+      "example": "{\"npc\":\"Guard\"}",
+      "params": [
+        {
+          "name": "npc",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.generation.record",
+      "channel": "editor",
+      "description": "登记一个 NPC 世代切换点（generation id 单调 +1；改进只发生在切换点）。proposal 为已 applied 的提案名（证据链）；memoryCsv 可选=该 NPC 的 trace CSV（事件流投影，存为世代记忆快照）。审计断言：rulesHash（当前场景全部规则组件的规范化哈希）与父世代必须一致——人设参数世代间零改动，人是缰绳；不一致直接 INVALID_PARAMS（除非 allowHumanRulesEdit=true 显式标注这是人的修改——仍会记录变更并留痕）。失败：NOT_FOUND（提案未 applied）、INVALID_PARAMS（哈希漂移/参数非法）。",
+      "example": "{\"npc\":\"Guard\",\"proposal\":\"guard-g3\",\"memoryCsv\":\".Primal/gameplay/dryrun/guard-g3-x/trace.csv\"}",
+      "params": [
+        {
+          "name": "npc",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "proposal",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "memoryCsv",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "allowHumanRulesEdit",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.generation.rollback",
+      "channel": "editor",
+      "description": "世代回滚（人的最终决定权——sandbox 自治不覆盖本命令）。回滚到 parent 世代：提案按其 backup 恢复文件（若该提案已 applied）——世代切换点原子回退；不修改任何世代记录（世代链只增不改，回滚后新世代=继续演进）。失败：INVALID_PARAMS（世代不存在/已是首代）。",
+      "example": "{\"npc\":\"Guard\"}",
+      "params": [
+        {
+          "name": "npc",
+          "type": "string",
+          "required": true
         }
       ],
       "returns": "object"
