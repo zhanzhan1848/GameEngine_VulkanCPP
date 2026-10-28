@@ -190,6 +190,21 @@ public sealed class CliGameplayCommandTests : IDisposable
     }
 
     [Fact]
+    public void RulesAttach_IdempotentWithUndo()
+    {
+        var plain = new GameEntity("Plain");
+        _scene.Entities.Add(plain);
+        var guid = plain.EntityGuid.Value;
+        var r1 = Data(Invoke("gameplay.rules.attach", new { entityGuid = guid }));
+        Assert.True(r1.Bool("attached"));
+        var r2 = Data(Invoke("gameplay.rules.attach", new { entityGuid = guid }));
+        Assert.False(r2.Bool("attached"));
+        Assert.Single(plain.Components.OfType<GameplayRulesComponent>());
+        _worldEditor.UndoRedo.Undo();
+        Assert.Empty(plain.Components.OfType<GameplayRulesComponent>());
+    }
+
+    [Fact]
     public void Status_ListsProposals()
     {
         File.WriteAllText(Path.Combine(_project.Path, "Content", "Scripts", "d.lua"), "return {}\n");

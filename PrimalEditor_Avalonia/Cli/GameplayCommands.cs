@@ -482,6 +482,32 @@ public sealed class GameplayCommands
         return new { rolledBack = true, proposal = name, filesRestored = restored, rulesRestored };
     }
 
+    [CliCommand("gameplay.rules.attach",
+        Description = "给实体挂 GameplayRulesComponent（已有则幂等返回）。空契约起步（InitialState" +
+                      "空=仅触发器段）；编辑走 Inspector GAMEPLAY RULES 段（JSON，文档模型+Undo）" +
+                      "或提案 patch。改动走 UndoRedo。失败：NOT_FOUND（实体不存在）。",
+        Example = """{"entityGuid":"…"}""")]
+    public object RulesAttach(Guid entityGuid)
+    {
+        var worldEditor = EditorServices.WorldEditor
+            ?? throw CliError.NotReady("编辑器视图中没有世界编辑器实例", "先在编辑器中打开项目");
+        var entity = FindEntityDeep(worldEditor.ActiveScene!.Entities, entityGuid)
+            ?? throw CliError.NotFound($"实体 {entityGuid}", "实体不在激活场景");
+        var existing = entity.GetComponent<GameplayRulesComponent>();
+        if (existing != null)
+            return new { attached = false, reason = "already-present", entity = entity.Name };
+        var comp = new GameplayRulesComponent();
+        entity.Components.Add(comp);
+        worldEditor.UndoRedo.Add(new DelegateAction("gameplay.rules.attach",
+            () => entity.Components.Remove(comp),
+            () =>
+            {
+                if (!entity.Components.Contains(comp)) entity.Components.Add(comp);
+            }));
+        worldEditor.MarkProjectDirty();
+        return new { attached = true, entity = entity.Name, hint = "Inspector → GAMEPLAY RULES 编辑契约 JSON（应用=文档模型+Undo）" };
+    }
+
     [CliCommand("gameplay.review.open",
         Description = "打开共创回路决定面窗口（S3 确认面的 UI 壳）：逐提案三个动作——" +
                       "批准生效（=gameplay.apply）/ 驳回（必填原因，回喂 AI）/ 重新取证（=dryrun）。" +
@@ -612,6 +638,17 @@ public sealed class GameplayCommands
         if (comp == null)
             throw CliError.InvalidParams("rules 反序列化失败", "字段见 GameplayRulesComponent");
         return comp;
+    }
+
+    private static GameEntity? FindEntityDeep(IEnumerable<GameEntity> roots, Guid guid)
+    {
+        foreach (var e in roots)
+        {
+            if (e.EntityGuid.Value == guid) return e;
+            var hit = FindEntityDeep(e.Children, guid);
+            if (hit != null) return hit;
+        }
+        return null;
     }
 
     private static GameEntity? FindEntity(IEnumerable<GameEntity> roots, string name)

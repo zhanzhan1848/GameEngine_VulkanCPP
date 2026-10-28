@@ -1,5 +1,5 @@
 {
-  "$version": "8e11875e74f1a12f",
+  "$version": "ef8b2becb7574a96",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -625,6 +625,20 @@
         {
           "name": "name",
           "type": "string",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.rules.attach",
+      "channel": "editor",
+      "description": "给实体挂 GameplayRulesComponent（已有则幂等返回）。空契约起步（InitialState空=仅触发器段）；编辑走 Inspector GAMEPLAY RULES 段（JSON，文档模型+Undo）或提案 patch。改动走 UndoRedo。失败：NOT_FOUND（实体不存在）。",
+      "example": "{\"entityGuid\":\"…\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
           "required": true
         }
       ],
