@@ -1,0 +1,57 @@
+# primal-runtime-scene v2
+scene "GuardPatrol"
+env 0.05 0.05 0.05 1 0.7 0.75 0.8 10 200 0.01 0 0.2 0.4 0.8 0 2 1 0 0 0 0 0 0 0
+entity
+name "Player"
+pos 0 0.5 0
+builtin box
+scl 0.2 0.2 0.2
+script "__THEME_DIR__/probe_player.lua"
+end
+entity
+name "Guard"
+pos -4 0.5 -4
+builtin box
+scl 0.3 0.6 0.3
+script "__THEME_DIR__/GUARD_LUA"
+param run "0"
+statemachine w1
+smstate w1
+smstate w2
+smstate w3
+smstate w4
+smtrans w1 w2 - manual
+smtrans w1 w3 - manual
+smtrans w1 w4 - manual
+smtrans w2 w1 - manual
+smtrans w2 w3 - manual
+smtrans w2 w4 - manual
+smtrans w3 w1 - manual
+smtrans w3 w2 - manual
+smtrans w3 w4 - manual
+smtrans w4 w1 - manual
+smtrans w4 w2 - manual
+smtrans w4 w3 - manual
+smend
+task patrol_quality
+taskcond complete count patrol.rounds gte 99
+taskcond fail count guard.escaped gte 1
+taskend
+end
+entity
+name "Cam"
+pos 0 6 -9
+camera 0 60 0.1 100 1
+end
+entity
+name "Sun"
+pos 3 8 2
+light 0 20 1 1 1 30 0 0 1
+end
+seqmeta 60 240
+seqpos "Player"
+seqposkey 0 0 0.5 0 0 0 0 0.2 0.2 0.2 0
+seqposkey 60 -5 0.5 5 0 0 0 0.2 0.2 0.2 0
+seqposkey 120 5 0.5 5 0 0 0 0.2 0.2 0.2 0
+seqposkey 180 5 0.5 -5 0 0 0 0.2 0.2 0.2 0
+seqposkey 240 0 0.5 0 0 0 0 0.2 0.2 0.2 0
