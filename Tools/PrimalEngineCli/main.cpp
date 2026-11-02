@@ -28,6 +28,7 @@
 // sc-bake-surface: per-card 真实表面页烘焙（SC per-mesh 计划 P1）
 #include "common/CardSurfaceBake.h"
 #include "Graphics/Baking/LightmapBaker.h"
+#include "JobSystem/JobSystem.h"
 #include <stb_image.h>
 
 #include <cstdint>
@@ -2470,6 +2471,30 @@ int VerbBuildShaders(int argc, char** argv)
 //（Graphics/Baking/LightmapBaker）。带 UVLM 段的 mesh 进烘焙，其余 trace-only
 //（BVH 遮挡）。灯光/天空为 CLI 参数（方向光默认对齐引擎 SunContract 姿态）；
 // 场景级灯光烘焙走编辑器 scene.bake_lightmaps。
+// [2026-10-30 无头烘焙轮] 四项补齐：①JobSystem 并行（此前未初始化——
+// ParallelBlocks 串行回退，大页慢 ~10×）；②stderr 进度日志（(phase,total)
+// 键控节流——长跑无输出会被当死进程）；③密度阶梯回退（--density 为上限，
+// 装箱溢出自动降档——对齐 e2e 语义）；④--e2e-names 条目命名
+// mesh_<序号>_e<序号>（运行时 LightmapModule::UpdateFrame 的代理命名契约，
+// 供渲染测试 LOAD 消费；缺省仍用 blob 原名）+ --texroot 材质贴图 albedo
+//（方案 A 平均色注入 + 方案 B ≤256² 降采样逐 texel 采样，与 e2e §14 同式；
+// 无贴图时回退 0.5 中灰——默认 0.8 灰会按 §13 白 albedo 教训虚增反弹）。
+static void LightmapBakeProgressLog(void*, u32 phase, u32 done, u32 total)
+{
+    static std::mutex s_mu;
+    static u64 s_lastKey = ~0ull;
+    static u32 s_lastPct = 200;
+    std::lock_guard<std::mutex> lk(s_mu);
+    const u64 key = (u64)phase << 32 | total;
+    const u32 pct = total ? (u32)((u64)done * 100 / total) : 100;
+    if (key != s_lastKey || pct == 100 || (s_lastPct < 100 && pct >= s_lastPct + 5)) {
+        std::fprintf(stderr, "[lightmap-bake] phase=%u %u%% (%u/%u)\n",
+                     phase, pct, done, total);
+        s_lastKey = key;
+        s_lastPct = pct;
+    }
+}
+
 int VerbBakeLightmaps(int argc, char** argv)
 {
     const char* inPath = nullptr;
@@ -2477,6 +2502,8 @@ int VerbBakeLightmaps(int argc, char** argv)
     u32 atlas = 2048, spp = 64, bounces = 3;
     f32 density = 16.f, sunIntensity = 3.f, skyIntensity = 1.f;
     bool denoise = true;
+    const char* texRoot = nullptr;
+    bool e2eNames = false, avgAlbedoOnly = false;
     f32 sunDir[3] = {0.548821f, -0.768350f, 0.329293f};
     f32 sunColor[3] = {1.f, 1.f, 1.f};
 
@@ -2501,6 +2528,9 @@ int VerbBakeLightmaps(int argc, char** argv)
         }
         else if (!std::strcmp(argv[i], "--sun-intensity") && i + 1 < argc) sunIntensity = (f32)std::atof(argv[++i]);
         else if (!std::strcmp(argv[i], "--sky") && i + 1 < argc) skyIntensity = (f32)std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--texroot") && i + 1 < argc) texRoot = argv[++i];
+        else if (!std::strcmp(argv[i], "--e2e-names")) e2eNames = true;
+        else if (!std::strcmp(argv[i], "--avg-albedo")) avgAlbedoOnly = true;
         else if (!std::strcmp(argv[i], "--no-denoise")) denoise = false;
         else {
             PrintError("INVALID_PARAMS", "未知参数", argv[i]);
@@ -2527,10 +2557,27 @@ int VerbBakeLightmaps(int argc, char** argv)
     sd.buffer = bytes.data();
     sd.buffer_size = static_cast<u32>(bytes.size());
 
+    // [2026-10-30] JobSystem：并行烘焙必需（否则 ParallelBlocks 串行回退）。
+    // CLI 进程独占使用，进程退出即回收——不 Shutdown（引擎常驻语义相反）。
+    if (!primal::jobsystem::JobSystem::Get()) {
+        if (!primal::jobsystem::JobSystem::Initialize())
+            std::fprintf(stderr, "[lightmap-bake] JobSystem init failed — serial fallback\n");
+        else
+            std::fprintf(stderr, "[lightmap-bake] JobSystem %u workers\n",
+                         primal::jobsystem::JobSystem::GetWorkerCount());
+    }
+
+    // 材质表（贴图路径）——best-effort，失败仅失去贴图 albedo。
+    primal::utl::vector<primal::tools::ErrorReport> errs;
+    primal::tools::pipeline::SceneHeader header{};
+    primal::tools::pipeline::ReadSceneHeader(sd, header, errs);
+
     primal::graphics::baking::BakeScene scene;
     std::vector<std::vector<u32>> ownedIndices;  // 16 位索引升位持有
-    primal::utl::vector<primal::tools::ErrorReport> errs;
-    u32 bakeable = 0, traceOnly = 0;
+    std::vector<std::vector<f32>> ownedUv0;      // 方案 B 材质 UV0 提取持有
+    std::vector<std::vector<unsigned char>> ownedAlbedoTex;  // ≤256² 降采样持有
+    u32 bakeable = 0, traceOnly = 0, texAlbedo = 0;
+    u32 meshOrdinal = 0;
     primal::tools::pipeline::WalkSceneBlob(
         sd,
         [&](u32, const primal::tools::pipeline::PackedMeshView& view) {
@@ -2551,7 +2598,86 @@ int VerbBakeLightmaps(int argc, char** argv)
                 for (u32 i = 0; i < view.num_indices; ++i) dst[i] = src[i];
                 m.indices = dst.data();
             }
-            m.name = view.name;
+            // 材质贴图 albedo（与 e2e §14 同式）：stbi 载入 → 方案 A 全分辨率
+            // 线性平均注入 base 色 + 方案 B ≤256² 盒滤波降采样供逐 texel 采样
+            //（baker 侧 material_uvs = element UV0，static_normal_texture 24B
+            // 布局末 8B——与渲染 PipelineDraw 同偏移）。缺贴图回退 0.5 中灰。
+            const primal::tools::material* mat =
+                (view.material_idx != u32_invalid_id &&
+                 view.material_idx < header.materials.size())
+                    ? &header.materials[view.material_idx] : nullptr;
+            if (mat && !mat->diffuse_texture.empty()) {
+                std::string texPath = mat->diffuse_texture;
+                if (!std::filesystem::exists(texPath) && texRoot)
+                    texPath = std::string(texRoot) + "/" + mat->diffuse_texture;
+                int tw = 0, th = 0, tc = 0;
+                unsigned char* px = nullptr;
+                if (std::filesystem::exists(texPath))
+                    px = stbi_load(texPath.c_str(), &tw, &th, &tc, 4);
+                if (px && tw > 0 && th > 0) {
+                    double lr = 0, lg = 0, lb = 0;
+                    const size_t n = (size_t)tw * th;
+                    const size_t stride = std::max<size_t>(1, n / 65536);
+                    size_t count = 0;
+                    for (size_t q = 0; q < n; q += stride) {
+                        const auto toLinear = [](unsigned char c) {
+                            return std::pow((float)c / 255.0f, 2.2f);
+                        };
+                        lr += toLinear(px[q * 4 + 0]);
+                        lg += toLinear(px[q * 4 + 1]);
+                        lb += toLinear(px[q * 4 + 2]);
+                        ++count;
+                    }
+                    if (count > 0)
+                        m.albedo[0] = (f32)(lr / count),
+                        m.albedo[1] = (f32)(lg / count),
+                        m.albedo[2] = (f32)(lb / count);
+                    ++texAlbedo;
+                    if (!avgAlbedoOnly &&
+                        view.elements_type == 0x3 /*static_normal_texture*/ &&
+                        view.element_buffer && view.elements_size >= 24) {
+                        const int scale = std::max(1, (std::max(tw, th) + 255) / 256);
+                        const int dw = std::max(1, tw / scale), dh = std::max(1, th / scale);
+                        ownedAlbedoTex.emplace_back((size_t)dw * dh * 3);
+                        unsigned char* o = ownedAlbedoTex.back().data();
+                        for (int dy = 0; dy < dh; ++dy)
+                            for (int dx = 0; dx < dw; ++dx) {
+                                const int sx0 = dx * scale, sy0 = dy * scale;
+                                const int sx1 = std::min(tw, sx0 + scale),
+                                          sy1 = std::min(th, sy0 + scale);
+                                unsigned r = 0, g = 0, b = 0;
+                                for (int sy = sy0; sy < sy1; ++sy)
+                                    for (int sx = sx0; sx < sx1; ++sx) {
+                                        const size_t q = ((size_t)sy * tw + sx) * 4;
+                                        r += px[q + 0]; g += px[q + 1]; b += px[q + 2];
+                                    }
+                                const size_t cnt = (size_t)(sy1 - sy0) * (sx1 - sx0);
+                                unsigned char* p = &o[((size_t)dy * dw + dx) * 3];
+                                p[0] = (unsigned char)(r / cnt);
+                                p[1] = (unsigned char)(g / cnt);
+                                p[2] = (unsigned char)(b / cnt);
+                            }
+                        m.albedo_texture = o;
+                        m.albedo_tex_w = (u32)dw;
+                        m.albedo_tex_h = (u32)dh;
+                        ownedUv0.emplace_back((size_t)view.num_vertices * 2);
+                        auto& uvs = ownedUv0.back();
+                        const u8* eb = view.element_buffer;
+                        for (u32 v = 0; v < view.num_vertices; ++v) {
+                            std::memcpy(&uvs[(size_t)v * 2 + 0], eb + (size_t)v * 24 + 16, 4);
+                            std::memcpy(&uvs[(size_t)v * 2 + 1], eb + (size_t)v * 24 + 20, 4);
+                        }
+                        m.material_uvs = uvs.data();
+                    }
+                    stbi_image_free(px);
+                }
+            }
+            if (!m.albedo_texture) { m.albedo[0] = m.albedo[1] = m.albedo[2] = 0.5f; }
+            // 条目命名：--e2e-names = mesh_<序号>_e<序号>（渲染测试代理契约）。
+            m.name = e2eNames ? ("mesh_" + std::to_string(meshOrdinal) + "_e" +
+                                 std::to_string(meshOrdinal))
+                              : view.name;
+            ++meshOrdinal;
             scene.meshes.push_back(m);
             if (m.lightmap_uvs) ++bakeable; else ++traceOnly;
         },
@@ -2560,6 +2686,8 @@ int VerbBakeLightmaps(int argc, char** argv)
         PrintError("INVALID_INPUT", "容器内没有可烘焙网格", inPath);
         return kExitEngine;
     }
+    std::fprintf(stderr, "[lightmap-bake] meshes=%u bakeable=%u trace-only=%u tex-albedo=%u\n",
+                 meshOrdinal, bakeable, traceOnly, texAlbedo);
 
     primal::graphics::baking::BakeLight light;
     light.type = primal::graphics::baking::BakeLight::Type::Directional;
@@ -2577,17 +2705,40 @@ int VerbBakeLightmaps(int argc, char** argv)
     settings.denoise = denoise ? 1 : 0;
     std::snprintf(settings.output_dir, sizeof(settings.output_dir), "%s", outDir);
 
-    const auto r = primal::graphics::baking::BakeLightmaps(scene, settings, nullptr, nullptr);
+    // [2026-10-30] 密度阶梯：--density 为上限，装箱溢出自动降档（对齐 e2e
+    // 语义——高密度溢出是快失败，不损耗积分时间）。
+    const f32 kLadder[] = {52.f, 48.f, 32.f, 26.f, 24.f, 20.f, 16.f, 12.f,
+                           10.f, 8.f, 4.f, 2.f, 1.f,
+                           0.5f, 0.25f, 0.125f, 0.0625f, 0.03f, 0.02f};
+    std::vector<f32> ladder;
+    ladder.push_back(density);
+    for (f32 d : kLadder)
+        if (d < density) ladder.push_back(d);
+
+    primal::graphics::baking::LightmapBakeResult r{};
+    for (f32 d : ladder) {
+        settings.texel_density = d;
+        const auto t0 = std::chrono::steady_clock::now();
+        r = primal::graphics::baking::BakeLightmaps(scene, settings,
+                                                    LightmapBakeProgressLog, nullptr);
+        const double sec = std::chrono::duration<double>(
+                               std::chrono::steady_clock::now() - t0).count();
+        std::fprintf(stderr, "[lightmap-bake] density=%.3g -> %s (%.1fs)\n",
+                     d, r.ok ? "OK" : r.error.c_str(), sec);
+        if (r.ok) break;
+    }
     if (!r.ok) {
-        PrintError("ENGINE_ERROR", "烘焙失败", r.error.c_str());
+        PrintError("ENGINE_ERROR", "烘焙失败（全部密度档）", r.error.c_str());
         return kExitEngine;
     }
     char okJson[1024];
     std::snprintf(okJson, sizeof(okJson),
                   "{\"path\":\"%s\",\"atlas\":[%u,%u],\"entries\":%zu,"
-                  "\"bakeable_meshes\":%u,\"trace_only\":%u}",
+                  "\"bakeable_meshes\":%u,\"trace_only\":%u,\"tex_albedo\":%u,"
+                  "\"density\":%.3g,\"spp\":%u}",
                   r.output_path.c_str(), r.atlas_width, r.atlas_height,
-                  r.entries.size(), bakeable, traceOnly);
+                  r.entries.size(), bakeable, traceOnly, texAlbedo,
+                  (double)settings.texel_density, spp);
     PrintOk(okJson);
     return kExitOk;
 }
