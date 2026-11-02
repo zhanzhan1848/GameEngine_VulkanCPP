@@ -15,6 +15,7 @@
 #include "Graphics/Lumen/SSAO/LumenSSAOPass.h"
 #include "Graphics/Lumen/SSGI/LumenSSGIPass.h"
 #include <array>
+#include <atomic>
 #include <unordered_map>
 #include "Graphics/Lumen/LumenTypes.h"
 #include "Graphics/Lumen/GIPlatformProfile.h"
@@ -43,6 +44,8 @@
 #include "Graphics/RenderPipeline/Modules/FusionCompositeModule.h"
 #include "Graphics/RenderPipeline/Modules/LightmapModule.h"
 #include "Graphics/Baking/LightmapBaker.h"
+// PrepareBakeScene 引用参数所需（定义在 LightmapSceneCollector.h——cpp 内包含）。
+namespace primal::graphics::baking { struct CollectedBakeScene; }
 #include "Graphics/RenderPipeline/Modules/SCDDGIIntegrationModule.h"
 #include "Graphics/Nanite/DepthHistoryManager.h"
 #include "Graphics/Nanite/ColorHistoryManager.h"
@@ -256,6 +259,21 @@ public:
                             std::vector<baking::LightmapMeshEntry>* out_entries = nullptr,
                             baking::LightmapProgressCallback progress = nullptr,
                             void* progress_user = nullptr);
+    // 异步烘焙（2026-10-29 无响应修复轮）：主线程仅做 CollectBakeScene +
+    // albedo/override 装配（秒级、RenderScene 主线程快照）；BakeLightmaps
+    //（纯 CPU，JobSystem 并行）整段在 detached worker 线程跑——窗口/渲染
+    // 保持响应（此前同步烘焙阻塞主线程数十分钟，观感为应用无响应被杀）。
+    // density_ladder 非空时逐档降密重试（每档覆盖 settings.texel_density；
+    // 空 = 只跑 settings.texel_density 一档）。进度回调来自 worker 线程
+    //（baker ParallelFor 并发上报——调用方自行加锁/节流）。完成后置原子
+    // 标志，由渲染帧 lmMutex 站点回主线程 LoadLightmap（GPU 上传不跨线程）。
+    // 生命周期约束：worker 持 this 与收集快照——管线析构前须确认
+    // AsyncBakeRunning()==false（e2e 长生命周期用法安全）。
+    bool BakeSceneLightmapsAsync(const baking::LightmapBakeSettings& settings,
+                                 const std::vector<float>& density_ladder = {},
+                                 baking::LightmapProgressCallback progress = nullptr,
+                                 void* progress_user = nullptr);
+    bool AsyncBakeRunning() const { return asyncBakeRunning_.load(std::memory_order_acquire); }
 
     // Debug/testing: primary DDGI volume access.
     // Default-off Vulkan source-distance candidate. CPU geometry survives the
@@ -733,6 +751,16 @@ private:
     // 自装 shader（Metal 移植前 Vulkan-only，装配失败即不存在）；场景未
     // 注册 lightmap 页时零 pass 执行。
     std::unique_ptr<LightmapModule> lightmap_module_;
+    // 异步烘焙（2026-10-29）：PrepareBakeScene = 同步/异步共用的收集+装配；
+    // worker 完成后写 pendingAsyncLightmapPath_ 再 release 置位
+    // pendingAsyncLightmapLoad_，渲染帧 lmMutex 站点 acquire 消费
+    //（ConsumePendingLightmapLoad，主线程 LoadLightmap——GPU 上传不跨线程）。
+    // asyncBakeRunning_ 同时是 worker 存活标志（析构前轮询，见异步 API 注）。
+    bool PrepareBakeScene(baking::CollectedBakeScene& collected, std::string& err);
+    void ConsumePendingLightmapLoad();
+    std::atomic<bool> asyncBakeRunning_{false};
+    std::atomic<bool> pendingAsyncLightmapLoad_{false};
+    std::string pendingAsyncLightmapPath_;
     std::unique_ptr<SCDDGIIntegrationModule> sc_ddgi_module_;
     std::unique_ptr<SDFVisualizationModule> sdf_viz_module_;
     // M0 神经渲染 debug 链路：PRIMAL_NEURAL_DEBUG=1 时激活（模块自加载字节码

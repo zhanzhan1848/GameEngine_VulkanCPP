@@ -40,6 +40,7 @@
 #include <iostream>
 #include <chrono>
 #include <cstring>
+#include <thread>
 #include "Graphics/Utils/ShaderRegistry.h"
 #include <fstream>
 #include <set>
@@ -1657,25 +1658,18 @@ void StandardRenderPipeline::ClearLightmapPage() {
     if (lightmap_module_) lightmap_module_->ClearLightmap();
 }
 
-bool StandardRenderPipeline::BakeSceneLightmaps(const baking::LightmapBakeSettings& settings,
-                                                std::string* out_path, std::string* out_err,
-                                                std::vector<baking::LightmapMeshEntry>* out_entries,
-                                                baking::LightmapProgressCallback progress,
-                                                void* progress_user) {
-    if (!lightmap_module_) {
-        if (out_err) *out_err = "lightmap module unavailable (non-Vulkan or spv missing)";
-        return false;
-    }
+// 异步烘焙（2026-10-29 无响应修复轮）共用装配：场景收集 + §14 per-mesh
+// 贴图 albedo 挂接 + 覆写网格并入。主线程调用（读 RenderScene 代理与
+// 管道旁路登记——装配即快照，返回后 collected 自持有全部存储）。
+bool StandardRenderPipeline::PrepareBakeScene(baking::CollectedBakeScene& collected,
+                                              std::string& err) {
     const RenderScene* scene = current_scene_ ? current_scene_ : &default_scene_;
     if (!scene) {
-        if (out_err) *out_err = "no active scene";
+        err = "no active scene";
         return false;
     }
-
-    baking::CollectedBakeScene collected;
-    std::string err;
     if (!baking::CollectBakeScene(*scene, collected, err)) {
-        if (out_err) *out_err = "collect: " + err;
+        err = "collect: " + err;
         return false;
     }
     // §14 方案 B：per-mesh 贴图 albedo 挂接（source_mesh_id 键控；收集器已
@@ -1741,6 +1735,97 @@ bool StandardRenderPipeline::BakeSceneLightmaps(const baking::LightmapBakeSettin
         m.index_count = asset.num_indices;
         m.name = "mesh_" + std::to_string(ov.first) + "_e700";
         collected.scene.meshes.push_back(m);
+    }
+    return true;
+}
+
+// 异步烘焙的主线程消费钩：worker 烘毕后 release 置位 + 写路径；此处
+//（渲染帧 lmMutex 站点，主线程）acquire 消费并 LoadLightmap——GPU 上传
+// 不跨线程。幂等（exchange）。
+void StandardRenderPipeline::ConsumePendingLightmapLoad() {
+    if (pendingAsyncLightmapLoad_.exchange(false, std::memory_order_acq_rel)) {
+        if (lightmap_module_ && lightmap_module_->LoadLightmap(pendingAsyncLightmapPath_)) {
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[Lightmap][async] page loaded on main thread: "
+                << pendingAsyncLightmapPath_ << std::endl;
+        } else {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[Lightmap][async] main-thread LoadLightmap FAILED: "
+                << pendingAsyncLightmapPath_ << std::endl;
+        }
+    }
+}
+
+bool StandardRenderPipeline::BakeSceneLightmapsAsync(const baking::LightmapBakeSettings& settings,
+                                                     const std::vector<float>& density_ladder,
+                                                     baking::LightmapProgressCallback progress,
+                                                     void* progress_user) {
+    if (asyncBakeRunning_.exchange(true, std::memory_order_acq_rel)) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[Lightmap][async] bake already running — request ignored" << std::endl;
+        return false;  // exchange 已再置 true，语义不变（仍有 worker 在跑）
+    }
+    if (!lightmap_module_) {
+        asyncBakeRunning_.store(false, std::memory_order_release);
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[Lightmap][async] module unavailable (non-Vulkan or spv missing)" << std::endl;
+        return false;
+    }
+    // 主线程装配快照（秒级）——worker 只做纯 CPU 烘焙。
+    auto collected = std::make_shared<baking::CollectedBakeScene>();
+    std::string err;
+    if (!PrepareBakeScene(*collected, err)) {
+        asyncBakeRunning_.store(false, std::memory_order_release);
+        PRIMAL_LOG_STREAM(Error, "Render") << "[Lightmap][async] " << err << std::endl;
+        return false;
+    }
+    PRIMAL_LOG_STREAM(Info, "Render")
+        << "[Lightmap][async] bake started on worker thread (atlas "
+        << settings.atlas_size << ", spp " << settings.samples_per_texel
+        << ", window stays responsive)" << std::endl;
+    std::thread([this, collected, settings, density_ladder, progress, progress_user]() {
+        std::vector<float> ladder = density_ladder.empty()
+            ? std::vector<float>{settings.texel_density} : density_ladder;
+        baking::LightmapBakeResult r{};
+        for (float density : ladder) {
+            baking::LightmapBakeSettings s = settings;
+            s.texel_density = density;
+            r = baking::BakeLightmaps(collected->scene, s, progress, progress_user);
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[Lightmap][async] density=" << density << " -> "
+                << (r.ok ? "OK" : r.error) << std::endl;
+            if (r.ok) break;
+        }
+        if (r.ok) {
+            pendingAsyncLightmapPath_ = r.output_path;  // 先写路径再 release 置位
+            pendingAsyncLightmapLoad_.store(true, std::memory_order_release);
+            PRIMAL_LOG_STREAM(Info, "Render")
+                << "[Lightmap][async] baked -> " << r.output_path
+                << " (" << r.entries.size() << " entries, " << r.atlas_width
+                << "x" << r.atlas_height << ") — awaiting main-thread load" << std::endl;
+        } else {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[Lightmap][async] all densities failed, last: " << r.error << std::endl;
+        }
+        asyncBakeRunning_.store(false, std::memory_order_release);
+    }).detach();
+    return true;
+}
+
+bool StandardRenderPipeline::BakeSceneLightmaps(const baking::LightmapBakeSettings& settings,
+                                                std::string* out_path, std::string* out_err,
+                                                std::vector<baking::LightmapMeshEntry>* out_entries,
+                                                baking::LightmapProgressCallback progress,
+                                                void* progress_user) {
+    if (!lightmap_module_) {
+        if (out_err) *out_err = "lightmap module unavailable (non-Vulkan or spv missing)";
+        return false;
+    }
+    baking::CollectedBakeScene collected;
+    std::string err;
+    if (!PrepareBakeScene(collected, err)) {
+        if (out_err) *out_err = err;
+        return false;
     }
 
     const baking::LightmapBakeResult r =
@@ -3832,6 +3917,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // ========================================================================
     const bool lmMutex = [&] {
         if (!lightmap_module_) return false;
+        ConsumePendingLightmapLoad();  // 异步烘焙页回主线程加载（GPU 不跨线程）
         if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
         return lightmap_module_->IsActive() && std::getenv("PRIMAL_LIGHTMAP_COEXIST") == nullptr;
     }();
@@ -5561,6 +5647,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         // 旧形态作 A/B 诊断。UpdateFrame 幂等。
         const bool lmMutex = [&] {
             if (!lightmap_module_) return false;
+            ConsumePendingLightmapLoad();  // 异步烘焙页回主线程加载（GPU 不跨线程）
             if (current_scene_) lightmap_module_->UpdateFrame(*current_scene_);
             return lightmap_module_->IsActive() && std::getenv("PRIMAL_LIGHTMAP_COEXIST") == nullptr;
         }();

@@ -60,6 +60,9 @@
 #include <string>
 #include <cctype>
 #include <limits>
+#include <mutex>
+#include <chrono>
+#include <thread>
 #include <stdexcept>
 
 using namespace primal::graphics;
@@ -2418,6 +2421,18 @@ void TestVulkanSponzaRenderGraph::Run() {
             lmSettings.atlas_size = 8192;
             lmSettings.samples_per_texel = 64;  // 用户基线 spp
             lmSettings.bounces = 3;
+            // [2026-10-30 验证轮] PRIMAL_LIGHTMAP_ATLAS / PRIMAL_LIGHTMAP_DENSITY：
+            // 快页覆写（亮度比/遮挡类验证与分辨率无关——8192/d52 烘焙在机器
+            // 高载时可达数小时，4096/d20 快 7×且比值结论不变）。
+            if (const char* as = std::getenv("PRIMAL_LIGHTMAP_ATLAS")) {
+                const int v = std::atoi(as);
+                if (v >= 256 && v <= 16384 && (v & (v - 1)) == 0)
+                    lmSettings.atlas_size = (u32)v;
+            }
+            if (const char* de = std::getenv("PRIMAL_LIGHTMAP_DENSITY")) {
+                const float v = (float)std::atof(de);
+                if (v > 0.0f && v <= 256.0f) lmSettings.texel_density = v;
+            }
             // [§20 取证] PRIMAL_LIGHTMAP_SPP：快烘旋钮（天空分量分解/泄漏
             // 审计用低 spp——统计量收敛即可，不必 51 分钟全档）。
             if (const char* sp = std::getenv("PRIMAL_LIGHTMAP_SPP")) {
@@ -2438,20 +2453,46 @@ void TestVulkanSponzaRenderGraph::Run() {
                 std::snprintf(lmSettings.output_dir, sizeof(lmSettings.output_dir),
                               "%s", od);
             }
-            bool lmOk = false;
-            std::string lmErr;
-            for (float density : {52.0f, 48.0f, 32.0f, 26.0f, 24.0f, 20.0f, 16.0f, 12.0f,
-                                  10.0f, 8.0f, 4.0f, 2.0f, 1.0f,
-                                  0.5f, 0.25f, 0.125f, 0.0625f, 0.03f, 0.02f}) {
-                lmSettings.texel_density = density;
-                lmErr.clear();
-                lmOk = pipeline_->BakeSceneLightmaps(lmSettings, nullptr, &lmErr);
-                std::cerr << "[Lightmap][e2e] density=" << density << " -> "
-                          << (lmOk ? "OK" : lmErr) << std::endl;
-                if (lmOk) break;
-            }
-            // 运行时消费走 LightmapModule::UpdateFrame 的
+            // [2026-10-29 异步烘焙轮] 烘焙挪入 worker 线程：此前同步
+            // BakeSceneLightmaps 阻塞主线程数十分钟，窗口观感为无响应
+            //（§23 曾两轮被当死进程杀掉）。现在主线程只做收集快照（秒级），
+            // 密度阶梯重试移入 worker；烘毕由渲染帧 lmMutex 站点回主线程
+            // LoadLightmap（见 StandardRenderPipeline::ConsumePendingLightmapLoad）。
+            // 运行时消费仍走 LightmapModule::UpdateFrame 的
             // mesh_<contentId>_e<entityId> 代理自动匹配——无需旁路直登记。
+            auto lmProgress = [](void*, u32 phase, u32 done, u32 total) {
+                static std::mutex s_mu;
+                static u64 s_lastKey = ~0ull;  // (phase,total) 复合键——phase=2
+                static u32 s_lastPct = 200;    // 的 BVH build(1/1) 与 trace(64
+                std::lock_guard<std::mutex> lk(s_mu);  // 块) 是两个子阶段，键变
+                const u64 key = (u64)phase << 32 | total;  // 即打印，勿被 100%
+                const u32 pct = total ? (u32)((u64)done * 100 / total) : 100;
+                if (key != s_lastKey || pct == 100 ||
+                    (s_lastPct < 100 && pct >= s_lastPct + 5)) {
+                    std::fprintf(stderr, "[Lightmap][progress] phase=%u %u%% (%u/%u)\n",
+                                 phase, pct, done, total);
+                    s_lastKey = key;
+                    s_lastPct = pct;
+                }
+            };
+            const std::vector<float> lmDensityLadder = {
+                52.0f, 48.0f, 32.0f, 26.0f, 24.0f, 20.0f, 16.0f, 12.0f,
+                10.0f, 8.0f, 4.0f, 2.0f, 1.0f,
+                0.5f, 0.25f, 0.125f, 0.0625f, 0.03f, 0.02f};
+            // DENSITY 覆写时阶梯从该档起步（env 档优先，其余取默认阶梯中
+            // 严格更低的档——保持降级重试语义）。
+            std::vector<float> lmLadder = lmDensityLadder;
+            if (const char* de2 = std::getenv("PRIMAL_LIGHTMAP_DENSITY")) {
+                const float dv = (float)std::atof(de2);
+                lmLadder.clear();
+                lmLadder.push_back(dv);
+                for (float d : lmDensityLadder)
+                    if (d < dv) lmLadder.push_back(d);
+            }
+            if (!pipeline_->BakeSceneLightmapsAsync(lmSettings, lmLadder,
+                                                    lmProgress, nullptr)) {
+                std::cerr << "[Lightmap][e2e] async bake failed to start" << std::endl;
+            }
             }
             } else if (std::getenv("PRIMAL_LIGHTMAP_DEBUG")) {
                 lmBakeDone = true;
@@ -2460,6 +2501,13 @@ void TestVulkanSponzaRenderGraph::Run() {
                           << std::endl;
             }
         }
+    }
+    // [2026-10-29 异步烘焙轮] 烘焙期渲染限流：烘焙 worker 与渲染共享
+    // JobSystem——全速 Lumen 渲染（~25fps 重载）与烘焙抢核实测把 8spp
+    // 烘焙拖慢 ~8×（3.5h 未出页）。限到 ~6fps：窗口持续呈现、事件循环
+    // 照常（不假死），核让给烘焙 worker；烘毕自动恢复全速。
+    if (pipeline_ && pipeline_->AsyncBakeRunning()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
     }
 
     auto cmd = renderSystem_.GetCurrentCommandBuffer();
