@@ -108,7 +108,7 @@ private:
     /// 3-field materials, LOD groups with names, meshlet+SDF per mesh).
     /// Returns empty vector on failure (caller falls back to old format).
     utl::vector<SceneDataMeshInfo> LoadPipelineFormat(
-        rhi::RHIDeviceBase* device, const void* data, u32 size);
+        rhi::RHIDeviceBase* device, const void* data, u32 size, bool& cardBakeError);
 };
 
 } // namespace primal::graphics

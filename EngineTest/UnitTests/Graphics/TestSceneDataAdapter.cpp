@@ -3,7 +3,9 @@
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHIResource.h"
 #include "Graphics/RHI/Core/RHICommand.h"
+#include "Graphics/RHI/Core/RHIMeshAsset.h"
 #include "Graphics/RenderMesh.h"
+#include <utility>
 // LoadRenderItemData registers meshes in the Content-layer static free_list
 // registry; drain it before exit or ~free_list asserts !_size at teardown.
 #include "Content/ContentToEngine.h"
@@ -70,6 +72,7 @@ protected:
 
 class MockDevice : public RHIDeviceBase {
 public:
+    uint32_t buffersCreated=0, buffersDestroyed=0;
     struct MockBindingInfo {
         uint32_t binding;
         rhi::DescriptorType type;
@@ -117,6 +120,7 @@ public:
     void DestroyRenderPass(RenderPassHandle) override {}
     
     ResourceHandle CreateBuffer(const BufferDesc& desc) override {
+        ++buffersCreated;
         auto* res = new MockResource(*this, ResourceDesc(ResourceType::Buffer, (ResourceUsage)desc.bindFlags, desc.usage, desc.size));
         ResourceHandle h = reinterpret_cast<ResourceHandle>(res);
         res->SetPublicHandle(h);
@@ -126,6 +130,7 @@ public:
     ResourceHandle CreateTexture(const TextureDesc&) override { return handles::INVALID_RESOURCE; }
     ResourceHandle CreateTextureView(const TextureViewDesc&) override { return handles::INVALID_RESOURCE; }
     void DestroyBuffer(ResourceHandle h) override {
+        ++buffersDestroyed;
         delete reinterpret_cast<MockResource*>(h);
     }
     void DestroyTexture(ResourceHandle) override {}
@@ -173,6 +178,61 @@ private:
     }
 
 public:
+    TestResult PipelineCardBakeVersionsAndTruncation() {
+        MockDevice device; SceneDataAdapter adapter;
+        auto build=[&](uint32_t version, unsigned truncate) {
+            std::vector<uint8_t> data;
+            WriteString(data,"scene");Write<uint32_t>(data,0);Write<uint32_t>(data,1);
+            WriteString(data,"LOD0");Write<uint32_t>(data,2);
+            auto mesh=[&](const char* name, bool v2) {
+                WriteString(data,name);Write<uint32_t>(data,0);Write<int32_t>(data,-1);
+                Write<uint32_t>(data,0);Write<uint32_t>(data,0x20);Write<uint32_t>(data,3);
+                Write<uint32_t>(data,2);Write<uint32_t>(data,3);Write<float>(data,0.f);
+                const float positions[]={0,0,0, 1,0,0, 0,1,0};
+                for(float p:positions)Write<float>(data,p);
+                for(uint16_t i:{uint16_t(0),uint16_t(1),uint16_t(2)})Write<uint16_t>(data,i);
+                Write<uint32_t>(data,0x4c48534d); // MSHL; 3 empty arrays
+                Write<uint32_t>(data,0);Write<uint32_t>(data,0);Write<uint32_t>(data,0);
+                Write<uint32_t>(data,0x20464453); // SDF; no voxels
+                for(unsigned i=0;i<3;++i)Write<uint32_t>(data,0);
+                for(unsigned i=0;i<6;++i)Write<float>(data,0.f);
+                for(unsigned i=0;i<3;++i)Write<uint32_t>(data,0);
+                Write<uint32_t>(data,v2?0x32424443u:0x4b424443u);
+                if(v2)Write<uint32_t>(data,version);
+                Write<uint32_t>(data,1); // one 32-byte card
+                RHICardBakeCard card{};card.center[0]=v2?2.f:1.f;card.axis_direction=2;card.extent[0]=.25f;card.resolution=32;
+                const auto* begin=reinterpret_cast<const uint8_t*>(&card);data.insert(data.end(),begin,begin+sizeof(card));
+                Write<uint32_t>(data,1); // one 32-byte surfel
+                RHICardBakeSurfel surfel{};surfel.pos[1]=3.f;surfel.normal[2]=1.f;surfel.area=.5f;
+                begin=reinterpret_cast<const uint8_t*>(&surfel);data.insert(data.end(),begin,begin+sizeof(surfel));
+            };
+            mesh("legacy",false);mesh("new-v2",true);
+            if(truncate)data.resize(data.size()-truncate);
+            return data;
+        };
+        auto good=build(2,0);auto meshes=adapter.LoadRenderItemData(&device,good.data(),u32(good.size()));
+        bool ok=meshes.size()==2 && meshes[0].name=="legacy" && meshes[1].name=="new-v2";
+        for(size_t i=0;i<meshes.size();++i) {
+            RHIMeshAsset asset{};const auto raw=primal::content::get_rhi_mesh_id(meshes[i].meshEntityId);
+            ok &= primal::content::get_rhi_mesh_asset(raw,asset) && asset.card_bake.cards.size()==1 &&
+                  asset.card_bake.surfels.size()==1;
+            if(asset.card_bake.cards.size()==1)ok &= asset.card_bake.cards[0].center[0]==float(i+1);
+            if(asset.card_bake.surfels.size()==1)ok &= asset.card_bake.surfels[0].pos[1]==3.f;
+            if(meshes[i].mesh){meshes[i].mesh->Destroy(&device);delete meshes[i].mesh;}
+            if(meshes[i].ownsMeshContentResource)primal::content::destroy_resource(meshes[i].meshEntityId,primal::content::asset_type::mesh,primal::content::GraphicsAPI::RHI);
+        }
+        ok &= device.buffersCreated==device.buffersDestroyed;
+        // First mesh is registered before the second card section fails: an
+        // empty result alone is insufficient unless its GPU buffers are freed.
+        for(const auto [version,trunc]:{std::pair<uint32_t,unsigned>{3,0},{2,1},{2,34},{2,68},{2,74},{2,77}}) {
+            auto invalid=build(version,trunc);auto failed=adapter.LoadRenderItemData(&device,invalid.data(),u32(invalid.size()));
+            ok &= failed.empty() && device.buffersCreated==device.buffersDestroyed;
+            // Avoid leaking evidence in case of a regression that returns a partial result.
+            for(auto& item:failed){if(item.mesh){item.mesh->Destroy(&device);delete item.mesh;}if(item.ownsMeshContentResource)primal::content::destroy_resource(item.meshEntityId,primal::content::asset_type::mesh,primal::content::GraphicsAPI::RHI);}
+        }
+        return ok?TestResult::Passed:TestResult::Failed;
+    }
+
     TestResult LoadMaterialTest() {
         MockDevice device;
         SceneDataAdapter adapter;
@@ -466,6 +526,11 @@ public:
 int main() {
     TestSceneDataAdapter test;
     int result = 0;
+
+    if (test.PipelineCardBakeVersionsAndTruncation() == TestResult::Failed) {
+        std::cerr << "PipelineCardBakeVersionsAndTruncation Failed" << std::endl;
+        result = 1;
+    }
     
     if (test.LoadSimpleScene() == TestResult::Failed) {
         std::cerr << "LoadSimpleScene Failed" << std::endl;

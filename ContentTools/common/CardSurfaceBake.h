@@ -8,7 +8,7 @@
 // **owner mesh 自己的三角形**求交，记录首个命中表面：
 //   - coverage mask（albedo.a）
 //   - 卡局部 axis depth（R32F，-1 = 无效，与运行时查询契约一致）
-//   - mesh 局部几何法线（oct RG16F）
+//   - mesh 局部插值顶点法线（无属性时用几何法线），按卡眼翻转后存 oct RG16F
 //   - albedo（sRGB 纹理双线性 × tint × albedo_scale，线性 RGBA8）
 //   - 材质参数（RGBA8：roughness/metallic/emissive_mag/flags——当前
 //     MaterialInstance 默认值；SC 消费方尚未读取，契约完整性占位）
@@ -69,7 +69,7 @@ struct CardPage
     u32 card_index{ 0 };
     u32 resolution{ 0 };
     std::vector<u8> albedo;    // RGBA8 线性（a = coverage 255/0）
-    std::vector<u8> normal;    // RG16F oct（mesh 局部，未翻转）
+    std::vector<u8> normal;    // RG16F oct（mesh 局部，已按卡眼令 dot(N, forward) <= 0）
     std::vector<u32> triangle_ids; // Original index-buffer triangle ordinal; UINT32_MAX = invalid.
     std::vector<f32> depth;    // R32F 卡局部 axis depth（-1 = 无效）
     std::vector<u8> params;    // RGBA8: roughness/metallic/emissive/flags
