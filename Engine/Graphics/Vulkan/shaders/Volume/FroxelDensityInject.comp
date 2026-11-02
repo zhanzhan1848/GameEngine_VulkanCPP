@@ -20,8 +20,12 @@ layout(set = 0, binding = 2) uniform texture3D sdf_cascade_0;
 layout(set = 0, binding = 3) uniform texture3D sdf_cascade_1;
 layout(set = 0, binding = 4) uniform texture3D sdf_cascade_2;
 layout(set = 0, binding = 5) uniform texture2D depth_buffer;
-// WP5 云原语（3D 纹理路线）: CPU 预烘焙积云体积（96³ R8, 密度 0-1）
+// WP5 云原语：CPU 预烘焙 192³ R32_Float 密度，实际尺寸由纹理查询。
 layout(set = 0, binding = 7) uniform texture3D cloud_volume;
+
+#define SPARSE_ATLAS_BINDING 8
+#define SPARSE_DIRECTORY_BINDING 9
+#include "SparseParticleVolume.glsl"
 
 void main() {
     ivec3 gid = ivec3(gl_GlobalInvocationID.xyz);
@@ -42,13 +46,17 @@ void main() {
         if (cuvw.x > 0.0 && cuvw.x < 1.0 &&
             cuvw.y > 0.0 && cuvw.y < 1.0 &&
             cuvw.z > 0.0 && cuvw.z < 1.0) {
-            float cd = froxelTrilinearClamp(cloud_volume, cuvw, vec3(96.0));
+            float cd = froxelTrilinearClamp(cloud_volume, cuvw, vec3(textureSize(cloud_volume, 0)));
             float sdf = froxelSampleBestSdf(worldPos, sdf_cascade_0,
                                             sdf_cascade_1, sdf_cascade_2);
             float notSolid = smoothstep(-1.0, -0.2, sdf);
             cloudD = params.CloudA.z * cd * notSolid;
         }
     }
+
+    float particleD = sparseDensity(worldPos);
+    if (particleD > 0.0)
+        cloudD = min(60000.0, cloudD + particleD * smoothstep(-1.0, -0.2, froxelSampleBestSdf(worldPos, sdf_cascade_0, sdf_cascade_1, sdf_cascade_2)));
 
     // 场景几何之后的 froxel 置零。取本 froxel 屏幕足迹 4 象限的最小深度
     // （最近表面）——单点采样会漏掉细柱/栏杆，让光束穿缝。

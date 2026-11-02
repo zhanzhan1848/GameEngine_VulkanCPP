@@ -264,8 +264,74 @@ bool FroxelFogPass::Initialize(RHIDeviceBase* device, u32 render_width, u32 rend
 
 void FroxelFogPass::Shutdown() {
     if (!initialized_) return;
+    // Pass toggles may occur while another frame is in flight. Drain only at
+    // teardown; normal particle updates use the owner's fenced frame slots.
+    if (std::any_of(std::begin(particle_slots_),std::end(particle_slots_),[](const auto& slot) {
+            return slot.directory != handles::INVALID_RESOURCE;
+        })) device_->WaitIdle();
+    for (auto& slot : particle_slots_) DestroyParticleSlot(slot);
     initialized_ = false;
     device_ = nullptr;
+}
+
+bool FroxelFogPass::SetVolumeParticles(std::span<const VolumeParticle> particles,
+                                       const SparseVolumeConfig& config, std::string* error) {
+    if (!particle_volume_.Build(particles, config, error)) return false;
+    ++particle_generation_;
+    return true;
+}
+
+void FroxelFogPass::DestroyParticleSlot(ParticleSlot& slot) {
+    if (slot.atlas != handles::INVALID_RESOURCE) device_->DestroyTexture(slot.atlas);
+    if (slot.directory != handles::INVALID_RESOURCE) device_->DestroyBuffer(slot.directory);
+    if (slot.staging != handles::INVALID_RESOURCE) device_->DestroyBuffer(slot.staging);
+    slot = ParticleSlot{};
+}
+
+bool FroxelFogPass::PrepareParticleSlot(u32 index) {
+    auto& slot = particle_slots_[index];
+    if (slot.generation == particle_generation_) return true;
+    ParticleSlot next;
+    BufferDesc bd{};
+    bd.size = particle_volume_.directory.size() * sizeof(SparseVolumeWord);
+    bd.type = BufferType::Structured;
+    bd.memoryUsage = GPUMemoryUsage::Dynamic;
+    bd.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+    bd.structured.elementCount = u32(particle_volume_.directory.size());
+    bd.structured.elementStride = sizeof(SparseVolumeWord);
+    bd.name = "SparseParticleDirectory";
+    next.directory = device_->CreateBuffer(bd);
+    bool ok = next.directory != handles::INVALID_RESOURCE &&
+        device_->UpdateBufferData(next.directory, particle_volume_.directory.data(), bd.size);
+    if (ok && particle_volume_.BrickCount()) {
+        next.side = particle_volume_.AtlasSide();
+        TextureDesc td{};
+        td.size = {next.side,next.side,next.side};
+        td.type = TextureType::Texture3D;
+        td.format = DataFormat::R32_Float;
+        td.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+        td.memoryUsage = GPUMemoryUsage::Static;
+        td.name = "SparseParticleAtlas";
+        next.atlas = device_->CreateTexture(td);
+        BufferDesc upload{};
+        upload.size = particle_volume_.atlas.size()*sizeof(float);
+        upload.memoryUsage = GPUMemoryUsage::Staging;
+        upload.name = "SparseParticleUpload";
+        next.staging = device_->CreateBuffer(upload);
+        ok = next.atlas != handles::INVALID_RESOURCE && next.staging != handles::INVALID_RESOURCE &&
+            device_->UpdateBufferData(next.staging,particle_volume_.atlas.data(),upload.size);
+        next.upload = ok;
+    }
+    if (!ok) {
+        DestroyParticleSlot(next);
+        PRIMAL_LOG_STREAM(Error,"Engine") << "[FroxelFogPass] sparse particle upload allocation failed" << std::endl;
+        // Do not display a stale volume after a failed update.
+        return false;
+    }
+    DestroyParticleSlot(slot); // frame slot is already fenced by the render owner
+    next.generation = particle_generation_;
+    slot = next;
+    return true;
 }
 
 void FroxelFogPass::CreateDescriptorSetLayouts() {
@@ -283,8 +349,11 @@ void FroxelFogPass::CreateDescriptorSetLayouts() {
             {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // depth_buffer
             {6, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // FroxelParams
             {7, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // WP5 cloud volume
+            {8, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},
+            {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
         };
-        DescriptorSetLayoutDesc layoutDesc{8, bindings};
+        // Portable sparse source (no hardware sparse-residency requirement).
+        DescriptorSetLayoutDesc layoutDesc{10, bindings};
         density_inject_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -303,8 +372,11 @@ void FroxelFogPass::CreateDescriptorSetLayouts() {
             {7, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // shadow_moments cascade 3
             // WP2: 上一帧 SPGI 辐照（ambient_source=1 时采样；无效时绑 1x1 黑）
             {8, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // spgi_ambient
+            {9, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr},  // immutable high-res cloud density
+            {10, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr},
+            {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
         };
-        DescriptorSetLayoutDesc layoutDesc{9, bindings};
+        DescriptorSetLayoutDesc layoutDesc{12, bindings};
         light_integrate_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -506,7 +578,7 @@ void FroxelFogPass::CreateCloudTexture() {
     // 形状 = 球形包络（y 压扁 + 云底淡出）× 三尺度细节（大团块 plateau
     // + FBM 中尺度 + Worley 蚀边）。CPU 生成可验证、确定性强，规避
     // inject 内程序化噪声的不可见问题（v7/v8/cumulus_v1 排查记录）。
-    constexpr u32 RES = 96;
+    constexpr u32 RES = 192;
     TextureDesc desc{};
     desc.size = {RES, RES, RES};
     desc.mipLevels = 1;
@@ -556,17 +628,20 @@ void FroxelFogPass::CreateCloudTexture() {
         float pz = (float(z) + 0.5f) / RES * 2.0f - 1.0f;
         float qy = py * 1.30f;   // 压扁:积云宽 > 高(用户反馈高度略高)
 
-        // 1) puff 场（二次衰减求和 → 阈值体 = 凹凸包络）
+        // 1) Union of puffs. Summing enlarged falloffs merged all lobes into
+        // one smooth ellipsoid, hiding the cumulus silhouette at high density.
         float field = 0.0f;
         for (int i = 0; i < kPuffCount; ++i) {
             float dx = px - kPuffs[i][0];
             float dy = qy - kPuffs[i][1];
             float dz = pz - kPuffs[i][2];
-            float rr = kPuffs[i][3] * 1.4f;
+            float rr = kPuffs[i][3];
             float t = 1.0f - std::sqrt(dx*dx + dy*dy + dz*dz) / rr;
-            if (t > 0.0f) field += t * t;
+            field = std::max(field, t);
         }
-        float body = clampf(field * 1.6f, 0.0f, 1.0f);
+        // A compact, feathered boundary around a filled core. Linear field
+        // scaling made most of each puff a low-density translucent halo.
+        float body = smoothstepf(0.02f, 0.20f, field);
         if (body <= 0.003f) { voxels[z*RES*RES + y*RES + x] = 0.0f; continue; }
 
         // 2) 世界尺度三尺度细节：团间谷（低频 worley plateau）+ FBM 调制
@@ -574,22 +649,43 @@ void FroxelFogPass::CreateCloudTexture() {
         const float wx = px * config_.cloud_radius;
         const float wy = qy * config_.cloud_radius;
         const float wz = pz * config_.cloud_radius;
-        float big = WorleyNoise3D(wx * freq * 0.7f + 31.7f,
-                                  wy * freq * 0.7f + 11.3f,
-                                  wz * freq * 0.7f + 7.9f);
-        float valleys = 0.55f + 0.45f * smoothstepf(0.15f, 0.55f, big);
-        float mid = FBMWorley(wx * freq * 1.4f + 5.1f,
-                              wy * freq * 1.4f + 13.7f,
-                              wz * freq * 1.4f + 3.3f, 3);
-        float det = WorleyNoise3D(wx * freq * 3.2f + 91.3f,
-                                  wy * freq * 3.2f + 47.9f,
-                                  wz * freq * 3.2f + 23.1f);
-        float shell = 1.0f - 0.40f * smoothstepf(0.50f, 0.95f, det);
+        // Billow modulates density without hollowing out the cloud interior.
+        float billow = 1.0f - WorleyNoise3D(wx * freq * 0.9f + 31.7f,
+                                            wy * freq * 0.9f + 11.3f,
+                                            wz * freq * 0.9f + 7.9f);
+        float lumps = smoothstepf(0.34f, 0.78f, billow);
+        lumps *= lumps;
+        float mid = FBMWorley(wx * freq * 1.8f + 5.1f,
+                              wy * freq * 1.8f + 13.7f,
+                              wz * freq * 1.8f + 3.3f, 3);
+        // Keep the erosion bands resolvable in the 192^3 bake. Merely
+        // multiplying density by fine noise leaves an opaque silhouette smooth.
+        float det = 0.5f * WorleyNoise3D(wx * freq * 3.0f + 91.3f,
+                                         wy * freq * 3.0f + 47.9f,
+                                         wz * freq * 3.0f + 23.1f)
+                  + 0.3f * WorleyNoise3D(wx * freq * 6.0f + 3.3f,
+                                         wy * freq * 6.0f + 71.7f,
+                                         wz * freq * 6.0f + 53.9f)
+                  + 0.2f * WorleyNoise3D(wx * freq * 12.0f + 17.1f,
+                                         wy * freq * 12.0f + 83.7f,
+                                         wz * freq * 12.0f + 41.3f);
+        // Erode the signed puff field, not its filled interior: small billows
+        // and creases now change the surface/light path while the core remains
+        // dense. A two-voxel feather avoids binary, sparkling surface holes.
+        float erosion = 0.04f + 0.30f * smoothstepf(0.25f, 0.80f, det)
+                             + 0.12f * smoothstepf(0.20f, 0.70f, mid);
+        // Confine the stronger breakup to the shell: never drill channels
+        // through the high-density central volume.
+        erosion *= 1.0f - smoothstepf(0.30f, 0.60f, field);
+        body = smoothstepf(0.02f, 0.06f, field - erosion);
+        float shell = 1.0f - 0.45f * smoothstepf(0.45f, 0.95f, det);
 
         // 垂直密度梯度(真实积云 LWC 分布):底浓顶淡——march 阴影下
         // 自然形成参考图的"暗底亮顶"对比。
         float grad = 1.15f - 0.35f * smoothstepf(-0.75f, 0.75f, py);
-        float d = body * valleys * (0.55f + 0.45f * mid) * shell * grad;
+        // Keep at least 65% density in the core. Structure comes from optical
+        // depth/self-shadowing; only the boundary should expose the background.
+        float d = body * (0.65f + 0.35f * lumps * (0.55f + 0.45f * mid) * shell) * grad;
         voxels[z*RES*RES + y*RES + x] = clampf(d, 0.0f, 1.0f);
     }
 
@@ -599,6 +695,23 @@ void FroxelFogPass::CreateCloudTexture() {
         PRIMAL_LOG_STREAM(Info, "Engine") << "[FroxelFogPass] cloud voxels nonzero="
                   << nz << "/" << voxels.size() << " mean=" << sum / voxels.size()
                   << " max=" << mx << std::endl;
+        // 烘焙验证：中心 z 切片导出 PPM(灰度)
+        if (const char* dbg = std::getenv("CLOUD_BAKE_DUMP")) {
+            u32 z = RES / 2;
+            std::ofstream ppm(std::string(dbg) + "/cloud_bake_slice.ppm", std::ios::binary);
+            ppm << "P6\n" << RES << " " << RES << "\n255\n";
+            for (u32 y = 0; y < RES; ++y)
+            for (u32 x = 0; x < RES; ++x) {
+                float v = voxels[z*RES*RES + y*RES + x];
+                u8 g = u8(clampf(v, 0.0f, 1.0f) * 255.0f);
+                ppm.write(reinterpret_cast<const char*>(&g), 1);
+                ppm.write(reinterpret_cast<const char*>(&g), 1);
+                ppm.write(reinterpret_cast<const char*>(&g), 1);
+            }
+            ppm.close();
+            PRIMAL_LOG_STREAM(Info, "Engine") << "[FroxelFogPass] bake slice -> "
+                      << dbg << "/cloud_bake_slice.ppm" << std::endl;
+        }
     }
     BufferDesc sdesc{};
     sdesc.size = voxels.size() * sizeof(float);
@@ -631,7 +744,7 @@ void FroxelFogPass::CreateCloudTexture() {
             cmd->WaitForCompletion();
             device_->DestroyCommandBuffer(cmdHandle);
             PRIMAL_LOG_STREAM(Info, "Engine") << "[FroxelFogPass] cloud volume baked ("
-                      << RES << "^3 R8)" << std::endl;
+                      << RES << "^3 R32_Float)" << std::endl;
         }
     }
     device_->DestroyBuffer(staging);
@@ -699,6 +812,7 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
     if (!initialized_) return output;
 
     u32 outIdx = inputs.camera_data.frame_index % 3;
+    if (!PrepareParticleSlot(outIdx)) return output;
     u32 half_w = render_width_ / 2;
     u32 half_h = render_height_ / 2;
 
@@ -711,15 +825,20 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
     rendergraph::RGResourceHandle noiseRG{};
     if (noise_texture_ != handles::INVALID_RESOURCE)
         noiseRG = graph.ImportResource("FroxelNoise3D", noise_texture_);
+    rendergraph::RGResourceHandle cloudRG{};
+    if (cloud_texture_ != handles::INVALID_RESOURCE)
+        cloudRG = graph.ImportResource("FroxelCloud3D", cloud_texture_);
 
     graph.AddPass<FroxelPassData>("FroxelFog",
         RGPassType::Compute, RGPassCategory::Lighting,
 
         // Setup
-        [inputs, scatterHandle, noiseRG](FroxelPassData& data, RenderGraphBuilder& builder) {
+        [inputs, scatterHandle, noiseRG, cloudRG](FroxelPassData& data, RenderGraphBuilder& builder) {
             builder.Read(inputs.gbuffer_depth, ResourceState::ShaderResource);
             if (noiseRG.IsValid())
                 builder.Read(noiseRG, ResourceState::ShaderResource);
+            if (cloudRG.IsValid())
+                builder.Read(cloudRG, ResourceState::ShaderResource);
             // P2-B: light-space moments are the shadow input of record. The
             // legacy screen-space shadow_map is no longer read by the
             // integrate shader (coordinate contract fixed).
@@ -744,6 +863,29 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
             const FroxelPassData& data, RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
+
+            auto& particleSlot = particle_slots_[outIdx];
+            if (particleSlot.upload) {
+                cmd->MemoryBarrier(PipelineStage::Host, PipelineStage::Transfer,
+                                   AccessFlag::HostWrite, AccessFlag::TransferRead);
+                ResourceBarrier b{};
+                b.resource=particleSlot.atlas;
+                b.beforeState=ResourceState::Unknown; b.afterState=ResourceState::CopyDest;
+                b.subresource=0xFFFFFFFF;
+                cmd->InsertBarrier(&b,1);
+                BufferTextureCopyRegion region{};
+                region.bufferRowLength=particleSlot.side;
+                region.imageSubresource={0,0,1};
+                region.imageExtent={particleSlot.side,particleSlot.side,particleSlot.side};
+                cmd->CopyBufferToTexture(particleSlot.staging,particleSlot.atlas,&region,1);
+                b.beforeState=ResourceState::CopyDest; b.afterState=ResourceState::ShaderResource;
+                cmd->InsertBarrier(&b,1);
+                particleSlot.upload=false;
+            }
+            cmd->MemoryBarrier(PipelineStage::Host,PipelineStage::ComputeShader,
+                               AccessFlag::HostWrite,AccessFlag::ShaderRead);
+            const auto particleAtlas = particleSlot.atlas != handles::INVALID_RESOURCE
+                ? particleSlot.atlas : noise_texture_;
 
             auto ResolveTexture = [&](RGResourceHandle handle) -> ResourceHandle {
                 auto* res = context.graph->GetResource(handle);
@@ -1024,9 +1166,12 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                     {4, DescriptorType::SampledImage,  sdfTex2},
                     {5, DescriptorType::SampledImage,  depthTex},
                     {6, DescriptorType::UniformBuffer, params_cb_[outIdx]},
-                    {7, DescriptorType::SampledImage,  cloud_texture_},
+                    {7, DescriptorType::SampledImage, cloud_texture_ != handles::INVALID_RESOURCE
+                        ? cloud_texture_ : noise_texture_},
+                    {8, DescriptorType::SampledImage, particleAtlas},
+                    {9, DescriptorType::StorageBuffer, particleSlot.directory},
                 };
-                UpdateDescriptorSet(device_, density_inject_ds_[outIdx], params, 8);
+                UpdateDescriptorSet(device_, density_inject_ds_[outIdx], params, 10);
 
                 // P2-B: froxel textures are module-owned (not RG-imported);
                 // prime the write slot to UA — on the first rotation cycle the
@@ -1079,8 +1224,12 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                     {7, DescriptorType::SampledImage,  momentTex[3]},
                     // WP2: 上一帧 SPGI 辐照（无效时 1x1 黑，CB ambient_source=0）
                     {8, DescriptorType::SampledImage,  ambientTex},
+                    {9, DescriptorType::SampledImage, cloud_texture_ != handles::INVALID_RESOURCE
+                        ? cloud_texture_ : noise_texture_},
+                    {10, DescriptorType::SampledImage, particleAtlas},
+                    {11, DescriptorType::StorageBuffer, particleSlot.directory},
                 };
-                UpdateDescriptorSet(device_, light_integrate_ds_[outIdx], params, 9);
+                UpdateDescriptorSet(device_, light_integrate_ds_[outIdx], params, 12);
 
                 // P2-B: scatter 写入槽位同样先转 UA（见上方 density 注释；
                 // 轮转槽位上一帧可能停在 SRO——上一帧作为 resolve 采样源）。

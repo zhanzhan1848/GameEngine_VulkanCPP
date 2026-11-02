@@ -6,6 +6,7 @@
 // MeshInstanceBridge 产出 mesh 渲染器的 per-instance 变换缓冲（48B/实例）。
 
 #include "../PfxTypes.h"
+#include "Graphics/Volume/SparseParticleVolume.h"
 #include "../core/AttributeStore.h"
 
 #ifndef DISABLE_PARTICLE_FX
@@ -15,6 +16,11 @@ namespace primal::pfx::render {
 // 把 store 中全部活行按行序打包为旧交错布局。返回打包行数（≤ cap）。
 // out 为 nullptr 或 cap 不足时返回需要的行数（探测用法）。
 u32 pack_sprite_instances(const attribute_store& store, void* out, u32 cap_bytes);
+
+// Explicit volume opt-in. World radius = abs(scale_rotation.x) * radius_at_scale_one;
+// density = max(color.a,0) * density_scale. Dead rows are never submitted.
+std::vector<graphics::volume::VolumeParticle> pack_volume_particles(
+    const attribute_store& store, f32 radius_at_scale_one, f32 density_scale);
 
 // mesh 渲染器实例数据（48B；P1 起消费旋转与实例色）。
 struct mesh_instance_data {

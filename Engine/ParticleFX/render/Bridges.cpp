@@ -18,6 +18,24 @@ namespace primal::pfx::render {
 
 namespace rhi = primal::graphics::rhi;
 
+std::vector<graphics::volume::VolumeParticle> pack_volume_particles(
+    const attribute_store& store, f32 radius_at_scale_one, f32 density_scale) {
+    std::vector<graphics::volume::VolumeParticle> result;
+    if (!store.is_initialized()) return result;
+    result.reserve(store.alive_count());
+    const auto* pos = store.v4_channel(attr::position);
+    const auto* scale = store.v4_channel(attr::scale_rotation);
+    const auto* color = store.v4_channel(attr::color);
+    for (u32 row=0; row<store.capacity(); ++row) {
+        if (!store.is_row_alive(row)) continue;
+        const float radius=std::abs(scale[row].x)*radius_at_scale_one;
+        const float density=std::max(color[row].w,0.0f)*density_scale;
+        if (radius==0 || density==0) continue;
+        result.push_back({pos[row].x,pos[row].y,pos[row].z,radius,density});
+    }
+    return result;
+}
+
 u32 pack_sprite_instances(const attribute_store& store, void* out, u32 cap_bytes) {
     const u32 alive = store.alive_count();
     const u32 bytes_needed = alive * (u32)sizeof(particles::particle_data);
