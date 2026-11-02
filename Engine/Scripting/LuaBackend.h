@@ -38,6 +38,9 @@ struct LuaSubRecord {
     int lua_fn_ref;              // LUA_REGISTRYINDEX ref to handler function
     void* lua_state;             // lua_State* — type->lua_state, cached for cleanup
     u64 sub_id;                  // engine-returned subscription id (map key)
+    u64 entity_id;               // gameplay S1：归属实体——drain 期派发 handler 时
+                                 // 套 LuaWriterIdScope（state.entities 写权限 +
+                                 // entity_id 全局正确性；此前是上一次 hook 的过期值）
 };
 
 // === Phase 2b.3 ===

@@ -16,6 +16,7 @@ Primal 以自身渲染特色、通用基础运行和容易使用的制作工具�
 | Agent 与流水线 | 模型/harness 可替换；跨软件任务、产物、取消、恢复与验收 | [Agent 与流水线](plans/production/agent-workflows-and-artifacts.md) |
 | 角色与动画 | 外部绑定/动作制作；引擎完成导入、蒙皮、播放、重导入与诊断 | [角色动画](plans/production/character-animation.md) |
 | 玩法脚本 | 基础 Lua 生产化、通用属性/事件、项目自由扩展、Player 闭环 | [脚本与属性](plans/production/scripting-properties-and-events.md) |
+| 玩法规则骨架 | 通用状态机/触发器/任务薄契约与确定性解释器；AI 写 Lua 响应、人确认/共创（三道门），S4 类 RSI NPC 行为回路 | [玩法规则](plans/production/gameplay-rules.md) |
 | 运行时 UI | 基础控件、布局、数据/事件绑定与默认样式，编辑器和 Player 一致 | [运行时 UI](plans/production/runtime-ui.md) |
 | AI 与导航 | 基础移动、路径、状态/任务与可解释失败；高级规则由项目定义 | [AI 与导航](plans/production/ai-navigation.md) |
 | Sequence | 通用属性/事件/片段轨道，可注册扩展、预览恢复与运行输出 | [Sequence](plans/production/sequence.md) |

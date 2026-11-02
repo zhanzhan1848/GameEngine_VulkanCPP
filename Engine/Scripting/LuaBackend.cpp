@@ -412,6 +412,23 @@ struct LuaPostCapture {
 // this flag lets the Lua bindings silent-skip re-entrant posts instead of crash.
 static thread_local bool in_lua_post_callback_ = false;
 
+thread_local u64 current_writer_entity_id_ = u64_invalid_id;
+
+// RAII guard: sets current_writer_entity_id_ for the duration of a hook
+// AND mirrors it as the `entity_id` Lua global. The Lua global must be
+// re-set per dispatch because instances of the same type share one L
+// (the global from a prior create_instance would otherwise leak).
+struct LuaWriterIdScope {
+    u64 saved;
+    lua_State* L;
+    LuaWriterIdScope(lua_State* L_, u64 eid) : saved(current_writer_entity_id_), L(L_) {
+        current_writer_entity_id_ = eid;
+        lua_pushnumber(L, (double)eid);
+        lua_setglobal(L, "entity_id");
+    }
+    ~LuaWriterIdScope() { current_writer_entity_id_ = saved; }
+};
+
 // Engine deleter for Lua-emitted events. Called after drain dispatch.
 // Releases the Lua table ref + frees the payload buffer.
 static void lua_payload_deleter(void* raw) {
@@ -426,7 +443,33 @@ static void lua_payload_deleter(void* raw) {
 // subscription whose user_data is LuaSubRecord*.
 static void lua_event_trampoline(void* user_data, const void* payload, u64 size) {
     auto* rec = static_cast<LuaSubRecord*>(user_data);
-    if (!rec || !rec->lua_state || size != sizeof(LuaEventPayload)) return;
+    if (!rec || !rec->lua_state) return;
+    lua_State* L = (lua_State*)rec->lua_state;
+
+    // gameplay S1：drain 期派发的 handler 以订阅归属实体的身份执行——
+    // state.entities 写权限与 entity_id 全局都按此归属（此前沿用上一次
+    // hook dispatch 的过期 scope，属未定义行为路径）。
+    LuaWriterIdScope writer_scope{ L, rec->entity_id };
+
+    // gameplay S1（加法语义）：C++ 侧发射的裸字节载荷不是 LuaEventPayload
+    //——按字节串交给 handler（跨 lua_State 均可达，不受 same-state 契约
+    // 约束——那是 Lua 表载荷的归属规则）。历史行为是静默丢弃；引入
+    // gameplay 解释器前引擎无 C++ 发射方，本分支不改变既有可观测行为。
+    if (size != sizeof(LuaEventPayload)) {
+        lua_rawgeti(L, LUA_REGISTRYINDEX, rec->lua_fn_ref);
+        if (!lua_isfunction(L, -1)) {
+            std::fprintf(stderr, "lua_event_trampoline: fn ref not a function\n");
+            lua_pop(L, 1);
+            return;
+        }
+        lua_pushlstring(L, (const char*)payload, (size_t)size);
+        if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
+            const char* err = lua_tostring(L, -1);
+            std::fprintf(stderr, "Lua event handler error: %s\n", err ? err : "(unknown)");
+            lua_pop(L, 1);
+        }
+        return;
+    }
 
     auto* p = static_cast<const LuaEventPayload*>(payload);
     // Same-state contract: see LuaEventPayload comment above.
@@ -436,7 +479,6 @@ static void lua_event_trampoline(void* user_data, const void* payload, u64 size)
             rec->lua_state, p->lua_state);
         return;
     }
-    lua_State* L = (lua_State*)rec->lua_state;
 
     // Push handler function
     lua_rawgeti(L, LUA_REGISTRYINDEX, rec->lua_fn_ref);
@@ -523,7 +565,8 @@ static int lua_bus_on(lua_State* L) {
     lua_pushvalue(L, 2);
     int fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
-    auto* rec = new LuaSubRecord{ fn_ref, (void*)L, 0 };
+    auto* rec = new LuaSubRecord{ fn_ref, (void*)L, 0,
+                                   backend.current_instance_->entity_id };
     u64 sub_id = script_event_subscribe(name, (void*)rec, &lua_event_trampoline);
     if (sub_id == 0) {
         luaL_unref(L, LUA_REGISTRYINDEX, fn_ref);
@@ -779,22 +822,6 @@ static int state_proxy_gc(lua_State* L) {
     return 0;
 }
 
-thread_local u64 current_writer_entity_id_ = u64_invalid_id;
-
-// RAII guard: sets current_writer_entity_id_ for the duration of a hook
-// AND mirrors it as the `entity_id` Lua global. The Lua global must be
-// re-set per dispatch because instances of the same type share one L
-// (the global from a prior create_instance would otherwise leak).
-struct LuaWriterIdScope {
-    u64 saved;
-    lua_State* L;
-    LuaWriterIdScope(lua_State* L_, u64 eid) : saved(current_writer_entity_id_), L(L_) {
-        current_writer_entity_id_ = eid;
-        lua_pushnumber(L, (double)eid);
-        lua_setglobal(L, "entity_id");
-    }
-    ~LuaWriterIdScope() { current_writer_entity_id_ = saved; }
-};
 
 static int state_proxy_index(lua_State* L) {
     auto* p = static_cast<StateProxy*>(luaL_checkudata(L, 1, kStateProxyMetatableName));

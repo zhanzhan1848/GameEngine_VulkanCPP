@@ -310,6 +310,8 @@ file(GLOB_RECURSE COMMON_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/ParticleFX/*.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Navigation/*.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Navigation/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Gameplay/*.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Gameplay/*.cpp"
 )
 
 # 根据编译器排除特定文件

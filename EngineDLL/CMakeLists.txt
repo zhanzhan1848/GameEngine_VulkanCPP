@@ -37,6 +37,7 @@ set(SOURCE_FILES
     "CameraAPI.cpp"
     "PhysicsAPI.cpp"
     "NavigationAPI.cpp"
+    "GameplayAPI.cpp"
     "PrintAPI.cpp"
     "ProceduralMeshAPI.cpp"
     "HeadlessRender.cpp"

@@ -379,6 +379,83 @@ public sealed class RuntimeSceneExporterTests
     }
 
     [Fact]
+    public void Export_WritesGameplayStateMachineAndTriggerLines()
+    {
+        // gameplay S1：sm* 行契约——机器块（statemachine/smstate/smtrans/
+        // smguard/smend）+ 独立触发器行；manual 边第 4 token；事件空写 "-"。
+        using var fixture = new Fixture();
+        var scene = new Scene("GameplayExport");
+        var entity = new GameEntity("Door");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new GameplayRulesComponent
+        {
+            InitialState = "closed",
+            States = { "closed", "open" },
+            Transitions =
+            {
+                new GameplayTransition { From = "closed", To = "open", Event = "door.opened", Manual = true },
+                new GameplayTransition
+                {
+                    From = "open", To = "closed", Event = "",
+                    Guards = { new GameplayPredicate { Kind = "dist", Op = "gte", EntityA = "Player", EntityB = "Button", Value = 5f } },
+                },
+            },
+            Triggers =
+            {
+                new GameplayTrigger
+                {
+                    Event = "button.near", Mode = "refire",
+                    Predicate = new GameplayPredicate { Kind = "dist", Op = "lt", EntityA = "self", EntityB = "Player", Value = 2f },
+                },
+            },
+        });
+        scene.Entities.Add(entity);
+
+        var pkg = fixture.ExportScene(scene);
+
+        Assert.Contains("statemachine closed", pkg, StringComparison.Ordinal);
+        Assert.Contains("smstate closed", pkg, StringComparison.Ordinal);
+        Assert.Contains("smstate open", pkg, StringComparison.Ordinal);
+        Assert.Contains("smtrans closed open door.opened manual", pkg, StringComparison.Ordinal);
+        Assert.Contains("smtrans open closed -", pkg, StringComparison.Ordinal);
+        Assert.Contains("smguard 1 dist Player Button gte 5", pkg, StringComparison.Ordinal);
+        Assert.Contains("smend", pkg, StringComparison.Ordinal);
+        Assert.Contains("smtrigger refire button.near dist self Player lt 2", pkg, StringComparison.Ordinal);
+        // smtrigger 在机器块外（smend 之后）——Player 解析期块状态约束
+        Assert.True(pkg.IndexOf("smend", StringComparison.Ordinal) < pkg.IndexOf("smtrigger", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Export_GameplayInvalidNamesSkippedWithMachineBlockIntact()
+    {
+        // 含空格状态名跳过；初始态不在 States 时整段机器不导出（Player 侧
+        // End 校验会拒绝——导出器提前挡）。
+        using var fixture = new Fixture();
+        var scene = new Scene("GameplayBad");
+        var entity = new GameEntity("Odd");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new GameplayRulesComponent
+        {
+            InitialState = "nope",
+            States = { "a", "b" },
+            Triggers =
+            {
+                new GameplayTrigger
+                {
+                    Event = "still.there", Mode = "once",
+                    Predicate = new GameplayPredicate { Kind = "timer", Op = "gte", Value = 1f },
+                },
+            },
+        });
+        scene.Entities.Add(entity);
+
+        var pkg = fixture.ExportScene(scene);
+
+        Assert.DoesNotContain("statemachine", pkg, StringComparison.Ordinal);
+        Assert.Contains("smtrigger once still.there timer gte 1", pkg, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Export_Portable_NameCollisionGetsDistinctCopies()
     {
         using var fx = new Fixture();

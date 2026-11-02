@@ -277,6 +277,7 @@ flowchart TD
     PROD_PLAN --> PROD_WORKFLOW["Docs/plans/production/agent-workflows-and-artifacts.md<br/>Agent · harness · 多软件流水线"]
     PROD_PLAN --> PROD_ANIMATION["Docs/plans/production/character-animation.md<br/>角色导入 · 外部绑定 · 动画运行"]
     PROD_PLAN --> PROD_SCRIPT["Docs/plans/production/scripting-properties-and-events.md<br/>脚本 · 属性 · 事件"]
+    PROD_PLAN --> PROD_GAMEPLAY["Docs/plans/production/gameplay-rules.md<br/>玩法规则容器 · 人在环共创 · 类RSI NPC 回路"]
     PROD_PLAN --> PROD_UI["Docs/plans/production/runtime-ui.md<br/>基础运行时 UI"]
     PROD_PLAN --> PROD_AI["Docs/plans/production/ai-navigation.md<br/>基础 AI 与导航"]
     PROD_PLAN --> PROD_SEQUENCE["Docs/plans/production/sequence.md<br/>通用时间线与轨道扩展"]
@@ -491,6 +492,7 @@ flowchart TD
 | [plans/production/agent-workflows-and-artifacts.md](plans/production/agent-workflows-and-artifacts.md) | 📋 | Agent/harness、多软件任务与产物：软件连接目录、依赖、恢复、费用与制作流水线验收 |
 | [plans/production/character-animation.md](plans/production/character-animation.md) | 📋 | 外部绑定与角色运行：骨骼导入/蒙皮、动作、重导入、可选 Tripo、关节与播放视觉验收 |
 | [plans/production/scripting-properties-and-events.md](plans/production/scripting-properties-and-events.md) | 📋 | 基础 Lua、通用属性/事件、编辑与 Player 闭环、项目自由扩展与调试成本验收 |
+| [plans/production/gameplay-rules.md](plans/production/gameplay-rules.md) | 📋 | 玩法规则骨架：状态机/触发器/任务薄契约与确定性解释器、AI 提案-人确认三道门（S1–S3）、S4 类 RSI NPC 行为回路（世代化/多样性下限/人设缰绳）；渲染/物理/流体零改动 |
 | [plans/production/runtime-ui.md](plans/production/runtime-ui.md) | 📋 | 基础运行时 UI：控件/布局/绑定、模板、Player、交互与 DPI/视觉验收 |
 | [plans/production/ai-navigation.md](plans/production/ai-navigation.md) | 📋 | 基础 AI/导航：路径/跟随/任务/诊断、可选模型决策、实际移动与上手验收 |
 | [plans/production/sequence.md](plans/production/sequence.md) | 📋 | Sequence：可注册轨道、属性/事件/动画片段、seek/恢复/Player、操作与画面验收 |

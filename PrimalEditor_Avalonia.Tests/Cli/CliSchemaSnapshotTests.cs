@@ -33,6 +33,8 @@ public sealed class CliSchemaSnapshotTests
         registry.Register(new DeviceDataCommands());
         registry.Register(new PrintCommands());
         registry.Register(new LightmapCommands());
+        registry.Register(new GameplayCommands());
+        registry.Register(new GameplayEvolutionCommands());
 
         var options = new JsonSerializerOptions
         {

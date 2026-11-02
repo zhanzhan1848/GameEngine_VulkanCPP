@@ -1,5 +1,5 @@
 {
-  "$version": "336b6d4bbf2973ac",
+  "$version": "c636e6f07a842173",
   "protocol": "primal.cli.v1",
   "commands": [
     {
@@ -392,6 +392,264 @@
           "required": false
         }
       ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.apply",
+      "channel": "editor",
+      "description": "人确认后原子生效提案（确认门的执行动作；由人发起，AI 不得调用）。文件：备份原件到 proposals/<name>/backup-<时间戳>/ 后覆盖；规则 patch：按实体名替换/追加 GameplayRulesComponent（文档模型+UndoRedo，前像记入 manifest 供跨会话回滚）。建议先 gameplay.dryrun 看证据（有 verdict 记录时返回里带 evidence）。失败：NOT_FOUND（提案不存在）、INVALID_PARAMS（已 applied / patch 实体不在场景）。原子性：任一文件复制失败即整体中止（已备份未覆盖的不动），已覆盖部分回滚。",
+      "example": "{\"name\":\"door-faster\"}",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.autonomy.get",
+      "channel": "editor",
+      "description": "读自治政策（只读）。manual=每提案必审（默认）；sandbox=审政策不审个案（回路在 maxFramesPerDryrun/timeoutSecPerDryrun/allowedPathPrefixes 预算内可自主 dryrun+apply，受 maxAutoAppliesPerSession 上限约束；世代级回滚恒需人）。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.autonomy.set",
+      "channel": "editor",
+      "description": "写自治政策（人批准预算与约束=政策审的核心动作）。mode=manual|sandbox；sandbox 必须显式给 allowedPathPrefixes（逗号分隔项目相对前缀，如 Content/Scripts/NPC）与 maxAutoAppliesPerSession>0，否则 INVALID_PARAMS（空政策不构成授权）。预算字段同 get 的说明。",
+      "example": "{\"mode\":\"sandbox\",\"allowedPathPrefixesCsv\":\"Content/Scripts/NPC\",\"maxAutoAppliesPerSession\":5}",
+      "params": [
+        {
+          "name": "mode",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "allowedPathPrefixesCsv",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "maxAutoAppliesPerSession",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "maxFramesPerDryrun",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "timeoutSecPerDryrun",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.diversity",
+      "channel": "editor",
+      "description": "行为流 n-gram 重复率度量（多样性只作下限约束：repeatRate 须低于阈值，不追求最小化——防 Goodhart）。输入一个或多个（逗号分隔）trace CSV（--dryrun 产物；绝对或项目相对路径）：跨运行计算实体的动作流（trace 中 entity=<名> 的记录序），n 默认 3。跨运行重复率=跨文件重复 n-gram 占比；单文件时=文件内重复占比。返回逐实体 {ngrams, distinct, repeatRate} 与总体值。threshold 给定时 repeatRate ≥ threshold 记 gate=false（门禁判不过——证据门可据此拦截重复行为）。",
+      "example": "{\"tracesCsv\":\"a.csv,b.csv\",\"n\":3,\"threshold\":0.6}",
+      "params": [
+        {
+          "name": "tracesCsv",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "n",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "threshold",
+          "type": "number",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.dryrun",
+      "channel": "editor",
+      "description": "对提案跑固定步长（1/60）dry-run 出行为证据。导出当前场景包到临时目录，把提案 Lua 覆盖进包旁同名相对路径（Player 解析包相对优先），并（若有）把规则patch 应用到场景克隆后导出——激活场景与项目文件零改动。启动 PrimalPlayer --dryrun frames --trace-out，等进程退出（timeoutSec 预算，超时杀进程并在 verdict 标记）。产物：trace.csv（确定性口径 index/frame/kind/detail，两轮逐位一致）+ verdict.json（证据指针/预算与实际值/事件直方图）。失败：NOT_FOUND（提案不存在）、INVALID_PARAMS（帧数/超时非法、提案已 applied）、ENGINE_ERROR（Player 缺失/退出码非 0——细节看 stderr.log）。",
+      "example": "{\"name\":\"door-faster\",\"frames\":150,\"timeoutSec\":120}",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "frames",
+          "type": "integer",
+          "required": false
+        },
+        {
+          "name": "timeoutSec",
+          "type": "integer",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.generation.list",
+      "channel": "editor",
+      "description": "列 NPC 的世代链（generation/parent/proposal/rulesHash 摘要/证据与记忆指针）。npc 省略=列全部 NPC。只读。",
+      "example": "{\"npc\":\"Guard\"}",
+      "params": [
+        {
+          "name": "npc",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.generation.record",
+      "channel": "editor",
+      "description": "登记一个 NPC 世代切换点（generation id 单调 +1；改进只发生在切换点）。proposal 为已 applied 的提案名（证据链）；memoryCsv 可选=该 NPC 的 trace CSV（事件流投影，存为世代记忆快照）。审计断言：rulesHash（当前场景全部规则组件的规范化哈希）与父世代必须一致——人设参数世代间零改动，人是缰绳；不一致直接 INVALID_PARAMS（除非 allowHumanRulesEdit=true 显式标注这是人的修改——仍会记录变更并留痕）。失败：NOT_FOUND（提案未 applied）、INVALID_PARAMS（哈希漂移/参数非法）。",
+      "example": "{\"npc\":\"Guard\",\"proposal\":\"guard-g3\",\"memoryCsv\":\".Primal/gameplay/dryrun/guard-g3-x/trace.csv\"}",
+      "params": [
+        {
+          "name": "npc",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "proposal",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "memoryCsv",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "allowHumanRulesEdit",
+          "type": "boolean",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.generation.rollback",
+      "channel": "editor",
+      "description": "世代回滚（人的最终决定权——sandbox 自治不覆盖本命令）。回滚到 parent 世代：提案按其 backup 恢复文件（若该提案已 applied）——世代切换点原子回退；不修改任何世代记录（世代链只增不改，回滚后新世代=继续演进）。失败：INVALID_PARAMS（世代不存在/已是首代）。",
+      "example": "{\"npc\":\"Guard\"}",
+      "params": [
+        {
+          "name": "npc",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.propose",
+      "channel": "editor",
+      "description": "登记一份玩法提案（AI 产出的唯一进入形式——不直接生效）。filesCsv 为逗号分隔的文件条目，两种形态：'路径'（绝对或项目相对——apply 落点=其项目相对路径，适合替换既有脚本）或 '源|目标'（源任意可达路径，目标=项目相对 .lua——变体放临时处不留工作区）。文件复制进提案 files/ 下按目标路径存档。rulesPatchJson 可选：JSON 数组 [{entity:'实体名',rules:{InitialState/States/Transitions/Triggers/Tasks 字段}}]——apply 时按实体名替换/追加 GameplayRulesComponent（文档模型+Undo）。同名提案覆盖（重新提案）。失败：NOT_READY（无项目/场景）、INVALID_PARAMS（名/文件非法）、NOT_FOUND（文件不存在）。",
+      "example": "{\"name\":\"door-faster\",\"filesCsv\":\"/tmp/door_v2.lua|Content/Scripts/door.lua\"}",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "filesCsv",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "note",
+          "type": "string",
+          "required": false
+        },
+        {
+          "name": "rulesPatchJson",
+          "type": "string",
+          "required": false
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.reject",
+      "channel": "editor",
+      "description": "驳回提案并把原因回喂给 AI 迭代（人的决定面之一，与 apply/只调参数 并列——单次确认 ≤3 个决定）。reason 必填（回喂的上下文核心）；manifest 记 rejected + reason + 时间，状态回可重提（同名 re-propose 即迭代，历史 verdict 保留）。返回反馈包：原因 + 最近 verdict 指针 + 当前契约摘要（实体→规则组件 JSON），AI 拿它迭代不丢上下文。失败：NOT_FOUND（提案不存在）、INVALID_PARAMS（reason 为空）。",
+      "example": "{\"name\":\"door-faster\",\"reason\":\"开门太快，破坏探索节奏；保留触发距离\"}",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        },
+        {
+          "name": "reason",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.review.open",
+      "channel": "editor",
+      "description": "打开共创回路决定面窗口（S3 确认面的 UI 壳）：逐提案三个动作——批准生效（=gameplay.apply）/ 驳回（必填原因，回喂 AI）/ 重新取证（=dryrun）。只调参数不在此窗（人经 Inspector/组件命令改 L0 数值+Undo）。幂等：已开则置前。失败：NOT_READY（无项目/UI 未就绪）。",
+      "example": "{}",
+      "params": [],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.rollback",
+      "channel": "editor",
+      "description": "回滚已 applied 的提案：文件从备份恢复（无原作的删除）；规则 patch 按前像恢复（文档模型+Undo 记录恢复动作）。幂等边界：提案未 applied 返回 INVALID_PARAMS。回滚后状态回 proposed（可再改再验）。",
+      "example": "{\"name\":\"door-faster\"}",
+      "params": [
+        {
+          "name": "name",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.rules.attach",
+      "channel": "editor",
+      "description": "给实体挂 GameplayRulesComponent（已有则幂等返回）。空契约起步（InitialState空=仅触发器段）；编辑走 Inspector GAMEPLAY RULES 段（JSON，文档模型+Undo）或提案 patch。改动走 UndoRedo。失败：NOT_FOUND（实体不存在）。",
+      "example": "{\"entityGuid\":\"…\"}",
+      "params": [
+        {
+          "name": "entityGuid",
+          "type": "guid",
+          "required": true
+        }
+      ],
+      "returns": "object"
+    },
+    {
+      "verb": "gameplay.status",
+      "channel": "editor",
+      "description": "列出全部提案与状态（proposed/applied）、文件数、是否有 dry-run 证据。附目录位置。只读。",
+      "example": "{}",
+      "params": [],
       "returns": "object"
     },
     {

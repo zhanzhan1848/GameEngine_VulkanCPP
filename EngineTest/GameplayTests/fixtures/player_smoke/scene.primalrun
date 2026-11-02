@@ -1,0 +1,49 @@
+# primal-runtime-scene v2
+scene "GameplayPlayerE2E"
+env 0.05 0.05 0.05 1 0.7 0.75 0.8 10 200 0.01 0 0.2 0.4 0.8 0 2 1 0 0 0 0 0 0 0
+entity
+name "Player"
+pos 10 0.5 0
+builtin box
+scl 0.2 0.2 0.2
+script "mover_probe.lua"
+end
+entity
+name "Button"
+pos 0 0.25 0
+builtin box
+scl 0.3 0.5 0.3
+smtrigger refire button.near dist self Player lt 2
+end
+entity
+name "Door"
+pos 0 1 -2
+builtin box
+scl 1 2 0.2
+script "door.lua"
+statemachine closed
+smstate closed
+smstate open
+smtrans closed open door.opened manual
+smtrans open closed door.closed
+smguard 1 dist Player Button gte 5
+smend
+task open_door
+taskcond complete prop self opened gte 1
+taskend
+end
+entity
+name "Cam"
+pos 0 1.5 -7
+camera 0 60 0.1 100 1
+end
+entity
+name "Sun"
+pos 3 6 2
+light 0 20 1 1 1 30 0 0 1
+end
+seqmeta 60 240
+seqpos "Player"
+seqposkey 0 10 0.5 0 0 0 0 0.2 0.2 0.2 0
+seqposkey 90 0 0.5 0 0 0 0 0.2 0.2 0.2 0
+seqposkey 240 20 0.5 0 0 0 0 0.2 0.2 0.2 0

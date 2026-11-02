@@ -369,6 +369,55 @@ public sealed class SceneDocumentTests
     }
 
     [Fact]
+    public void SceneDocument_GameplayRulesRoundTripPreservesContract()
+    {
+        // gameplay S1：状态机+触发器契约（含 manual 边与封闭谓词）往返不丢。
+        var entity = new GameEntity("Door");
+        entity.Components.Add(new Transform());
+        entity.Components.Add(new GameplayRulesComponent
+        {
+            InitialState = "closed",
+            States = { "closed", "open" },
+            Transitions =
+            {
+                new GameplayTransition { From = "closed", To = "open", Event = "door.opened", Manual = true },
+                new GameplayTransition
+                {
+                    From = "open", To = "closed",
+                    Guards = { new GameplayPredicate { Kind = "dist", Op = "gte", EntityA = "Player", EntityB = "Button", Value = 5f } },
+                },
+            },
+            Triggers =
+            {
+                new GameplayTrigger
+                {
+                    Event = "button.near", Mode = "refire",
+                    Predicate = new GameplayPredicate { Kind = "dist", Op = "lt", EntityA = "self", EntityB = "Player", Value = 2f },
+                },
+            },
+        });
+        var scene = new Scene("GameplayRT") { Entities = { entity } };
+
+        var loaded = Serializer.FromSceneDocument(Serializer.ToSceneDocument(scene));
+        var rules = loaded.Entities.Single().GetComponent<GameplayRulesComponent>();
+
+        Assert.NotNull(rules);
+        Assert.Equal("closed", rules!.InitialState);
+        Assert.Equal(new[] { "closed", "open" }, rules.States);
+        Assert.Equal(2, rules.Transitions.Count);
+        Assert.Equal("door.opened", rules.Transitions[0].Event);
+        Assert.True(rules.Transitions[0].Manual);
+        Assert.False(rules.Transitions[1].Manual);
+        Assert.Single(rules.Transitions[1].Guards);
+        Assert.Equal("dist", rules.Transitions[1].Guards[0].Kind);
+        Assert.Equal("gte", rules.Transitions[1].Guards[0].Op);
+        Assert.Equal(5f, rules.Transitions[1].Guards[0].Value);
+        Assert.Single(rules.Triggers);
+        Assert.Equal("refire", rules.Triggers[0].Mode);
+        Assert.Equal(2f, rules.Triggers[0].Predicate.Value);
+    }
+
+    [Fact]
     public void SceneDocument_PreservesBuiltinMeshKind()
     {
         var entity = new GameEntity("Plane");
