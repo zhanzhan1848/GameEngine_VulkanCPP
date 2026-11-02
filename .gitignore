@@ -501,6 +501,8 @@ scripts/analyze_*.py
 scripts/compare_*.py
 scripts/certify_*.py
 scripts/make_*.py
+!scripts/make_ddgi_strict_spirv.py
+!scripts/test_ddgi_strict_spirv.py
 scripts/ddgi_*.py
 scripts/spgi_plan_*.py
 scripts/sponza_sdf_*.py
