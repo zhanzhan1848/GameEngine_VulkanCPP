@@ -64,6 +64,13 @@ public:
      */
     u32 GetCurrentFrameIndex() const { return currentFrameIndex_; }
 
+    struct FrameTiming {
+        double fenceWaitMs{0}, acquireMs{0};
+        bool enabled{false}, fenceCompleted{false}, acquireSucceeded{false};
+        u64 completionSerial{0};
+    };
+    const FrameTiming& GetFrameTiming() const { return frameTiming_; }
+
     /**
      * @brief 获取当前 acquired swapchain image 的索引
      * @details T4.6.5 part 30.13 (X5 fix): caller 需要 per-image semaphore
@@ -187,6 +194,7 @@ private:
     utl::vector<rhi::SyncHandle> imageSemaphores_; // T4.6.5 part 30.5: GPU-GPU acquire→draw semaphores
     u32 currentFrameIndex_{0};
     u32 currentImageIndex_{0}; // Index of the swapchain image acquired for the current frame
+    FrameTiming frameTiming_{};
 
     rhi::ResourceHandle depthStencilTexture_{rhi::handles::INVALID_RESOURCE};
     std::unordered_map<id::id_type, std::shared_ptr<MaterialInstance>> materialInstances_;

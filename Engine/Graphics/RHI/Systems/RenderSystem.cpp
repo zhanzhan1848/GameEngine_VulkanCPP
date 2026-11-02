@@ -16,6 +16,8 @@
 #include <iostream>
 #include <chrono>
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
@@ -243,6 +245,9 @@ void RenderSystem::Resize(u32 width, u32 height) {
 
 bool RenderSystem::BeginFrame(rhi::ResourceHandle& outBackBuffer, rhi::SyncHandle& outSignalFence) {
     if (!device_ || !swapChain_) return false;
+    static const bool timingEnabled = [] { const char* e=std::getenv("PRIMAL_FRAME_TIMING");return e && std::strcmp(e,"1")==0; }();
+    frameTiming_ = {};
+    frameTiming_.enabled = timingEnabled;
 
     // T4.6.5 part 35.6: drive device-level frame lifecycle so the GC's
     // currentFrame_ advances and DeferredDestroy items eventually get
@@ -254,7 +259,14 @@ bool RenderSystem::BeginFrame(rhi::ResourceHandle& outBackBuffer, rhi::SyncHandl
 
     // Internal Frame Sync: failed waits must never authorize resource reuse.
     device_->FrameSlotCompletions().Invalidate();
+    const u64 priorSerial = timingEnabled ? device_->FrameSlotCompletions().Serial(currentFrameIndex_) : 0;
+    const auto waitStart = timingEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     Wait(currentFrameIndex_);
+    if (timingEnabled) {
+        frameTiming_.fenceWaitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-waitStart).count();
+        frameTiming_.fenceCompleted = device_->FrameSlotCompletions().CanReuse(currentFrameIndex_, priorSerial);
+        frameTiming_.completionSerial = device_->FrameSlotCompletions().Serial(currentFrameIndex_);
+    }
 
     // Acquire Next Image — T4.6.5 part 30.5 (Bug A): pass GPU-GPU acquire
     // semaphore. Vulkan spec requires semaphore OR fence be non-NULL.
@@ -262,7 +274,13 @@ bool RenderSystem::BeginFrame(rhi::ResourceHandle& outBackBuffer, rhi::SyncHandl
     // every frame, and the swapchain image is never properly acquired (which
     // cascades into "image has not been acquired" errors on Submit/Present).
     const rhi::SyncHandle imageSem = imageSemaphores_[currentFrameIndex_];
-    if (!swapChain_->AcquireNextImage(&currentImageIndex_, imageSem)) {
+    const auto acquireStart = timingEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    const bool acquired = swapChain_->AcquireNextImage(&currentImageIndex_, imageSem);
+    if (timingEnabled) {
+        frameTiming_.acquireMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now()-acquireStart).count();
+        frameTiming_.acquireSucceeded = acquired;
+    }
+    if (!acquired) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "RenderSystem: Failed to acquire next image." << std::endl;
         return false;
     }

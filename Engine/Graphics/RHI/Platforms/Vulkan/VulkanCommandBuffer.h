@@ -40,6 +40,10 @@ public:
     bool Initialize() override;
 
     VkCommandBuffer GetNativeCmdBuffer() const { return cmdBuffer_; }
+    u32 GetNativeQueueFamilyIndex() const { return queueFamily_; }
+    bool IsRecordingOutsideRenderPass() const {
+        return GetState()==CommandBufferState::Recording && scope_!=Scope::RenderPass;
+    }
 
     // === 渲染命令(Phase 4 实现)===
     void BeginRenderPass(const RenderPassDesc& desc) override;
@@ -165,6 +169,15 @@ private:
     struct PendingAttachment { VulkanTexture* tex; VkImageLayout finalLayout; };
     std::vector<PendingAttachment> pendingAttachments_;
 };
+
+namespace vulkan {
+// Isolated opt-in albedo path. Layout tracking is per mip, uniform across
+// all array layers; caller must have initialized mip0 in EVERY layer.
+bool CanGenerateAlbedoMipChain(VulkanDevice&, VulkanCommandBuffer&, const TextureDesc&);
+bool CopyAlbedoMip0Layer(VulkanDevice&, VulkanCommandBuffer&, ResourceHandle src,
+                        ResourceHandle dst, u32 dstLayer, bool expandSingleTexel);
+bool GenerateAlbedoMipChain(VulkanDevice&, VulkanCommandBuffer&, ResourceHandle texture);
+}
 
 } // namespace primal::graphics::rhi
 

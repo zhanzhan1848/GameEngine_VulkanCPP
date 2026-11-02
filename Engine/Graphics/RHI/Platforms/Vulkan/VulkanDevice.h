@@ -15,6 +15,7 @@
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
 #include <memory>
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 
@@ -74,6 +75,8 @@ public:
     VkInstance GetNativeInstance() const { return instance_; }
     VkPhysicalDevice GetNativePhysicalDevice() const { return physicalDevice_; }
     VkDevice GetNativeDevice() const { return device_; }
+    VkResult GetLastWaitIdleResult() const { return lastWaitIdleResult_.load(std::memory_order_acquire); }
+    u64 GetLifecycleGeneration() const { return lifecycleGeneration_; }
     VkQueue GetGraphicsQueue() const { return graphicsQueue_; }
     VkQueue GetComputeQueue() const { return computeQueue_; }
     VkQueue GetTransferQueue() const { return transferQueue_; }
@@ -258,6 +261,8 @@ private:
     VkInstance instance_{VK_NULL_HANDLE};
     VkPhysicalDevice physicalDevice_{VK_NULL_HANDLE};
     VkDevice device_{VK_NULL_HANDLE};
+    mutable std::atomic<VkResult> lastWaitIdleResult_{VK_NOT_READY};
+    u64 lifecycleGeneration_=0;
 
     VkQueue graphicsQueue_{VK_NULL_HANDLE};
     VkQueue computeQueue_{VK_NULL_HANDLE};

@@ -11,6 +11,7 @@
 
 #include "Engine/Common/CommonHeaders.h"
 #include "Engine/Common/CoreDiag.h"
+#include "Engine/Graphics/Utilities/CPUStallAudit.h"
 
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "VulkanTexture.h"
@@ -41,6 +42,16 @@
 #endif
 
 namespace primal::graphics::rhi {
+namespace {
+std::atomic<u64> nextVulkanDeviceGeneration{1};
+u64 AllocateVulkanDeviceGeneration() {
+    u64 current=nextVulkanDeviceGeneration.load(std::memory_order_relaxed);
+    for(;;) {
+        if(current==~u64(0))return 0; // fail closed on exhaustion; never reuse an id
+        if(nextVulkanDeviceGeneration.compare_exchange_weak(current,current+1,std::memory_order_relaxed))return current;
+    }
+}
+}
 
 // ============================================================================
 // 构造 / 析构
@@ -59,6 +70,8 @@ VulkanDevice::~VulkanDevice() {
 // ============================================================================
 
 bool VulkanDevice::initializeImpl() {
+    lifecycleGeneration_=0;
+    lastWaitIdleResult_.store(VK_NOT_READY,std::memory_order_release);
     validationEnabled_ = desc_.enableValidation || desc_.enableDebug;
 
     if (!createInstance()) {
@@ -198,10 +211,12 @@ bool VulkanDevice::initializeImpl() {
     } else {
         PRIMAL_LOG_STREAM(Info, "RHI") << "[VulkanDevice] Initialized (validation disabled)." << std::endl;
     }
+    lifecycleGeneration_=AllocateVulkanDeviceGeneration();
     return true;
 }
 
 void VulkanDevice::shutdownImpl() {
+    lifecycleGeneration_=0;
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
     }
@@ -269,9 +284,7 @@ void VulkanDevice::shutdownImpl() {
 }
 
 void VulkanDevice::waitIdleImpl() const {
-    if (device_ != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(device_);
-    }
+    lastWaitIdleResult_=device_!=VK_NULL_HANDLE?vkDeviceWaitIdle(device_):VK_ERROR_DEVICE_LOST;
 }
 
 void VulkanDevice::beginFrameImpl() {
@@ -719,6 +732,7 @@ void VulkanDevice::destroyCommandBufferImpl(CommandBufferHandle handle) {
 // ============================================================================
 
 bool VulkanDevice::submitImpl(const QueueSubmitInfo& info) {
+    lastWaitIdleResult_.store(VK_NOT_READY,std::memory_order_release);
     if (info.cmdBuffer == handles::INVALID_COMMAND_BUFFER) return false;
 
     VulkanCommandBuffer* cmd = GetCommandBuffer(info.cmdBuffer);
@@ -737,7 +751,8 @@ bool VulkanDevice::submitImpl(const QueueSubmitInfo& info) {
     if (info.signalFence != handles::INVALID_SYNC) {
         if (auto* s = GetSync(info.signalFence)) {
             signalFence = s->GetFence();
-            s->ResetFence();  // 提交前 reset,后续可 WaitForFences
+            { primal::graphics::cpu_stall_audit::Scope cpuScope("vulkan.submit.reset_fence");
+                s->ResetFence(); }  // 提交前 reset,后续可 WaitForFences
         }
     }
 
@@ -754,7 +769,8 @@ bool VulkanDevice::submitImpl(const QueueSubmitInfo& info) {
     if (signalFence == VK_NULL_HANDLE) {
         signalFence = cmd->GetSubmitFence();
         if (signalFence != VK_NULL_HANDLE) {
-            vkResetFences(device_, 1, &signalFence);
+            { primal::graphics::cpu_stall_audit::Scope cpuScope("vulkan.submit.reset_fence");
+                vkResetFences(device_, 1, &signalFence); }
         }
         cmd->externalFenceSignaled_ = false;
         cmd->externalFence_ = VK_NULL_HANDLE;
@@ -777,7 +793,9 @@ bool VulkanDevice::submitImpl(const QueueSubmitInfo& info) {
     si.signalSemaphoreCount = signalSem != VK_NULL_HANDLE ? 1 : 0;
     si.pSignalSemaphores = &signalSem;
 
-    VkResult res = vkQueueSubmit(graphicsQueue_, 1, &si, signalFence);
+    VkResult res;
+    { primal::graphics::cpu_stall_audit::Scope cpuScope("vulkan.submit.queue_submit");
+        res = vkQueueSubmit(graphicsQueue_, 1, &si, signalFence); }
     if (res != VK_SUCCESS) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] submitImpl vkQueueSubmit failed: " << res << std::endl;
         return false;

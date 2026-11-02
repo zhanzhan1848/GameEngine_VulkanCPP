@@ -473,6 +473,112 @@ void VulkanCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
     UpdateStats(CommandType::BlitTexture);
 }
 
+namespace vulkan {
+namespace {
+bool AlbedoCommandReady(VulkanDevice& device,VulkanCommandBuffer& cmd) {
+    if(!cmd.GetNativeCmdBuffer()||!cmd.IsRecordingOutsideRenderPass())return false;
+    u32 count=0;vkGetPhysicalDeviceQueueFamilyProperties(device.GetNativePhysicalDevice(),&count,nullptr);
+    const u32 family=cmd.GetNativeQueueFamilyIndex();if(family>=count)return false;
+    std::vector<VkQueueFamilyProperties> properties(count);
+    vkGetPhysicalDeviceQueueFamilyProperties(device.GetNativePhysicalDevice(),&count,properties.data());
+    return (properties[family].queueFlags&VK_QUEUE_GRAPHICS_BIT)!=0;
+}
+bool AlbedoLayoutKnown(VkImageLayout l) {
+    return l==VK_IMAGE_LAYOUT_UNDEFINED||l==VK_IMAGE_LAYOUT_PREINITIALIZED||
+        l==VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL||l==VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL||
+        l==VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL||l==VK_IMAGE_LAYOUT_GENERAL||
+        l==VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+}
+void AlbedoMipBarrier(VulkanCommandBuffer& cmd,VulkanTexture& tex,u32 mip,VkImageLayout next) {
+    const VkImageLayout old=tex.GetMipLayout(mip);if(old==next)return;
+    VkImageMemoryBarrier b{};b.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.oldLayout=old;b.newLayout=next;b.image=tex.GetNativeImage();
+    b.srcQueueFamilyIndex=b.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+    b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,mip,1,0,std::max(1u,tex.GetTextureDesc().arraySize)};
+    VkPipelineStageFlags source=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,dest=VK_PIPELINE_STAGE_TRANSFER_BIT;
+    switch(old) {
+        case VK_IMAGE_LAYOUT_UNDEFINED:source=VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;b.srcAccessMask=0;break;
+        case VK_IMAGE_LAYOUT_PREINITIALIZED:source=VK_PIPELINE_STAGE_HOST_BIT;b.srcAccessMask=VK_ACCESS_HOST_WRITE_BIT;break;
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:source=VK_PIPELINE_STAGE_TRANSFER_BIT;b.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;break;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:source=VK_PIPELINE_STAGE_TRANSFER_BIT;b.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;break;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:b.srcAccessMask=VK_ACCESS_SHADER_READ_BIT;break;
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:source=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;b.srcAccessMask=VK_ACCESS_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;break;
+        default:b.srcAccessMask=VK_ACCESS_MEMORY_READ_BIT|VK_ACCESS_MEMORY_WRITE_BIT;break;
+    }
+    if(next==VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)b.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
+    else if(next==VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL)b.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
+    else {dest=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;b.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;}
+    vkCmdPipelineBarrier(cmd.GetNativeCmdBuffer(),source,dest,0,0,nullptr,0,nullptr,1,&b);
+    // All layers of this mip now agree. Never use SetCurrentLayout here:
+    // that would overwrite tracking for the other (possibly undefined) mips.
+    tex.SetMipLayout(mip,next);
+}
+}
+
+bool CanGenerateAlbedoMipChain(VulkanDevice& device,VulkanCommandBuffer& cmd,const TextureDesc& d) {
+    if(!AlbedoCommandReady(device,cmd)||d.size.x==0||d.size.y==0||d.size.z!=1||
+       (d.type!=TextureType::Texture2D&&d.type!=TextureType::Texture2DArray)||d.arraySize==0)return false;
+    if(d.format!=DataFormat::RGBA8_UNorm&&d.format!=DataFormat::RGBA8_sRGB&&d.format!=DataFormat::BGRA8_UNorm)return false;
+    const auto usage=ToVkImageUsageFlags(d.usage);
+    if((usage&(VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT))!=
+       (VK_IMAGE_USAGE_TRANSFER_SRC_BIT|VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT))return false;
+    u32 full=1;for(u32 n=std::max(d.size.x,d.size.y);n>1;n>>=1)++full;
+    if(d.mipLevels==0||d.mipLevels>full)return false;
+    VkFormatProperties format{};vkGetPhysicalDeviceFormatProperties(device.GetNativePhysicalDevice(),ToVkFormat(d.format),&format);
+    const VkFormatFeatureFlags required=VK_FORMAT_FEATURE_BLIT_SRC_BIT|VK_FORMAT_FEATURE_BLIT_DST_BIT|VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    if((format.optimalTilingFeatures&required)!=required)return false;
+    VkPhysicalDeviceProperties properties{};vkGetPhysicalDeviceProperties(device.GetNativePhysicalDevice(),&properties);
+    return d.size.x<=properties.limits.maxImageDimension2D&&d.size.y<=properties.limits.maxImageDimension2D&&d.arraySize<=properties.limits.maxImageArrayLayers;
+}
+
+bool CopyAlbedoMip0Layer(VulkanDevice& device,VulkanCommandBuffer& cmd,ResourceHandle src,ResourceHandle dst,u32 layer,bool expandSingleTexel) {
+    auto* s=device.GetTexture(src);auto* d=device.GetTexture(dst);
+    if(src==dst||!s||!d||!s->OwnsImage()||!d->OwnsImage()||!s->GetNativeImage()||!d->GetNativeImage())return false;
+    const auto& sd=s->GetTextureDesc();const auto& dd=d->GetTextureDesc();
+    if(!CanGenerateAlbedoMipChain(device,cmd,dd)||sd.type!=TextureType::Texture2D||sd.size.z!=1||sd.format!=dd.format||layer>=dd.arraySize||
+       s->GetMipLayout(0)==VK_IMAGE_LAYOUT_UNDEFINED||!AlbedoLayoutKnown(s->GetMipLayout(0))||!AlbedoLayoutKnown(d->GetMipLayout(0)))return false;
+    if((ToVkImageUsageFlags(sd.usage)&VK_IMAGE_USAGE_TRANSFER_SRC_BIT)==0)return false;
+    const bool same=sd.size.x==dd.size.x&&sd.size.y==dd.size.y;
+    if(!same&&!(expandSingleTexel&&sd.size.x==1&&sd.size.y==1))return false;
+    AlbedoMipBarrier(cmd,*s,0,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    AlbedoMipBarrier(cmd,*d,0,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    if(same) {
+        VkImageCopy region{};region.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,layer,1};
+        region.extent={dd.size.x,dd.size.y,1};
+        vkCmdCopyImage(cmd.GetNativeCmdBuffer(),s->GetNativeImage(),VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,d->GetNativeImage(),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&region);
+    } else {
+        // Only the explicit single-texel placeholder may expand. Real layers
+        // never filter/convert mip0: they use the byte-exact image copy above.
+        VkImageBlit region{};region.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,layer,1};
+        region.srcOffsets[1]={1,1,1};region.dstOffsets[1]={s32(dd.size.x),s32(dd.size.y),1};
+        vkCmdBlitImage(cmd.GetNativeCmdBuffer(),s->GetNativeImage(),VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,d->GetNativeImage(),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&region,VK_FILTER_NEAREST);
+    }
+    AlbedoMipBarrier(cmd,*s,0,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    return true;
+}
+
+bool GenerateAlbedoMipChain(VulkanDevice& device,VulkanCommandBuffer& cmd,ResourceHandle texture) {
+    auto* tex=device.GetTexture(texture);if(!tex||!tex->OwnsImage()||!tex->GetNativeImage())return false;
+    const auto& d=tex->GetTextureDesc();if(!CanGenerateAlbedoMipChain(device,cmd,d)||tex->GetMipLayout(0)==VK_IMAGE_LAYOUT_UNDEFINED)return false;
+    for(u32 mip=0;mip<d.mipLevels;++mip)if(!AlbedoLayoutKnown(tex->GetMipLayout(mip)))return false;
+    // Caller has initialized every mip0 layer. Higher mip contents can be
+    // undefined; only their actually tracked layouts are used for barriers.
+    for(u32 mip=1;mip<d.mipLevels;++mip) {
+        AlbedoMipBarrier(cmd,*tex,mip-1,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        AlbedoMipBarrier(cmd,*tex,mip,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkImageBlit blit{};blit.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,mip-1,0,d.arraySize};blit.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,mip,0,d.arraySize};
+        blit.srcOffsets[1]={s32(std::max(1u,d.size.x>>(mip-1))),s32(std::max(1u,d.size.y>>(mip-1))),1};
+        blit.dstOffsets[1]={s32(std::max(1u,d.size.x>>mip)),s32(std::max(1u,d.size.y>>mip)),1};
+        // Vulkan performs sRGB decode before linear filtering and encode for
+        // an sRGB destination. UNORM retains its declared linear semantics.
+        vkCmdBlitImage(cmd.GetNativeCmdBuffer(),tex->GetNativeImage(),VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,tex->GetNativeImage(),VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,VK_FILTER_LINEAR);
+    }
+    for(u32 mip=0;mip<d.mipLevels;++mip)AlbedoMipBarrier(cmd,*tex,mip,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    tex->SetCurrentLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    return true;
+}
+} // namespace vulkan
+
 void VulkanCommandBuffer::GenerateMipmaps(ResourceHandle texture) {
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
     VulkanTexture* tex = vk.GetTexture(texture);
