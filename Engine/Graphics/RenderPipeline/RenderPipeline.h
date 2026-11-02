@@ -16,6 +16,13 @@ struct PipelineStatistics {
     
     // Per-pass GPU execution time in milliseconds
     std::unordered_map<std::string, double> passExecutionTimes;
+    // Sequence numbers identify graph recordings, not swapchain frame IDs.
+    u64 timestampRecordingSequence{0};
+    u64 timestampResolvedSequence{0};
+    bool timestampResultsFresh{false};
+    bool timestampQueryReadOk{false};
+    double timestampQueryReadCpuMs{-1.0};
+    u64 timestampReadMin{0}, timestampReadMax{0}, timestampPreviousBound{0};
 };
 
 class RenderPipeline {

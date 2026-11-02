@@ -11,11 +11,14 @@
 #include "BoundaryStaticSamples.h"
 #include <memory>
 #include "Graphics/Utilities/GeometryFirstHit.h"
+#include "Graphics/Utilities/GeometryBVHStore.h"
+#include "Graphics/Utilities/EnvironmentHybridCertificate.h"
 #include "../LumenTypes.h"
 #include "../GICacheView.h"
 
 namespace primal::graphics::rhi {
     class RHIDeviceBase;
+    class RHICommandBuffer;
 }
 
 namespace primal::graphics::rendergraph {
@@ -84,11 +87,13 @@ public:
     // the runtime cascades (1m/2m/4m) misplace SC shadow hits the same way
     // they do for the DDGI trace.
     void SetOfflineSDFSource(rhi::ResourceHandle texture,
-                             math::v3 origin, math::v3 extent, u32 resolution) {
+                             math::v3 origin, math::v3 extent, u32 resolution,
+                             bool signed_field = false) {
         sc_offline_sdf_texture_ = texture;
         sc_offline_sdf_origin_ = origin;
         sc_offline_sdf_extent_ = extent;
         sc_offline_sdf_resolution_ = resolution;
+        sc_offline_sdf_signed_ = signed_field;
     }
 
     bool Initialize(rhi::RHIDeviceBase* device, const LumenConfig& config);
@@ -144,7 +149,8 @@ public:
     rhi::ResourceHandle GetTileAuxTexture() const { return indirect_tile_aux_; }
     // Diagnostic readback only; 32 ProbeRayHit records per tile, 32 B each.
     rhi::ResourceHandle GetIndirectRayHitsBuffer() const { return ray_hits_buffer_; }
-    rhi::ResourceHandle GetLightInfoBuffer() const { return light_info_buffer_; }
+    rhi::ResourceHandle GetLightInfoBuffer() const { return GetLightInfoBuffer(last_light_info_slot_); }
+    rhi::ResourceHandle GetLightInfoBuffer(u32 slot) const { return light_info_buffer_[StorageSlot(slot)]; }
     // Read-only test-host source diagnostics; no additional production binding.
     rhi::ResourceHandle GetLightingParamsBuffer(u32 slot) const { return params_cb_[slot % 3]; }
     rhi::ResourceHandle GetShadowParamsBuffer(u32 slot) const { return shadow_cb_[slot % 3]; }
@@ -209,9 +215,65 @@ public:
         const auto& s=geometry_buffers_[frame%3];
         return i<4 && s.ready && s.epoch==geometry_epoch_ ? s.buffers[i] : rhi::handles::INVALID_RESOURCE;
     }
+    struct GeometryWitnessView {
+        rhi::ResourceHandle buffers[4]{};
+        u64 sizes[4]{}, scene_epoch{}, slot_epoch{}, source_digest{};
+        u32 slot{};
+        bool ready=false;
+        bool equal_box_ready=false;
+        rhi::ResourceHandle equal_box_buffer{rhi::handles::INVALID_RESOURCE};
+        u64 equal_box_size=0,equal_box_flags_hash=0,equal_box_payload_hash=0,equal_box_serial=0;
+        bool compact_ready=false;
+        u32 compact_top_max=0, compact_bottom_max=0;
+        bool upper_ready=false;
+        rhi::ResourceHandle upper_buffer{rhi::handles::INVALID_RESOURCE};
+        u64 upper_size=0, upper_original_hash=0, upper_candidate_hash=0;
+    };
+    // Diagnostic snapshot only: never uploads/rebuilds a different scene.
+    GeometryWitnessView GetGeometryWitnessView(u32 frame) const {
+        const auto& s=geometry_buffers_[frame%3];GeometryWitnessView v{};
+        v.slot=frame%3;v.scene_epoch=geometry_epoch_;v.slot_epoch=s.epoch;
+        v.source_digest=geometry_source_digest_;v.ready=s.ready && s.epoch==geometry_epoch_;
+        for(u32 i=0;i<4;++i){v.buffers[i]=s.buffers[i];v.sizes[i]=s.sizes[i];
+            v.ready=v.ready && s.buffers[i]!=rhi::handles::INVALID_RESOURCE && s.sizes[i]>0;}
+        v.equal_box_buffer=s.equal_box_buffer;v.equal_box_size=s.equal_box_size;
+        v.equal_box_flags_hash=s.equal_box_flags_hash;v.equal_box_payload_hash=s.equal_box_payload_hash;v.equal_box_serial=s.equal_box_serial;
+        v.equal_box_ready=v.ready && geometry_equal_box_ && geometry_equal_box_->valid && s.equal_box_ready &&
+            s.equal_box_buffer!=rhi::handles::INVALID_RESOURCE && EqualBoxSlotComplete(frame%3) &&
+            ray_geometry::EqualBoxBindingMatches(s.equal_box_epoch,s.equal_box_digest,s.equal_box_slot,s.equal_box_payload_hash,s.equal_box_flags_hash,
+                s.equal_box_buffer,s.equal_box_size,s.equal_box_sources,s.equal_box_source_sizes,geometry_epoch_,geometry_source_digest_,frame%3,
+                geometry_equal_box_->payload_hash,geometry_equal_box_->flags_hash,s.equal_box_buffer,geometry_equal_box_->flags.size()*sizeof(u32),s.buffers,s.sizes);
+        v.compact_top_max=s.compact.top_max_pending; v.compact_bottom_max=s.compact.bottom_max_pending;
+        v.compact_ready=v.ready && ray_geometry::CompactBindingMatches(s.compact,
+            s.compact_epoch,s.compact_digest,s.compact_slot,s.compact_buffers,s.compact_sizes,
+            geometry_epoch_,geometry_source_digest_,frame%3,s.buffers,s.sizes);
+        v.upper_buffer=s.upper_buffer; v.upper_size=s.upper_size;
+        v.upper_original_hash=s.upper_original_hash; v.upper_candidate_hash=s.upper_candidate_hash;
+        v.upper_ready=v.ready && s.upper_ready && s.upper_buffer!=rhi::handles::INVALID_RESOURCE &&
+            ray_geometry::UpperBindingMatches(s.upper_epoch,s.upper_digest,s.upper_slot,s.upper_original_hash,s.upper_candidate_hash,
+                s.upper_buffer,s.upper_size,s.upper_source_buffers,s.upper_source_sizes,geometry_epoch_,geometry_source_digest_,frame%3,
+                geometry_upper_stats_.original_payload_hash,geometry_upper_stats_.candidate_payload_hash,s.upper_buffer,s.upper_size,s.buffers,s.sizes);
+        return v;
+    }
+    environment_hybrid::Binding GetHybridBinding(u32 frame) const;
+    std::span<const u8> GetHybridField() const {return hybrid_certified_?std::span<const u8>(hybrid_field_):std::span<const u8>{};}
+    // Publish fenced geometry to independent visibility consumers without
+    // changing the Surface Cache trace/resolve algorithm.
+    bool PrepareGeometryConsumer(u32 frame) { return device_ && UploadGeometryScene(frame % 3u); }
+    bool PrepareEqualBoxConsumer(u32 frame);
+    bool EqualBoxSlotComplete(u32 frame) const;
+    // Called only by the explicitly enabled Gather candidate. Immutable snapshot
+    // prevents a later scene rebuild from mutating an already built RG input.
+    std::shared_ptr<const ray_geometry::InstanceNormalOwnerCertificate> GetInstanceNormalOwners() {
+        if(normal_owner_epoch_!=geometry_epoch_) {
+            normal_owner_epoch_=geometry_epoch_;
+            normal_owners_=ray_geometry::TryCertifyInstanceNormalOwners(geometry_scene_,128ull*1024*1024,53ull*1024*1024);
+        }
+        return normal_owners_;
+    }
     bool WantsGeometryFirstHit() const { return geometry_first_requested_; }
     bool SetGeometryScene(std::span<const ray_geometry::InstanceInput> instances);
-    void InvalidateGeometryScene() { geometry_scene_={}; ++geometry_epoch_; RequestTileValidityReset(); }
+    void InvalidateGeometryScene() { hybrid_certified_=false;hybrid_field_.clear();for(auto& b:hybrid_bindings_)b={}; geometry_scene_={}; geometry_equal_box_.reset(); geometry_compact_={}; geometry_upper_nodes_.clear(); geometry_upper_stats_={}; geometry_source_digest_=0; ++geometry_epoch_; RequestTileValidityReset(); }
 
     bool IsInitialized() const { return initialized_; }
 
@@ -241,6 +303,8 @@ public:
     }
 
 private:
+    u32 StorageSlot(u32 slot) const { return experimental_light_dispatch_slots_ ? slot % 3 : 0; }
+    rhi::ResourceHandle GetCardDispatchBuffer(u32 slot) const { return card_dispatch_buffer_[StorageSlot(slot)]; }
     void CreateAtlasTextures();
     void CreateConstantBuffers();
     void CreateDescriptorSetLayouts();
@@ -252,12 +316,32 @@ private:
     bool boundary_consumer_requested_{false};
     bool geometry_first_requested_ = false;
     ray_geometry::SceneBVH geometry_scene_;
+    bool hybrid_certified_=false;u64 hybrid_owner_id_=environment_hybrid::NewProducerId(),hybrid_generation_=0;std::vector<u8> hybrid_field_;environment_hybrid::Binding hybrid_bindings_[3]{};
+    u64 normal_owner_epoch_=~u64(0);
+    std::shared_ptr<const ray_geometry::InstanceNormalOwnerCertificate> normal_owners_;
+    ray_geometry::CompactTraversalCertificate geometry_compact_{};
+    std::shared_ptr<const ray_geometry::EqualBoxSidecar> geometry_equal_box_;
+    std::vector<ray_geometry::Node> geometry_upper_nodes_;
+    ray_geometry::UpperBVHStats geometry_upper_stats_{};
     u64 geometry_epoch_ = 0;
+    u64 geometry_source_digest_ = 0;
     struct GeometryBuffers {
         rhi::ResourceHandle buffers[4]{rhi::handles::INVALID_RESOURCE,rhi::handles::INVALID_RESOURCE,
             rhi::handles::INVALID_RESOURCE,rhi::handles::INVALID_RESOURCE};
         u64 sizes[4]{}, epoch{~u64(0)};
         bool ready = false;
+        rhi::ResourceHandle equal_box_buffer{rhi::handles::INVALID_RESOURCE};
+        u64 equal_box_size=0,equal_box_epoch=~u64(0),equal_box_digest=0,equal_box_flags_hash=0,equal_box_payload_hash=0,equal_box_serial=0;
+        u64 equal_box_sources[4]{},equal_box_source_sizes[4]{};u32 equal_box_slot=~u32(0);bool equal_box_ready=false;
+        ray_geometry::CompactTraversalCertificate compact{};
+        u64 compact_epoch{~u64(0)}, compact_digest{};
+        u32 compact_slot{~u32(0)};
+        rhi::ResourceHandle compact_buffers[4]{};
+        u64 compact_sizes[4]{};
+        rhi::ResourceHandle upper_buffer{rhi::handles::INVALID_RESOURCE};
+        u64 upper_size=0,upper_epoch{~u64(0)},upper_digest=0,upper_original_hash=0,upper_candidate_hash=0;
+        u32 upper_slot{~u32(0)}; bool upper_ready=false;
+        rhi::ResourceHandle upper_source_buffers[4]{}; u64 upper_source_sizes[4]{};
     } geometry_buffers_[3];
     bool UploadGeometryScene(u32 frame);
     rhi::ResourceHandle triangle_support_buffer_{rhi::handles::INVALID_RESOURCE};
@@ -324,6 +408,10 @@ private:
     rhi::ResourceHandle params_cb_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };
+    // Immutable zero policy CB for the Vulkan full-atlas pre-capture reset.
+    rhi::ResourceHandle atlas_reset_cb_{rhi::handles::INVALID_RESOURCE};
+    void ResetSurfaceAtlas(rhi::RHICommandBuffer* cmd, u32 frame_slot);
+    bool HasOfflineSDFSource() const;
 
     // Descriptor set layouts
     rhi::DescriptorSetLayoutHandle dilate_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
@@ -410,7 +498,10 @@ private:
     };
 
     // Runtime buffers
-    rhi::ResourceHandle light_info_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle light_info_buffer_[3]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
+    bool experimental_light_dispatch_slots_ = false;
+    u32 last_light_info_slot_ = 0;
+    u64 light_dispatch_consumed_serial_[3]{};
     rhi::ResourceHandle ray_hits_buffer_{ rhi::handles::INVALID_RESOURCE };
     // G (plan §三.G): actual hit capacity of ray_hits_buffer_ in ProbeRayHit
     // entries (tilesX×tilesY×raysPerProbe) — sized from the runtime tile
@@ -442,7 +533,7 @@ private:
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET
     };
-    rhi::ResourceHandle card_dispatch_buffer_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle card_dispatch_buffer_[3]{ rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE };
     // A7: nearest-depth scratch (u32 floatBits per atlas texel) for the
     // three-dispatch GBuffer-gather capture (clear → atomicMin → write).
     rhi::ResourceHandle capture_min_depth_buffer_{ rhi::handles::INVALID_RESOURCE };
@@ -486,6 +577,7 @@ private:
     math::v3 sc_offline_sdf_origin_{};
     math::v3 sc_offline_sdf_extent_{};
     u32 sc_offline_sdf_resolution_ = 0;
+    bool sc_offline_sdf_signed_ = false;
     rhi::ResourceHandle shadow_cb_[3]{
         rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE
     };

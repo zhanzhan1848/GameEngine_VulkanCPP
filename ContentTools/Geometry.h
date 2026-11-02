@@ -151,6 +151,8 @@ namespace primal::tools {
 		utl::vector<math::v3>					positions;
 		utl::vector<math::v3>					normals;
 		utl::vector<math::v4>					tangents;
+		// Importer certifies one tangent per raw index slot.
+		bool tangents_corner_trusted{ false };
 		utl::vector<math::v3>					colors;
 		utl::vector<utl::vector<math::v2>>		uv_sets;
 		utl::vector<u32>						material_indices;

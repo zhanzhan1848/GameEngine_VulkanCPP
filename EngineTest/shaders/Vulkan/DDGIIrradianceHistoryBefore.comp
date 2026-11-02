@@ -1,0 +1,296 @@
+#version 450 core
+// DDGIUpdateIrradiance.comp — Vulkan Lumen hand-written GLSL port of
+// DDGIUpdateIrradiance.wgsl. Entry point: ddgi_update_irradiance
+//   (glslangValidator --source-entrypoint main -e ddgi_update_irradiance)
+//
+// Projects ray radiance into SH9 (9 coeffs/probe) and blends temporally
+// with a history buffer using a hysteresis EMA.
+//
+// Why GLSL (not naga-compiled WGSL): the WGSL DDGIVolumeData uniform struct
+// contains array<vec4<f32>, 3> fields (SdfOrigins/VoxelSizes/Extents). naga
+// emits these as spvUnsafeArray, which MoltenVK cannot consume inside a uniform
+// struct. GLSL std140 handles vec4[3] natively. Same pattern as SSAOTrace.comp
+// and DDGIGIGather.comp.
+//
+// Flat descriptor bindings (matches LumenDDGIPass.cpp:393-401 Vulkan branch):
+//   binding 0 = UniformBuffer        GlobalShaderData
+//   binding 1 = UniformBuffer        DDGIVolumeData
+//   binding 2 = StorageBuffer (ro)   ray_buffer
+//   binding 3 = StorageBuffer (ro)   irradiance_history
+//   binding 4 = StorageBuffer (rw)   irradiance_output
+//   binding 5 = StorageBuffer (ro)   probe_update_list
+//   binding 6 = StorageBuffer (rw)   probe confidence (4 floats/probe)
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// ----------------------------------------------------------------------------
+// Bindings (flat — see header)
+// ----------------------------------------------------------------------------
+
+// GlobalShaderData UBO — mirrors C++ RHIShaderCommon.h / WGSL GlobalShaderData.
+layout(set = 0, binding = 0, std140) uniform GlobalShaderData {
+    mat4 View;
+    mat4 Projection;
+    mat4 InvProjection;
+    mat4 ViewProjection;
+    mat4 PreviousViewProjection;
+    mat4 InvViewProjection;
+    vec4 CameraPositionAndViewWidth;
+    vec4 CameraDirectionAndViewHeight;
+    uint NumDirectionalLights;
+    float DeltaTime;
+    float FrameCount;
+    uint  _padding;
+} globalData;
+
+// DDGIVolumeData UBO — byte-for-byte match with C++ LumenDDGIPass.h.
+// The C++ struct is 336 bytes (extends to Albedo @ 320); this shader only
+// references fields through LightColor @ 288. Trailing bytes are uploaded
+// but not read — Vulkan allows a UBO block to be smaller than the bound
+// buffer as long as accessed offsets are in-bounds.
+layout(set = 0, binding = 1, std140) uniform DDGIVolumeData {
+    vec4  ProbeOrigin;              //   0
+    float ProbeSpacing;             //  16
+    float _pad_before_counts_0;     //  20
+    float _pad_before_counts_1;     //  24
+    float _pad_before_counts_2;     //  28
+    uvec4 ProbeCounts;              //  32
+    uint  RaysPerProbe;             //  48
+    uint  ProbeCountTotal;          //  52
+    float IrradianceBlurSigma;      //  56
+    float DepthBlurSigma;           //  60
+    float DeltaTime;                //  64
+    uint  FrameIndex;               //  68
+    float RayMaxDistance;           //  72
+    float ProbeHysteresis;          //  76
+    float TemporalAlpha;            //  80
+    uint  ProbeUpdateCount;         //  84
+    uint  SCLookupCount;            //  88  (Surface Cache card lookup count)
+    uint  SCAtlasSize;              //  92  (Surface Cache lighting atlas size)
+    int   ProbeRelocationShiftX;    //  96
+    int   ProbeRelocationShiftY;    // 100
+    int   ProbeRelocationShiftZ;    // 104
+    int   RaySampleMode;            // 108 — ray sampler mode (ProbeSampleLib)
+    vec4  SdfOrigins[3];            // 112
+    vec4  SdfVoxelSizes[3];         // 160
+    vec4  SdfExtents[3];            // 208
+    uvec4 SdfResolutionsAndCount;   // 256
+    vec4  LightDirection;           // 272
+    vec4  LightColor;               // 288
+} volume;
+
+// DDGIRayData — storage buffer element. Packed as vec4 (16B stride).
+struct DDGIRayData {
+    vec4 radiance_and_dist;  // xyz = radiance, w = hit_distance
+};
+
+layout(set = 0, binding = 2) readonly buffer RayBuffer {
+    DDGIRayData ray_buffer[];
+};
+// Packed float[] layout: 9 coeffs/probe * 3 floats/coeff = 27 floats/probe
+// (12-byte stride). Declaring this as vec3[] would silently use 16-byte stride
+// under std140/std430 rules for vec3 arrays.
+// Packed as vec4[] (16B stride per coeff) — matches GIGather's declaration.
+// Each coeff: xyz = SH coefficient (RGB), w = unused.
+layout(set = 0, binding = 3) readonly buffer IrradianceHistory {
+    vec4 irradiance_history[];
+};
+layout(set = 0, binding = 4) buffer IrradianceOutput {
+    vec4 irradiance_output[];
+};
+layout(set = 0, binding = 5) readonly buffer ProbeUpdateList {
+    uint probe_update_list[];
+};
+layout(set = 0, binding = 6) buffer ConfidenceBuffer {
+    float probe_confidence[];
+};
+// GI 根治 Phase 3.1 + 能量所有权 Phase 4a（openSky V2）: 每探针 openSky
+// 统计，vec2 = {escapeRatio, skyEnergyRatio}。
+//   x = escapeRatio——逃逸射线占比 EMA（原 float 语义，原样保留）；
+//   y = skyEnergyRatio——逃逸射线能量占总能量的比值 EMA（P3 拆分用：
+//       E = E_geo + classify·E_sky 的 sER 分量）。
+// gather 端（DDGIGIGather / SurfaceCacheLightEval）据此把 sky-dominant 探针
+// 的**天空分量**按分类一致度衰减（V2）——露天探针携带的几何反弹不再被
+// 整探针压暗（审计 §2.5：旧整探针分类最多 ×0.15 属过度衰减）。
+layout(set = 0, binding = 7) buffer ProbeOpenSky {
+    vec2 probe_opensky[];
+};
+
+// ----------------------------------------------------------------------------
+// Shared probe ray sampler — single source with the trace shaders. The SH
+// projection MUST map rayIndex→direction identically to DDGITraceRays/SDF or
+// the coefficients desynchronize from the traced radiance. pdf-correct:
+// importance-sampled modes divide the MC weight by the sampler's pdf.
+// ----------------------------------------------------------------------------
+#include "ShaderLib/ProbeSampleLib.glsl"
+
+// ----------------------------------------------------------------------------
+// Constants
+// ----------------------------------------------------------------------------
+// GI 能量根治方案 Phase 1.2：DDGI_SKY_COLOR 常量已删除（R2 根因）。逃逸射线
+// 的天空能量由 Finalize 的 EvaluateSkyBase(rayDir) × volume.SkyColor.xyz 单一
+// 事实源写入 ray_buffer，本 kernel 直接沿用——SkyColor 档位旋钮恢复效力，
+// 逃逸注入与可见天空/SPGI 门控同源。（旧常量 (2.75,2.88,3.00) 是全天空档，
+// 绕过 Finalize 已做的 SkyColor 门控，注释自称"0.3 档"实为 10× 过驱。）
+
+const float DDGI_SH_C0   = 0.282095;
+const float DDGI_SH_C1   = 0.488603;
+const float DDGI_SH_C2_0 = 1.092548;
+const float DDGI_SH_C2_1 = 0.315392;
+const float DDGI_SH_C2_2 = 0.546274;
+
+// ----------------------------------------------------------------------------
+// Main Kernel: ddgi_update_irradiance
+// ----------------------------------------------------------------------------
+void ddgi_update_irradiance() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    if (gid >= volume.ProbeUpdateCount) {
+        return;
+    }
+
+    // Map sparse update index to real probe index
+    uint probeIdx = probe_update_list[gid];
+    uint rayOffset = probeIdx * volume.RaysPerProbe;
+
+    // Accumulate L0+L1+L2 (9 coefficients)
+    vec3 shAccum[9];
+    for (uint i = 0u; i < 9u; i++) {
+        shAccum[i] = vec3(0.0);
+    }
+
+    // Phase 3.1: 本帧逃逸射线计数（真·露天射线，w ≤ -1.5；步数耗尽的密闭
+    // 爬行不计入——它不是可见天空）。
+    // Phase 4a: 同一分类面上累计能量占比（skyEnergyRatio 分子/分母）。
+    uint escapeCount = 0u;
+    float skyEnergySum = 0.0;
+    float totalEnergySum = 0.0;
+
+    for (uint r = 0u; r < volume.RaysPerProbe; r++) {
+        uint rayIdx = rayOffset + r;
+        vec3 radiance = ray_buffer[rayIdx].radiance_and_dist.xyz;
+        float hitDist = ray_buffer[rayIdx].radiance_and_dist.w;
+
+        if (volume.RaySampleMode == 7 ? hitDist == -2.0 : hitDist <= -1.5) {
+            // 逃逸→沿用 Finalize 写入的 EvaluateSkyBase × SkyColor.xyz
+            //（Phase 1.2：不再覆盖成硬编码常量）。
+            ++escapeCount;
+            skyEnergySum += dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+            totalEnergySum += dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+        } else if (hitDist < 0.0) {
+            // 步数耗尽：保留 Finalize 解析结果（SC 回退或黑），不再覆盖成天空
+        } else {
+            // Gentler distance falloff — only attenuate near max distance
+            float distWeight = 1.0 - smoothstep(volume.RayMaxDistance * 0.8, volume.RayMaxDistance, hitDist);
+            radiance = radiance * max(distWeight, 0.2);
+            // T3.4 (D4): irradiance bailing — see Metal twin.
+            float bail = smoothstep(0.0, volume.SdfVoxelSizes[0].x * 2.0, hitDist);
+            radiance = radiance * bail;
+            totalEnergySum += dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+        }
+
+        // Same sampler the trace side used for this ray index — the projection
+        // must reproduce the exact direction the radiance came from.
+        vec3 toLight = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0));
+        vec4 raySample = ddgiSampleRayDirection(r, volume.RaysPerProbe,
+                                                volume.FrameIndex,
+                                                uint(volume.RaySampleMode), toLight);
+        vec3 d = raySample.xyz;
+        float x = d.x;
+        float y = d.y;
+        float z = d.z;
+        float x2 = x * x;
+        float y2 = y * y;
+        float z2 = z * z;
+
+        // L0+L1+L2 SH basis
+        float basis[9];
+        basis[0] =  DDGI_SH_C0;
+        basis[1] = -DDGI_SH_C1 * y;
+        basis[2] =  DDGI_SH_C1 * z;
+        basis[3] = -DDGI_SH_C1 * x;
+        basis[4] =  DDGI_SH_C2_0 * y * x;
+        basis[5] = -DDGI_SH_C2_0 * y * z;
+        basis[6] =  DDGI_SH_C2_1 * (3.0 * z2 - 1.0);
+        basis[7] = -DDGI_SH_C2_0 * x * z;
+        basis[8] =  DDGI_SH_C2_2 * (x2 - y2);
+
+        // PDF-correct Monte Carlo weight for the radiance-SH integral
+        // sh_i = ∫ L(ω)·Y_i(ω) dΩ ≈ Σ_k L(ω_k)·Y_i(ω_k) / (N·p(ω_k)).
+        // Mode 0 keeps the legacy uniform expression bit-for-bit;
+        // importance-sampled modes divide by the sampler's pdf instead.
+        float mcWeight = (volume.RaySampleMode == DDGI_RAY_SAMPLE_UNIFORM)
+            ? (4.0 * 3.14159265 / float(volume.RaysPerProbe))
+            : 1.0 / (float(volume.RaysPerProbe) * max(raySample.w, 1e-5));
+
+        for (uint i = 0u; i < 9u; i++) {
+            shAccum[i] = shAccum[i] + radiance * basis[i] * mcWeight;
+        }
+    }
+
+    // Temporal blend with history (9 coeffs as vec4 = 9 vec4s per probe).
+    uint probeBase = probeIdx * 9u;
+
+    // A probe that has never converged must not EMA-blend against the cleared
+    // buffer: with the normal 0.02 alpha that made its first valid result only
+    // 2% bright and left the rotating update batches effectively black.  The
+    // fourth confidence component is initialized to zero by C++; publish the
+    // first sample directly, then use the configured temporal filter.
+    uint confidenceBase = probeIdx * 4u;
+    float conv = probe_confidence[confidenceBase + 3u];
+    bool firstUpdate = conv < 0.5;
+    // Young probes blend aggressively (alpha 0.35, τ≈3 frames) so the
+    // multi-bounce SC↔probe loop becomes VISIBLE within the first seconds
+    // instead of needing 300+ frames; alpha settles to the configured
+    // TemporalAlpha once the convergence ramp passes 0.5 (~15 updates).
+    float settledAlpha = clamp(volume.TemporalAlpha, 0.0, 1.0);
+    float alpha = firstUpdate ? 1.0 : mix(0.35, settledAlpha, min(conv * 2.0, 1.0));
+
+    vec3 sh0 = shAccum[0];
+    // 2026-09-05 对齐 Metal 修复：上限随未钳位 sh0 无界放大时，prev-screen
+    // 辐射尖峰同步抬高 l1/l2 上限（Metal 实测 L1=1661=3×553.6），钳位失效。
+    // T2.4 (B7): L0 钳位 10→64、比例上限 30/20→192/128（see Metal twin）。
+    float l1Limit = max(min(length(sh0) * 3.0, 192.0), 0.1);
+    float l2Limit = max(min(length(sh0) * 2.0, 128.0), 0.05);
+
+    for (uint i = 0u; i < 9u; i++) {
+        vec3 history = irradiance_history[probeBase + i].xyz;
+        vec3 filtered = mix(history, shAccum[i], alpha);
+
+        // Energy-aware clamp
+        if (i == 0u) {
+            float mag = length(filtered);
+            if (mag > 64.0) filtered = filtered * (64.0 / mag);   // T2.4 (B7): was 10.0
+        } else if (i < 4u) {
+            float mag = length(filtered);
+            if (mag > l1Limit) filtered = filtered * (l1Limit / mag);
+        } else {
+            float mag = length(filtered);
+            if (mag > l2Limit) filtered = filtered * (l2Limit / mag);
+        }
+
+        irradiance_output[probeBase + i] = vec4(filtered, 0.0);
+    }
+
+    // Convergence ramp: confidence[3] climbs by 1/30 per update instead of
+    // snapping to 1, giving probe_vis (and any future consumer) a real
+    // "how settled is this probe" signal.
+    probe_confidence[confidenceBase + 3u] = min(conv + 0.0333, 1.0);
+
+    // Phase 3.1: openSky 统计写入——逃逸占比 EMA 平滑（射线随机抽样逐帧
+    // 噪声大；α=0.35 ≈ τ3 帧收敛，与年轻探针 SH 的激进混合一致）。首次
+    // 写入直接发布（EMA 从 0 起步会系统性低估露天探针）。
+    // Phase 4a: y 分量 = 天空能量占比（逃逸射线能量 / 全部射线能量，
+    // 亮度加权），同款 EMA + 首发规则；分母 0（全 miss）保持上一帧值。
+    float curOpen = float(escapeCount) / float(volume.RaysPerProbe);
+    vec2 prevOpen = probe_opensky[probeIdx];
+    float curSer = (totalEnergySum > 1e-6)
+        ? clamp(skyEnergySum / totalEnergySum, 0.0, 1.0)
+        : prevOpen.y;
+    bool firstPublish = (prevOpen.x <= 0.0 && curOpen > 0.0 && conv < 0.5);
+    float newOpen = firstPublish ? curOpen : mix(prevOpen.x, curOpen, 0.35);
+    float newSer = (totalEnergySum > 1e-6)
+        ? ((firstPublish ? curSer : mix(prevOpen.y, curSer, 0.35)))
+        : prevOpen.y;
+    probe_opensky[probeIdx] = vec2(newOpen, newSer);
+}

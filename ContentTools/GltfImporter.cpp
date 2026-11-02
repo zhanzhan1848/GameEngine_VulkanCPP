@@ -1084,6 +1084,12 @@ namespace primal::tools
 
 				if (has_tangents)
 				{
+					// The legacy importer currently transforms position/normal, but not
+					// tangent. A non-identity linear transform therefore needs regeneration.
+					m.tangents_corner_trusted =
+						world.m[0] == 1.f && world.m[5] == 1.f && world.m[10] == 1.f &&
+						world.m[1] == 0.f && world.m[2] == 0.f && world.m[4] == 0.f &&
+						world.m[6] == 0.f && world.m[8] == 0.f && world.m[9] == 0.f;
 					m.tangents.emplace_back(math::v4{
 						accessor_comp(tan_a, pi, 0),
 						accessor_comp(tan_a, pi, 1),

@@ -200,6 +200,126 @@ layout(set = 0, binding = 3, std140) uniform DDGIVolumeData {
 #endif
 #endif
 
+#ifdef DDGI_MEASURED_GEOMETRY
+// 48B nodes/triangles, 64B instances; mirrors GeometryFirstHit.h.
+struct GeometryNode { vec4 lo; vec4 hi; uvec4 links; };
+struct GeometryTriangle { vec4 a; vec4 e1; vec4 e2; };
+struct GeometryInstance { vec4 inverse0; vec4 inverse1; vec4 inverse2; uvec4 identity; };
+layout(set=0,binding=13,std430) readonly buffer GeometryTop { GeometryNode data[]; } geometryTop;
+layout(set=0,binding=14,std430) readonly buffer GeometryBottom { GeometryNode data[]; } geometryBottom;
+layout(set=0,binding=15,std430) readonly buffer GeometryTriangles { GeometryTriangle data[]; } geometryTriangles;
+layout(set=0,binding=16,std430) readonly buffer GeometryInstances { GeometryInstance data[]; } geometryInstances;
+// Compensated difference of products prevents skinny-triangle normals from
+// losing their small component. No shaderFloat64 capability is required.
+float geometryDifferenceOfProducts(float a,float b,float c,float d) {
+    precise float cd=c*d;
+    precise float error=fma(-c,d,cd);
+    precise float difference=fma(a,b,-cd);
+    return difference+error;
+}
+vec3 geometryTriangleNormal(vec3 a,vec3 b) {
+    return vec3(geometryDifferenceOfProducts(a.y,b.z,a.z,b.y),
+                geometryDifferenceOfProducts(a.z,b.x,a.x,b.z),
+                geometryDifferenceOfProducts(a.x,b.y,a.y,b.x));
+}
+bool geometryBox(GeometryNode n,vec3 o,vec3 d,float nearT,float farT) {
+    for(uint k=0u;k<3u;++k) {
+        if(d[k]==0.) { if(o[k]<n.lo[k] || o[k]>n.hi[k]) return false; }
+        else { float a=(n.lo[k]-o[k])/d[k], b=(n.hi[k]-o[k])/d[k]; nearT=max(nearT,min(a,b)); farT=min(farT,max(a,b)); if(nearT>farT) return false; }
+    } return true;
+}
+#ifndef SC_GEO_NONZERO_ONLY
+#define SC_GEO_NONZERO_ONLY false
+#endif
+// This is exactly the original nonzero-axis branch, in the same axis order.
+// Only finite directions with all three components nonzero use it.
+bool geometryBoxNonzero(GeometryNode n,vec3 o,vec3 d,float nearT,float farT) {
+    for(uint k=0u;k<3u;++k) {
+        float a=(n.lo[k]-o[k])/d[k], b=(n.hi[k]-o[k])/d[k];
+        nearT=max(nearT,min(a,b)); farT=min(farT,max(a,b)); if(nearT>farT)return false;
+    } return true;
+}
+// -1 unknown, 0 segment miss, 1 first geometric triangle. Material and
+// captured surface qualification are checked separately; never skip it.
+int geometryFirstHit(vec3 o,vec3 d,float nearT,float farT,out float bestT,out uint owner,out uint bestPrimitive,out vec3 firstN,out vec3 firstA,out vec3 firstE1,out vec3 firstE2) {
+    bool topNonzero=SC_GEO_NONZERO_ONLY && all(notEqual(d,vec3(0))) && !any(isnan(d)) && !any(isinf(d));
+    firstN=vec3(0);firstA=vec3(0);firstE1=vec3(0);firstE2=vec3(0);bestT=farT; owner=0u; bestPrimitive=0xffffffffu; bool found=false;
+    uint topVisited=0u;
+    uint ts[64]; uint tp=1u; ts[0]=0u;
+    while(tp!=0u) {
+        if(topVisited++>=geometryTop.data.length()) return -1;
+        uint at=ts[--tp]; if(at>=geometryTop.data.length()) return -1;
+        GeometryNode n=geometryTop.data[at];bool topHit;
+        if(topNonzero)topHit=geometryBoxNonzero(n,o,d,nearT,bestT);else topHit=geometryBox(n,o,d,nearT,bestT);
+        if(!topHit)continue;
+        if(n.links.w==0u) { if(tp+2u>64u) return -1; ts[tp++]=n.links.x; ts[tp++]=n.links.y; continue; }
+        if(n.links.z>=geometryInstances.data.length()) return -1;
+        GeometryInstance inst=geometryInstances.data[n.links.z];
+        vec3 lo=vec3(dot(inst.inverse0,vec4(o,1)),dot(inst.inverse1,vec4(o,1)),dot(inst.inverse2,vec4(o,1)));
+        // Do not normalize: inverse scaling must preserve world ray parameter.
+        vec3 ld=vec3(dot(inst.inverse0.xyz,d),dot(inst.inverse1.xyz,d),dot(inst.inverse2.xyz,d));
+        if(any(isnan(lo))||any(isinf(lo))||any(isnan(ld))||any(isinf(ld))) return -1;
+        bool bottomNonzero=SC_GEO_NONZERO_ONLY && all(notEqual(ld,vec3(0)));
+        uint bottomVisited=0u;
+        uint bs[64]; uint bp=1u; bs[0]=inst.identity.x;
+        while(bp!=0u) {
+            if(bottomVisited++>=geometryBottom.data.length()) return -1;
+            at=bs[--bp]; if(at>=geometryBottom.data.length()) return -1;
+            GeometryNode b=geometryBottom.data[at];bool bottomHit;
+            if(bottomNonzero)bottomHit=geometryBoxNonzero(b,lo,ld,nearT,bestT);else bottomHit=geometryBox(b,lo,ld,nearT,bestT);
+            if(!bottomHit)continue;
+            if(b.links.w==0u) { if(bp+2u>64u) return -1; bs[bp++]=b.links.x; bs[bp++]=b.links.y; continue; }
+            if(b.links.z>geometryTriangles.data.length() || b.links.w>geometryTriangles.data.length()-b.links.z) return -1;
+            for(uint i=0u;i<b.links.w;++i) {
+                GeometryTriangle tri=geometryTriangles.data[b.links.z+i];
+                vec3 p=cross(ld,tri.e2.xyz); float det=dot(tri.e1.xyz,p);
+                if(det==0.) continue;
+                vec3 v=lo-tri.a.xyz; float u=dot(v,p)/det;
+                if(u<0. || u>1.) continue;
+                vec3 q=cross(v,tri.e1.xyz); float bary=dot(ld,q)/det;
+                // Barycentrics decide containment; solve t from the plane.
+                // The triple product e2 dot ((origin-a) cross e1) suffers
+                // cancellation on long thin triangles even for interior hits.
+                vec3 normal=geometryTriangleNormal(tri.e1.xyz,tri.e2.xyz);
+                float planeDet=dot(ld,normal);
+                if(planeDet==0.) return -1;
+                float t=dot(tri.a.xyz-lo,normal)/planeDet;
+                if(isnan(t)||isinf(t)||isnan(bary)||isinf(bary)||isnan(u)||isinf(u)) return -1;
+                if(bary<0. || u+bary>1. || t<nearT || t>bestT) continue;
+                uint primitive=floatBitsToUint(tri.a.w);
+                if(found && t==bestT && (inst.identity.y>owner || (inst.identity.y==owner && primitive>=bestPrimitive))) continue;
+                owner=inst.identity.y; bestPrimitive=primitive; bestT=t; found=true;
+                // Inverse transpose transforms the local geometric normal;
+                // the unnormalized local direction preserves WORLD t.
+                vec3 worldN=vec3(
+                    dot(vec3(inst.inverse0.x,inst.inverse1.x,inst.inverse2.x),normal),
+                    dot(vec3(inst.inverse0.y,inst.inverse1.y,inst.inverse2.y),normal),
+                    dot(vec3(inst.inverse0.z,inst.inverse1.z,inst.inverse2.z),normal));
+                float normalScale=max(abs(worldN.x),max(abs(worldN.y),abs(worldN.z)));
+                if(any(isnan(worldN))||any(isinf(worldN))||normalScale<=0.) return -1;
+                firstN=normalize(worldN/normalScale);
+                firstA=tri.a.xyz;firstE1=tri.e1.xyz;firstE2=tri.e2.xyz;
+            }
+        }
+    } return found?1:0;
+}
+
+// Both a missing scene epoch and malformed inputs are UNKNOWN, not clear.
+bool measuredGeometryReady(vec3 origin,vec3 direction,float maxDistance) {
+    if (volume.SdfVoxelSizes[2].w != 1.0 || volume.RaySampleMode != 7 ||
+        geometryTop.data.length()==0 || geometryBottom.data.length()==0 ||
+        geometryTriangles.data.length()==0 || geometryInstances.data.length()==0 ||
+        any(isnan(origin)) || any(isinf(origin)) ||
+        any(isnan(direction)) || any(isinf(direction)) ||
+        isnan(maxDistance) || isinf(maxDistance) || maxDistance<=0.) return false;
+    GeometryNode root=geometryTop.data[0];
+    return !any(isnan(root.lo.xyz)) && !any(isinf(root.lo.xyz)) &&
+        !any(isnan(root.hi.xyz)) && !any(isinf(root.hi.xyz)) &&
+        all(lessThanEqual(root.lo.xyz,root.hi.xyz));
+}
+
+#endif
+
 // ----------------------------------------------------------------------------
 // Helpers (copied from DDGITraceRays.comp for consistency)
 // ----------------------------------------------------------------------------
@@ -610,7 +730,11 @@ void ddgi_trace_sdf() {
     vec3 toLight = (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0));
     // T8.13 P2: lane-strided ray loop — 64 lanes serve any RaysPerProbe
     // multiple of 64 (128 = two strided rays per lane).
+#ifdef DDGI_MEASURED_GEOMETRY
+    uint traceRayCount = volume.RaysPerProbe;
+#else
     uint traceRayCount = volume.RaysPerProbe + (volume.RaySampleMode == 5 ? 128u : 0u);
+#endif
     for (uint rayId = tid; rayId < traceRayCount; rayId += 64u) {
     bool depthOnly = rayId >= volume.RaysPerProbe;
     vec3 rayDir = depthOnly ? ddgiDepthRayDirection(rayId - volume.RaysPerProbe)
@@ -628,6 +752,39 @@ void ddgi_trace_sdf() {
         hn.hit_normal[sourceBase + 0u] = vec4(probePos, uintBitsToFloat(((volume.FrameIndex & 65535u) << 16u) | (probeIdx + 1u)));
         hn.hit_normal[sourceBase + 1u] = vec4(rayDir, float(rayId + 1u));
     }
+#ifdef DDGI_MEASURED_GEOMETRY
+    // This independent candidate replaces the SDF march, never adds a ray.
+    // Distance validity is independent of material/radiance qualification.
+    uint measuredRayIdx=group_id*volume.RaysPerProbe+rayId;
+    float measuredDistance=-1.0;
+    vec4 measuredNormal=vec4(0.0);
+    if (!depthOnly && measuredGeometryReady(probePos,rayDir,volume.RayMaxDistance)) {
+        float firstT;uint owner,primitive;vec3 firstN,firstA,firstE1,firstE2;
+        int outcome=geometryFirstHit(probePos,rayDir,0.0,volume.RayMaxDistance,
+            firstT,owner,primitive,firstN,firstA,firstE1,firstE2);
+        if (outcome==1) {
+            // Endpoint ambiguity remains UNKNOWN; no origin offset changes
+            // the distance anchor. Owner+2 is an exact integer float payload.
+            if (!isnan(firstT) && !isinf(firstT) && firstT>2e-5 &&
+                firstT<volume.RayMaxDistance-2e-5 && owner<=65535u &&
+                !any(isnan(firstN)) && !any(isinf(firstN)) && dot(firstN,firstN)>.25) {
+                if(dot(firstN,rayDir)>0.)firstN=-firstN;
+                measuredDistance=firstT;
+                measuredNormal=vec4(firstN,float(owner+2u));
+            }
+        } else if (outcome==0) {
+            // A bounded segment miss is not automatically sky. A forward
+            // half-ray which can still meet the complete scene-root AABB
+            // beyond maxDistance is only a finite-range clear measurement.
+            bool sceneAhead=geometryBox(geometryTop.data[0],probePos,rayDir,
+                volume.RayMaxDistance,3.402823466e38);
+            measuredDistance=sceneAhead?-3.0:-2.0;
+        }
+    }
+    hn.hit_normal[measuredRayIdx]=measuredNormal;
+    hd.hit_distance[measuredRayIdx]=measuredDistance;
+    continue;
+#endif
     float t = 0.0;
     // -1 = 步数耗尽（密闭内部爬行，非天空）；-2 = 越出 RayMaxDistance（真逃逸→天空）。
     // 2026-09-06 逃逸门控：可见天空提到 2.9 档后，耗尽射线误吃天空会把暗拱

@@ -80,9 +80,28 @@ inline void test_mesh_bridge_pack() {
     std::cout << "  PASS: Mesh instance bridge" << std::endl;
 }
 
+inline void test_volume_bridge_pack() {
+    attribute_store store;
+    assert(render::pack_volume_particles(store,2,10).empty());
+    assert(store.initialize(4,nullptr,0));
+    auto dead=store.allocate();
+    auto live=store.allocate();
+    *static_cast<math::v4*>(store.resolve(live,attr::position))={-2,3,4,0};
+    *static_cast<math::v4*>(store.resolve(live,attr::scale_rotation))={-1.5f,1,0,0};
+    *static_cast<math::v4*>(store.resolve(live,attr::color))={1,1,1,.25f};
+    store.free(dead);
+    auto particles=render::pack_volume_particles(store,2,10);
+    assert(particles.size()==1 && particles[0].x==-2 && particles[0].z==4);
+    assert(particles[0].radius==3 && particles[0].density==2.5f);
+    store.free(live);
+    assert(render::pack_volume_particles(store,2,10).empty());
+    std::cout << "  PASS: Volume bridge live rows, radius, density, removal" << std::endl;
+}
+
 inline void run_all_n2_tests() {
     test_sprite_bridge_pack();
     test_mesh_bridge_pack();
+    test_volume_bridge_pack();
     std::cout << "All ParticleFX N2 tests passed." << std::endl;
 }
 

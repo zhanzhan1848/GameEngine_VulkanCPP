@@ -18,6 +18,7 @@ HZBSystem::~HZBSystem() {
 }
 
 bool HZBSystem::Initialize(rhi::RHIDeviceBase* device, const Config& config) {
+    history_valid_ = false;
     if (initialized_) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Already initialized" << std::endl;
         return false;
@@ -63,6 +64,7 @@ bool HZBSystem::Initialize(rhi::RHIDeviceBase* device, const Config& config) {
 }
 
 void HZBSystem::Shutdown() {
+    history_valid_ = false;
     if (!initialized_) return;
 
 //    std::cout << "[HZBSystem] Shutting down..." << std::endl;
@@ -417,6 +419,7 @@ bool HZBSystem::CreateHZBComputePipeline() {
 HZBSystem::BuildResult HZBSystem::BuildHZB(rhi::ResourceHandle depth_texture,
                                           rhi::RHICommandBuffer* cmd_buffer,
                                           u32 frame_slot) {
+    history_valid_ = false;
     if (!initialized_) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Not initialized" << std::endl;
         return {};
@@ -433,7 +436,8 @@ HZBSystem::BuildResult HZBSystem::BuildHZB(rhi::ResourceHandle depth_texture,
 
     if (config_.generate_on_gpu && cmd_buffer) {
 //        std::cout << "[HZBSystem] Attempting GPU HZB generation..." << std::endl;
-        if (!GenerateHZBOnGPU(cmd_buffer, depth_texture, frame_slot)) {
+        history_valid_ = GenerateHZBOnGPU(cmd_buffer, depth_texture, frame_slot);
+        if (!history_valid_) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] ❌ GPU HZB generation failed, falling back to CPU" << std::endl;
             GenerateHZBOnCPU(depth_texture);
         }
@@ -442,6 +446,8 @@ HZBSystem::BuildResult HZBSystem::BuildHZB(rhi::ResourceHandle depth_texture,
 //                  << ", cmd_buffer=" << (cmd_buffer ? "valid" : "null") << ")" << std::endl;
         GenerateHZBOnCPU(depth_texture);
     }
+    // GenerateHZBOnCPU is currently a no-write placeholder. It must never
+    // qualify as valid occlusion history, even though it returns true.
 
     auto end_time = std::chrono::high_resolution_clock::now();
     result.build_time_ms = std::chrono::duration<float, std::milli>(end_time - start_time).count();

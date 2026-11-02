@@ -30,6 +30,7 @@
 #include "Graphics/RenderPipeline/Modules/ShadowMapModule.h"
 #include "Graphics/RenderPipeline/Modules/PlanarReflectionModule.h"
 #include "Graphics/RenderPipeline/Modules/DeferredLightingModule.h"
+#include "Graphics/RenderPipeline/Modules/EnvironmentVisibilityModule.h"
 #include "Graphics/RenderPipeline/Modules/FinalBlitModule.h"
 #include "Graphics/RenderPipeline/Modules/PassDebugViewModule.h"
 #include "Graphics/RenderPipeline/PassDebugView.h"
@@ -78,6 +79,9 @@ public:
                                   rhi::CommandBufferHandle cmdHandle,
                                   rhi::SyncHandle signalFence = rhi::handles::INVALID_SYNC);
 
+    u64 BeginVarianceFenceFrame(u32 slot,rhi::CommandBufferHandle command,rhi::SyncHandle fence,u64 nativeFrame);
+    void CommitVarianceFenceFrame(u32 slot,rhi::CommandBufferHandle command,rhi::SyncHandle fence,u64 nativeFrame,u64 ticket,bool success);
+
     void SetOutputResource(rhi::ResourceHandle handle, const rhi::TextureDesc& desc) {
         outputResource_ = handle;
         outputDesc_ = desc;
@@ -113,6 +117,9 @@ public:
         const bool changed =
             a.light_color.x != b.light_color.x || a.light_color.y != b.light_color.y ||
             a.light_color.z != b.light_color.z || a.light_color.w != b.light_color.w ||
+            a.ddgi_light_color.x != b.ddgi_light_color.x ||
+            a.ddgi_light_color.y != b.ddgi_light_color.y ||
+            a.ddgi_light_color.z != b.ddgi_light_color.z ||
             a.light_direction.x != b.light_direction.x ||
             a.light_direction.y != b.light_direction.y ||
             a.light_direction.z != b.light_direction.z;
@@ -205,6 +212,8 @@ public:
     GIGatherModule* GetGIGatherModule() const {
         return gi_gather_module_ ? gi_gather_module_.get() : nullptr;
     }
+
+    EnvironmentVisibilityModule* GetEnvironmentVisibilityModule() const { return environment_visibility_module_.get(); }
 
     // Debug/testing: shadow visibility texture access.
     ShadowMapModule* GetShadowMapModule() const {
@@ -309,6 +318,14 @@ public:
 
     lumen::LumenDDGIPass* GetDDGIPass() const {
         return ddgi_volumes_[0] ? ddgi_volumes_[0].get() : nullptr;
+    }
+
+    lumen::LumenDDGIPass* GetDDGIVolume(u32 index) const {
+        return index<ddgi_volume_count_ ? ddgi_volumes_[index].get() : nullptr;
+    }
+    // Controlled test invalidation; this does not simulate a scene switch.
+    void ResetDDGIProbeFieldsForTest() {
+        for (u32 i=0;i<ddgi_volume_count_;++i) if(ddgi_volumes_[i]) ddgi_volumes_[i]->ClearProbeField();
     }
 
     // Debug/testing: screen-probe GI access（SPGI_TRACE_DIAG 读回用）.
@@ -510,7 +527,7 @@ public:
         // T8.13: forward to the SC shadow march as well (runtime cascades
         // misplace SC shadow hits just like they did for the DDGI trace).
         if (surface_cache_pass_) {
-            surface_cache_pass_->SetOfflineSDFSource(texture, origin, extent, resolution);
+            surface_cache_pass_->SetOfflineSDFSource(texture, origin, extent, resolution, signed_field);
         }
     }
 
@@ -580,6 +597,10 @@ public:
     // will pass to ForwardSceneRenderer. Used by GlobalSDFMeshNode to pick
     // the matching triple-buffer slot for SurfaceNets writes.
     u64 GetFrameCount() const { return frameCount_; }
+
+    // Diagnostic phase boundary: retain prepared geometry, recreate GI state
+    // on the next render. Requires the opt-in comparison capture environment.
+    void ResetComparisonGIHistory();
 
 private:
     void InitializeSubsystems();
@@ -674,6 +695,7 @@ private:
     // T5.5 multi-volume runtime (cap 4). ddgi_pass_ aliases volumes[0] — all
     // legacy consumers (SC integration, SPGI fallback, pass gating) keep
     // working against the near volume.
+    u64 variance_submission_ticket_=0;
     std::array<std::unique_ptr<lumen::LumenDDGIPass>, 4> ddgi_volumes_{};
     u32 ddgi_volume_count_ = 0;
     std::unique_ptr<lumen::LumenDDGIPass>& ddgi_pass_ = ddgi_volumes_[0];
@@ -730,8 +752,13 @@ private:
     std::unique_ptr<ShadowMapModule> shadow_module_;
     std::unique_ptr<PlanarReflectionModule> reflection_module_;
     std::unique_ptr<DeferredLightingModule> deferred_module_;
+    std::unique_ptr<EnvironmentVisibilityModule> environment_visibility_module_;
+    u64 environment_geometry_digest_=0;
+    rhi::ShaderHandle environment_visibility_shaders_[2]{rhi::handles::INVALID_SHADER,rhi::handles::INVALID_SHADER};
+    EnvironmentVisibilityOutputs AddEnvironmentVisibility(rendergraph::RenderGraph&, nanite::GPUDrivenDrawPipeline&, u32, rendergraph::RGResourceHandle={}, rendergraph::RGResourceHandle={}, rendergraph::RGResourceHandle={});
     std::unique_ptr<FinalBlitModule> final_blit_module_;
     std::unique_ptr<GIGatherModule> gi_gather_module_;
+    void ConfigureGatherGeometry(GIGatherInputs&,u32);
 
     // T4.1: frame-rate-driven GI quality governor (FPS ≥ 30 floor).
     GIAdaptiveGovernor gi_governor_;

@@ -306,10 +306,9 @@ void compute_prefilter_texel(const std::vector<u8>& cubePixels, u32 x, u32 y, u3
     Vec3 N = normalize3(cube_face_dir(x, y, layer));
     Vec3 V = N;  // R = N, V = R
 
-    // WGSL: select(fallback=(0,0,1), zDom=(1,0,0), abs(N.z) < 0.999)
-    //   → up = (1,0,0) when N is NOT z-dominant, else (0,0,1).
-    // C++ ternary has opposite ordering from WGSL select(f, t, cond) → cond ? t : f.
-    Vec3 up = (std::abs(N.z) < 0.999f) ? Vec3{1,0,0} : Vec3{0,0,1};
+    // Match the Vulkan prefilter's nonparallel-axis frame. The former
+    // reversed WGSL select operands degenerated at +/-X and +/-Z centres.
+    Vec3 up = (std::abs(N.z) < 0.999f) ? Vec3{0,0,1} : Vec3{1,0,0};
     Vec3 tangentX = normalize3(cross3(up, N));
     Vec3 tangentY = cross3(N, tangentX);
 
@@ -394,9 +393,9 @@ ResourceHandle CreateAndUploadCube(DeviceFixture& fx,
                                     const std::vector<u8>& pixels,
                                     DataFormat format,
                                     TextureUsage extraUsage,
-                                    const char* name) {
+                                    const char* name, u32 faceSize = kCubeFaceSize) {
     TextureDesc td{};
-    td.size = { kCubeFaceSize, kCubeFaceSize, 1 };
+    td.size = { faceSize, faceSize, 1 };
     td.mipLevels = 1;
     td.arraySize = kCubeLayers;
     td.format = format;
@@ -428,7 +427,7 @@ ResourceHandle CreateAndUploadCube(DeviceFixture& fx,
     region.imageSubresource.baseArrayLayer = 0;
     region.imageSubresource.layerCount = kCubeLayers;
     region.imageOffset = {0, 0, 0};
-    region.imageExtent = { kCubeFaceSize, kCubeFaceSize, 1 };
+    region.imageExtent = { faceSize, faceSize, 1 };
     vcmd->CopyBufferToTexture(staging, tex, &region, 1);
 
     ResourceBarrier b{};
@@ -448,8 +447,8 @@ ResourceHandle CreateAndUploadCube(DeviceFixture& fx,
 }
 
 // Per-layer readback.
-void readback_layer(DeviceFixture& fx, ResourceHandle cubeTex, ResourceHandle readback,
-                    u32 layer, std::vector<u8>& outBytes) {
+bool readback_layer(DeviceFixture& fx, ResourceHandle cubeTex, ResourceHandle readback,
+                    u32 layer, std::vector<u8>& outBytes, u32 faceSize = kCubeFaceSize) {
     CommandBufferHandle cmd = fx.base->CreateCommandBuffer(CommandQueueType::Compute);
     VulkanCommandBuffer* vcmd = fx.vk->GetCommandBuffer(cmd);
     vcmd->Reset(); vcmd->Begin();
@@ -458,15 +457,19 @@ void readback_layer(DeviceFixture& fx, ResourceHandle cubeTex, ResourceHandle re
     region.imageSubresource.baseArrayLayer = layer;
     region.imageSubresource.layerCount = 1;
     region.imageOffset = {0, 0, 0};
-    region.imageExtent = { kCubeFaceSize, kCubeFaceSize, 1 };
+    region.imageExtent = { faceSize, faceSize, 1 };
     vcmd->CopyTextureToBuffer(cubeTex, readback, &region, 1);
-    vcmd->End(); vcmd->Submit(0); vcmd->WaitForCompletion();
+    vcmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
+                        AccessFlag::TransferWrite, AccessFlag::HostRead);
+    if (!vcmd->End() || !vcmd->Submit(0) || !vcmd->WaitForCompletion()) return false;
     fx.base->DestroyCommandBuffer(cmd);
 
-    void* mapped = fx.base->MapBuffer(readback, 0, u64(kCubeFaceSize) * kCubeFaceSize * 8);
+    void* mapped = fx.base->MapBuffer(readback, 0, u64(faceSize) * faceSize * 8);
+    if (!mapped) return false;
     outBytes.assign(static_cast<const u8*>(mapped),
-                    static_cast<const u8*>(mapped) + u64(kCubeFaceSize) * kCubeFaceSize * 8);
+                    static_cast<const u8*>(mapped) + u64(faceSize) * faceSize * 8);
     fx.base->UnmapBuffer(readback);
+    return true;
 }
 
 } // anonymous namespace
@@ -613,7 +616,7 @@ TestResult TestIBL_Irradiance_Dispatch() {
     float worstR_cpu = 0, worstG_cpu = 0, worstB_cpu = 0;
     for (u32 layer = 0; layer < kCubeLayers; ++layer) {
         std::vector<u8> layerBytes;
-        readback_layer(fx, outputTex, readback, layer, layerBytes);
+        TEST_ASSERT(readback_layer(fx, outputTex, readback, layer, layerBytes), "Readback layer");
 
         // CPU reference: compute texel (8, 8) for sanity, plus full sweep.
         for (u32 y = 0; y < kCubeFaceSize; ++y) {
@@ -626,6 +629,9 @@ TestResult TestIBL_Irradiance_Dispatch() {
                 std::memcpy(&ha, p + 6, 2);
                 float gpuR = half_to_float(hr), gpuG = half_to_float(hg),
                       gpuB = half_to_float(hb);
+                TEST_ASSERT(std::isfinite(gpuR) && std::isfinite(gpuG) &&
+                            std::isfinite(gpuB) && std::isfinite(half_to_float(ha)),
+                            "Irradiance RGBA finite");
                 float cpuR, cpuG, cpuB;
                 compute_irradiance_texel(inputCube, x, y, layer, cpuR, cpuG, cpuB);
                 float dR = std::abs(gpuR - cpuR), dG = std::abs(gpuG - cpuG),
@@ -672,7 +678,11 @@ TestResult TestIBL_Irradiance_Dispatch() {
 // ============================================================================
 // Test 2: Specular Prefilter
 // ============================================================================
-TestResult TestIBL_Prefilter_Dispatch() {
+TestResult RunIBL_Prefilter(bool constantEnvironment, float roughness) {
+    const u32 faceSize = constantEnvironment ? 1u : kCubeFaceSize;
+    // Exactly representable FP16 RGB, including HDR, with a distinct value
+    // in every channel. A constant environment is invariant under filtering.
+    constexpr std::array<float, 4> constantColor{0.25f, 1.0f, 4.0f, 1.0f};
     DeviceFixture fx;
     TEST_ASSERT(fx.Init(), "Vulkan device init");
 
@@ -683,12 +693,23 @@ TestResult TestIBL_Prefilter_Dispatch() {
     TEST_ASSERT(cs != handles::INVALID_SHADER, "CreateShader compute");
 
     std::vector<u8> inputCube;
-    generate_input_cube(inputCube);
+    if (constantEnvironment) {
+        inputCube.resize(kCubeLayers * 8);
+        for (u32 layer = 0; layer < kCubeLayers; ++layer) {
+            for (u32 channel = 0; channel < 4; ++channel) {
+                const u16 half = float_to_half(constantColor[channel]);
+                std::memcpy(inputCube.data() + layer * 8 + channel * 2, &half, 2);
+            }
+        }
+    } else {
+        generate_input_cube(inputCube);
+    }
     ResourceHandle inputTex = CreateAndUploadCube(fx, inputCube, DataFormat::RGBA16_Float,
-                                                   TextureUsage{}, "Prefilter_InputCube");
+                                                   TextureUsage{}, "Prefilter_InputCube", faceSize);
+    TEST_ASSERT(inputTex != handles::INVALID_RESOURCE, "CreateTexture inputCube");
     ResourceHandle outputTex = fx.base->CreateTexture([&]{
         TextureDesc d{};
-        d.size = { kCubeFaceSize, kCubeFaceSize, 1 };
+        d.size = { faceSize, faceSize, 1 };
         d.mipLevels = 1;
         d.arraySize = kCubeLayers;
         d.format = DataFormat::RGBA16_Float;
@@ -699,6 +720,8 @@ TestResult TestIBL_Prefilter_Dispatch() {
         return d;
     }());
 
+    TEST_ASSERT(outputTex != handles::INVALID_RESOURCE, "CreateTexture outputCube");
+
     SamplerDesc samplerDesc{};
     samplerDesc.minFilter = FilterMode::Linear;
     samplerDesc.magFilter = FilterMode::Linear;
@@ -708,9 +731,11 @@ TestResult TestIBL_Prefilter_Dispatch() {
     samplerDesc.comparisonFunc = ComparisonFunc::Never;
     SamplerHandle sampler = fx.base->CreateSampler(samplerDesc);
 
+    TEST_ASSERT(sampler != handles::INVALID_SAMPLER, "CreateSampler");
+
     // PrefilterParams { faceSize: u32, _pad0: u32, roughness: f32, srcResolution: f32 }
     struct PrefilterParams { u32 faceSize; u32 _pad0; float roughness; float srcResolution; };
-    PrefilterParams paramsBytes{ kCubeFaceSize, 0, 0.5f, float(kCubeFaceSize) };
+    PrefilterParams paramsBytes{ faceSize, 0, roughness, float(faceSize) };
 
     BufferDesc uboDesc{};
     uboDesc.size = sizeof(PrefilterParams);
@@ -718,7 +743,8 @@ TestResult TestIBL_Prefilter_Dispatch() {
     uboDesc.memoryUsage = GPUMemoryUsage::Dynamic;
     uboDesc.name = "Prefilter_UBO";
     ResourceHandle ubo = fx.base->CreateBuffer(uboDesc);
-    fx.base->UpdateBufferData(ubo, &paramsBytes, sizeof(paramsBytes), 0);
+    TEST_ASSERT(ubo != handles::INVALID_RESOURCE, "CreateBuffer UBO");
+    TEST_ASSERT(fx.base->UpdateBufferData(ubo, &paramsBytes, sizeof(paramsBytes), 0), "UpdateBufferData UBO");
 
     DescriptorSetLayoutBinding bindings[4]{};
     bindings[0] = { 0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr };
@@ -753,6 +779,8 @@ TestResult TestIBL_Prefilter_Dispatch() {
     cpd.layout = pl;
     PipelineHandle pipe = fx.base->CreateComputePipeline(cpd);
 
+    TEST_ASSERT(pipe != handles::INVALID_PIPELINE, "CreateComputePipeline");
+
     CommandBufferHandle cmd = fx.base->CreateCommandBuffer(CommandQueueType::Compute);
     VulkanCommandBuffer* vcmd = fx.vk->GetCommandBuffer(cmd);
     vcmd->Reset(); vcmd->Begin();
@@ -781,11 +809,13 @@ TestResult TestIBL_Prefilter_Dispatch() {
     fx.base->DestroyCommandBuffer(cmd);
 
     BufferDesc rbDesc{};
-    rbDesc.size = u64(kCubeFaceSize) * kCubeFaceSize * 8;
+    rbDesc.size = u64(faceSize) * faceSize * 8;
     rbDesc.type = BufferType::Raw;
     rbDesc.memoryUsage = GPUMemoryUsage::Readback;
     rbDesc.name = "Prefilter_Readback";
     ResourceHandle readback = fx.base->CreateBuffer(rbDesc);
+
+    TEST_ASSERT(readback != handles::INVALID_RESOURCE, "CreateBuffer readback");
 
     float maxDiff = 0.0f, meanDiff = 0.0f;
     u32 count = 0;
@@ -794,11 +824,11 @@ TestResult TestIBL_Prefilter_Dispatch() {
     float worstR_cpu = 0, worstG_cpu = 0, worstB_cpu = 0;
     for (u32 layer = 0; layer < kCubeLayers; ++layer) {
         std::vector<u8> layerBytes;
-        readback_layer(fx, outputTex, readback, layer, layerBytes);
+        TEST_ASSERT(readback_layer(fx, outputTex, readback, layer, layerBytes, faceSize), "Readback layer");
 
-        for (u32 y = 0; y < kCubeFaceSize; ++y) {
-            for (u32 x = 0; x < kCubeFaceSize; ++x) {
-                const u8* p = layerBytes.data() + (size_t(y) * kCubeFaceSize + x) * 8;
+        for (u32 y = 0; y < faceSize; ++y) {
+            for (u32 x = 0; x < faceSize; ++x) {
+                const u8* p = layerBytes.data() + (size_t(y) * faceSize + x) * 8;
                 u16 hr, hg, hb;
                 std::memcpy(&hr, p + 0, 2);
                 std::memcpy(&hg, p + 2, 2);
@@ -806,9 +836,34 @@ TestResult TestIBL_Prefilter_Dispatch() {
                 float gpuR = half_to_float(hr), gpuG = half_to_float(hg),
                       gpuB = half_to_float(hb);
                 float cpuR, cpuG, cpuB;
-                compute_prefilter_texel(inputCube, x, y, layer,
-                                         paramsBytes.roughness, paramsBytes.srcResolution,
-                                         cpuR, cpuG, cpuB);
+                u16 ha;
+                std::memcpy(&ha, p + 6, 2);
+                const float gpuA = half_to_float(ha);
+                if (!std::isfinite(gpuR) || !std::isfinite(gpuG) ||
+                    !std::isfinite(gpuB) || !std::isfinite(gpuA)) {
+                    std::cerr << "Nonfinite prefilter RGBA: roughness=" << roughness
+                              << " face=" << layer << " x=" << x << " y=" << y << '\n';
+                    return TestResult::Failed;
+                }
+                if (constantEnvironment) {
+                    cpuR = constantColor[0]; cpuG = constantColor[1]; cpuB = constantColor[2];
+                    // Two FP16 relative ulps allow final storage rounding and
+                    // FP32 accumulation; zero/black substitution cannot pass.
+                    for (u32 channel = 0; channel < 4; ++channel) {
+                        const float actual = std::array<float, 4>{gpuR, gpuG, gpuB, gpuA}[channel];
+                        const float expected = constantColor[channel];
+                        if (std::abs(actual - expected) > expected * (2.0f / 1024.0f)) {
+                            std::cerr << "Constant energy mismatch: roughness=" << roughness
+                                      << " face=" << layer << " channel=" << channel
+                                      << " actual=" << actual << " expected=" << expected << '\n';
+                            return TestResult::Failed;
+                        }
+                    }
+                } else {
+                    compute_prefilter_texel(inputCube, x, y, layer,
+                                             paramsBytes.roughness, paramsBytes.srcResolution,
+                                             cpuR, cpuG, cpuB);
+                }
                 float dR = std::abs(gpuR - cpuR), dG = std::abs(gpuG - cpuG),
                       dB = std::abs(gpuB - cpuB);
                 float lm = std::max(dR, std::max(dG, dB));
@@ -826,7 +881,8 @@ TestResult TestIBL_Prefilter_Dispatch() {
     meanDiff /= float(count);
 
     std::cout << "[TestVulkanIBL_Prefilter] max diff=" << maxDiff
-              << " mean=" << meanDiff << " texels=" << count << std::endl;
+              << " mean=" << meanDiff << " texels=" << count
+              << " constant=" << constantEnvironment << " roughness=" << roughness << std::endl;
     std::cout << "[Prefilter worst] layer=" << worstLayer << " x=" << worstX << " y=" << worstY
               << " GPU=(" << worstR_gpu << "," << worstG_gpu << "," << worstB_gpu << ")"
               << " CPU=(" << worstR_cpu << "," << worstG_cpu << "," << worstB_cpu << ")" << std::endl;
@@ -853,24 +909,34 @@ TestResult TestIBL_Prefilter_Dispatch() {
     return TestResult::Passed;
 }
 
+// The final 1x1 mip has normals exactly on all six axes. An even 16x16
+// sweep never hits those centres, so it cannot catch the old zero-cross basis.
+TestResult TestIBL_Prefilter_Dispatch() { return RunIBL_Prefilter(false, 0.5f); }
+TestResult TestIBL_Prefilter_Constant0() { return RunIBL_Prefilter(true, 0.0f); }
+TestResult TestIBL_Prefilter_ConstantHalf() { return RunIBL_Prefilter(true, 0.5f); }
+TestResult TestIBL_Prefilter_Constant1() { return RunIBL_Prefilter(true, 1.0f); }
+
 void RegisterVulkanIBL_IrradPrefilter_Tests() {
     auto suite = std::make_shared<TestSuite>("VulkanIBL_IrradPrefilter_Tests");
     suite->AddTestCase(TestCase("Irradiance", TestIBL_Irradiance_Dispatch));
     suite->AddTestCase(TestCase("Prefilter",  TestIBL_Prefilter_Dispatch));
+    suite->AddTestCase(TestCase("Prefilter_Constant_1x1_Roughness0", TestIBL_Prefilter_Constant0));
+    suite->AddTestCase(TestCase("Prefilter_Constant_1x1_RoughnessHalf", TestIBL_Prefilter_ConstantHalf));
+    suite->AddTestCase(TestCase("Prefilter_Constant_1x1_Roughness1", TestIBL_Prefilter_Constant1));
     TestRunner::RegisterTestSuite(suite);
 }
 
 int main() {
     RegisterVulkanIBL_IrradPrefilter_Tests();
-    TestRunner::RunAllSuites();
-    return 0;
+    const TestStats stats = TestRunner::RunAllSuites();
+    return (stats.failedTests == 0 && stats.skippedTests == 0 && stats.totalTests == 5) ? 0 : 1;
 }
 
 #else // ENABLE_VULKAN undefined
 
 int main() {
-    std::cout << "[TestVulkanIBL_IrradPrefilter] ENABLE_VULKAN not defined — no-op." << std::endl;
-    return 0;
+    std::cerr << "[TestVulkanIBL_IrradPrefilter] ENABLE_VULKAN required." << std::endl;
+    return 1;
 }
 
 #endif // ENABLE_VULKAN

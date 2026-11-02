@@ -47,6 +47,8 @@ struct SurfaceCacheView {
 
 /// DDGI 单个 volume 的只读快照（irradiance 三缓冲取 frame_idx % 3 槽位）。
 struct DDGIVolumeView {
+    // Internal consumer contract: negative depth mean denotes unmeasured.
+    bool measured_visibility = false;
     rhi::ResourceHandle irradiance{ rhi::handles::INVALID_RESOURCE };  ///< irradiance_buffers_[frame_idx % 3]
     rhi::ResourceHandle depth{ rhi::handles::INVALID_RESOURCE }; ///< matching SH slot; mean[64], variance[64] per probe
 

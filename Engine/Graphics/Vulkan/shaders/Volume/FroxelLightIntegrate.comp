@@ -34,10 +34,15 @@ layout(set = 0, binding = 7) uniform texture2D shadow_moments_c3;
 // SPGI 本帧输出，读"最近完成帧"（体积雾低频，上一帧辐照可接受——计划 §4
 // WP2 风险段退路）。ambient_source=0 时 shader 不采样。
 layout(set = 0, binding = 8) uniform texture2D spgi_ambient;
+layout(set = 0, binding = 9) uniform texture3D cloud_volume;
 
 // P2-B: moments 双线性（同时取 z 与 z² 通道），Chebyshev 上界。
 // 约定与 DeferredLighting.frag::chebyshevVisibility 一致（variance 下限
 // 0.00002，smoothstep(0.05, 1.0) 抗 light bleed）。
+#define SPARSE_ATLAS_BINDING 10
+#define SPARSE_DIRECTORY_BINDING 11
+#include "SparseParticleVolume.glsl"
+
 vec2 froxelShadowBilinear2(texture2D tex, vec2 uv) {
     ivec2 dims = textureSize(tex, 0);
     vec2 p = clamp(uv, vec2(0.0), vec2(1.0)) * vec2(dims) - 0.5;
@@ -211,28 +216,39 @@ void main() {
             // 计划 §4 WP1 伪码写的 +LightDir 未区分传播方向约定；本引擎
             // light_direction 是传播方向（audit V7），朝光 march 取负号。
             float shadow = 1.0;
+            float mediumVisibility = 1.0;
             if (params.VolumeParams3.w > 0.5) {
                 int marchSteps = int(params.VolumeParams4.x + 0.5);
                 if (marchSteps > 0) {
                     float stepLen = params.VolumeParams4.y / float(marchSteps);
                     // 半步起步（中点采样，均匀介质下无偏）
                     vec3 lp = worldPos - lightDir * (0.5 * stepLen);
-                    float vis = 1.0;
+                    // 多散射八度近似（Wrenski/Schneider 实时云课程）：同一次
+                    // march 维护 σt×{1, 0.25, 0.0625} 三条透射率——深倍频让光
+                    // "填充"云内部，同时保留单次散射的缝隙阴影（参考图
+                    // "既亮又有结构"的关键；近零成本，同一循环三累加器）。
+                    float beer1 = 1.0, beer2 = 1.0, beer3 = 1.0;
+                    float geo = 1.0;
                     bool uniformMedium = params.FrustumParams2.z > 0.0;
                     for (int s = 0; s < marchSteps; ++s) {
+                        float beer = 0.0;
                         if (uniformMedium) {
-                            vis *= exp(-sigmaT * stepLen);
+                            beer = sigmaT * stepLen;
                         } else {
                             vec3 uvw = froxelWorldToUvw(lp);
                             float d = froxelTrilinearClamp(froxel_density, uvw,
                                                            vec3(params.FroxelDims.xyz));
-                            vis *= exp(-d * extinctionScale * stepLen);
+                            beer = d * extinctionScale * stepLen;
                         }
-                        vis *= froxelShadowQuery(lp,
+                        beer1 *= exp(-beer);
+                        beer2 *= exp(-beer * 0.25);
+                        beer3 *= exp(-beer * 0.0625);
+                        geo *= froxelShadowQuery(lp,
                                                  int(params.VolumeParams3.w + 0.5));
                         lp -= lightDir * stepLen;
                     }
-                    shadow = clamp(vis, 0.0, 1.0);
+                    mediumVisibility = (beer1 + 0.7 * beer2 + 0.4 * beer3) / 2.1;
+                    shadow = clamp(geo * mediumVisibility, 0.0, 1.0);
                 } else {
                     shadow = froxelShadowQuery(worldPos,
                                                int(params.VolumeParams3.w + 0.5));
@@ -271,6 +287,51 @@ void main() {
                 vec3 spgiTerm = froxelSpgiBilinear(spgi_ambient, colScreenUv)
                                 * (ambient * 9.55);   // GAIN 30 × 1/π
                 ambientTerm = max(spgiTerm, vec3(0.4, 0.45, 0.6) * (ambient * 0.55));
+            }
+            // Dense clouds also occlude the broad sky fill. Without this term,
+            // constant ambient dominates in geometric shadow and erases all
+            // puff structure once the cloud becomes opaque. Reuse the light
+            // march as a low-cost directional sky-occlusion approximation;
+            // retain a diffuse floor for unresolved multiple scattering.
+            if (params.CloudA.x > 0.5 &&
+                all(lessThan(abs(worldPos - params.CloudB.xyz), vec3(params.CloudA.y)))) {
+                // Surface-gradient sky fill: ambient occlusion alone varies
+                // too slowly to reveal turbulent cloud faces. Use the actual
+                // density gradient as a local outward normal (a directional
+                // diffuse approximation, not a replacement for volume march).
+                // Differentiate the immutable world-space cloud, not its
+                // coarse, camera-aligned froxel resampling (which caused facets).
+                vec3 cloudDims = vec3(textureSize(cloud_volume, 0));
+                vec3 cloudUv = (worldPos - params.CloudB.xyz) / (2.0 * params.CloudA.y) + 0.5;
+                vec3 texel = 1.0 / cloudDims;
+                vec3 grad = vec3(0.0);
+                for (int axis = 0; axis < 3; ++axis) {
+                    vec3 offset = vec3(0.0); offset[axis] = 2.0 * texel[axis];
+                    grad[axis] = froxelTrilinearClamp(cloud_volume, cloudUv + offset, cloudDims)
+                               - froxelTrilinearClamp(cloud_volume, cloudUv - offset, cloudDims);
+                }
+                float skyFacing = 0.65;
+                if (dot(grad, grad) > 1e-10) {
+                    vec3 outward = -normalize(grad);
+                    vec3 skyDirection = normalize(vec3(-0.45, 1.0, -0.25));
+                    float directional = 0.15 + 0.85 * max(dot(outward, skyDirection), 0.0);
+                    // A vanishing gradient has no reliable direction. Blend
+                    // continuously instead of snapping to a normalized vector.
+                    skyFacing = mix(0.65, directional, smoothstep(0.002, 0.04, length(grad)));
+                }
+                ambientTerm *= skyFacing * (0.35 + 0.65 * mediumVisibility);
+            }
+            if (sparseDensity(worldPos) > 0.001) {
+                float h = intBitsToFloat(particle_words[1].x);
+                vec3 grad = vec3(0.0);
+                for (int a=0;a<3;++a) {
+                    vec3 off=vec3(0.0); off[a]=h;
+                    grad[a]=sparseDensity(worldPos+off)-sparseDensity(worldPos-off);
+                }
+                float facing=0.65;
+                if(dot(grad,grad)>1e-10)
+                    facing=mix(0.65,0.15+0.85*max(dot(-normalize(grad),normalize(vec3(-0.45,1.0,-0.25))),0.0),smoothstep(0.002,0.04,length(grad)));
+                ambientTerm *= facing * (0.35 + 0.65 * mediumVisibility);
             }
             vec3 sourceJ = sigmaS * (lightColor * shadow * phase
                                      + ambientTerm);

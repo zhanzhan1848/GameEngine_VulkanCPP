@@ -310,6 +310,8 @@ public:
         ddgi_fb_counts_ = view.counts;
         ddgi_fb_spacing_ = view.spacing;
         ddgi_fallback_available_ = IsScreenProbeDDGIValid(view);
+        if (ddgi_measured_visibility_ != view.measured_visibility) RequestTemporalReset();
+        ddgi_measured_visibility_ = view.measured_visibility;
     }
 
     // Offline high-res SDF (single volume, e.g. OfflineSDFMerger's 384³ field).
@@ -617,6 +619,7 @@ private:
     rhi::ResourceHandle ddgi_irradiance_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle ddgi_depth_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle ddgi_relocated_origins_{ rhi::handles::INVALID_RESOURCE };
+    bool ddgi_measured_visibility_ = false; // internal validated DDGI view, mode7 only
     math::v3 ddgi_fb_origin_{ 0.0f };    math::v3 ddgi_fb_counts_{ 0.0f };
     float ddgi_fb_spacing_ = 0.0f;
     bool ddgi_fallback_available_ = false;

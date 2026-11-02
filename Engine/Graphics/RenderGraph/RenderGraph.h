@@ -102,6 +102,15 @@ public:
 
     // 获取上一帧各Pass的GPU耗时 (ms)
     const std::unordered_map<std::string, double>& GetPassExecutionTimes() const { return passExecutionTimes_; }
+    bool AreTimestampsEnabled() const { return timestampsEnabled_; }
+    u64 GetTimestampRecordingSequence() const { return timestampRecordingSequence_; }
+    u64 GetTimestampResolvedSequence() const { return timestampResolvedSequence_; }
+    bool HasFreshTimestampResults() const { return timestampResultsFresh_; }
+    bool WasTimestampQueryReadSuccessful() const { return timestampQueryReadOk_; }
+    double GetTimestampQueryReadCpuMs() const { return timestampQueryReadCpuMs_; }
+    u64 GetTimestampReadMin() const { return timestampReadMin_; }
+    u64 GetTimestampReadMax() const { return timestampReadMax_; }
+    u64 GetTimestampPreviousBound() const { return timestampPreviousBound_; }
     size_t GetPoolSize() const { return resourcePool_.size(); }
 
 private:
@@ -148,17 +157,27 @@ private:
     utl::vector<PooledResource> resourcePool_;
     u64 currentFrame_ = 0;
 
+    // Immutable for this graph's lifetime. Exact PRIMAL_RG_TIMESTAMPS=0 only
+    // disables diagnostics, independently of all production synchronization.
+    bool timestampsEnabled_=true;
     // GPU时间戳查询
     struct FrameQueryData {
         rhi::QueryPoolHandle queryPool = rhi::handles::INVALID_QUERY_POOL;
         u32 capacity = 0;
         utl::vector<std::string> passNames; // Index i corresponds to queries 2*i and 2*i+1
+        u64 recordingSequence = 0;
         bool ready = false;
     };
     FrameQueryData queryFrames_[2]; // Ping-pong
     u32 currentQueryFrameIndex_ = 0;
     
     std::unordered_map<std::string, double> passExecutionTimes_;
+    u64 timestampRecordingSequence_ = 0;
+    u64 timestampResolvedSequence_ = 0;
+    bool timestampResultsFresh_ = false;
+    bool timestampQueryReadOk_ = false;
+    double timestampQueryReadCpuMs_ = -1.0;
+    u64 timestampLastTickBound_ = 0, timestampReadMin_ = 0, timestampReadMax_ = 0, timestampPreviousBound_ = 0;
 
     void ResolveTimestamps();
 };

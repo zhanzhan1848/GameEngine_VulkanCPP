@@ -98,6 +98,9 @@ private:
     primal::graphics::RenderSystem renderSystem_;
     std::unique_ptr<primal::graphics::StandardRenderPipeline> pipeline_;
     primal::graphics::RenderScene scene_;
+    // Test-only alternate identity; both scenes survive every in-flight frame.
+    std::unique_ptr<primal::graphics::RenderScene> farSwitchScene_;
+    primal::graphics::RenderScene* activeScene_{nullptr};
     primal::graphics::RenderView view_;
 
     // Sponza scene state — mirrors TestVulkanStandardPipelineRender_NonEditor.

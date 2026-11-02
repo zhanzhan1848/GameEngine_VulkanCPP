@@ -1,0 +1,29 @@
+#version 450 core
+#extension GL_GOOGLE_include_directive : require
+// The exact production helper is included, not a test-side reimplementation.
+#include "GeometryFirstHit.glsl"
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+struct Case { vec4 parentLo; vec4 parentHi; vec4 childLo; vec4 childHi; vec4 originNear; vec4 directionFar; };
+layout(set=0,binding=0,std430) readonly buffer Inputs { Case cases[]; } inputs;
+layout(set=0,binding=1,std430) writeonly buffer Results { uvec4 values[]; } results;
+void main(){
+    uint i=gl_GlobalInvocationID.x;if(i>=inputs.cases.length())return;
+    Case c=inputs.cases[i];GeometryNode p;p.lo=c.parentLo;p.hi=c.parentHi;p.links=uvec4(0);
+    GeometryNode q;q.lo=c.childLo;q.hi=c.childHi;q.links=uvec4(0);
+    bool parent=geometryBox(p,c.originNear.xyz,c.directionFar.xyz,c.originNear.w,c.directionFar.w);
+    bool child=geometryBox(q,c.originNear.xyz,c.directionFar.xyz,c.originNear.w,c.directionFar.w);
+    uint violation=uint(child&&!parent);
+#ifdef DDGI_GEOMETRY_BOUNDS_FIRST
+    bool parentBounds=geometryBoxBounds(p.lo,p.hi,c.originNear.xyz,c.directionFar.xyz,c.originNear.w,c.directionFar.w);
+    bool childBounds=geometryBoxBounds(q.lo,q.hi,c.originNear.xyz,c.directionFar.xyz,c.originNear.w,c.directionFar.w);
+    if(parent!=parentBounds || child!=childBounds)violation|=2u;
+    if(all(notEqual(c.directionFar.xyz,vec3(0))) && !any(isnan(c.directionFar.xyz)) && !any(isinf(c.directionFar.xyz))) {
+        bool pn=geometryBoxNonzero(p,c.originNear.xyz,c.directionFar.xyz,c.originNear.w,c.directionFar.w);
+        bool cn=geometryBoxNonzero(q,c.originNear.xyz,c.directionFar.xyz,c.originNear.w,c.directionFar.w);
+        bool pbn=geometryBoxBoundsNonzero(p.lo,p.hi,c.originNear.xyz,c.directionFar.xyz,c.originNear.w,c.directionFar.w);
+        bool cbn=geometryBoxBoundsNonzero(q.lo,q.hi,c.originNear.xyz,c.directionFar.xyz,c.originNear.w,c.directionFar.w);
+        if(pn!=pbn || cn!=cbn)violation|=2u;
+    }
+#endif
+    results.values[i]=uvec4(uint(parent),uint(child),violation,i);
+}

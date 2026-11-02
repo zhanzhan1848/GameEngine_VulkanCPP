@@ -1,3 +1,4 @@
+#include "Graphics/RenderGraph/LumenCompareCapture.h"
 #include "OwnerCardRanges.h"
 #include "BoundaryLightingPoints.h"
 #include "CardTileOwners.h"
@@ -28,6 +29,7 @@
 #include <cstring>
 #include <cstdio>
 #include <set>
+#include <cmath>
 #include "Engine/Common/CoreLogStream.h"
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 #include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
@@ -40,6 +42,26 @@ namespace primal::graphics::lumen {
 using namespace rhi;
 using namespace rendergraph;
 namespace rhimath = primal::graphics::rhi::math;
+
+// Exact opt-in, diagnostic-only reproduction of the former surface policy.
+static bool LegacySurfacePolicy() {
+    static const bool legacy = [] {
+        const char* value = std::getenv("PRIMAL_SC_LEGACY_SURFACE");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    return legacy;
+}
+
+bool SurfaceCachePass::HasOfflineSDFSource() const {
+    return sc_offline_sdf_texture_ != handles::INVALID_RESOURCE &&
+        sc_offline_sdf_resolution_ > 0 &&
+        std::isfinite(sc_offline_sdf_origin_.x) && std::isfinite(sc_offline_sdf_origin_.y) &&
+        std::isfinite(sc_offline_sdf_origin_.z) &&
+        std::isfinite(sc_offline_sdf_extent_.x) && sc_offline_sdf_extent_.x > 0 &&
+        std::isfinite(sc_offline_sdf_extent_.y) && sc_offline_sdf_extent_.y > 0 &&
+        std::isfinite(sc_offline_sdf_extent_.z) && sc_offline_sdf_extent_.z > 0;
+}
+
 
 // Diagnostic labels only: preserve dispatch, barriers, resources and shader bytes.
 // Native profilers may retain these as encoder labels or debug-group events.
@@ -244,6 +266,41 @@ struct SurfaceCacheRGData {
 
 } // anonymous namespace
 
+void SurfaceCachePass::ResetSurfaceAtlas(RHICommandBuffer* cmd, u32 slot) {
+    if (!cmd || atlas_init_pipeline_ == handles::INVALID_PIPELINE ||
+        atlas_reset_cb_ == handles::INVALID_RESOURCE) return;
+    if (atlas_seeded_ && surface_seed_epoch_ == card_generator_.GetAllocationEpoch()) return;
+    ResourceBarrier barriers[4]{};
+    const ResourceHandle images[] = {albedo_atlas_, normal_atlas_, depth_atlas_, emissive_atlas_};
+    for (u32 i = 0; i < 4; ++i) {
+        barriers[i].resource = images[i];
+        barriers[i].beforeState = ResourceState::Unknown;
+        barriers[i].afterState = ResourceState::UnorderedAccess;
+        barriers[i].subresource = 0xffffffffu;
+    }
+    cmd->InsertBarrier(barriers, 4);
+    const DescriptorData params[] = {
+        {0, DescriptorType::StorageImage, albedo_atlas_},
+        {1, DescriptorType::StorageImage, normal_atlas_},
+        {2, DescriptorType::StorageImage, depth_atlas_},
+        {3, DescriptorType::StorageImage, emissive_atlas_},
+        {4, DescriptorType::UniformBuffer, atlas_reset_cb_},
+        {5, DescriptorType::StorageBuffer, GetCardDispatchBuffer(slot)},
+        {6, DescriptorType::StorageBuffer, triangle_atlas_buffer_},
+    };
+    UpdateDescriptorSet(device_, atlas_init_set_[slot], params, 7);
+    cmd->BindComputePipeline(atlas_init_pipeline_);
+    cmd->BindDescriptorSets(PipelineBindPoint::Compute, atlas_init_layout_, 0, 1,
+                           &atlas_init_set_[slot], 0, nullptr);
+    cmd->Dispatch((atlas_size_ * atlas_size_ + 255u) / 256u, 1, 1);
+    cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::AllCommands,
+                      AccessFlag::ShaderWrite, AccessFlag::MemoryRead | AccessFlag::MemoryWrite);
+    atlas_seeded_ = true;
+    surface_seed_epoch_ = card_generator_.GetAllocationEpoch();
+    RequestTileValidityReset();
+}
+
+
 // ============================================================================
 // SurfaceCachePass Implementation
 // ============================================================================
@@ -432,6 +489,13 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
 
     device_ = device;
     config_ = config;
+    const char* slots = std::getenv("PRIMAL_SC_LIGHT_DISPATCH_SLOTS");
+    const char* nonblocking = std::getenv("PRIMAL_VK_QUERY_NONBLOCKING");
+    experimental_light_dispatch_slots_ = device_->GetPlatform() == RHIPlatform::Vulkan &&
+        ((slots && std::strcmp(slots, "1") == 0) ||
+         (nonblocking && std::strcmp(nonblocking, "1") == 0));
+    // Experimental three-slot candidate is not promoted to default. The
+    // measured cross-run image difference did not establish a single cause.
     atlas_size_ = config.surface_cache_atlas_size;
     page_size_ = config.surface_cache_page_size;
     light_eval_rr_cursor_ = 0;
@@ -490,7 +554,8 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
     card_view_enabled_ = !(cvEnv && strcmp(cvEnv, "0") == 0);
     const char* ownerEnv = std::getenv("PRIMAL_SC_CAPTURE_OWNER");
     const bool ownerIsolation = !(ownerEnv && std::strcmp(ownerEnv, "0") == 0);
-    if (!card_view_enabled_ && ownerIsolation) {
+    if (!card_view_enabled_ && (ownerIsolation ||
+        (device_->GetPlatform() == RHIPlatform::Vulkan && !LegacySurfacePolicy()))) {
         card_view_enabled_ = true;
         PRIMAL_LOG_STREAM(Warn, "Render") << "[SurfaceCache] owner isolation requires card-view capture; overriding SC_CARDVIEW=0" << std::endl;
     }
@@ -662,12 +727,26 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
 
     // Create triple-buffered constant buffers
     CreateConstantBuffers();
+    if (device_->GetPlatform() == RHIPlatform::Vulkan &&
+        !LegacySurfacePolicy() && atlas_reset_cb_ == handles::INVALID_RESOURCE) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] surface reset CB unavailable" << std::endl;
+        return false;
+    }
 
     // Create descriptor set layouts
     CreateDescriptorSetLayouts();
 
     // Create pipelines and triple-buffered descriptor sets
     CreatePipelines();
+    if (device_->GetPlatform() == RHIPlatform::Vulkan && !LegacySurfacePolicy()) {
+        bool resetReady = atlas_init_pipeline_ != handles::INVALID_PIPELINE &&
+            atlas_init_layout_ != handles::INVALID_PIPELINE_LAYOUT;
+        for (const auto set : atlas_init_set_) resetReady &= set != handles::INVALID_DESCRIPTOR_SET;
+        if (!resetReady) {
+            PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] qualified surface reset pipeline unavailable" << std::endl;
+            return false;
+        }
+    }
     card_generator_.SetCoveragePackingDefault(geometry_first_requested_ && StaticPagesEnabled());
 
     // [SC per-mesh P4] 射线 lookup 分类统计缓冲。
@@ -691,6 +770,18 @@ void SurfaceCachePass::Shutdown() {
     if (!initialized_) return;
     initialized_ = false;
 
+    for (auto& b : light_info_buffer_) {
+        if (b != handles::INVALID_RESOURCE) device_->DestroyBuffer(b);
+        b = handles::INVALID_RESOURCE;
+    }
+    for (auto& b : card_dispatch_buffer_) {
+        if (b != handles::INVALID_RESOURCE) device_->DestroyBuffer(b);
+        b = handles::INVALID_RESOURCE;
+    }
+    for (auto& serial : light_dispatch_consumed_serial_) serial = 0;
+    last_light_info_slot_ = 0;
+    experimental_light_dispatch_slots_ = false;
+
     card_view_depth_ = rhi::handles::INVALID_RESOURCE;
     for (auto* resource : {&static_composite_info_buffer_, &static_composite_pool_buffer_, &ray_lookup_stats_buffer_, &page_clear_rects_buffer_, &triangle_atlas_buffer_, &triangle_support_buffer_, &ray_triangle_buffer_}) {
         if (*resource != handles::INVALID_RESOURCE) device_->DestroyBuffer(*resource);
@@ -699,9 +790,14 @@ void SurfaceCachePass::Shutdown() {
     triangle_support_word_count_=0u;
     for(auto& slot:geometry_buffers_) {
         for(auto& b:slot.buffers) { if(b!=handles::INVALID_RESOURCE) device_->DestroyBuffer(b); b=handles::INVALID_RESOURCE; }
+        if(slot.upper_buffer!=handles::INVALID_RESOURCE)device_->DestroyBuffer(slot.upper_buffer);
+        slot.upper_buffer=handles::INVALID_RESOURCE;slot.upper_size=0;slot.upper_ready=false;
+        if(slot.equal_box_buffer!=handles::INVALID_RESOURCE)device_->DestroyBuffer(slot.equal_box_buffer);
+        slot.equal_box_buffer=handles::INVALID_RESOURCE;slot.equal_box_size=0;slot.equal_box_ready=false;slot.equal_box_serial=0;
         slot.epoch=~u64(0); slot.ready=false;
     }
-    geometry_scene_={};
+    hybrid_certified_=false;hybrid_field_.clear();for(auto& b:hybrid_bindings_)b={};
+    geometry_scene_={}; geometry_equal_box_.reset(); geometry_compact_={}; geometry_upper_nodes_.clear();geometry_upper_stats_={};
     for (auto& b : indirect_tile_owner_buffers_) {
         if (b != handles::INVALID_RESOURCE) device_->DestroyBuffer(b);
         b = handles::INVALID_RESOURCE;
@@ -724,6 +820,8 @@ void SurfaceCachePass::Shutdown() {
 
     if(card_fill_audit_.tables_staging!=handles::INVALID_RESOURCE)
         device_->DestroyBuffer(card_fill_audit_.tables_staging);
+    if (atlas_reset_cb_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(atlas_reset_cb_);
+    atlas_reset_cb_ = handles::INVALID_RESOURCE;
     if (light_writer_snapshot_.staging != handles::INVALID_RESOURCE)
         device_->DestroyBuffer(light_writer_snapshot_.staging);
     light_writer_snapshot_ = {};
@@ -837,7 +935,8 @@ void SurfaceCachePass::CreateAtlasTextures() {
         lightInfoDesc.type = BufferType::Structured;
         lightInfoDesc.usage = GPUMemoryUsage::Dynamic;
         lightInfoDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-        light_info_buffer_ = device_->CreateBuffer(lightInfoDesc);
+        const u32 count = experimental_light_dispatch_slots_ ? 3u : 1u;
+        for (u32 i=0; i<count; ++i) light_info_buffer_[i] = device_->CreateBuffer(lightInfoDesc);
     }
 
     if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
@@ -860,7 +959,8 @@ void SurfaceCachePass::CreateAtlasTextures() {
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        card_dispatch_buffer_ = device_->CreateBuffer(desc);
+        const u32 count = experimental_light_dispatch_slots_ ? 3u : 1u;
+        for (u32 i=0; i<count; ++i) card_dispatch_buffer_[i] = device_->CreateBuffer(desc);
     }
 
     // T3.3 (D10): indirect trace/resolve wiring resources
@@ -949,6 +1049,20 @@ void SurfaceCachePass::CreateConstantBuffers() {
 
     CreateCBs(global_cb_, 512);    // GlobalShaderData (padded)
     CreateCBs(params_cb_, 512);    // SurfaceCacheParams (padded)
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        BufferDesc reset{};
+        reset.size = 512;
+        reset.type = BufferType::Constant;
+        reset.usage = reset.memoryUsage = GPUMemoryUsage::Dynamic;
+        atlas_reset_cb_ = device_->CreateBuffer(reset);
+        if (auto* data = device_->MapBuffer(atlas_reset_cb_)) {
+            std::memset(data, 0, 512);
+            device_->UnmapBuffer(atlas_reset_cb_);
+        } else {
+            if (atlas_reset_cb_ != handles::INVALID_RESOURCE) device_->DestroyBuffer(atlas_reset_cb_);
+            atlas_reset_cb_ = handles::INVALID_RESOURCE;
+        }
+    }
     CreateCBs(capture_cb_, 96);    // CaptureParams: invViewProj (64) + counts (16) padded
     CreateCBs(capture_emissive_cb_, 16);  // T4.4: CaptureEmissive (rgba, 16B)
 
@@ -1000,6 +1114,8 @@ void SurfaceCachePass::CreateConstantBuffers() {
 bool SurfaceCachePass::SetGeometryScene(std::span<const ray_geometry::InstanceInput> instances)
 {
     ++geometry_epoch_;
+    hybrid_certified_=false;hybrid_field_.clear();for(auto& b:hybrid_bindings_)b={};
+    geometry_equal_box_.reset();geometry_compact_={}; geometry_upper_nodes_.clear(); geometry_upper_stats_={};
     bool identityValid=true;
     for(const auto& instance:instances)
         if(!instance.mesh || !card_generator_.BindGeometryIdentity(instance.instance_id,instance.mesh->geometry_digest)) {
@@ -1009,25 +1125,77 @@ bool SurfaceCachePass::SetGeometryScene(std::span<const ray_geometry::InstanceIn
     bool loaded=false,persisted=false;
     const bool ok=identityValid && ray_geometry::LoadOrBuildSceneBVH(instances,
         ray_geometry::GeometryCacheDirectory(),geometry_scene_,&loaded,&persisted);
+    geometry_source_digest_=ok?ray_geometry::SceneSourceDigest(instances):0;
     if(!ok)geometry_scene_={};
-    else if(!persisted)PRIMAL_LOG_STREAM(Warn,"Render") << "[SC_BVH_CACHE] unable to persist scene; using validated memory BVH";
+    else {
+        const char* equalBox=std::getenv("PRIMAL_DDGI_GEOMETRY_EQUAL_BOX");
+        if(device_ && device_->GetPlatform()==RHIPlatform::Vulkan && equalBox && std::strcmp(equalBox,"1")==0)
+            geometry_equal_box_=ray_geometry::TryBuildEqualBoxSidecar(geometry_scene_,16ull*1024*1024);
+        const char* upper=std::getenv("PRIMAL_DDGI_GEOMETRY_UPPER_BVH");
+        const char* compact=std::getenv("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS");
+        const char* visibility=std::getenv("PRIMAL_DDGI_GEOMETRY_VISIBILITY");
+        const char* reference=std::getenv("PRIMAL_DDGI_GEOMETRY_VISIBILITY_REFERENCE");
+        const bool upperRequested=device_ && device_->GetPlatform()==RHIPlatform::Vulkan && upper && std::strcmp(upper,"1")==0 && visibility && std::strcmp(visibility,"1")==0 &&
+            !(reference && std::strcmp(reference,"1")==0);
+        if(upperRequested) {
+            ray_geometry::SceneBVH candidate;
+            const bool built=ray_geometry::BuildUpperSAH16(geometry_scene_,candidate,geometry_upper_stats_);
+            if(built) geometry_upper_nodes_=std::move(candidate.bottom);
+            PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_UPPER_BVH] built=" << built << " roots=" << geometry_upper_stats_.roots_changed
+                << " build_ms=" << geometry_upper_stats_.build_ms << " old_cost=" << geometry_upper_stats_.original_cost
+                << " new_cost=" << geometry_upper_stats_.candidate_cost << " old_pending=" << geometry_upper_stats_.original_max_pending
+                << " new_pending=" << geometry_upper_stats_.candidate_max_pending << " old_depth=" << geometry_upper_stats_.original_max_depth
+                << " new_depth=" << geometry_upper_stats_.candidate_max_depth << " bytes_per_slot=" << geometry_upper_stats_.extra_gpu_bytes << std::endl;
+        }
+        if(!upperRequested && compact && std::strcmp(compact,"1")==0 && visibility && std::strcmp(visibility,"1")==0 &&
+           !(reference && std::strcmp(reference,"1")==0)) {
+            geometry_compact_=ray_geometry::CertifyCompactTraversal(geometry_scene_);
+            PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_COMPACT_STACKS] certificate_valid=" << geometry_compact_.valid
+                << " fits=" << geometry_compact_.Fits() << " top_pending=" << geometry_compact_.top_max_pending
+                << " bottom_pending=" << geometry_compact_.bottom_max_pending << " scene_epoch=" << geometry_epoch_ << std::endl;
+        }
+    }
+    if(ok && device_ && device_->GetPlatform()==RHIPlatform::Vulkan) {
+        const char* hybrid=std::getenv("PRIMAL_ENV_SDF_HYBRID");
+        if(hybrid && std::strcmp(hybrid,"1")==0) {
+            hybrid_certified_=geometry_source_digest_==environment_hybrid::kSourceDigest && environment_hybrid::Verify(geometry_scene_,hybrid_field_);
+            if(!hybrid_certified_)hybrid_field_.clear();
+            PRIMAL_LOG_STREAM(Info,"Render") << "[ENV_FIELD_CERT] epoch=" << geometry_epoch_ << " certified=" << hybrid_certified_;
+        }
+    }
+    if(ok && !persisted)PRIMAL_LOG_STREAM(Warn,"Render") << "[SC_BVH_CACHE] unable to persist scene; using validated memory BVH";
     RequestTileValidityReset();
     PRIMAL_LOG_STREAM(Info,"Render") << "[SC_GEOMETRY_FIRST] scene_complete=" << ok
-        << " cache=" << (loaded?"loaded":persisted?"saved":"memory") << " source_digest=" << ray_geometry::SceneSourceDigest(instances)
+        << " cache=" << (loaded?"loaded":persisted?"saved":"memory") << " source_digest=" << geometry_source_digest_
         << " instances=" << geometry_scene_.instances.size() << " blas_nodes=" << geometry_scene_.bottom.size()
         << " triangles=" << geometry_scene_.triangles.size();
     return ok;
 }
 
+environment_hybrid::Binding SurfaceCachePass::GetHybridBinding(u32 frame) const {
+    frame%=3;auto b=hybrid_bindings_[frame];const auto& s=geometry_buffers_[frame];
+    b.ready=b.ready && hybrid_certified_ && device_ && device_->FrameSlotCompletions().CanReuse(frame,0) && s.ready && s.epoch==geometry_epoch_ && b.epoch==geometry_epoch_ && b.digest==geometry_source_digest_;
+    for(u32 i=0;i<4;++i)b.ready=b.ready && b.handles[i]==s.buffers[i] && b.allocated[i]==s.sizes[i];return b;
+}
+
 bool SurfaceCachePass::UploadGeometryScene(u32 frame)
 {
     auto& slot=geometry_buffers_[frame];
-    if(slot.epoch==geometry_epoch_) return slot.ready;
+    if(slot.epoch==geometry_epoch_) {
+        // If the ordinary path uploaded before completion was witnessed, H may
+        // establish its own proof only by re-uploading after a real slot fence.
+        const bool retryHybrid=slot.ready && hybrid_certified_ && hybrid_owner_id_ && !hybrid_bindings_[frame].ready && device_->FrameSlotCompletions().CanReuse(frame,0);
+        if(!retryHybrid)return slot.ready;
+    }
     const void* data[4]={geometry_scene_.top.data(),geometry_scene_.bottom.data(),
         geometry_scene_.triangles.data(),geometry_scene_.instances.data()};
     const u64 size[4]={geometry_scene_.top.size()*sizeof(ray_geometry::Node),geometry_scene_.bottom.size()*sizeof(ray_geometry::Node),
         geometry_scene_.triangles.size()*sizeof(ray_geometry::Triangle),geometry_scene_.instances.size()*sizeof(ray_geometry::Instance)};
-    slot.ready=false;
+    const bool hybridCompletion=hybrid_certified_ && hybrid_owner_id_ && device_->FrameSlotCompletions().CanReuse(frame,0);
+    const u64 hybridCompletionSerial=hybridCompletion?device_->FrameSlotCompletions().Serial(frame):0;
+    hybrid_bindings_[frame]={};
+    slot.ready=false; slot.upper_ready=false; slot.upper_epoch=~u64(0); slot.upper_digest=0;
+    slot.compact={}; slot.compact_epoch=~u64(0); slot.compact_digest=0; slot.compact_slot=~u32(0);
     // Each slot is updated only after the frame fence. Never destroy another
     // in-flight slot when scene geometry or transforms change.
     const u8 zero[64]{};
@@ -1045,7 +1213,66 @@ bool SurfaceCachePass::UploadGeometryScene(u32 frame)
         if(size[i]) std::memcpy(dst,data[i],size[i]); else std::memcpy(dst,zero,64);
         device_->UnmapBuffer(slot.buffers[i]);
     }
-    slot.epoch=ok?geometry_epoch_:~u64(0); slot.ready=ok; return ok;
+    slot.epoch=ok?geometry_epoch_:~u64(0); slot.ready=ok;
+    if(ok && hybridCompletion && hybrid_generation_!=~u64(0)) {
+        auto& b=hybrid_bindings_[frame];b.producer=this;b.producer_id=hybrid_owner_id_;b.epoch=geometry_epoch_;b.digest=geometry_source_digest_;b.generation=++hybrid_generation_;b.completion=hybridCompletionSerial;b.slot=frame;b.ready=true;
+        for(u32 i=0;i<4;++i){b.handles[i]=slot.buffers[i];b.allocated[i]=slot.sizes[i];b.logical[i]=size[i];b.ready=b.ready && size[i]>0 && slot.buffers[i]!=handles::INVALID_RESOURCE;}
+    }
+    if(ok && geometry_compact_.Fits()) {
+        slot.compact=geometry_compact_; slot.compact_epoch=geometry_epoch_;
+        slot.compact_digest=geometry_source_digest_; slot.compact_slot=frame;
+        for(u32 i=0;i<4;++i){slot.compact_buffers[i]=slot.buffers[i];slot.compact_sizes[i]=slot.sizes[i];}
+    }
+    if(ok && !geometry_upper_nodes_.empty()) {
+        const auto upperStart=std::chrono::steady_clock::now();
+        const u64 bytes=geometry_upper_nodes_.size()*sizeof(ray_geometry::Node);
+        if(slot.upper_size!=bytes || slot.upper_buffer==handles::INVALID_RESOURCE) {
+            if(slot.upper_buffer!=handles::INVALID_RESOURCE)device_->DestroyBuffer(slot.upper_buffer);
+            BufferDesc desc{};desc.size=bytes;desc.type=BufferType::Structured;
+            desc.usage=desc.memoryUsage=GPUMemoryUsage::Dynamic;
+            slot.upper_buffer=device_->CreateBuffer(desc);slot.upper_size=bytes;
+        }
+        auto* dst=slot.upper_buffer!=handles::INVALID_RESOURCE?device_->MapBuffer(slot.upper_buffer):nullptr;
+        if(dst) {
+            std::memcpy(dst,geometry_upper_nodes_.data(),bytes);device_->UnmapBuffer(slot.upper_buffer);
+            slot.upper_epoch=geometry_epoch_;slot.upper_digest=geometry_source_digest_;slot.upper_slot=frame;
+            slot.upper_original_hash=geometry_upper_stats_.original_payload_hash;slot.upper_candidate_hash=geometry_upper_stats_.candidate_payload_hash;
+            for(u32 i=0;i<4;++i){slot.upper_source_buffers[i]=slot.buffers[i];slot.upper_source_sizes[i]=slot.sizes[i];}
+            slot.upper_ready=true;
+        }
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_UPPER_BVH] slot=" << frame << " upload_ready=" << slot.upper_ready
+            << " bytes=" << bytes << " upload_cpu_ms=" << std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-upperStart).count() << std::endl;
+    }
+    return ok;
+}
+
+bool SurfaceCachePass::EqualBoxSlotComplete(u32 frame) const {
+    return device_ && device_->FrameSlotCompletions().CanReuse(frame%3,0);
+}
+bool SurfaceCachePass::PrepareEqualBoxConsumer(u32 frame) {
+    frame%=3;auto& slot=geometry_buffers_[frame];
+    if(!device_ || !geometry_equal_box_ || !geometry_equal_box_->valid || !slot.ready || slot.epoch!=geometry_epoch_)return false;
+    const auto current=GetGeometryWitnessView(frame);
+    if(current.equal_box_ready)return true;
+    slot.equal_box_ready=false;
+    const auto& completed=device_->FrameSlotCompletions();
+    if(!completed.CanReuse(frame,slot.equal_box_serial))return false;
+    const u64 serial=completed.Serial(frame),bytes=geometry_equal_box_->flags.size()*sizeof(u32);
+    if(!bytes || !ray_geometry::EqualBoxSidecarIntact(*geometry_equal_box_))return false;
+    if(slot.equal_box_size!=bytes || slot.equal_box_buffer==handles::INVALID_RESOURCE) {
+        if(slot.equal_box_buffer!=handles::INVALID_RESOURCE)device_->DestroyBuffer(slot.equal_box_buffer);
+        BufferDesc desc{};desc.size=bytes;desc.type=BufferType::Structured;desc.usage=desc.memoryUsage=GPUMemoryUsage::Dynamic;
+        slot.equal_box_buffer=device_->CreateBuffer(desc);slot.equal_box_size=bytes;
+    }
+    void* dst=slot.equal_box_buffer!=handles::INVALID_RESOURCE?device_->MapBuffer(slot.equal_box_buffer):nullptr;
+    if(!dst)return false;
+    std::memcpy(dst,geometry_equal_box_->flags.data(),bytes);device_->UnmapBuffer(slot.equal_box_buffer);
+    slot.equal_box_epoch=geometry_epoch_;slot.equal_box_digest=geometry_source_digest_;slot.equal_box_slot=frame;
+    slot.equal_box_flags_hash=geometry_equal_box_->flags_hash;slot.equal_box_payload_hash=geometry_equal_box_->payload_hash;
+    for(u32 i=0;i<4;++i){slot.equal_box_sources[i]=slot.buffers[i];slot.equal_box_source_sizes[i]=slot.sizes[i];}
+    slot.equal_box_serial=serial;slot.equal_box_ready=true;
+    PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_EQUAL_BOX] upload_slot=" << frame << " epoch=" << geometry_epoch_ << " serial=" << serial << " bytes=" << bytes << std::endl;
+    return GetGeometryWitnessView(frame).equal_box_ready;
 }
 
 bool SurfaceCachePass::ReadbackRayLookupStats(uint32_t frame)
@@ -1559,6 +1786,7 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // material_data
             {12, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr}, // albedo texture array
             {13, DescriptorType::Sampler,       1, ShaderStage::Compute, nullptr}, // sampler
+            {16, DescriptorType::StorageImage,  1, ShaderStage::Compute, nullptr}, // invalid emissive
         };
         DescriptorSetLayoutBinding* b = bindings;
         b[0].is3D = true; b[1].is3D = true; b[2].is3D = true;
@@ -1578,19 +1806,19 @@ void SurfaceCachePass::CreateDescriptorSetLayouts() {
             (void)vtB;   // 布局已含 0-13;VT 资源经 card_fill matBuf(flags.vtId)
                           // + 全局页表/atlas 绑定接入(VT 系统初始化后)
         }
-        card_fill_set_layout_ = device_->CreateDescriptorSetLayout({14, bindings});
+        card_fill_set_layout_ = device_->CreateDescriptorSetLayout({15, bindings});
 
         if (source_writer_audit_requested_ && !source_writer_audit_failed_) {
             // Keep bindings 0..13 byte-for-byte identical to the production
             // layout.  The diagnostic variant appends only the writer image
             // and its frame constant (14/15).
-            DescriptorSetLayoutBinding writerBindings[16]{};
+            DescriptorSetLayoutBinding writerBindings[17]{};
             std::memcpy(writerBindings, bindings, sizeof(bindings));
-            writerBindings[14] = {14, DescriptorType::StorageImage, 1,
+            writerBindings[15] = {14, DescriptorType::StorageImage, 1,
                                   ShaderStage::Compute, nullptr};
-            writerBindings[15] = {15, DescriptorType::UniformBuffer, 1,
+            writerBindings[16] = {15, DescriptorType::UniformBuffer, 1,
                                   ShaderStage::Compute, nullptr};
-            card_fill_writer_set_layout_ = device_->CreateDescriptorSetLayout({16, writerBindings});
+            card_fill_writer_set_layout_ = device_->CreateDescriptorSetLayout({17, writerBindings});
             if (card_fill_writer_set_layout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
                 source_writer_audit_failed_ = true;
             }
@@ -2206,15 +2434,32 @@ void SurfaceCachePass::AddCardCapturePasses(
     const u32 total = card_generator_.GetCardCount();
     if (total == 0) return;
 
+    const bool qualified = device_->GetPlatform() == RHIPlatform::Vulkan && !LegacySurfacePolicy();
+    RGResourceHandle materialDependency{};
+    if (qualified) {
+        materialDependency = graph.ImportResource("SC_SurfaceValidity", albedo_atlas_);
+        struct PrepareData {};
+        graph.AddPass<PrepareData>("SurfaceCachePrepare", RGPassType::Compute,
+            RGPassCategory::Lighting,
+            [materialDependency](PrepareData&, RenderGraphBuilder& builder) {
+                builder.Write(materialDependency, ResourceState::UnorderedAccess);
+                builder.SideEffect();
+            },
+            [this, current_frame_index](const PrepareData&, RenderGraphContext& ctx) {
+                ResetSurfaceAtlas(ctx.cmdBuffer, DDGISlotsForFrame(current_frame_index).writeIndex);
+            });
+    }
+
     struct CapPassData {};
     graph.AddPass<CapPassData>(
         "SurfaceCacheCardCapture",
         RGPassType::Graphics,
         RGPassCategory::Lighting,
-        [](CapPassData&, RenderGraphBuilder& builder) {
+        [materialDependency](CapPassData&, RenderGraphBuilder& builder) {
+            if (materialDependency.IsValid()) builder.Write(materialDependency, ResourceState::RenderTarget);
             builder.SideEffect();  // atlases are manually barriered module RTs
         },
-        [this, &scene_snapshot, &gpuDraw, total, current_frame_index](const CapPassData&, RenderGraphContext& ctx) {
+        [this, &scene_snapshot, &gpuDraw, total, current_frame_index, qualified](const CapPassData&, RenderGraphContext& ctx) {
             auto* cmd = ctx.cmdBuffer;
             const auto& cards = card_generator_.GetCards();
 
@@ -2323,7 +2568,7 @@ void SurfaceCachePass::AddCardCapturePasses(
                     card.atlas_offset_x, card.atlas_offset_y, card.resolution,
                     albedo_atlas_, normal_atlas_, depth_atlas_, card_view_depth_,
                     /*owning_instance_id=*/card.mesh_instance_id,
-                    /*owner_only=*/kScCaptureOwnerOnly,
+                    /*owner_only=*/(kScCaptureOwnerOnly || qualified),
                     /*writer_rt=*/source_writer_audit_enabled_ ? source_writer_atlas_ : handles::INVALID_RESOURCE,
                     /*geometry_rt0=*/geometry_audit_enabled_ ? geometry_witness_[0] : handles::INVALID_RESOURCE,
                     /*geometry_rt1=*/geometry_audit_enabled_ ? geometry_witness_[1] : handles::INVALID_RESOURCE,
@@ -2401,7 +2646,7 @@ void SurfaceCachePass::AddCardCapturePasses(
                 b.subresource = 0xFFFFFFFF;
                 cmd->InsertBarrier(&b, 1);
             }
-            if (source_writer_audit_enabled_ || geometry_audit_enabled_) {
+            if (source_writer_audit_enabled_ || geometry_audit_enabled_ || qualified) {
                 // These images may be consumed by CardFill or a later transfer
                 // read. State transitions alone do not carry the writer's
                 // color-attachment visibility on every RHI.
@@ -2412,6 +2657,11 @@ void SurfaceCachePass::AddCardCapturePasses(
             }
             if (source_writer_audit_enabled_) source_writer_atlas_in_uav_ = true;
             if (geometry_audit_enabled_) geometry_witness_in_uav_ = true;
+            if (lumencompare::enabled) {
+                lumencompare::Output(device_, cmd, "SurfaceCache.Capture", "albedo", albedo_atlas_, false);
+                lumencompare::Output(device_, cmd, "SurfaceCache.Capture", "depth", depth_atlas_, false);
+                lumencompare::Output(device_, cmd, "SurfaceCache.Capture", "normal", normal_atlas_, false);
+            }
         });
 }
 
@@ -2490,6 +2740,24 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
     // Phase 1d: 槽位单一事实源 DDGISlotMap.h（outIdx = writeIndex）。
     const u32 outIdx = DDGISlotsForFrame(current_frame_index).writeIndex;
+    // The opt-in Vulkan slot experiment requires explicit proof
+    // that the renderer's write slot matches a successfully completed host
+    // fence. A frame counter alone is not such proof. The default path keeps
+    // its existing caller-owned fence contract (including its known timeout
+    // boundary); neither path certifies other shared Surface Cache resources.
+    if (experimental_light_dispatch_slots_) {
+        const auto& completed = device_->FrameSlotCompletions();
+        if (!completed.CanReuse(outIdx, light_dispatch_consumed_serial_[outIdx])) {
+            PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] light/dispatch slot experiment rejected: slot not completed: " << outIdx;
+            return output;
+        }
+        light_dispatch_consumed_serial_[outIdx] = completed.Serial(outIdx);
+    }
+    if (GetLightInfoBuffer(outIdx) == handles::INVALID_RESOURCE ||
+        GetCardDispatchBuffer(outIdx) == handles::INVALID_RESOURCE) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] light/dispatch frame slot unavailable: " << outIdx;
+        return output;
+    }
 
     // Import persistent lighting atlas into render graph
     auto lightingHandle = graph.ImportResource(
@@ -2503,6 +2771,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
     output.lighting_atlas = lightingHandle;
     output.lighting_nodirect_atlas = nodirectHandle;
+    const bool qualifiedSurface = device_->GetPlatform() == RHIPlatform::Vulkan && !LegacySurfacePolicy();
+    const auto materialDependency = qualifiedSurface
+        ? graph.ImportResource("SC_SurfaceValidity", albedo_atlas_) : RGResourceHandle{};
 
     graph.AddPass<SurfaceCacheRGData>("LumenSurfaceCache",
         RGPassType::Compute, RGPassCategory::Lighting,
@@ -2510,7 +2781,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
         // ====================================================================
         // Setup lambda: declare resource dependencies
         // ====================================================================
-        [prev_frame_color, lightingHandle, nodirectHandle, frame_data](
+        [prev_frame_color, lightingHandle, nodirectHandle, frame_data, materialDependency](
             SurfaceCacheRGData& data, RenderGraphBuilder& builder) {
             // Read previous frame color
             builder.Read(prev_frame_color, ResourceState::ShaderResource);
@@ -2530,6 +2801,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             builder.Write(lightingHandle, ResourceState::UnorderedAccess);
             // [E0-B] nodirect 副本同帧 Write(UA)——LightEval 的第二个存储写。
             builder.Write(nodirectHandle, ResourceState::UnorderedAccess);
+            if (materialDependency.IsValid()) builder.Write(materialDependency, ResourceState::UnorderedAccess);
         },
 
         // ====================================================================
@@ -2541,6 +2813,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             if (!cmd) return;
 
             const u32 frameIdx = DDGISlotsForFrame(current_frame_index).writeIndex;
+            if (device_->GetPlatform() == RHIPlatform::Vulkan && !LegacySurfacePolicy())
+                ResetSurfaceAtlas(cmd, frameIdx);
 
             // Guard: pipeline must be valid
             if (light_eval_pipeline_ == handles::INVALID_PIPELINE) return;
@@ -2720,15 +2994,14 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
             // Upload dispatch info to GPU
             {
-                auto* mapped = static_cast<CardDispatchInfo*>(device_->MapBuffer(card_dispatch_buffer_));
-                if (mapped) {
-                    memcpy(mapped, dispatch_info.data(), card_count * sizeof(CardDispatchInfo));
-                    device_->UnmapBuffer(card_dispatch_buffer_);
-                }
+                auto* mapped = static_cast<CardDispatchInfo*>(device_->MapBuffer(GetCardDispatchBuffer(frameIdx)));
+                if (!mapped) return;
+                memcpy(mapped, dispatch_info.data(), card_count * sizeof(CardDispatchInfo));
+                device_->UnmapBuffer(GetCardDispatchBuffer(frameIdx));
             }
 
             // ================================================================
-            // 2. Upload light list into light_info_buffer_ (T3.2: direction/
+            // 2. Upload light list into GetLightInfoBuffer(frameIdx) (T3.2: direction/
             //    color come from the caller's frame data — the pipeline
             //    injects settings_.lighting — replacing the hardcoded light).
             //    (LightInfo = position(vec4) + color(vec4) + direction(vec4) = 48B)
@@ -2740,7 +3013,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     math::v4 direction;   // xyz=dir, w=type (1.0=directional)
                 };
                 static_assert(sizeof(LightInfoGPU) == 48, "LightInfo must be 48 bytes");
-                auto* lights = static_cast<LightInfoGPU*>(device_->MapBuffer(light_info_buffer_));
+                auto* lights = static_cast<LightInfoGPU*>(device_->MapBuffer(GetLightInfoBuffer(frameIdx)));
+                if (!lights) return;
                 if (lights) {
                     // A4: upload the real per-slot light list when the caller
                     // provided one (type/position/radius per slot) — keeps the
@@ -2765,9 +3039,15 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                                                            frame_data.light_direction.z, 1.0f}; // w=1 → directional
                         }
                     }
-                    device_->UnmapBuffer(light_info_buffer_);
+                    device_->UnmapBuffer(GetLightInfoBuffer(frameIdx));
                 }
+                last_light_info_slot_ = frameIdx;
             }
+            // The experimental slot path publishes its mapped inputs before
+            // GPU consumption. Default keeps the prior synchronization path.
+            if (experimental_light_dispatch_slots_)
+                cmd->MemoryBarrier(PipelineStage::Host, PipelineStage::ComputeShader,
+                                   AccessFlag::HostWrite, AccessFlag::ShaderRead);
 
             // ================================================================
             // 3. Upload FlattenedLightingParams constant buffer
@@ -2776,6 +3056,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 auto* mapped = static_cast<FlattenedLightingParams*>(device_->MapBuffer(params_cb_[frameIdx]));
                 if (mapped) {
                     FlattenedLightingParams params{};
+                    params.sc_params._pad = device_->GetPlatform() == RHIPlatform::Vulkan && LegacySurfacePolicy() ? 1u : 0u;
                     params.sc_params.atlas_size = atlas_size_;
                     params.sc_params.page_size = page_size_;
                     params.sc_params.capture_budget_pages = config_.surface_cache_capture_budget;
@@ -2953,6 +3234,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             //     alpha=1 albedo to process even before Capture covers texels.
             // ================================================================
             if (atlas_init_pipeline_ != handles::INVALID_PIPELINE &&
+                (device_->GetPlatform() != RHIPlatform::Vulkan || LegacySurfacePolicy()) &&
                 (!atlas_seeded_ || surface_seed_epoch_ != card_generator_.GetAllocationEpoch() ||
                  (StaticPagesEnabled() && static_composite_epoch_ != card_generator_.GetAllocationEpoch()))) {
                 static bool s_ai_once = false;
@@ -2974,7 +3256,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     {2, DescriptorType::StorageImage,  depth_atlas_},
                     {3, DescriptorType::StorageImage,  emissive_atlas_},
                     {aiIsVk ? 4u : 1u, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
-                    {aiIsVk ? 5u : 2u, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                    {aiIsVk ? 5u : 2u, DescriptorType::StorageBuffer, GetCardDispatchBuffer(frameIdx)},
                     {6, DescriptorType::StorageBuffer, triangle_atlas_buffer_},
                 };
                 UpdateDescriptorSet(device_, atlas_init_set_[frameIdx], initParams, aiIsVk?7u:6u);
@@ -3451,7 +3733,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 // silently substitute coarse runtime data if unavailable.
                 const char* fillSource = std::getenv("SC_FILL_OFFLINE_SDF");
                 const bool offlineFillRequested = device_->GetPlatform() == RHIPlatform::Vulkan &&
-                    fillSource && fillSource[0] == '1';
+                    (!LegacySurfacePolicy() ? HasOfflineSDFSource() : (fillSource && fillSource[0] == '1'));
                 const bool offlineFill = offlineFillRequested &&
                     sc_offline_sdf_texture_ != handles::INVALID_RESOURCE &&
                     sc_offline_sdf_resolution_ > 0u;
@@ -3508,6 +3790,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                                 cfm->_pad0 = originHit && originHit[0] == '1' ? 1u : 0u;
                                 cfm->_pad1 = axisLimit && axisLimit[0] == '1' ? 1u : 0u;
                                 if(materialBits && materialBits[0]=='1') cfm->_pad0 |= 2u;
+                                if (LegacySurfacePolicy()) cfm->_pad0 |= 0x80000000u;
                             }
                             device_->UnmapBuffer(card_fill_cb_[frameIdx]);
                         }
@@ -3538,18 +3821,19 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         {5, DescriptorType::StorageImage,  depth_atlas_},
                         {6, DescriptorType::StorageImage,  lighting_atlas_[outIdx]},
                         {7, DescriptorType::UniformBuffer, card_fill_cb_[frameIdx]},
-                        {8, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                        {8, DescriptorType::StorageBuffer, GetCardDispatchBuffer(frameIdx)},
                         {9, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
                         {10, DescriptorType::StorageBuffer, instBuf},
                         {11, DescriptorType::StorageBuffer, matBuf},
                         {12, DescriptorType::SampledImage,  albedoTexArr},
                         {13, DescriptorType::Sampler,       static_cast<ResourceHandle>(s_cf_sampler)},
+                        {16, DescriptorType::StorageImage,  emissive_atlas_},
                     };
-                    DescriptorData writerParams[16];
+                    DescriptorData writerParams[17];
                     if (source_writer_audit_enabled_) {
                         std::memcpy(writerParams, fillParams, sizeof(fillParams));
-                        writerParams[14] = {14, DescriptorType::StorageImage, source_writer_atlas_};
-                        writerParams[15] = {15, DescriptorType::UniformBuffer, card_fill_writer_cb_[frameIdx]};
+                        writerParams[15] = {14, DescriptorType::StorageImage, source_writer_atlas_};
+                        writerParams[16] = {15, DescriptorType::UniformBuffer, card_fill_writer_cb_[frameIdx]};
                         struct WriterParams { u32 frame, pad0, pad1, pad2; };
                         auto* writerCB = static_cast<WriterParams*>(device_->MapBuffer(card_fill_writer_cb_[frameIdx]));
                         if (!writerCB) {
@@ -3562,9 +3846,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         writerCB->frame = current_frame_index;
                         writerCB->pad0 = writerCB->pad1 = writerCB->pad2 = 0;
                         device_->UnmapBuffer(card_fill_writer_cb_[frameIdx]);
-                        UpdateDescriptorSet(device_, card_fill_writer_set_[frameIdx], writerParams, 16);
+                        UpdateDescriptorSet(device_, card_fill_writer_set_[frameIdx], writerParams, 17);
                     } else {
-                        UpdateDescriptorSet(device_, card_fill_set_[frameIdx], fillParams, 14);
+                        UpdateDescriptorSet(device_, card_fill_set_[frameIdx], fillParams, 15);
                     }
 
                     cmd->BindComputePipeline(source_writer_audit_enabled_
@@ -3725,7 +4009,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 if (GIDebug().sc_shadow &&   // [F3-V4] 死旋钮接门控（visibility 保持上帧）
                     shadow_pipeline_ != handles::INVALID_PIPELINE &&
                     shadow_visibility_buffer_ != handles::INVALID_RESOURCE &&
-                    globalSDF.IsInitialized()) {
+                    (globalSDF.IsInitialized() || HasOfflineSDFSource())) {
                     static bool s_scshadow_once = false;
                     if (!s_scshadow_once) {
                         s_scshadow_once = true;
@@ -3738,7 +4022,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     // T8.13: prefer the offline merged SDF (384^3, sharp) —
                     // same source as the DDGI trace; runtime cascades stay as
                     // the fallback when no offline bake is wired.
-                    if (sc_offline_sdf_texture_ != handles::INVALID_RESOURCE) {
+                    if (HasOfflineSDFSource()) {
                         sdfTex[0] = sc_offline_sdf_texture_;
                         cascadeCount = 1;
                     } else {
@@ -3784,7 +4068,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             memset(sp, 0, sizeof(ShadowParamsGPU));
                             float resArr[3] = {0.0f, 0.0f, 0.0f};
                             if (cascadeCount == 1 &&
-                                sc_offline_sdf_texture_ != handles::INVALID_RESOURCE) {
+                                HasOfflineSDFSource()) {
                                 sp->sdf_origins[0] = {sc_offline_sdf_origin_.x, sc_offline_sdf_origin_.y,
                                                       sc_offline_sdf_origin_.z, 0.0f};
                                 sp->sdf_extents[0] = {sc_offline_sdf_extent_.x, sc_offline_sdf_extent_.y,
@@ -3839,7 +4123,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             {3, DescriptorType::StorageImage, depth_atlas_},
                             {4, DescriptorType::StorageImage, normal_atlas_},
                             {shIsVk ? 5u : 0u, DescriptorType::UniformBuffer, shadow_cb_[frameIdx]},
-                            {shIsVk ? 6u : 1u, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                            {shIsVk ? 6u : 1u, DescriptorType::StorageBuffer, GetCardDispatchBuffer(frameIdx)},
                             {shIsVk ? 7u : 2u, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
                             {shIsVk ? 8u : 3u, DescriptorType::StorageBuffer, shadow_visibility_buffer_},
                             {shIsVk ? 9u : 4u,  DescriptorType::SampledImage, depthTex[0]},
@@ -3855,6 +4139,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
                         u32 shGroups = (total_texels + 255) / 256;
                         cmd->Dispatch(shGroups, 1, 1);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "SurfaceCache.Shadow", "visibility", shadow_visibility_buffer_, true);
 
                         if(boundaryProofNow && !BoundaryProof().failed){
                             auto& p=BoundaryProof();
@@ -3919,7 +4204,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                 const bool ptOn = card_generator_.IsPageTableEnabled();
                 ResourceHandle pageTableBuf = ptOn
                     ? card_generator_.GetPageTableBuffer()
-                    : ResourceHandle(card_dispatch_buffer_);
+                    : ResourceHandle(GetCardDispatchBuffer(frameIdx));
                 if (isVk) {
                     DescriptorData p[] = {
                         {0, DescriptorType::StorageImage,  albedo_atlas_},
@@ -3928,8 +4213,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         {3, DescriptorType::StorageImage,  lighting_atlas_[outIdx]},
                         {4, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
                         {5, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
-                        {6, DescriptorType::StorageBuffer, light_info_buffer_},
-                        {7, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                        {6, DescriptorType::StorageBuffer, GetLightInfoBuffer(frameIdx)},
+                        {7, DescriptorType::StorageBuffer, GetCardDispatchBuffer(frameIdx)},
                         {8, DescriptorType::StorageImage,  prevLightingAtlas},  // prev for multi-bounce [E0-B: nodirect]
                         {9, DescriptorType::StorageBuffer, shadow_visibility_buffer_},  // T3.3
                         // Probe-fed indirect: bind the previous-frame slot
@@ -3937,7 +4222,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         {10, DescriptorType::StorageBuffer,
                          frame_data.ddgi_irradiance != handles::INVALID_RESOURCE
                              ? frame_data.ddgi_irradiance
-                             : card_dispatch_buffer_},
+                             : GetCardDispatchBuffer(frameIdx)},
                         // Surface-point reconstruction for the probe gather
                         // (same depth source the shadow pass uses).
                         {11, DescriptorType::StorageImage,  depth_atlas_},
@@ -3947,13 +4232,13 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         {13, DescriptorType::StorageBuffer,
                          frame_data.ddgi_depth != handles::INVALID_RESOURCE
                              ? frame_data.ddgi_depth
-                             : card_dispatch_buffer_},
+                             : GetCardDispatchBuffer(frameIdx)},
                         // GI 根治 Phase 3.2: openSky 统计（无效时绑 stand-in，
                         // radiosity_gate.z 关 → shader 不读）。
                         {14, DescriptorType::StorageBuffer,
                          frame_data.ddgi_opensky != handles::INVALID_RESOURCE
                              ? frame_data.ddgi_opensky
-                             : card_dispatch_buffer_},
+                             : GetCardDispatchBuffer(frameIdx)},
                         // [WRC 计划 Stream D2]: 卡片页表（过表寻址）。
                         {15, DescriptorType::StorageBuffer, pageTableBuf},
                         // [E0-B 2026-09-21] nodirect 副本输出（result − direct·ρ/π）。
@@ -3972,8 +4257,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         {3, DescriptorType::StorageImage,  lighting_atlas_[outIdx]},
                         {1, DescriptorType::UniformBuffer, params_cb_[frameIdx]},
                         {2, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
-                        {3, DescriptorType::StorageBuffer, light_info_buffer_},
-                        {4, DescriptorType::StorageBuffer, card_dispatch_buffer_},
+                        {3, DescriptorType::StorageBuffer, GetLightInfoBuffer(frameIdx)},
+                        {4, DescriptorType::StorageBuffer, GetCardDispatchBuffer(frameIdx)},
                         {5, DescriptorType::StorageBuffer, shadow_visibility_buffer_},  // T3.3
                         {4, DescriptorType::StorageImage,  prevLightingAtlas},   // prev for multi-bounce [E0-B: nodirect]
                         {5, DescriptorType::StorageImage,  depth_atlas_},               // surface-point probe gather
@@ -3982,19 +4267,19 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         {6, DescriptorType::StorageBuffer,
                          frame_data.ddgi_irradiance != handles::INVALID_RESOURCE
                              ? frame_data.ddgi_irradiance
-                             : card_dispatch_buffer_},
+                             : GetCardDispatchBuffer(frameIdx)},
                         // T3.3 tile radiosity (Metal texture namespace 6)
                         {6, DescriptorType::StorageImage,  indirect_out_tex_[outIdx]},
                         // C 系列：探针深度（Chebyshev gather 可见性）
                         {7, DescriptorType::StorageBuffer,
                          frame_data.ddgi_depth != handles::INVALID_RESOURCE
                              ? frame_data.ddgi_depth
-                             : card_dispatch_buffer_},
+                             : GetCardDispatchBuffer(frameIdx)},
                         // GI 根治 Phase 3.2: openSky 统计（Metal buffer(8)）
                         {8, DescriptorType::StorageBuffer,
                          frame_data.ddgi_opensky != handles::INVALID_RESOURCE
                              ? frame_data.ddgi_opensky
-                             : card_dispatch_buffer_},
+                             : GetCardDispatchBuffer(frameIdx)},
                         // [E0-B 2026-09-21] nodirect 副本输出 [[texture(7)]]。
                         {7, DescriptorType::StorageImage,  lighting_nodirect_atlas_[outIdx]},
                     };
@@ -4095,7 +4380,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     witness.dispatch_cards = card_count;
                     const ResourceHandle sources[] = {indirect_out_tex_[outIdx], albedo_atlas_, normal_atlas_,
                         depth_atlas_, emissive_atlas_, shadow_visibility_buffer_, params_cb_[frameIdx],
-                        light_info_buffer_, card_generator_.GetCardDataBuffer(), card_dispatch_buffer_,
+                        GetLightInfoBuffer(frameIdx), card_generator_.GetCardDataBuffer(), GetCardDispatchBuffer(frameIdx),
                         lighting_atlas_[outIdx], lighting_nodirect_atlas_[outIdx]};
                     const u64 texels = u64(atlas_size_) * atlas_size_;
                     const u64 sizes[] = {texels*8,texels*4,texels*4,texels*4,texels*8,texels*4,
@@ -4139,6 +4424,31 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
                 u32 groups = (total_texels + 255) / 256;
                 cmd->Dispatch(groups, 1, 1);
+                if (lumencompare::enabled) {
+                    lumencompare::Output(device_, cmd, "SurfaceCache.Policy", "params", params_cb_[frameIdx], true);
+                    lumencompare::Output(device_, cmd, "SurfaceCache.Policy", "dispatch", GetCardDispatchBuffer(frameIdx), true);
+                    lumencompare::Output(device_, cmd, "SurfaceCache.Policy", "cards", card_generator_.GetCardDataBuffer(), true);
+                    const auto directory = std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR")) /
+                        ("frame-" + std::to_string(lumencompare::ordinal));
+                    std::filesystem::create_directories(directory);
+                    std::ofstream policy(directory / "surface-policy.json");
+                    const bool legacy = device_->GetPlatform() == RHIPlatform::Vulkan && LegacySurfacePolicy();
+                    const bool fillOffline = HasOfflineSDFSource() && (!legacy ||
+                        (std::getenv("SC_FILL_OFFLINE_SDF") && std::getenv("SC_FILL_OFFLINE_SDF")[0] == '1'));
+                    policy << "{\"frame\":" << current_frame_index << ",\"legacy_surface\":" << (legacy ? "true" : "false")
+                        << ",\"allocation_epoch\":" << card_generator_.GetAllocationEpoch()
+                        << ",\"card_count\":" << card_generator_.GetCardCount()
+                        << ",\"qualified_writers\":\"owner_raster_or_offline_page\""
+                        << ",\"unqualified_SDF_surface_valid\":" << (legacy ? "true" : "false")
+                        << ",\"fill_offline\":" << (fillOffline ? "true" : "false")
+                        << ",\"offline_resolution\":" << sc_offline_sdf_resolution_
+                        << ",\"offline_signed\":" << (sc_offline_sdf_signed_ ? "true" : "false") << "}\n";
+                }
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "SurfaceCache.LightEval", "lighting", lighting_atlas_[outIdx], false);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "SurfaceCache.LightEval", "albedo", albedo_atlas_, false);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "SurfaceCache.LightEval", "normal", normal_atlas_, false);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "SurfaceCache.LightEval", "depth", depth_atlas_, false);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "SurfaceCache.LightEval", "emissive", emissive_atlas_, false);
                 if (snapshotNow && !light_writer_snapshot_.failed) {
                     cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
                         AccessFlag::ShaderWrite, AccessFlag::TransferRead);
@@ -4164,7 +4474,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     BoundaryTimestamp(cmd,2);DispatchScNativeLabel(device_,cmd,"SC.boundary.light",(p.count+255)/256,1,1);BoundaryTimestamp(cmd,3);
                     if(p.readback_requested){
                     const u64 probes=u64(frame_data.ddgi_counts[0])*frame_data.ddgi_counts[1]*frame_data.ddgi_counts[2];
-                    ResourceHandle sources[]={p.points,p.results,p.visibility,params_cb_[frameIdx],shadow_cb_[frameIdx],light_info_buffer_,
+                    ResourceHandle sources[]={p.points,p.results,p.visibility,params_cb_[frameIdx],shadow_cb_[frameIdx],GetLightInfoBuffer(frameIdx),
                         frame_data.ddgi_irradiance,frame_data.ddgi_depth,frame_data.ddgi_opensky,card_generator_.GetCardDataBuffer()};
                     const u64 sizes[]={u64(p.count)*64,u64(p.count)*64,u64(p.count)*4,sizeof(FlattenedLightingParams),432,4096,
                         sources[6]!=handles::INVALID_RESOURCE?probes*9*16:0,
@@ -4376,7 +4686,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
                     // C3.5 slice 4: offline propagated SDF for the tile march
                     // (thin-arch sky leaks in the coarse runtime GlobalSDF).
-                    const bool useOfflineSdf = sc_offline_sdf_texture_ != handles::INVALID_RESOURCE;
+                    const bool useOfflineSdf = HasOfflineSDFSource();
 
                     auto& gsdf = nanite::GlobalSDF::Get();
 
@@ -4498,6 +4808,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         const DescriptorSetHandle isets[] = { indirect_trace_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_trace_layout_, 0, 1, isets, 0, nullptr);
                         DispatchScNativeLabel(device_,cmd,"SC.main.trace",kTilesEff,kTilesEff,1);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "SurfaceCache.IndirectTrace", "ray-hits", ray_hits_buffer_, true);
                         if(boundaryProofNow && isVk && geometry_first_requested_){
                             auto& p=BoundaryProof();
                             std::vector<DescriptorData> descriptors(ip,ip+18);
@@ -4747,7 +5058,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         const bool ptOn = card_generator_.IsPageTableEnabled();
                         const ResourceHandle pageTableBuf = ptOn
                             ? card_generator_.GetPageTableBuffer()
-                            : ResourceHandle(card_dispatch_buffer_);
+                            : ResourceHandle(GetCardDispatchBuffer(frameIdx));
                         // [E0-B 2026-09-21 + 780 帧稳定性修正] tile 反弹的 SC
                         // 查询源保持混合 atlas：tile 环路（radiosity）的能量源
                         // 是每帧 fresh 解析直射烘进 atlas 的 L_o（受光面反弹 =
@@ -4779,7 +5090,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             rp2[10] = {10, DescriptorType::StorageBuffer,
                                        indirect_tile_valid_buffer_ != handles::INVALID_RESOURCE
                                            ? indirect_tile_valid_buffer_
-                                           : card_dispatch_buffer_};
+                                           : GetCardDispatchBuffer(frameIdx)};
                             // C: capture validation + orientation atlases.
                             rp2[11] = {11, DescriptorType::SampledImage, depth_atlas_};
                             rp2[12] = {12, DescriptorType::SampledImage, normal_atlas_};
@@ -4805,7 +5116,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             rp2[10] = {5, DescriptorType::StorageBuffer,   // [[buffer(5)]]
                                        indirect_tile_valid_buffer_ != handles::INVALID_RESOURCE
                                            ? indirect_tile_valid_buffer_
-                                           : card_dispatch_buffer_};
+                                           : GetCardDispatchBuffer(frameIdx)};
                             // C: Metal texture namespace — the layout binding
                             // number IS the MSL [[texture(N)]] index: 7 = depth,
                             // 8 = normal (4/5 would collide with the buffer
@@ -4829,6 +5140,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         const DescriptorSetHandle rsets[] = { indirect_resolve_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_resolve_layout_, 0, 1, rsets, 0, nullptr);
                         DispatchScNativeLabel(device_,cmd,"SC.main.resolve.base",kTilesEff,kTilesEff,1);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "SurfaceCache.IndirectResolve", "tile-radiance", indirect_tile_tex_[outIdx], false);
                         }
                         if(boundaryProofNow && BoundaryProof().radio_traced && isVk && geometry_first_requested_){
                             auto& p=BoundaryProof();std::vector<DescriptorData> descriptors(rp2,rp2+21);
@@ -4934,6 +5246,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             const DescriptorSetHandle rcSets[] = { indirect_reconstruct_set_[frameIdx] };
                             cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_reconstruct_layout_, 0, 1, rcSets, 0, nullptr);
                             cmd->Dispatch(atlas_size_ / 8u, atlas_size_ / 8u, 1);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "SurfaceCache.IndirectReconstruct", "indirect-out", indirect_out_tex_[outIdx], false);
                             // tile textures back to UAV for next frame's resolve
                             // write; indirect_out stays UAV → LightEval read.
                             rhi::ResourceBarrier tileRb2{};

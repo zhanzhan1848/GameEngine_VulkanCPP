@@ -156,8 +156,16 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
     outputDesc.format = DataFormat::RGBA16_Float;
     outputDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource | TextureUsage::CopySource;
     outputDesc.memoryUsage = GPUMemoryUsage::Static;
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 3; ++i) {
         output_textures_[i] = device->CreateTexture(outputDesc);
+        if (device->GetPlatform() == RHIPlatform::Vulkan)
+            environment_textures_[i] = device->CreateTexture(outputDesc);
+        if (device->GetPlatform() == RHIPlatform::Vulkan && environment_textures_[i] == handles::INVALID_RESOURCE) {
+            PRIMAL_LOG_STREAM(Error, "Render") << "[DeferredLighting] Environment attachment allocation failed" << std::endl;
+            Shutdown();
+            return false;
+        }
+    }
 
     // Triple-buffered constant buffers
     // T4.6.5 part 24.4 (B1 fix): type=Constant required so VulkanBuffer
@@ -190,6 +198,7 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         desc.addressU = TextureAddressMode::Clamp;
         desc.addressV = TextureAddressMode::Clamp;
         desc.addressW = TextureAddressMode::Clamp;
+        desc.comparisonFunc = ComparisonFunc::Never; // Ordinary texture sampling; Vulkan must disable comparison.
         sampler_ = device->CreateSampler(desc);
     }
 
@@ -260,6 +269,10 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         pd.pixelShader = pixel_shader;
         pd.renderTargetFormats[0] = DataFormat::RGBA16_Float;
         pd.renderTargetCount = 1;
+        if (device->GetPlatform() == RHIPlatform::Vulkan) {
+            pd.renderTargetFormats[1] = DataFormat::RGBA16_Float;
+            pd.renderTargetCount = 2;
+        }
         pd.depthStencilFormat = DataFormat::Unknown;
         pd.enableDepthTest = false;
         pd.enableDepthWrite = false;
@@ -273,6 +286,11 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
 }
 
 void DeferredLightingModule::Shutdown() {
+    for (auto& environment : environment_textures_) {
+        if (device_ && environment != handles::INVALID_RESOURCE)
+            device_->DestroyTexture(environment);
+        environment = handles::INVALID_RESOURCE;
+    }
     // Resources are owned by the device; nothing else to clean up
 }
 
@@ -308,15 +326,23 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
     auto deferredRG = graph.ImportTexture("DeferredOutput", currentTex, deferredOutDesc);
     outputs.deferred_output_rg = deferredRG;
     outputs.deferred_output_tex = currentTex;
+    rendergraph::RGResourceHandle environmentRG{};
+    if (environment_textures_[cbIdx] != handles::INVALID_RESOURCE) {
+        environmentRG = graph.ImportTexture("EnvironmentSpecular", environment_textures_[cbIdx], deferredOutDesc);
+        outputs.environment_specular_rg = environmentRG;
+        outputs.environment_specular_tex = environment_textures_[cbIdx];
+    }
 
     struct PassData {
         rendergraph::RGResourceHandle output;
+        rendergraph::RGResourceHandle environment;
     };
 
     graph.AddPass<PassData>("DeferredLighting",
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::Lighting,
-        [deferredRG, visRG = inputs.shadow_visibility_rg,
+        [deferredRG, environmentRG, visRG = inputs.shadow_visibility_rg,
+             transRG = inputs.shadow_translucent_rg,
              mom0RG = inputs.shadow_moments_rg[0],
              mom1RG = inputs.shadow_moments_rg[1],
              albedoRG = inputs.gbuffer_albedo_rg,
@@ -324,9 +350,13 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
              ormRG = inputs.gbuffer_orm_rg,
              depthRG = inputs.gbuffer_depth_rg](PassData& data, rendergraph::RenderGraphBuilder& builder) {
             data.output = builder.Write(deferredRG, ResourceState::RenderTarget);
+            if (environmentRG.IsValid())
+                data.environment = builder.Write(environmentRG, ResourceState::RenderTarget);
 
             if (visRG.IsValid())
                 builder.Read(visRG, ResourceState::ShaderResource);
+            if (transRG.IsValid())
+                builder.Read(transRG, ResourceState::ShaderResource);
             if (mom0RG.IsValid())
                 builder.Read(mom0RG, ResourceState::ShaderResource);
             if (mom1RG.IsValid())
@@ -350,6 +380,9 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                 .storeOp = StoreAction::Store,
                 .clearColor = { math::v4{0, 0, 0, 1} }
             });
+            if (environmentRG.IsValid())
+                rpDesc.colors.push_back({.texture = data.environment, .loadOp = LoadAction::DontCare,
+                    .storeOp = StoreAction::Store, .clearColor = {math::v4{0, 0, 0, 0}}});
             builder.DeclareRenderPass(rpDesc);
         },
         [this, inputs, cbIdx](const PassData& data, rendergraph::RenderGraphContext& context) {
@@ -412,6 +445,11 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                             : (visDebug ? 0.5f : (inputs.vsm_enabled ? 1.0f : 0.0f)),
                         inputs.cascade_splits.x,
                         0.0f, translucency};
+                    // The spare ambient field carries environment validity without
+                    // changing the shared SceneData layout. No IBL => no fallback energy.
+                    sd->ambientLight.w = (ibl_irradiance_ != handles::INVALID_RESOURCE && ibl_irradiance_ != 0 &&
+                                          ibl_prefilter_ != handles::INVALID_RESOURCE && ibl_prefilter_ != 0 &&
+                                          ibl_brdf_lut_ != handles::INVALID_RESOURCE && ibl_brdf_lut_ != 0) ? (inputs.measured_environment_visibility ? 2.0f : 1.0f) : 0.0f;
                     // Raw Vulkan diagnostics keep the selected shadow method.
                     if (const char* debug = std::getenv("PRIMAL_LIGHTING_DEBUG");
                         debug && device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {

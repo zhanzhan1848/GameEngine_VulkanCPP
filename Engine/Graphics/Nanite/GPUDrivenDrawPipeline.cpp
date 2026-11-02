@@ -1,5 +1,6 @@
 #include "Graphics/MaterialInstance.h"
 #include "GPUDrivenDrawPipeline.h"
+#include "QualifiedLegacyNormalSigns.h"
 #include "GPUCullingPipeline.h"
 #include "NaniteResourceManager.h"
 #include "HZBSystem.h"
@@ -29,6 +30,37 @@
 namespace primal::graphics::nanite {
 
 namespace {
+    bool LegacyNormalSignsEnabled(rhi::RHIDeviceBase* device) {
+        const char* setting = std::getenv("PRIMAL_RASTER_LEGACY_NORMAL_SIGNS");
+        return setting && std::strcmp(setting, "1") == 0 && device &&
+               device->GetPlatform() == rhi::RHIPlatform::Vulkan;
+    }
+    template<class T> void RecoverLegacyRasterSigns(const rhi::RHIMeshAsset& asset,
+                                                    T& elements, size_t begin) {
+        using namespace qualified_normal_signs;
+        const size_t count=asset.num_vertices;
+        const size_t stride=count ? asset.element_buffer.size()/count : 0;
+        if (!count || (stride!=20 && stride!=24) || asset.position_buffer.size()!=count*12 ||
+            asset.element_buffer.size()!=count*stride || asset.num_indices%3 ||
+            (asset.index_size!=2 && asset.index_size!=4) ||
+            asset.index_buffer.size()!=size_t(asset.num_indices)*asset.index_size ||
+            begin+count!=elements.size()) {
+            PRIMAL_LOG_STREAM(Warn,"Render") << "[RASTER_LEGACY_N] rejected malformed/unsupported mesh" << std::endl;
+            return;
+        }
+        static_assert(sizeof(Vec)==12 && sizeof(XY)==4);
+        std::vector<Vec> positions(count);std::memcpy(positions.data(),asset.position_buffer.data(),count*12);
+        std::vector<XY> xy(count);std::vector<uint8_t> signs(count);std::vector<uint32_t> indices(asset.num_indices);
+        for(size_t i=0;i<count;++i){const auto* src=asset.element_buffer.data()+i*stride;
+            std::memcpy(&xy[i],src+4,4);signs[i]=src[3];}
+        for(size_t i=0;i<indices.size();++i){if(asset.index_size==2){uint16_t v;std::memcpy(&v,asset.index_buffer.data()+i*2,2);indices[i]=v;}
+            else std::memcpy(&indices[i],asset.index_buffer.data()+i*4,4);}
+        const auto result=Recover(positions,xy,indices,signs);
+        if(result.qualified)for(size_t i=0;i<count;++i)elements[begin+i].padding=uint32_t(result.signs[i])<<24;
+        PRIMAL_LOG_STREAM(Info,"Render") << "[RASTER_LEGACY_N] vertices="<<count<<" indices="<<indices.size()
+            <<" qualified="<<result.qualified<<" max_xy_delta="<<result.maxXYDelta<<" mismatch="<<result.mismatch
+            <<" positive="<<result.positive<<" source_tangent_SC_unchanged=1"<<std::endl;
+    }
     // N0c: Forks shader loading on backend.
     //   Metal:  loads from EngineTest/shaders/<name>.metal (existing path).
     //   Dawn:   loads from Engine/Graphics/Dawn/shaders/Nanite/<name>.wgsl
@@ -1273,11 +1305,43 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
         // std::cout << "[GPUDrivenDrawPipeline] Visibility Buffer shaders not found" << std::endl;
     }
     
-    // Load GPU Driven Draw shaders (original WGSL-converted SPV).
-    std::vector<u8> gpuDrawVertexShaderCode;
-    std::vector<u8> gpuDrawFragmentShaderCode;
-    gpuDrawVertexShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_vertex_shader", device_);
-    gpuDrawFragmentShaderCode = LoadShaderBytecode("GPUDrivenDraw", "gpu_driven_fragment_shader", device_);
+    // The tangent-frame variant requires qualified tangent.z and handedness data.
+    const char* tangentFrameSetting = std::getenv("PRIMAL_VK_TANGENT_FRAME");
+    const bool tangentFrame = device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+                              tangentFrameSetting && std::strcmp(tangentFrameSetting, "1") == 0;
+    if (tangentFrame && LegacyNormalSignsEnabled(device_)) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VK_TANGENT_FRAME] incompatible with PRIMAL_RASTER_LEGACY_NORMAL_SIGNS; refusing uncertified combination" << std::endl;
+        return false;
+    }
+
+    const char* albedoMips = std::getenv("PRIMAL_VK_ALBEDO_MIPS");
+    const char* forceAlbedoLod0 = std::getenv("PRIMAL_VK_ALBEDO_SAMPLE_LOD0");
+    const bool useAlbedoMips = device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+        albedoMips && std::strcmp(albedoMips, "1") == 0 &&
+        !(forceAlbedoLod0 && std::strcmp(forceAlbedoLod0, "1") == 0);
+    std::vector<u8> gpuDrawVertexShaderCode = LoadShaderBytecode(
+        tangentFrame ? "GPUDrivenDrawTangentFrame" : "GPUDrivenDraw", "gpu_driven_vertex_shader", device_);
+    if (LegacyNormalSignsEnabled(device_)) {
+        gpuDrawVertexShaderCode=LoadShaderBytecode("GPUDrivenDrawQualifiedNormal.vert", "gpu_driven_vertex_shader",device_);
+        if(gpuDrawVertexShaderCode.empty())return false;
+        PRIMAL_LOG_STREAM(Info,"Render")<<"[RASTER_LEGACY_N] experimental Vulkan normal-only shader enabled"<<std::endl;
+    }
+    const char* fragmentName = tangentFrame
+        ? (useAlbedoMips ? "GPUDrivenDrawTangentFrameAlbedoMips.frag" : "GPUDrivenDrawTangentFrame")
+        : (useAlbedoMips ? "GPUDrivenDrawAlbedoMips.frag" : "GPUDrivenDraw");
+    std::vector<u8> gpuDrawFragmentShaderCode = LoadShaderBytecode(fragmentName, "gpu_driven_fragment_shader", device_);
+    if (tangentFrame && (gpuDrawVertexShaderCode.empty() || gpuDrawFragmentShaderCode.empty())) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VK_TANGENT_FRAME] required shader missing" << std::endl;
+        return false;
+    }
+    if (tangentFrame) {
+        PRIMAL_LOG_STREAM(Info, "Render") << "[VK_TANGENT_FRAME] enabled; fragment=" << fragmentName
+            << "; requires qualified tangent data" << std::endl;
+    }
+    if (useAlbedoMips) {
+        if(gpuDrawFragmentShaderCode.empty())return false;
+        PRIMAL_LOG_STREAM(Info,"Render") << "[VK_ALBEDO_MIPS] albedo gradient sampling; normal/ORM remain LOD0" << std::endl;
+    }
 
     if (!gpuDrawVertexShaderCode.empty() && !gpuDrawFragmentShaderCode.empty()) {
         // std::cout << "[GPUDrivenDrawPipeline] Loaded GPU Draw shaders (" << gpuDrawVertexShaderCode.size()
@@ -1461,6 +1525,10 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
         PRIMAL_LOG_STREAM(Error, "Render") << "[GPUDrivenDrawPipeline] Failed to load GPU Draw shaders" << std::endl;
     }
 
+    if (tangentFrame && draw_pipeline_ == rhi::handles::INVALID_PIPELINE) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[VK_TANGENT_FRAME] pipeline creation failed" << std::endl;
+        return false;
+    }
     auto resolveShaderCode = LoadShaderBytecode("VisibilityBufferResolve", "ComputeMain", device_);
 
     if (resolveShaderCode.empty()) {
@@ -2018,6 +2086,9 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
                 defaultElem.uv = math::v2{0.0f, 0.0f};
                 for(u32 i=0; i<elemCount; ++i) mergedElements.push_back(defaultElem);
             }
+
+            if(LegacyNormalSignsEnabled(device_))
+                RecoverLegacyRasterSigns(meshAsset,mergedElements,mergedElements.size()-elemCount);
 
             // Copy MeshletVertices (Global Vertex Indices)
             // Need to offset by currentPositionOffset
@@ -3018,10 +3089,13 @@ bool GPUDrivenDrawPipeline::Stage3_GPUDrawCalls(rhi::RHICommandBuffer* cmd_buffe
     drawConsts.prev_jitter = prev_jitter_;   // what the previous frame rendered with
     prev_jitter_ = drawConsts.jitter;        // store for next frame
 
+    last_raster_jitter_frame_=~u32(0);
     void* constData = device_->MapBuffer(cameraConstBuffer);
     if (constData) {
         memcpy(constData, &drawConsts, sizeof(DrawConstants));
         device_->UnmapBuffer(cameraConstBuffer);
+        last_raster_jitter_ndc_=drawConsts.jitter;
+        last_raster_jitter_frame_=frame_index;
     }
 
     // Update Descriptor Set with Global Buffers
@@ -4033,7 +4107,7 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
         void* args = device_->MapBuffer(frame.indirect_draw_buffer[cascade_index], 0, sizeof(u32) * 4);
         if (args) {
             u32* p = static_cast<u32*>(args);
-            p[0] = 126 * 3;           // vertexCount
+            p[0] = kMeshletMaxTriangles * 3; // Match the synthesized meshlet triangle cap.
             p[1] = totalMeshlets;      // instanceCount
             p[2] = 0;                  // vertexStart
             p[3] = 0;                  // baseInstance

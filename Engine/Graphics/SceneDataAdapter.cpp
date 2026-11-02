@@ -119,10 +119,12 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadRenderItemData(rhi::RHIDevi
         }
 
         if (isPipelineFormat) {
-            auto pipelineResult = LoadPipelineFormat(device, data, size);
+            bool cardBakeError = false;
+            auto pipelineResult = LoadPipelineFormat(device, data, size, cardBakeError);
             if (!pipelineResult.empty()) {
                 return pipelineResult;
             }
+            if (cardBakeError) return {};
             PRIMAL_LOG_STREAM(Error, "Scene") << "[SceneData] Pipeline-format parse failed; trying legacy parser" << std::endl;
         }
     }
@@ -1456,9 +1458,19 @@ ImportedResources SceneDataAdapter::ImportResources(const void* data, u32 size) 
 //   [u32 magic_sdf][sdf data...]
 // ============================================================================
 utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
-    rhi::RHIDeviceBase* device, const void* data, u32 size) {
+    rhi::RHIDeviceBase* device, const void* data, u32 size, bool& cardBakeError) {
 
     utl::vector<SceneDataMeshInfo> result;
+    cardBakeError = false;
+    auto rejectCardBake = [&]() {
+        cardBakeError = true;
+        for (auto& entry : result) {
+            if (entry.mesh) { entry.mesh->Destroy(device); delete entry.mesh; entry.mesh = nullptr; }
+            if (entry.ownsMeshContentResource && entry.meshEntityId != id::invalid_id)
+                content::destroy_resource(entry.meshEntityId, content::asset_type::mesh, content::GraphicsAPI::RHI);
+        }
+        result.clear();
+    };
     BlobReader reader(static_cast<const u8*>(data), size);
 
     // Helper lambdas for safe reading.
@@ -1658,37 +1670,39 @@ utl::vector<SceneDataMeshInfo> SceneDataAdapter::LoadPipelineFormat(
                 }
             }
 
-            // T4.2: card bake ("CDBK") section — peek-gated like UVLM above;
-            // kept in locals and copied into the asset registered below.
+            // CDBK is legacy v1. CDB2 has an explicit supported version 2.
+            // A flagged malformed section invalidates the whole pipeline load:
+            // continuing would interpret its payload as the following mesh.
             utl::vector<rhi::RHICardBakeCard> bakedCards;
             utl::vector<rhi::RHICardBakeSurfel> bakedSurfels;
             if (hasCardBake) {
                 bool cardBakeConsumed = false;
-                if (reader.Remaining() >= 8) {
-                    const u8* cdbkPeek = static_cast<const u8*>(reader.GetCurrentPtr());
-                    u32 cdbkMagic = ReadPackedValue<u32>(cdbkPeek);
-                    if (cdbkMagic == 0x4B424443) { // "CDBK"
-                        reader.Skip(4);
-                        u32 cardCount = reader.Read<u32>();
-                        const u32 cardBytes = cardCount * 32; // sizeof(RHICardBakeCard)
-                        if (cardCount <= 4096 && reader.Remaining() >= cardBytes + 4) {
-                            bakedCards.resize(cardCount);
-                            reader.Read(bakedCards.data(), cardCount * sizeof(rhi::RHICardBakeCard));
-                            u32 surfelCount = reader.Read<u32>();
-                            const u32 surfelBytes = surfelCount * 32; // sizeof(RHICardBakeSurfel)
-                            if (surfelCount <= (1u << 20) && reader.Remaining() >= surfelBytes) {
+                if (reader.Remaining() >= sizeof(u32)) {
+                    const u32 magic=reader.Read<u32>();
+                    bool versionOK=magic==0x4B424443u; // CDBK
+                    if (magic==0x32424443u && reader.Remaining()>=sizeof(u32))
+                        versionOK=reader.Read<u32>()==2u; // CDB2 v2 only
+                    if (versionOK && reader.Remaining()>=sizeof(u32)) {
+                        const u32 count=reader.Read<u32>();
+                        const size_t bytes=count<=4096 ? size_t(count)*sizeof(rhi::RHICardBakeCard) : 0;
+                        if (count<=4096 && reader.Remaining()>=bytes && reader.Remaining()-bytes>=sizeof(u32)) {
+                            bakedCards.resize(count);
+                            if(bytes)reader.Read(bakedCards.data(),bytes);
+                            const u32 surfelCount=reader.Read<u32>();
+                            const size_t surfelBytes=surfelCount<=(1u<<20) ? size_t(surfelCount)*sizeof(rhi::RHICardBakeSurfel) : 0;
+                            if(surfelCount<=(1u<<20) && reader.Remaining()>=surfelBytes) {
                                 bakedSurfels.resize(surfelCount);
-                                reader.Read(bakedSurfels.data(), surfelCount * sizeof(rhi::RHICardBakeSurfel));
-                                cardBakeConsumed = true;
+                                if(surfelBytes)reader.Read(bakedSurfels.data(),surfelBytes);
+                                cardBakeConsumed=true;
                             }
                         }
                     }
                 }
                 if (!cardBakeConsumed) {
-                    PRIMAL_LOG_STREAM(Warn, "Scene") << "[Pipeline] flagged card bake section missing/invalid for \""
-                              << meshName << "\"; continuing without card bake" << std::endl;
-                    bakedCards.clear();
-                    bakedSurfels.clear();
+                    PRIMAL_LOG_STREAM(Error, "Scene") << "[Pipeline] flagged card bake section missing/invalid for \""
+                              << meshName << "\"; rejecting entire pipeline load" << std::endl;
+                    rejectCardBake();
+                    return {};
                 }
             }
 

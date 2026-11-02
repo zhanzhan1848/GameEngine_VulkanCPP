@@ -14,6 +14,8 @@ namespace primal::graphics::rhi {
 
 namespace primal::graphics::nanite {
 
+enum class TextureArrayChannel { Generic, Albedo };
+
 // 🎨 Texture array build context
 struct TextureArrayBuildContext {
     // Deduplication mapping: texture handle → array index
@@ -88,7 +90,8 @@ public:
         rhi::RHICommandBuffer* cmdBuffer,
         const std::vector<rhi::ResourceHandle>& sources,
         const char* name,
-        rhi::ResourceHandle& outArray
+        rhi::ResourceHandle& outArray,
+        TextureArrayChannel channel = TextureArrayChannel::Generic
     );
 
 private:

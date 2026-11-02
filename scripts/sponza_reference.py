@@ -176,6 +176,7 @@ def main():
     parser.add_argument("backend", choices=("metal", "vulkan"))
     parser.add_argument("--output", type=Path, default=Path("/tmp/sponza-reference"))
     parser.add_argument("--frame", type=int, default=360)
+    parser.add_argument("--frames", help="comma-separated discrete frames in one Vulkan run; requires same-frame pass completion")
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--min-runtime", type=float, default=0, help="keep rendering this many seconds for regression checks")
     parser.add_argument("--readback-json", type=Path, action="append", default=[], help="wait for each fresh JSON completion record before terminating; repeat for independent readbacks")
@@ -186,6 +187,15 @@ def main():
     args = parser.parse_args()
     if args.frame < 1 or args.timeout <= 0 or not 0 <= args.min_runtime < args.timeout:
         parser.error("frame and timeout must be positive")
+    frames = []
+    if args.frames:
+        try:
+            frames = [int(v) for v in args.frames.split(",")]
+            if args.backend != "vulkan" or not frames or any(v < 1 for v in frames) or frames != sorted(set(frames)):
+                raise ValueError()
+        except ValueError:
+            parser.error("frames must be strictly increasing positive Vulkan frame numbers")
+        args.frame = frames[-1]
     if args.camera:
         try:
             camera = [float(v) for v in args.camera.split(",")]
@@ -207,6 +217,33 @@ def main():
     log = output / "render.log"
     env = dict(os.environ, SPONZA_REFERENCE="1", SPGI_CAM_LOCK="1",
                SPONZA_CAPTURE=str(capture), SPONZA_CAPTURE_FRAME=str(args.frame))
+    if frames:
+        env.update(SPONZA_CAPTURE_FRAMES=",".join(map(str, frames)), SPONZA_CAPTURE_DIR=str(output), SPONZA_PASS_CAPTURE_DIR=str(output))
+        capture = output / f"reference_{frames[-1]}.ppm"
+    def discrete_ready():
+        if not frames:
+            return True
+        for frame in frames:
+            ppm = output / f"reference_{frame}.ppm"
+            meta = output / f"frame-{frame}.json"
+            if not ppm.is_file() or not meta.is_file():
+                return False
+            try:
+                with ppm.open("rb") as f:
+                    magic, size, maximum = f.readline(), f.readline(), f.readline()
+                    w,h = map(int,size.split())
+                    if magic != b"P6\n" or maximum != b"255\n" or ppm.stat().st_size != f.tell()+w*h*3:
+                        return False
+                m=json.loads(meta.read_text())
+                if m["frame"] != frame or not m["complete"] or len(m["sources"]) != 5:
+                    return False
+                for source in m["sources"]:
+                    raw=output / f"frame-{frame}-{source['name']}.raw"
+                    if not raw.is_file() or raw.stat().st_size != source['width']*source['height']*source['bpp']:
+                        return False
+            except (ValueError,KeyError,OSError):
+                return False
+        return True
     if args.default_lighting:
         env["SPONZA_REFERENCE"] = "0"
     # The repaired SC offline-SDF transport removes false floor bounce, so
@@ -325,7 +362,7 @@ def main():
         "RG_PROF",
     )
     (output / "capture.json").write_text(json.dumps({
-        "backend": args.backend, "mode": args.mode, "frame": args.frame,
+        "backend": args.backend, "mode": args.mode, "frame": args.frame, "frames": frames,
         "camera": args.camera, "fov": args.fov,
         "default_lighting": args.default_lighting,
         "min_runtime": args.min_runtime,
@@ -350,7 +387,7 @@ def main():
                             width, height = map(int, size.split())
                             expected_size = image.tell() + width * height * 3
                     if expected_size and capture.stat().st_size == expected_size:
-                        if time.monotonic() - started >= args.min_runtime and readbacks_ready(args.readback_json, started_wall):
+                        if time.monotonic() - started >= args.min_runtime and readbacks_ready(args.readback_json, started_wall) and discrete_ready():
                             succeeded = True
                             break
                 time.sleep(0.5)
@@ -363,7 +400,7 @@ def main():
                     process.kill()
                     process.wait()
     # P0: 无论成败都并入引擎侧真值——失败采集的 provenance 同样要可核查。
-    merge_engine_reported(output / "capture.json", log, output / "frame.ppm")
+    merge_engine_reported(output / "capture.json", log, capture)
     metadata = json.loads((output / 'capture.json').read_text())
     metadata['readback_wait'] = dict(required=[str(p.resolve()) for p in args.readback_json], ready=readbacks_ready(args.readback_json, started_wall), capture_succeeded=succeeded, scope='fresh JSON completion only; individual audits must verify frame/source identity')
     (output / 'capture.json').write_text(json.dumps(metadata, indent=2)+'\n')

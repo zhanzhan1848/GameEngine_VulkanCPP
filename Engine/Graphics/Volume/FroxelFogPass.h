@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CommonHeaders.h"
+#include "SparseParticleVolume.h"
 #include "Graphics/Volume/FroxelTypes.h"
 #include "Graphics/Volume/VolumeTypes.h"
 #include "Graphics/RHI/Core/RHITypes.h"
@@ -96,7 +97,27 @@ public:
     void SetTemporalEnabled(bool on) { temporal_enabled_ = on; }
     void SetAmbientSourceSPGI(bool on) { ambient_spgi_override_ = on ? 1u : 0u; }
 
+    // Render-thread submission before AddPass. Empty input clears the source.
+    // Caller provides only live particles; unchanged snapshots need no resubmission.
+    // The three frame slots must be fenced before reuse, as for the existing froxel textures.
+    bool SetVolumeParticles(std::span<const VolumeParticle> particles,
+                            const SparseVolumeConfig& config = {}, std::string* error = nullptr);
+    const SparseParticleVolume& GetParticleVolume() const { return particle_volume_; }
+
 private:
+    struct ParticleSlot {
+        rhi::ResourceHandle atlas = rhi::handles::INVALID_RESOURCE;
+        rhi::ResourceHandle directory = rhi::handles::INVALID_RESOURCE;
+        rhi::ResourceHandle staging = rhi::handles::INVALID_RESOURCE;
+        uint64_t generation = ~uint64_t(0);
+        bool upload = false;
+        u32 side = 0;
+    };
+    SparseParticleVolume particle_volume_;
+    uint64_t particle_generation_ = 0;
+    ParticleSlot particle_slots_[3];
+    bool PrepareParticleSlot(u32 slot);
+    void DestroyParticleSlot(ParticleSlot& slot);
     void CreateDescriptorSetLayouts();
     void CreatePipelines();
     void CreateConstantBuffers();

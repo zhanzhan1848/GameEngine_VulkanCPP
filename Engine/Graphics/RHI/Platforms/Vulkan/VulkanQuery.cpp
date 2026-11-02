@@ -14,6 +14,7 @@
 
 #include <iostream>
 #include <cstring>
+#include <cstdlib>
 
 namespace primal::graphics::rhi {
 
@@ -83,6 +84,12 @@ bool VulkanQueryPool::GetResults(u32 firstQuery, u32 queryCount, void* data, siz
 
     // 每条结果大小:Timestamp/Occlusion = u64;PipelineStatistics 默认按 u64 取每条
     VkQueryResultFlags flags = VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT;
+    // Experiment only: absence of a result is not zero GPU work and must not
+    // authorize host reuse of any frame slot or resource. Callers must use the
+    // returned boolean to distinguish unavailable timestamp data.
+    const char* nonblocking = std::getenv("PRIMAL_VK_QUERY_NONBLOCKING");
+    if (type_ == QueryType::Timestamp && nonblocking && std::strcmp(nonblocking,"1") == 0)
+        flags &= ~VK_QUERY_RESULT_WAIT_BIT;
 
     VkResult res = vkGetQueryPoolResults(
         device_, pool_, firstQuery, queryCount,
@@ -92,7 +99,8 @@ bool VulkanQueryPool::GetResults(u32 firstQuery, u32 queryCount, void* data, siz
 
     if (res == VK_SUCCESS) return true;
     if (res == VK_NOT_READY) {
-        // 不应发生(WAIT bit 已设),但兜底
+        // The nonblocking timestamp experiment expects VK_NOT_READY; keep
+        // the existing false contract (the caller must ignore unavailable data).
         return false;
     }
     if (res == VK_ERROR_DEVICE_LOST) {

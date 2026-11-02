@@ -59,6 +59,7 @@ layout(location = 7) out uvec4 out_geometry_triangle2;
 struct MaterialInfo {
     uint  albedo_texture_idx;
     vec3  albedo_tint;
+    vec2  uv_scale;
     uint  flags;
 };
 
@@ -72,6 +73,8 @@ MaterialInfo load_material(uint idx) {
         uintBitsToFloat(mdb.mats[base + 5u])
     );
     m.flags = mdb.mats[base + 11u];
+    m.uv_scale = vec2(uintBitsToFloat(mdb.mats[base + 9u]),
+                      uintBitsToFloat(mdb.mats[base + 10u]));
     return m;
 }
 
@@ -99,16 +102,29 @@ vec2 octEncode(vec3 n) {
 void main() {
     // Missing-material sentinel: neutral gray (never magenta — atlas texels
     // feed probes).
+    if (IN.material_id >= uint(mdb.mats.length()) / 12u) discard;
     MaterialInfo mat = load_material(IN.material_id);
-    vec2 scaled_uv = fract(IN.uv * vec2(1.0));
+    if (any(isnan(mat.albedo_tint)) || any(isinf(mat.albedo_tint)) ||
+        any(isnan(mat.uv_scale)) || any(isinf(mat.uv_scale)) ||
+        any(lessThan(mat.albedo_tint, vec3(0.0)))) discard;
+    vec2 scaled_uv = fract(IN.uv * mat.uv_scale);
 
     int albedo_layers = textureSize(albedo_textures, 0).z;
-    vec4 albedo_sample = vec4(0.5);
-    if (mat.albedo_texture_idx != 0xFFFFFFFFu && int(mat.albedo_texture_idx) < albedo_layers) {
+    // The main material path uses the tint for a constant material. An
+    // invalid array index cannot create a measured neutral-gray surface.
+    vec4 albedo_sample = vec4(1.0);
+    if (mat.albedo_texture_idx != 0xFFFFFFFFu) {
+        if (mat.albedo_texture_idx >= uint(albedo_layers)) discard;
         albedo_sample = texture(sampler2DArray(albedo_textures, texture_sampler),
                                 vec3(scaled_uv, float(mat.albedo_texture_idx)));
     }
     vec3 base_color = albedo_sample.rgb * mat.albedo_tint;
+
+    float axis_depth = dot(IN.world_pos - cb.center.xyz, cb.fwd.xyz);
+    if (any(isnan(base_color)) || any(isinf(base_color)) ||
+        any(isnan(IN.normal)) || any(isinf(IN.normal)) ||
+        dot(IN.normal, IN.normal) < 1e-8 || isnan(axis_depth) ||
+        isinf(axis_depth) || axis_depth < 0.0) discard;
 
     vec3 N = normalize(IN.normal);
     // Card projections mirror U for three faces. Raster winding therefore
@@ -118,7 +134,7 @@ void main() {
     out_albedo = vec4(base_color,
                       float(encode_card_transport_alpha(mat.flags)) / 255.0);
     out_normal = vec4(octEncode(N), 0.0, 1.0);
-    out_axis_depth = dot(IN.world_pos - cb.center.xyz, cb.fwd.xyz);
+    out_axis_depth = axis_depth;
 #ifdef SC_CAPTURE_SOURCE_AUDIT_VARIANT
     // misc.z is intentionally carried as float in CardParams for the
     // existing capture ABI; preserve its exact frame bits in the audit MRT.

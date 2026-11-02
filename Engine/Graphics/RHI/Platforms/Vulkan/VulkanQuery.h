@@ -35,9 +35,11 @@ public:
      * @param queryCount 读取数量
      * @param data 输出缓冲
      * @param stride 每条结果的字节步长
-     * @return true 全部就绪并写出;false 超时或参数非法
+     * @return true 全部就绪并写出；false 表示结果不可用或参数/设备错误，不能当零耗时
      *
-     * @details 阻塞等待(WAIT bit),超时 1 秒;调用方按 stride 拷贝。
+     * @details 默认使用 WAIT bit，无额外 1 秒超时；实验环境变量
+     *          PRIMAL_VK_QUERY_NONBLOCKING=1 仅对 Timestamp 取消 WAIT。
+     *          非阻塞读取不可代替 frame fence 或授权任何 host 资源复用。
      *          Timestamp/PipelineStatistics:每条 u64;
      *          Occlusion:每条 u64(可见 sample 数)。
      */

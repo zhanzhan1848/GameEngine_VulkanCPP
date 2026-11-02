@@ -113,6 +113,7 @@ layout(set = 0, binding = 6) readonly buffer DepthOnlyHits {
 #ifdef DDGI_DEPTH_PROVENANCE
 // Diagnostic sidecar mirrors depth history slot identity, NOT inferred from
 // the moments. Per cell: H/E/X counts + observation stamp; last H/E/X/sample
+// stamps. In mode 7 E means measured clear/censored (-2 or -3), NOT sky.
 // stamps. All stamps are volume.FrameIndex+1 (zero=never observed).
 layout(set=0,binding=7) readonly buffer ProvenanceHistory { uvec4 provenance_history[]; };
 layout(set=0,binding=8) buffer ProvenanceOutput { uvec4 provenance_output[]; };
@@ -165,10 +166,12 @@ void ddgi_update_depth() {
     float sumDist[64];
     float sumDistSq[64];
     uint  rayCountArr[64];
+    float sumWeight[64];
 #ifdef DDGI_DEPTH_PROVENANCE
     uvec3 observed[64];
 #endif
     for (uint t = 0u; t < texels; t++) {
+        sumWeight[t] = 0.0;
         sumDist[t]   = 0.0;
         sumDistSq[t] = 0.0;
         rayCountArr[t] = 0u;
@@ -185,33 +188,58 @@ void ddgi_update_depth() {
         // Production skips negative rays for moments; diagnostic counts them
         // independently, preserving escape vs exhausted/unknown semantics.
 #ifndef DDGI_DEPTH_PROVENANCE
-        if (ray.radiance_and_dist.w < 0.0) {
+        if (volume.RaySampleMode != 7 && ray.radiance_and_dist.w < 0.0) {
             continue;
         }
 #endif
 
         // Compute ray direction and map to octahedral texel — same sampler the
         // trace side used for this ray index.
-        vec3 rayDir = ddgiSampleRayDirection(r, volume.RaysPerProbe,
+        vec4 raySample = ddgiSampleRayDirection(r, volume.RaysPerProbe,
                                              volume.FrameIndex,
                                              uint(volume.RaySampleMode),
-                                             (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0))).xyz;
-        vec2 uv = octahedralEncode(rayDir);
+                                             (volume.LightDirection.xyz[0]*volume.LightDirection.xyz[0] + volume.LightDirection.xyz[1]*volume.LightDirection.xyz[1] + volume.LightDirection.xyz[2]*volume.LightDirection.xyz[2] > 1e-8 ? normalize(-volume.LightDirection.xyz) : vec3(0.0, -1.0, 0.0)));
+        vec2 uv = octahedralEncode(raySample.xyz);
         uvec2 texel = uvec2(clamp(uint(uv.x * float(res)), 0u, res - 1u),
                             clamp(uint(uv.y * float(res)), 0u, res - 1u));
         uint texelIdx = texel.y * res + texel.x;
 
 #ifdef DDGI_DEPTH_PROVENANCE
         float measured=ray.radiance_and_dist.w;
-        if (measured>=0.0) observed[texelIdx].x++;
-        else if (measured<=-1.5) observed[texelIdx].y++;
+        if (measured>=0.0 && (volume.RaySampleMode != 7 || (!isnan(measured) && !isinf(measured)))) observed[texelIdx].x++;
+        else if (volume.RaySampleMode == 7 ? (measured == -2.0 || measured == -3.0) : measured<=-1.5) observed[texelIdx].y++;
         else observed[texelIdx].z++;
-        if (measured<0.0) continue;
+        if (volume.RaySampleMode != 7 && measured<0.0) continue;
 #endif
 
         float dist = ray.radiance_and_dist.w;
-        sumDist[texelIdx]   = sumDist[texelIdx] + dist;
-        sumDistSq[texelIdx] = sumDistSq[texelIdx] + dist * dist;
+        float weight = 1.0;
+        if (volume.RaySampleMode == 7) {
+            // True escape (-2) and finite-range clear (-3) are max-distance
+            // measurements; only -2 is sky. Exhaustion remains
+            // UNKNOWN. Do not turn NaNs or other negative status into sky.
+            if (dist == -2.0 || dist == -3.0) dist = volume.RayMaxDistance;
+            if (dist < 0.0 || isnan(dist) || isinf(dist)) continue;
+            weight = 0.25 / raySample.w; // 1/length(q)^3; constant 4 cancels
+            // Weighted Welford: mode7 uses sumDist as the online mean and
+            // sumDistSq as M2. Never subtract two large second moments.
+            float oldWeight = sumWeight[texelIdx];
+            float newWeight = oldWeight + weight;
+            if (oldWeight == 0.0) {
+                sumDist[texelIdx] = dist;
+                sumDistSq[texelIdx] = 0.0;
+            } else {
+                float delta = dist - sumDist[texelIdx];
+                float newMean = sumDist[texelIdx] + delta * (weight / newWeight);
+                sumDistSq[texelIdx] += weight * delta * (dist - newMean);
+                sumDist[texelIdx] = newMean;
+            }
+            sumWeight[texelIdx] = newWeight;
+        } else {
+            // Preserve legacy sums and mode5 depth-only extras verbatim.
+            sumDist[texelIdx] = sumDist[texelIdx] + dist;
+            sumDistSq[texelIdx] = sumDistSq[texelIdx] + dist * dist;
+        }
         rayCountArr[texelIdx] = rayCountArr[texelIdx] + 1u;
     }
 
@@ -284,6 +312,11 @@ void ddgi_update_depth() {
         // No hit: retain the measured open-sky history. Mode 4 separately
         // repairs only directions the fixed 128-ray lattice never sampled.
         if (rayCountArr[texelIdx] == 0u) {
+            if (volume.RaySampleMode == 7) {
+                depth_output[meanIdx] = -1.0; // no current observation: UNKNOWN
+                depth_output[varIdx] = 0.0;
+                continue;
+            }
             if (volume.RaySampleMode == 4 && sampledArr[texelIdx] == 0u) {
                 uint nearest = texels;
                 uint bestDist2 = 0xffffffffu;
@@ -313,6 +346,18 @@ void ddgi_update_depth() {
             }
             depth_output[meanIdx] = depth_history[meanIdx];
             depth_output[varIdx]  = depth_history[varIdx];
+            continue;
+        }
+
+        if (volume.RaySampleMode == 7) {
+            float mean = sumDist[texelIdx];
+            float variance = max(sumDistSq[texelIdx] / sumWeight[texelIdx], 0.0);
+            float oldMean = depth_history[meanIdx];
+            float oldVariance = depth_history[varIdx];
+            bool historyValid = oldMean >= 0.0 && !isnan(oldMean) && !isinf(oldMean) &&
+                oldVariance >= 0.0 && !isnan(oldVariance) && !isinf(oldVariance);
+            depth_output[meanIdx] = historyValid ? mix(oldMean, mean, alpha) : mean;
+            depth_output[varIdx] = historyValid ? mix(oldVariance, variance, alpha) : variance;
             continue;
         }
 

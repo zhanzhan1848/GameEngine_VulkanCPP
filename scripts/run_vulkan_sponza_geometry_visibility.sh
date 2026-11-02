@@ -1,0 +1,1 @@
+run_vulkan_sponza_measured.sh

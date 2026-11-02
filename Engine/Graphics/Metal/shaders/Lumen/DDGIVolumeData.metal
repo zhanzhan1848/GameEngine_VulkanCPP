@@ -84,7 +84,7 @@ struct DDGIVolumeData {
 
     // Mode 11 (MeshletDynamicDDGI) canonical radiance inputs — mirror of the
     // C++ tail (offsets 304/320). Struct grows 304→336B, byte-matched.
-    float4   SkyColor;                // 304: xyz = sky color, w unused
+    float4   SkyColor;                // 304: xyz = sky color, w = analytic history (legacy0/off1/Lambert2)
     float4   Albedo;                  // 320: xyz = uniform albedo, w unused
 };
 

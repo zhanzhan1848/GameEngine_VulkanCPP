@@ -403,7 +403,12 @@ vec3 shDot9(vec3 c[9], vec3 d) {
 // carries the previous frame's accumulated GI (which includes earlier bounces'
 // albedo colors). Each frame adds one more bounce, each tinted by the
 // surface's albedo — producing colored multi-bounce GI.
-vec3 samplePrevProbeGrid(vec3 pos, vec3 N) {
+// Production mode2 returns normalized Lambert convolution E(N)/pi. Mode0
+// remains an explicit legacy radiance diagnostic for historical replay.
+const float DDGI_HISTORY_LEGACY_RADIANCE = 0.0;
+const float DDGI_HISTORY_DISABLED = 1.0;
+const float DDGI_HISTORY_LAMBERT_DIFFUSE = 2.0;
+vec3 sampleDiffuseHistoryIrradianceOverPi(vec3 pos, vec3 N) {
     vec3 origin = volume.ProbeOrigin.xyz;
     float spacing = volume.ProbeSpacing;
     uvec3 counts = volume.ProbeCounts.xyz;
@@ -423,16 +428,16 @@ vec3 samplePrevProbeGrid(vec3 pos, vec3 N) {
         for (uint i = 0u; i < 9u; i++) {
             sh[i] = ih.irradiance_history[base + i].xyz;
         }
-        // Opt-in corrected diffuse history: EvalLib returns E(N)/pi.
+        // EvalLib returns E(N)/pi. Host policy defaults to Lambert mode2.
         // Convolve BEFORE interpolation (linear); positivity AFTER it.
-        vec3 irradiance = volume.SkyColor.w>1.5
+        vec3 irradiance = volume.SkyColor.w == DDGI_HISTORY_LAMBERT_DIFFUSE
             ? evalProbeIrradianceSH9(sh,N) : shDot9(sh, N);
         result += irradiance * tet.bw[p];
         totalWeight += tet.bw[p];
     }
     if (totalWeight > 0.0) {
         vec3 value=result/totalWeight;
-        return volume.SkyColor.w>1.5?max(value,vec3(0.0)):value;
+        return volume.SkyColor.w == DDGI_HISTORY_LAMBERT_DIFFUSE?max(value,vec3(0.0)):value;
     }
     return vec3(0.0);
 }
@@ -440,6 +445,46 @@ vec3 samplePrevProbeGrid(vec3 pos, vec3 N) {
 // ----------------------------------------------------------------------------
 // Main
 // ----------------------------------------------------------------------------
+
+#ifdef DDGI_MEASURED_GEOMETRY
+// Geometry-primary radiance has a stricter source contract than a coarse SDF
+// hit. The owner tag is necessary, never sufficient, surface qualification.
+bool ddgiMeasuredOwnerCandidate(SurfaceCacheCard card, uint owner, bool ownerKnown,
+                                vec3 hitPos, vec3 geometricN, vec3 rayDir,
+                                out vec3 radiance, out float key, out uint reject) {
+    radiance=vec3(0.0);key=1e30;reject=11u;
+    if(!ownerKnown || card.mesh_instance_id!=owner) return false;
+    if(any(isnan(hitPos))||any(isinf(hitPos))||any(isnan(geometricN))||any(isinf(geometricN))||
+       dot(geometricN,geometricN)<0.25 || dot(geometricN,rayDir)>=0.0 || card.resolution==0u ||
+       (card.axis_direction & 255u)>2u || ((card.axis_direction>>8u)&255u)>1u) return false;
+    vec3 n=normalize(geometricN), face=scCardFaceNormal(card);
+    // A soft key penalty is not same-side geometric normal qualification.
+    if(dot(face,n)>-0.5 || dot(face,-rayDir)>=0.0) {reject=12u;return false;}
+    vec2 uv;
+    if(!worldToCardUV(hitPos,card,uv)||any(isnan(uv))||any(isinf(uv))) {reject=13u;return false;}
+    reject=14u; // atlas/depth/lighting stage reached; predicates unchanged
+    ivec2 ds=textureSize(depth_atlas,0),ls=textureSize(lighting_atlas,0);
+    if(any(lessThanEqual(ds,ivec2(0)))||any(notEqual(ds,ls))||
+       card.atlas_offset_x>=uint(ds.x)||card.atlas_offset_y>=uint(ds.y)||
+       card.resolution>uint(ds.x)-card.atlas_offset_x||
+       card.resolution>uint(ds.y)-card.atlas_offset_y) return false;
+    uvec2 texel=uvec2(clamp(uv,vec2(card.atlas_offset_x,card.atlas_offset_y),
+        vec2(card.atlas_offset_x+card.resolution-1u,card.atlas_offset_y+card.resolution-1u)));
+    float depth=texelFetch(depth_atlas,ivec2(texel),0).r;
+    vec4 light=texelFetch(lighting_atlas,ivec2(texel),0);
+    if(isnan(depth)||isinf(depth)||depth<0.0||any(isnan(light))||any(isinf(light))||light.a<=0.5) {
+        reject=14u;return false;
+    }
+    vec3 captured=cardTexelToWorld(texel,depth,card),delta=captured-hitPos;
+    float along=dot(delta,n);
+    float footprint=2.0*length(card.extent.xyz)/float(card.resolution);
+    // 2mm is a geometry/raster plane gate; no .45m SDF uncertainty is added.
+    if(any(isnan(captured))||any(isinf(captured))||abs(along)>0.002||
+       length(delta-n*along)>max(footprint,0.002)) {reject=15u;return false;}
+    radiance=light.rgb;key=length(delta-n*along)+abs(along);reject=0u;
+    return true; // includes valid black; a failed source never changes depth
+}
+#endif
 
 void ddgi_trace_finalize() {
     uint tid      = gl_LocalInvocationID.y * 8u + gl_LocalInvocationID.x;
@@ -470,7 +515,25 @@ void ddgi_trace_finalize() {
     // DDGI_LEGACY_CONSUMERS=1（编译期变体，-DDDGI_LEGACY_CONSUMERS，C++ 侧
     // 按 env 选择 bytecode）：归因 A/B——消费端回到旧原格点行为（缓冲仍写）。
     vec3 rayOrigin = probePos;
+#ifdef DDGI_MEASURED_GEOMETRY
+    const bool measuredGeometry = volume.RaySampleMode == 7;
+    const vec4 geometryHN = hnb.hit_normal[globalRayIdx];
+    const vec4 geometryOrigin = robuf.relocated_origin[probeIdx];
+    const bool geometryOriginKnown = geometryOrigin.w >= 0.5 &&
+        !any(isnan(geometryOrigin)) && !any(isinf(geometryOrigin));
+    const bool geometryOwnerTagKnown = measuredGeometry && !isnan(geometryHN.w) && !isinf(geometryHN.w) &&
+        geometryHN.w >= 2.0 && geometryHN.w <= 65537.0 && floor(geometryHN.w)==geometryHN.w;
+    const uint geometryOwner = geometryOwnerTagKnown ? uint(geometryHN.w-2.0) : 0u;
+    const bool geometryOwnerKnown = geometryOwnerTagKnown && geometryOriginKnown &&
+        volume.SdfVoxelSizes[2].w == 1.0 && !any(isnan(geometryHN)) && !any(isinf(geometryHN)) &&
+        dot(geometryHN.xyz,geometryHN.xyz)>0.25;
+#endif
 #ifndef DDGI_LEGACY_CONSUMERS
+#ifdef DDGI_MEASURED_GEOMETRY
+    if (measuredGeometry) {
+        if(geometryOriginKnown) rayOrigin=geometryOrigin.xyz;
+    } else
+#endif
     if (robuf.relocated_origin[probeIdx].w > 0.5) {
         rayOrigin = robuf.relocated_origin[probeIdx].xyz;
     }
@@ -599,18 +662,64 @@ void ddgi_trace_finalize() {
 #endif
 
         bool scUsed = false;
+#ifdef DDGI_MEASURED_GEOMETRY
+        // Bounded observation only: deepest reached same-owner rejection.
+        uint geometryRejectSummary=17u;
+        bool geometrySawOwnerCandidate=false;
+        // Validated host sideband; never infer owner membership from a cell/AABB.
+        bool geometryUseOwnerDirectory=measuredGeometry && volume.SdfVoxelSizes[2].z==1.0;
+        uint geometryOwnerBegin=0u,geometryOwnerEnd=0u;
+        bool geometryOwnerDirectoryValid=false;
+        if(geometryUseOwnerDirectory && geometryOwnerKnown &&
+           geometryOwner<volume.SCLookupCount && geometryOwner<uint(cl.card_lookups.length())) {
+            geometryOwnerBegin=cl.card_lookups[geometryOwner]._pad0;
+            geometryOwnerEnd=cl.card_lookups[geometryOwner]._pad1;
+            geometryOwnerDirectoryValid=geometryOwnerBegin<=geometryOwnerEnd &&
+                geometryOwnerEnd<=uint(cd.card_data.length());
+        }
+#endif
 #if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
         bool analyticRhoPrevUsed = false;
 #endif
+#ifdef DDGI_MEASURED_GEOMETRY
+        if(!measuredGeometry || (geometryOwnerKnown && volume.SCLookupCount>0u && volume.SCAtlasSize>0u &&
+            cd.card_data.length()>0 && (geometryUseOwnerDirectory ? geometryOwnerDirectoryValid :
+                (scgo.sc_grid_offsets.length()>=18 && scgc.sc_grid_cards.length()>0))))
+#endif
         {
+#ifdef DDGI_MEASURED_GEOMETRY
+            if(measuredGeometry) geometryRejectSummary=16u;
+#endif
             uint deviceReads = 0u;
             const uint kMaxDeviceReads = 16u;
+#ifdef DDGI_MEASURED_GEOMETRY
+            uint cell=0xFFFFFFFFu;
+            if(!geometryUseOwnerDirectory) {
+                SCGridParams gp=scGridLoad();
+                cell=scGridCellIndex(gp,hitPos);
+            }
+#else
             SCGridParams gp = scGridLoad();
             uint cell = scGridCellIndex(gp, hitPos);
-            if (cell != 0xFFFFFFFFu) {
+#endif
+            if (
+#ifdef DDGI_MEASURED_GEOMETRY
+                geometryUseOwnerDirectory ||
+#endif
+                (cell != 0xFFFFFFFFu
+#ifdef DDGI_MEASURED_GEOMETRY
+                && (!measuredGeometry || cell<uint(scgo.sc_grid_offsets.length())-17u)
+#endif
+                )
+            ) {
                 if (querySourceAudit) queryCell = cell;
+#ifdef DDGI_MEASURED_GEOMETRY
+                uint begin=geometryUseOwnerDirectory ? geometryOwnerBegin : scgo.sc_grid_offsets[16u+cell];
+                uint end=geometryUseOwnerDirectory ? geometryOwnerEnd : scgo.sc_grid_offsets[17u+cell];
+#else
                 uint begin = scgo.sc_grid_offsets[16u + cell];
                 uint end   = scgo.sc_grid_offsets[17u + cell];
+#endif
 #ifdef DDGI_PATH_DEBUG
                 if (begin == end) dbgSCReject = 9u;
                 uint failCount[8];
@@ -627,15 +736,38 @@ void ddgi_trace_finalize() {
                 // wins. See SurfaceCacheData.glsl::scQueryCardCandidate.
                 float bestKey = 1e30;
                 for (uint gi = begin; gi < end && deviceReads < kMaxDeviceReads; ++gi) {
+#ifdef DDGI_MEASURED_GEOMETRY
+                    if(measuredGeometry && !geometryUseOwnerDirectory && gi>=uint(scgc.sc_grid_cards.length())) break;
+                    uint cardIdx=geometryUseOwnerDirectory ? gi : scgc.sc_grid_cards[gi];
+#else
                     uint cardIdx = scgc.sc_grid_cards[gi];
+#endif
                     if (cardIdx >= 4096u) continue;
+#ifdef DDGI_MEASURED_GEOMETRY
+                    if(measuredGeometry && cardIdx>=uint(cd.card_data.length())) continue;
+#endif
                     SurfaceCacheCard card = cd.card_data[cardIdx];
+#ifdef DDGI_MEASURED_GEOMETRY
+                    // Foreign owners cannot consume the finite lighting-query
+                    // budget and starve the actual first surface's candidates.
+                    if(measuredGeometry && (!geometryOwnerKnown ||
+                        card.mesh_instance_id!=geometryOwner)) continue;
+#endif
                     uint queryCandidateSlot = deviceReads;
                     ++deviceReads;
                     vec3 scRadiance;
                     float key = 1e30;
                     uint reject = 0u;
                     bool accepted;
+#ifdef DDGI_MEASURED_GEOMETRY
+                    if(measuredGeometry) {
+                        accepted=ddgiMeasuredOwnerCandidate(card,geometryOwner,geometryOwnerKnown,
+                            hitPos,N,rayDir,scRadiance,key,reject);
+                        if(!geometrySawOwnerCandidate) geometryRejectSummary=11u;
+                        geometrySawOwnerCandidate=true;
+                        if(!accepted) geometryRejectSummary=max(geometryRejectSummary,reject);
+                    } else {
+#endif
 #ifdef DDGI_PATH_DEBUG
                     // PATH_DEBUG already uses the diagnostic wrapper and
                     // emits the existing path/card labels.  Query audit
@@ -661,6 +793,9 @@ void ddgi_trace_finalize() {
                                                         max(volume.SdfVoxelSizes[0].x * 1.25, 0.45),
                                                         depth_atlas, lighting_atlas,
                                                         vec3(0.0), scRadiance, key);
+                    }
+#endif
+#ifdef DDGI_MEASURED_GEOMETRY
                     }
 #endif
                     if (querySourceAudit) {
@@ -720,6 +855,16 @@ void ddgi_trace_finalize() {
 #endif
             }
         }
+#ifdef DDGI_MEASURED_GEOMETRY
+        if(measuredGeometry) {
+            // COMPACT update-slot index, exactly matching Trace/HD input:
+            // group_id*RaysPerProbe+rayId. The absolute rb output index differs.
+            // Only w changes after all source decisions; xyz stays the true N.
+            float ownerTag=float(geometryOwner+2u);
+            hnb.hit_normal[globalRayIdx].w=geometryOwnerTagKnown
+                ? (scUsed ? ownerTag : -(ownerTag+float(geometryRejectSummary)/32.0)) : -1.0;
+        }
+#endif
         if (querySourceAudit) {
             // Publish the actual min-key winner only after the complete
             // production candidate loop.  A miss keeps the initialized
@@ -742,7 +887,13 @@ void ddgi_trace_finalize() {
 #if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
         if (scUsed) analyticRhoPath = 1u;
 #endif
+#ifdef DDGI_MEASURED_GEOMETRY
+        // Screen projection and analytic/history light have no owner proof.
+        // Preserve a measured geometric distance even when radiance is unknown.
+        if (!scUsed && !measuredGeometry) {
+#else
         if (!scUsed) {
+#endif
             vec3 prevRadiance;
             if (samplePrevColor(hitPos, prevRadiance)) {
                 // Screen radiance already includes this surface's material
@@ -783,27 +934,26 @@ void ddgi_trace_finalize() {
                     analyticRho.status = DDGI_RHO_STATUS_SOURCE;
                 }
 #endif
-                vec3 L_i_prev = samplePrevProbeGrid(historyPos, N);
+                vec3 L_i_prev = sampleDiffuseHistoryIrradianceOverPi(historyPos, N);
                 // Analytic: sky floor + single diffuse bounce.
                 // C3.1: the old unshadowed E_direct here injected sunlight
                 // through walls for every ray whose SC/prev-screen lookups
                 // failed — this path must only fill "black", never "bright".
                 // E_sky stays as a dim environmental floor (×0.3).
                 // Phase 2.1（本方案）: 反馈回路物理化——旧手工系数 0.70 删除，
-                // 改为扩散一跳 L_bounce = (ρ/π)·E_prev。samplePrevProbeGrid
-                // 返回未乘 π 的 SH 辐亮度评估，故 E_prev = π·L_i_prev；回路
-                // 稳态增益 = ρ（材质反照率，<1 保证几何收敛），不再有手工
+                // 扩散一跳 L_bounce = (ρ/π)·E_prev。生产 history sampler
+                // 返回 cosine 卷积 E_prev/π，而不是方向辐亮度 L(N)；回路
+                // 材质因子 = ρ，不再有手工
                 // 常数。（scsupply0 A/B 已证旧 0.70 回路把天空地板能量泵满
                 // 封闭区——SC=0 后上拱仍 54.7 vs 参考 18.9。）
                 float NdotUp = max(0.0, N.y);
                 vec3 E_sky = volume.SkyColor.xyz * (0.5 + 0.5 * NdotUp) * 0.3;
                 const float PI_VAL = 3.14159265358979;
-                // Opt-in diagnostic only: SkyColor.w is set by the Vulkan
-                // host for the analytic history diagnostics. Default0 retains exact
-                // legacy one-hop history; no SC/direct/escape changes.
-                // mode1 removes history; mode2 keeps rho*E/pi instead of
-                // rho*L(N). PI here cancels the common /PI below exactly once.
-                vec3 historyBounce=volume.SkyColor.w>.5 && volume.SkyColor.w<1.5
+                // Stable wire policy: mode0=explicit legacy radiance,
+                // mode1=disabled, mode2=production Lambert diffuse history.
+                // Keep the old mode2 arithmetic order for exact A/B replay:
+                // PI here cancels the common /PI below exactly once.
+                vec3 historyBounce=volume.SkyColor.w == DDGI_HISTORY_DISABLED
                     ?vec3(0.0):PI_VAL*L_i_prev;
                 result.xyz = (albedo / PI_VAL) * (E_sky + historyBounce);
                 if (analyticAudit) {
@@ -819,6 +969,15 @@ void ddgi_trace_finalize() {
 #endif
             }
         }
+#ifdef DDGI_MEASURED_GEOMETRY
+    } else if (measuredGeometry && hitDistance == -3.0) {
+        // Only a finite clear segment was measured; environment radiance is unknown.
+        result=vec4(0.0,0.0,0.0,-3.0);
+    } else if (measuredGeometry && hitDistance != -2.0) {
+        // Unknown geometry must not borrow a nearby card at the probe origin.
+        result=vec4(0.0,0.0,0.0,
+            isnan(hitDistance)||isinf(hitDistance) ? -1.0 : hitDistance);
+#endif
     } else if (hitDistance <= -1.5) {
 #if defined(DDGI_ANALYTIC_FIRST_RHO_VARIANT) && DDGI_ANALYTIC_FIRST_RHO_VARIANT
         analyticRhoPath = 4u;

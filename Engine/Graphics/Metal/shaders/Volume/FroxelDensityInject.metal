@@ -2,6 +2,7 @@
 using namespace metal;
 
 #include "FroxelCommon.metal"
+#include "SparseParticleVolume.metal"
 
 // ============================================================================
 // Pass 1: Froxel Density Inject
@@ -17,6 +18,8 @@ kernel void froxel_density_inject(
     texture3d<float, access::sample>  sdf_cascade_2  [[texture(4)]],
     texture2d<float, access::read>    depth_buffer   [[texture(5)]],
     texture3d<float, access::sample>  cloud_volume   [[texture(7)]],
+    texture3d<float, access::sample> particle_atlas [[texture(8)]],
+    device const int4* particle_words [[buffer(9)]],
     constant FroxelParams& params                    [[buffer(6)]],
     uint3 gid [[thread_position_in_grid]])
 {
@@ -46,6 +49,10 @@ kernel void froxel_density_inject(
             cloudD = params.CloudA.z * cd * not_solid;
         }
     }
+
+    float particleD = sparseDensity(world_pos, particle_atlas, particle_words);
+    if (particleD > 0.0)
+        cloudD = min(60000.0, cloudD + particleD * smoothstep(-1.0, -0.2, froxel_sample_best_sdf(world_pos, sdf_cascade_0, sdf_cascade_1, sdf_cascade_2, params)));
 
     // 场景几何之后的 froxel 置零：屏幕足迹 4 象限取最小深度（最近表面），
     // 与 GLSL 同步（audit V2/V3）；切片后边界越面即清零。

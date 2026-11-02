@@ -1,3 +1,8 @@
+#include "Graphics/Utilities/CPUStallAudit.h"
+#include "Graphics/Utilities/GeometryBVHStore.h"
+#include "Graphics/RenderPipeline/Modules/ExperimentalSAHWitness.h"
+#include "Graphics/RenderGraph/LumenCompareCapture.h"
+#include "Graphics/RenderPipeline/PassChainCapture.h"
 #include "StandardRenderPipeline.h"
 #include "Graphics/Lumen/DDGIFitGrid.h"
 #include "Graphics/RenderPipeline/RenderPasses/ForwardPass.h"
@@ -358,9 +363,8 @@ void StandardRenderPipeline::OnSceneChanged(const RenderScene& scene, bool first
     sc_registration_deferred_frames_ = 0;
     sc_gate_diag_logged_ = false;
 
-    if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
-        ddgi_pass_->ClearProbeField();
-    }
+    for (u32 vi=0; vi<ddgi_volume_count_; ++vi)
+        if (ddgi_volumes_[vi] && ddgi_volumes_[vi]->IsInitialized()) ddgi_volumes_[vi]->ClearProbeField();
     // [WRC] 场景切换同步清场（A12 同语义：不继承旧场景 GI）。
     for (u32 vi = 0; vi < wrc_volume_count_; ++vi) {
         if (wrc_volumes_[vi] && wrc_volumes_[vi]->IsInitialized()) {
@@ -427,6 +431,18 @@ void StandardRenderPipeline::TryLatchGIContentReady() {
     PRIMAL_LOG_STREAM(Info, "Render")
         << "[Lumen] GI content-ready at frame " << readyFrame
         << " — temporal caches reset; GI-local warmup begins." << std::endl;
+}
+
+void StandardRenderPipeline::ResetComparisonGIHistory() {
+    if (!std::getenv("LUMEN_COMPARE_DIR") || !device_) return;
+    device_->WaitIdle();
+    gi_content_ready_frame_ = 0xFFFFFFFFu;
+    sc_registration_done_ = false;
+    sc_registration_deferred_frames_ = 0;
+    camera_cut_this_frame_ = true;
+    PostProcess::ResetTAAHistory();
+    settings_dirty_ = true; // ApplyConfigChanges recreates Lumen passes.
+    PRIMAL_LOG_STREAM(Info, "Render") << "[LUMEN_COMPARE] GI history reset after raster preparation" << std::endl;
 }
 
 
@@ -980,6 +996,159 @@ void StandardRenderPipeline::SetPassEnabled(RenderPassID pass, bool enabled) {
     }
 }
 
+static bool EnvironmentVisibilityRequested(rhi::RHIDeviceBase* device) {
+    const char* value=std::getenv("PRIMAL_IBL_VISIBILITY");
+    return device && device->GetPlatform()==rhi::RHIPlatform::Vulkan &&
+        !(value && std::strcmp(value,"0")==0);
+}
+
+EnvironmentVisibilityOutputs StandardRenderPipeline::AddEnvironmentVisibility(
+    rendergraph::RenderGraph& graph,nanite::GPUDrivenDrawPipeline& gpuDraw,u32 slot,rendergraph::RGResourceHandle depthRG,rendergraph::RGResourceHandle normalRG,rendergraph::RGResourceHandle ormRG) {
+    EnvironmentVisibilityOutputs result{};
+    if(!EnvironmentVisibilityRequested(device_) || !environment_visibility_module_ ||
+       ibl_prefilter_==rhi::handles::INVALID_RESOURCE) return result;
+    EnvironmentVisibilityInputs inputs{};
+    const char* visibilityMode=std::getenv("PRIMAL_IBL_VISIBILITY");
+    inputs.legacy_unoccluded=visibilityMode && std::strcmp(visibilityMode,"unoccluded")==0;
+    inputs.depth=gpuDraw.GetGBufferDepthSampleable();inputs.normal=gpuDraw.GetGBufferNormal();inputs.orm=gpuDraw.GetGBufferORM();
+    if(inputs.depth==rhi::handles::INVALID_RESOURCE || inputs.normal==rhi::handles::INVALID_RESOURCE ||
+       inputs.orm==rhi::handles::INVALID_RESOURCE) return result;
+    inputs.depth_rg=depthRG.IsValid()?depthRG:graph.ImportResource("EnvironmentVisibility_Depth",inputs.depth);
+    inputs.normal_rg=normalRG.IsValid()?normalRG:graph.ImportResource("EnvironmentVisibility_Normal",inputs.normal);
+    inputs.orm_rg=ormRG.IsValid()?ormRG:graph.ImportResource("EnvironmentVisibility_ORM",inputs.orm);
+    const char* sahExperiment=std::getenv("PRIMAL_EXPERIMENT_ENV_SAH");
+    const bool useExperimentalSAH=sahExperiment && std::strcmp(sahExperiment,"1")==0 && !inputs.legacy_unoccluded;
+    if(useExperimentalSAH) {
+        // Force the ordinary fallback cache to re-establish its own scene if
+        // the opt-in is removed in a process that changes its environment.
+        environment_geometry_digest_=0;
+        // The candidate is a separate in-memory scene, never written to the
+        // shared PBVH cache or substituted for SC's buffers. It is usable only
+        // while the actual SC scene and frame-slot witness still match.
+        auto* sc=surface_cache_pass_.get();
+        lumen::SurfaceCachePass::GeometryWitnessView view{};
+        if(sc) {sc->PrepareGeometryConsumer(slot);view=sc->GetGeometryWitnessView(slot);}
+        std::vector<ray_geometry::InstanceInput> instances;
+        bool complete=scene_snapshot_ && view.ready && view.source_digest;
+        if(scene_snapshot_) {
+            const auto& source=scene_snapshot_->GetInstanceData();instances.reserve(source.size());
+            complete &= !source.empty();
+            for(u32 i=0;i<source.size();++i) {
+                auto mesh=primal::content::get_rhi_mesh_blas(source[i].geometry_id);
+                complete &= mesh!=nullptr;instances.push_back({mesh,source[i].world_matrix,i});
+            }
+        }
+        const u64 digest=complete?ray_geometry::SceneSourceDigest(instances):0;
+        complete &= digest && digest==view.source_digest;
+        if(complete && !environment_visibility_module_->HasExperimentalGeometryScene(digest,view.scene_epoch))
+            complete=environment_visibility_module_->SetExperimentalGeometryScene(instances,digest,view.scene_epoch);
+        inputs.geometry_still_current=[this,sc,view,digest,complete,slot] {
+            if(!complete || !sc || surface_cache_pass_.get()!=sc || !scene_snapshot_ || !environment_visibility_module_ ||
+               !environment_visibility_module_->HasExperimentalGeometryScene(digest,view.scene_epoch))return false;
+            const auto current=sc->GetGeometryWitnessView(slot);
+            if(!experimental_sah::WitnessStillCurrent(view,current,digest))return false;
+            std::vector<ray_geometry::InstanceInput> currentInstances;
+            const auto& source=scene_snapshot_->GetInstanceData();currentInstances.reserve(source.size());
+            if(source.empty())return false;
+            for(u32 i=0;i<source.size();++i) {
+                auto mesh=primal::content::get_rhi_mesh_blas(source[i].geometry_id);
+                if(!mesh)return false;
+                currentInstances.push_back({mesh,source[i].world_matrix,i});
+            }
+            return ray_geometry::SceneSourceDigest(currentInstances)==digest;
+        };
+    } else if(surface_cache_pass_) {
+        surface_cache_pass_->PrepareGeometryConsumer(slot);
+        inputs.geometry_ready=true;
+        for(u32 i=0;i<4;++i) {
+            inputs.geometry[i]=surface_cache_pass_->GetGeometryFirstHitBuffer(slot,i);
+            inputs.geometry_ready &= inputs.geometry[i]!=rhi::handles::INVALID_RESOURCE;
+        }
+    }
+    if(!useExperimentalSAH && inputs.geometry_ready && surface_cache_pass_ && scene_snapshot_ && !scene_snapshot_->NeedsFullRebuild()){
+        const char* enabled=std::getenv("PRIMAL_ENV_SDF_HYBRID");
+        if(enabled && std::strcmp(enabled,"1")==0){auto* sc=surface_cache_pass_.get();auto binding=sc->GetHybridBinding(slot);bool same=binding.ready;for(u32 i=0;i<4;++i)same=same && binding.handles[i]==inputs.geometry[i];
+            if(same){auto* snapshot=scene_snapshot_.get();inputs.hybrid_binding=binding;inputs.hybrid_field=sc->GetHybridField();const char* staleTest=std::getenv("PRIMAL_ENV_FIELD_TEST_STALE_RECORD");const bool forceStale=staleTest && std::strcmp(staleTest,"1")==0;
+                // Test-only: first qualification succeeds, closure recheck
+                // fails after graph scheduling, exercising the real A route.
+                inputs.hybrid_still_current=[this,sc,snapshot,binding,slot,forceStale,calls=0u]() mutable {if(forceStale && calls++>0){PRIMAL_LOG_STREAM(Info,"Render") << "[ENV_FIELD_TEST] stale_after_prepare=1 slot=" << slot;return false;}return surface_cache_pass_.get()==sc && scene_snapshot_.get()==snapshot && !snapshot->NeedsFullRebuild() && environment_hybrid::SameBinding(binding,sc->GetHybridBinding(slot));};}
+        }
+    }
+    if(!useExperimentalSAH && !inputs.geometry_ready && scene_snapshot_) {
+        std::vector<ray_geometry::InstanceInput> instances;
+        const auto& source=scene_snapshot_->GetInstanceData();instances.reserve(source.size());
+        bool complete=!source.empty();
+        for(u32 i=0;i<source.size();++i) {
+            auto mesh=primal::content::get_rhi_mesh_blas(source[i].geometry_id);complete &= mesh!=nullptr;
+            instances.push_back({mesh,source[i].world_matrix,i});
+        }
+        const u64 digest=complete?ray_geometry::SceneSourceDigest(instances):0;
+        if(digest!=environment_geometry_digest_ || !complete) {
+            environment_visibility_module_->SetGeometryScene(complete?std::span<const ray_geometry::InstanceInput>(instances):std::span<const ray_geometry::InstanceInput>{});
+            environment_geometry_digest_=digest;
+        }
+    }
+    inputs.inverse_view_projection=rhi::math::Inverse(proj_matrix_*view_matrix_);
+    inputs.raster_jitter_provider=[&gpuDraw,frame=static_cast<u32>(frameCount_)](rhi::math::v2& jitter){return gpuDraw.GetLastRasterJitterNDC(frame,jitter);};
+    inputs.camera_position=camera_position_;inputs.current_buffer_index=slot;inputs.frame_index=static_cast<u32>(frameCount_);
+    return environment_visibility_module_->AddPasses(graph,inputs);
+}
+
+void StandardRenderPipeline::ConfigureGatherGeometry(GIGatherInputs& inputs,u32 slot) {
+    if(!gi_gather_module_ || !gi_gather_module_->RequiresGeometryConnections() || !surface_cache_pass_)return;
+    surface_cache_pass_->PrepareGeometryConsumer(slot);
+    const char* equalBox=std::getenv("PRIMAL_DDGI_GEOMETRY_EQUAL_BOX");
+    if(equalBox && std::strcmp(equalBox,"1")==0)surface_cache_pass_->PrepareEqualBoxConsumer(slot);
+    const auto view=surface_cache_pass_->GetGeometryWitnessView(slot);
+    inputs.geometry_ready=view.ready;inputs.geometry_epoch=view.scene_epoch;inputs.geometry_source_digest=view.source_digest;
+    if(const char* cache=std::getenv("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE");cache && std::strcmp(cache,"1")==0)
+        inputs.geometry_normal_owners=surface_cache_pass_->GetInstanceNormalOwners();
+    for(u32 i=0;i<4;++i){inputs.geometry[i]=view.buffers[i];inputs.geometry_sizes[i]=view.sizes[i];}
+    auto& gpuDraw=nanite::GPUDrivenDrawPipeline::Get();
+    inputs.raster_jitter_provider=[&gpuDraw,frame=inputs.frame_index](math::v2& jitter){return gpuDraw.GetLastRasterJitterNDC(frame,jitter);};
+    auto* sc=surface_cache_pass_.get();auto* ddgi=inputs.ddgi_pass;
+    inputs.equal_box_buffer=view.equal_box_buffer;inputs.equal_box_size=view.equal_box_size;
+    inputs.equal_box_flags_hash=view.equal_box_flags_hash;inputs.equal_box_payload_hash=view.equal_box_payload_hash;inputs.equal_box_serial=view.equal_box_serial;
+    inputs.equal_box_still_current=[sc,ddgi,view,slot] {
+        const auto now=sc->GetGeometryWitnessView(slot);
+        if(!view.equal_box_ready || !now.equal_box_ready || !ddgi || now.slot!=view.slot || now.scene_epoch!=view.scene_epoch || now.slot_epoch!=view.slot_epoch || now.source_digest!=view.source_digest ||
+           now.equal_box_buffer!=view.equal_box_buffer || now.equal_box_size!=view.equal_box_size || now.equal_box_flags_hash!=view.equal_box_flags_hash || now.equal_box_payload_hash!=view.equal_box_payload_hash || now.equal_box_serial!=view.equal_box_serial)return false;
+        for(u32 i=0;i<4;++i)if(now.buffers[i]!=view.buffers[i] || now.sizes[i]!=view.sizes[i] || ddgi->GetMeasuredGeometrySource(i)!=now.buffers[i])return false;
+        return true;
+    };
+    inputs.geometry_upper=view.upper_buffer; inputs.geometry_upper_size=view.upper_size;
+    inputs.geometry_upper_original_hash=view.upper_original_hash;inputs.geometry_upper_candidate_hash=view.upper_candidate_hash;
+    inputs.geometry_upper_still_current=[sc,ddgi,view,slot] {
+        const auto current=sc->GetGeometryWitnessView(slot);
+        if(!view.ready || !view.upper_ready || !current.ready || !current.upper_ready || !ddgi ||
+           current.slot!=view.slot || current.scene_epoch!=view.scene_epoch || current.slot_epoch!=view.slot_epoch ||
+           current.source_digest!=view.source_digest || current.upper_buffer!=view.upper_buffer ||
+           current.upper_size!=view.upper_size || current.upper_original_hash!=view.upper_original_hash ||
+           current.upper_candidate_hash!=view.upper_candidate_hash) return false;
+        for(u32 i=0;i<4;++i) if(current.buffers[i]!=view.buffers[i] || current.sizes[i]!=view.sizes[i] ||
+            ddgi->GetMeasuredGeometrySource(i)!=current.buffers[i]) return false;
+        return true;
+    };
+    inputs.geometry_compact_still_current=[sc,ddgi,view,slot] {
+        const auto current=sc->GetGeometryWitnessView(slot);
+        if(!view.compact_ready || !current.compact_ready || !ddgi || current.slot!=view.slot ||
+           current.scene_epoch!=view.scene_epoch || current.slot_epoch!=view.slot_epoch ||
+           current.source_digest!=view.source_digest || current.compact_top_max!=view.compact_top_max ||
+           current.compact_bottom_max!=view.compact_bottom_max) return false;
+        for(u32 i=0;i<4;++i) if(current.buffers[i]!=view.buffers[i] || current.sizes[i]!=view.sizes[i] ||
+            ddgi->GetMeasuredGeometrySource(i)!=current.buffers[i]) return false;
+        return true;
+    };
+    inputs.geometry_still_current=[sc,ddgi,view,slot] {
+        const auto current=sc->GetGeometryWitnessView(slot);
+        if(!current.ready||current.scene_epoch!=view.scene_epoch||current.source_digest!=view.source_digest||
+           !ddgi)return false;
+        for(u32 i=0;i<4;++i)if(current.buffers[i]!=view.buffers[i]||current.sizes[i]!=view.sizes[i]||
+            ddgi->GetMeasuredGeometrySource(i)!=current.buffers[i])return false;
+        return true;
+    };
+}
+
 void StandardRenderPipeline::SetIBLResources(rhi::ResourceHandle irradiance,
                                              rhi::ResourceHandle prefilter,
                                              rhi::ResourceHandle brdfLUT) {
@@ -1443,6 +1612,19 @@ void StandardRenderPipeline::InitializeSubsystems() {
     // called before SetLumenConfig).
     deferred_module_->SetIBLResources(ibl_irradiance_, ibl_prefilter_, ibl_brdf_lut_);
 
+    if(EnvironmentVisibilityRequested(device_)) {
+        environment_visibility_module_=std::make_unique<EnvironmentVisibilityModule>();
+        environment_geometry_digest_=0;
+        auto traceCode=SelfLoadShaderSource("Lumen/EnvironmentVisibility_trace.comp",rhi::RHIPlatform::Vulkan,ShaderStage::Compute,"");
+        auto resolveCode=SelfLoadShaderSource("Lumen/EnvironmentVisibility_resolve.comp",rhi::RHIPlatform::Vulkan,ShaderStage::Compute,"");
+        ShaderHandle trace=traceCode.empty()?handles::INVALID_SHADER:device_->CreateShader(traceCode.data(),traceCode.size(),ShaderStage::Compute,"main");
+        ShaderHandle resolve=resolveCode.empty()?handles::INVALID_SHADER:device_->CreateShader(resolveCode.data(),resolveCode.size(),ShaderStage::Compute,"main");
+        if(!environment_visibility_module_->Initialize(device_,trace,resolve,render_width_,render_height_))
+            PRIMAL_LOG_STREAM(Error,"Render") << "[EnvironmentVisibility] unavailable; environment contribution remains unsupported";
+        if(const char* audit=std::getenv("PRIMAL_PAIR_FRAME_AUDIT");audit && std::strcmp(audit,"1")==0 && trace!=handles::INVALID_SHADER){u64 hash=14695981039346656037ull;for(u8 byte:traceCode){hash^=byte;hash*=1099511628211ull;}environment_visibility_module_->SetFrameAuditTraceHash(hash);}
+        environment_visibility_shaders_[0]=trace;environment_visibility_shaders_[1]=resolve;
+    }
+
     final_blit_module_ = std::make_unique<FinalBlitModule>();
     final_blit_module_->Initialize(device_, blit_vs_, blit_ps_);
 
@@ -1541,7 +1723,10 @@ void StandardRenderPipeline::InitializeSubsystems() {
     probe_sphere_module_ = std::make_unique<DebugProbeSphereModule>();
     probe_sphere_module_->Initialize(device_, probe_sphere_vs_, probe_sphere_ps_);
 
-    if (settings_.quality.enable_ssgi || settings_.quality.enable_ddgi) {
+    // Vulkan also needs the HDR display composite when all GI features are off:
+    // its deferred MRT keeps environment reflection separate from direct radiance.
+    if (settings_.quality.enable_ssgi || settings_.quality.enable_ddgi ||
+        device_->GetPlatform() == RHIPlatform::Vulkan) {
         fusion_module_ = std::make_unique<FusionCompositeModule>();
         fusion_module_->Initialize(device_, fusion_indirect_ps_, blit_vs_,
                                    fusion_composite_ps_, render_width_, render_height_);
@@ -1599,6 +1784,8 @@ void StandardRenderPipeline::ShutdownSubsystems() {
     if (neural_nr_module_) { neural_nr_module_->Shutdown(); neural_nr_module_.reset(); }
     framegen_present_ = false;
     if (probe_sphere_module_) { probe_sphere_module_->Shutdown(); probe_sphere_module_.reset(); }
+    if(environment_visibility_module_) {environment_visibility_module_->Shutdown();environment_visibility_module_.reset();environment_geometry_digest_=0;}
+    for(auto& shader:environment_visibility_shaders_) if(shader!=handles::INVALID_SHADER) {device_->DestroyShader(shader);shader=handles::INVALID_SHADER;}
     if (deferred_module_) { deferred_module_->Shutdown(); deferred_module_.reset(); }
     if (shadow_module_) { shadow_module_->Shutdown(); shadow_module_.reset(); }
     if (reflection_module_) { reflection_module_->Shutdown(); reflection_module_.reset(); }
@@ -1945,6 +2132,21 @@ void StandardRenderPipeline::InitializeLumenPasses() {
             }
             if (vi > 0 && vc.update_budget_divisor > 1)
                 vp.max_probes_per_frame = 16384u / vc.update_budget_divisor;
+            // Explicit Vulkan experiment: reference and candidate share lifecycle.
+            const char* farBudgetEnv=std::getenv("PRIMAL_DDGI_FAR_UPDATE_BUDGET");
+            const char* normalCacheEnv=std::getenv("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE");
+            const bool farExperiment=device_->GetPlatform()==RHIPlatform::Vulkan &&
+                farBudgetEnv && (std::strcmp(farBudgetEnv,"512")==0 || std::strcmp(farBudgetEnv,"2048")==0) &&
+                vp.rays_per_probe==128 && !(normalCacheEnv && std::strcmp(normalCacheEnv,"1")==0);
+            vp.deferred_field_reset=farExperiment;
+            if (vi>0 && farExperiment) {
+                vp.far_update_budget=static_cast<u32>(std::strtoul(farBudgetEnv,nullptr,10));
+                vp.max_probes_per_frame=vp.far_update_budget;
+            }
+            if (farBudgetEnv) PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_FAR_POLICY] volume=" << vi
+                << " enabled=" << (farExperiment && vi>0) << " budget=" << vp.far_update_budget
+                << " deferred_reset=" << vp.deferred_field_reset << " rays=" << vp.rays_per_probe
+                << " measured_far_gather_supported=0" << std::endl;
             auto vol = std::make_unique<lumen::LumenDDGIPass>();
             if (!vol->Initialize(device_, vp)) {
                 PRIMAL_LOG_STREAM(Error, "Render") << "[Lumen] DDGI volume " << vi << " init failed (skipping)" << std::endl;
@@ -2206,7 +2408,7 @@ void StandardRenderPipeline::InitializeLumenPasses() {
             // setter ran. Rebind the same offline field on SUCCESS; the old
             // failure-only branch silently fell back to coarse GlobalSDF.
             surface_cache_pass_->SetOfflineSDFSource(offline_sdf_texture_,
-                offline_sdf_origin_, offline_sdf_extent_, offline_sdf_resolution_);
+                offline_sdf_origin_, offline_sdf_extent_, offline_sdf_resolution_, offline_sdf_signed_);
         }
     }
 
@@ -2672,7 +2874,7 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                         }
                     }
                 }
-                    if(surface_cache_pass_ && surface_cache_pass_->WantsGeometryFirstHit()) {
+                    if(surface_cache_pass_ && (surface_cache_pass_->WantsGeometryFirstHit() || environment_visibility_module_ || (ddgi_pass_ && ddgi_pass_->UsesMeasuredVisibility()))) {
                         std::vector<ray_geometry::InstanceInput> geometryInstances;
                         geometryInstances.reserve(instances.size());
                         for(u32 id=0;id<instances.size();++id) {
@@ -2761,7 +2963,7 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                 }
             }
             if (anyDirty && frameCount_ != lastDirtyRebuildFrame) {
-                if(surface_cache_pass_ && surface_cache_pass_->WantsGeometryFirstHit())
+                if(surface_cache_pass_ && (surface_cache_pass_->WantsGeometryFirstHit() || environment_visibility_module_ || (ddgi_pass_ && ddgi_pass_->UsesMeasuredVisibility())))
                     surface_cache_pass_->InvalidateGeometryScene();
                 lastDirtyRebuildFrame = static_cast<u32>(frameCount_);
                 scene_snapshot_->MarkFullRebuild();
@@ -3442,11 +3644,12 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // env 回滚开关（Phase 5b 二分用）：PRIMAL_GBUFFER_RG=0 → 旧 per-site 导入。
     const bool gbufferInRG = device_ && device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
                              [](const char* e) { return !(e && e[0] == '0'); }(std::getenv("PRIMAL_GBUFFER_RG"));
-    RGResourceHandle gbufferDepthRG{}, gbufferAlbedoRG{}, gbufferNormalRG{};
+    RGResourceHandle gbufferDepthRG{}, gbufferAlbedoRG{}, gbufferNormalRG{}, gbufferOrmRG{};
     if (gbufferInRG) {
         gbufferDepthRG = graph.ImportResource("GBufferDepth", gpuDraw.GetGBufferDepthSampleable());
         gbufferAlbedoRG = graph.ImportResource("GBufferAlbedo", gpuDraw.GetGBufferAlbedo());
         gbufferNormalRG = graph.ImportResource("GBufferNormal", gpuDraw.GetGBufferNormal());
+        gbufferOrmRG = graph.ImportResource("GBufferORM", gpuDraw.GetGBufferORM());
     }
 
     // A13/T0.11: on a viewport size change, drop all screen-space history
@@ -3485,7 +3688,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         gi_history_dirty_ = false;
         const u32 now = static_cast<u32>(frameCount_);
         if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
-            ddgi_pass_->NotifyLightingChanged(now);
+            for (u32 vi=0; vi<ddgi_volume_count_; ++vi)
+                if (ddgi_volumes_[vi]) ddgi_volumes_[vi]->NotifyLightingChanged(now);
         }
         if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
             surface_cache_pass_->RequestTileValidityReset();
@@ -3562,6 +3766,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 if (gbufferDepthRG.IsValid()) builder.Write(gbufferDepthRG, ResourceState::ShaderResource);
                 if (gbufferAlbedoRG.IsValid()) builder.Write(gbufferAlbedoRG, ResourceState::ShaderResource);
                 if (gbufferNormalRG.IsValid()) builder.Write(gbufferNormalRG, ResourceState::ShaderResource);
+                if (gbufferOrmRG.IsValid()) builder.Write(gbufferOrmRG,ResourceState::ShaderResource);
                 data.culling_pipeline = culling_pipeline_;
                 data.streaming_manager = streaming_manager_;
                 data.scene_snapshot = scene_snapshot_.get();
@@ -3769,6 +3974,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         DeferredLightingInputs deferredIn;
         deferredIn.gpu_draw_pipeline = &gpuDraw;
         deferredIn.ssao_pass = ssao_pass_.get();
+        deferredIn.measured_environment_visibility=EnvironmentVisibilityRequested(device_);
         deferredIn.view_matrix = view_matrix_;
         deferredIn.proj_matrix = proj_matrix_;
         deferredIn.camera_position = camera_position_;
@@ -4144,6 +4350,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                     zeroOwners.push_back(math::u32v4{inst.material_id,found&&supported?1u:0u,u32(zeroOwners.size()),u32(frameCount_)});
                 }
             }
+            if (ddgi_pass_ && ddgi_pass_->UsesMeasuredVisibility())
+                surface_cache_pass_->PrepareGeometryConsumer(static_cast<u32>(frameCount_));
             screen_probe_pass_->SetFirstSurfaceInputs(surface_cache_pass_.get(),std::move(zeroOwners),
                 nanite::GPUDrivenDrawPipeline::Get().GetMaterialDataBuffer());
         }
@@ -4170,6 +4378,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         FillDDGISunLight(camData, settings_);
         camData.frame_index = static_cast<u32>(frameCount_);
         camData.gi_frame_index = giFrame;
+        camData.gi_content_ready = gi_content_ready_frame_!=0xFFFFFFFFu;
         camData.delta_time = settings_.advanced.delta_time_override;
 
         RGResourceHandle prevColor;
@@ -4199,6 +4408,18 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             // （省一次历史深度解析）；screen_depth 仍供 albedo/遮挡查询。
         }
 
+        if (surface_cache_pass_ && ddgi_pass_->UsesMeasuredVisibility()) {
+            const u32 slot=static_cast<u32>(frameCount_)%3u;
+            surface_cache_pass_->PrepareGeometryConsumer(slot);
+            const auto geometryWitness=surface_cache_pass_->GetGeometryWitnessView(slot);
+            for (u32 vi=0;vi<ddgi_volume_count_;++vi) if(ddgi_volumes_[vi])
+                ddgi_volumes_[vi]->SetMeasuredGeometrySource(
+                    surface_cache_pass_->GetGeometryFirstHitBuffer(slot,0),surface_cache_pass_->GetGeometryFirstHitBuffer(slot,1),
+                    surface_cache_pass_->GetGeometryFirstHitBuffer(slot,2),surface_cache_pass_->GetGeometryFirstHitBuffer(slot,3),
+                    surface_cache_pass_->GetCardGenerator().HasOwnerCardDirectory(),
+                    geometryWitness.ready ? geometryWitness.scene_epoch : 0,
+                    geometryWitness.ready ? geometryWitness.source_digest : 0);
+        }
         ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData,
                                        static_cast<u32>(frameCount_), scLightingRG);
 
@@ -4492,6 +4713,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         giIn.current_buffer_index = cbIdx;
         giIn.frame_index = static_cast<u32>(frameCount_);
         giIn.fallback_texture = black_texture_;
+        ConfigureGatherGeometry(giIn,cbIdx);
         giOut = gi_gather_module_->AddPasses(graph, giIn);
     }
 
@@ -4514,12 +4736,23 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     }
 
     FusionOutputs fusionOut;
-    // lmMutex（Step 4 后判定）：lightmap 激活 ⇒ Lumen GI 整区不挂，
-    // fusion 不再执行；composite 直接消费 deferred 输出。
-
-    if (!lmMutex && fusion_module_ && (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
-                           settings_.quality.enable_screen_probes) && lumen::GIDebug().fusion) {
+    // [2026-11-02 合并轮] lmMutex 语义收窄：lightmap 激活仍禁 diffuse GI
+    // fusion（fuseGI——防间接双计，v4 用户定调不变），但 dev 新增的
+    // environment-specular 通道（environment_only 模式）放行——镜面环境
+    // 项不消费 GI diffuse 输入，与烘焙间接无双重计能量，且正是 lightmap
+    // 态质感（SSR/镜面缺席）修复方向的第一步。
+    const bool fuseGI = !lmMutex &&
+                        (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
+                         settings_.quality.enable_screen_probes) && lumen::GIDebug().fusion;
+    if (fusion_module_ && (fuseGI || deferredOut.environment_specular_rg.IsValid())) {
+        const auto environmentVisibility=AddEnvironmentVisibility(graph,gpuDraw,cbIdx,gbufferDepthRG,gbufferNormalRG,gbufferOrmRG);
         FusionInputs fusionIn;
+        fusionIn.environment_visibility_required=EnvironmentVisibilityRequested(device_);
+        fusionIn.environment_visibility_rg=environmentVisibility.visibility_rg;
+        fusionIn.environment_visibility_tex=environmentVisibility.visibility_tex;
+        fusionIn.environment_specular_rg = deferredOut.environment_specular_rg;
+        fusionIn.environment_specular_tex = deferredOut.environment_specular_tex;
+        fusionIn.environment_only = !fuseGI;
         fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
         fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
         fusionIn.ssgi_rg = ssgiOut.ssgi_output;
@@ -4552,7 +4785,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         fusionIn.pixel_gi_spgi_only = settings_.lumen.axes.use_screen_probes;
 
         // [REFL R4/R5] 屏幕外 specular 兜底：SSR composite 之后、fusion 之前。
-        if (refl_specular_pass_ && refl_specular_pass_->IsInitialized()) {
+        if (!fusionIn.environment_only && refl_specular_pass_ && refl_specular_pass_->IsInitialized()) {
             lumen::ReflSpecularTracePass::FrameData reflIn{};
             reflIn.depth_rg = gbufferDepthRG;
             reflIn.albedo_rg = gbufferAlbedoRG;
@@ -4674,6 +4907,16 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // then (or when history is invalid) AddTAAPass keeps the velocity path.
         PostProcess::TAADepthInputs taaDepth;
         PostProcess::TAADepthInputs* taaDepthPtr = nullptr;
+        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            taaDepth.require_raster_jitter = true;
+            taaDepth.currDepth = gpuDraw.GetGBufferDepthSampleable();
+            taaDepth.current_depth_rg = gbufferDepthRG.IsValid() ? gbufferDepthRG :
+                graph.ImportResource("TAA_CanonicalDepth",taaDepth.currDepth);
+            taaDepth.raster_jitter_provider = [&gpuDraw,frame=static_cast<u32>(frameCount_)](math::v2& j) {
+                return gpuDraw.GetLastRasterJitterNDC(frame,j);
+            };
+            taaDepthPtr = &taaDepth;
+        }
         {
             const auto prevDepth = depth_history_
                 ? depth_history_->GetPreviousFrameDepth(static_cast<u32>(frameCount_))
@@ -4684,6 +4927,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 const math::m4x4 currVP = proj_matrix_ * view_matrix_;
                 taaDepth.currDepth = gpuDraw.GetGBufferDepthSampleable();
                 taaDepth.prevDepth = prevDepth.texture;
+                taaDepth.previous_depth_frame = prevDepth.frame_index;
                 taaDepth.currInvViewProj = Inverse(currVP);
                 taaDepth.prevViewProj = prev_taa_view_proj_;
                 taaDepthPtr = &taaDepth;
@@ -4808,7 +5052,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // ① frame 380：CPU 卡片查找（与 SurfaceCacheCapture/LightEval 同一 uv
         // 约定）+ 记录卡片 rect 拷贝 pass。世界点 = 中央地面 ROI 中心视线 ∩
         // y=0 平面。
-        if (std::getenv("GI_LADDER_DUMP") && scLightingRG.IsValid() &&
+        if ([] { const char* v=std::getenv("GI_LADDER_DUMP"); return v && std::strcmp(v,"1")==0; }() && scLightingRG.IsValid() &&
             surface_cache_pass_ && frameCount_ == 380 && !scLadderDone) {
             const math::m4x4 invVP = Inverse(proj_matrix_ * view_matrix_);
             auto xform = [&invVP](float x, float y, float z, float out[4]) {
@@ -5238,9 +5482,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 // Top-N by average GPU ms.
 // ============================================================================
 static void ReportGraphPassTimes(RenderGraph& graph) {
-    static bool enabled = std::getenv("RG_PROF") != nullptr;
-    static bool checked = false;
-    if (!checked) { checked = true; enabled = enabled || false; }
+    static const bool enabled = [] {
+        const char* value = std::getenv("RG_PROF");
+        return value && std::strcmp(value, "1") == 0;
+    }();
     if (!enabled) return;
 
     static std::unordered_map<std::string, double> sumMs;
@@ -5303,6 +5548,22 @@ static void ReportGraphPassTimes(RenderGraph& graph) {
     frames = 0;
 }
 
+static bool VarianceFenceRequested(const rhi::RHIDeviceBase* device) {
+    static const bool requested=[] {const char* value=std::getenv("PRIMAL_DDGI_VARIANCE_FENCED");return value && std::strcmp(value,"1")==0;}();
+    return requested && device && device->GetPlatform()==rhi::RHIPlatform::Vulkan;
+}
+u64 StandardRenderPipeline::BeginVarianceFenceFrame(u32 slot,rhi::CommandBufferHandle command,rhi::SyncHandle fence,u64 nativeFrame) {
+    if(!VarianceFenceRequested(device_) || variance_submission_ticket_>=~u64(0)-1)return 0;
+    const u64 ticket=++variance_submission_ticket_;
+    const auto witness=surface_cache_pass_?surface_cache_pass_->GetGeometryWitnessView(slot):lumen::SurfaceCachePass::GeometryWitnessView{};
+    for(auto& volume:ddgi_volumes_)if(volume){volume->SetVarianceFenceSceneProvider(surface_cache_pass_.get());volume->SyncVarianceFenceScene(witness.scene_epoch,witness.source_digest);volume->BeginVarianceFenceFrame(slot,command,fence,nativeFrame,ticket);}
+    return ticket;
+}
+void StandardRenderPipeline::CommitVarianceFenceFrame(u32 slot,rhi::CommandBufferHandle command,rhi::SyncHandle fence,u64 nativeFrame,u64 ticket,bool success) {
+    if(!VarianceFenceRequested(device_))return;
+    for(auto& volume:ddgi_volumes_)if(volume)volume->CommitVarianceFenceFrame(slot,command,fence,nativeFrame,ticket,success);
+}
+
 void StandardRenderPipeline::RenderWithCommandBuffer(
     RenderScene& scene, RenderView& view,
     ResourceHandle target, const TextureDesc& targetDesc,
@@ -5310,10 +5571,18 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     CommandBufferHandle cmdHandle,
     SyncHandle signalFence)
 {
+    cpu_stall_audit::Scope cpuRender("render.with_command_buffer");
+    if(VarianceFenceRequested(device_)) {
+        const auto varianceCommand=(cmd && cmd==rhi::GetCommandBuffer(cmdHandle) && cmd->GetType()==rhi::CommandQueueType::Graphics)
+            ?cmdHandle:rhi::handles::INVALID_COMMAND_BUFFER;
+        for(auto& volume:ddgi_volumes_)if(volume)volume->ValidateVarianceFenceCommand(bufferIndex,varianceCommand);
+    }
+    if(environment_visibility_module_)environment_visibility_module_->ResetPairReceipt();
+    if (gi_gather_module_) { gi_gather_module_->ResetCrossRayPairReceipt(); gi_gather_module_->ResetInstancePayloadReceipt(); gi_gather_module_->ResetEqualBoxReceipt(); gi_gather_module_->ResetGeometryCompactTraversalUsed(); gi_gather_module_->ResetGeometryUpperBVHUsed(); gi_gather_module_->ResetGeometryQueryKernelUsed(); gi_gather_module_->ResetGeometryBoundsFirstUsed(); }
     // Phase 5b: 本 twin 路径的 RG 在函数内多次 Clear/重建，规范身份的导入
     // 时机与图生命周期耦合——保持下方消费点的 IsValid() 回退（= 旧 per-site
     // 导入），待本路径图生命周期梳理后再接入 producer identity。
-    RGResourceHandle gbufferDepthRG{}, gbufferAlbedoRG{}, gbufferNormalRG{};
+    RGResourceHandle gbufferDepthRG{}, gbufferAlbedoRG{}, gbufferNormalRG{}, gbufferOrmRG{};
     // A13/T0.11: on a viewport size change, drop all screen-space history
     // before this frame records — TAA re-inits from the current frame instead
     // of blending a different-size history (black/mixed-frame regression),
@@ -5331,6 +5600,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
     // T4.1: governor tick — scale the GI budgets for this frame (FPS ≥ 30 floor).
     gi_governor_.RecordFrame();
+    cpu_stall_audit::GovernorScale(gi_governor_.Scale());
     if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
         ddgi_pass_->SetMaxProbesPerFrame(
             GIAdaptiveGovernor::ScaleBudget(gi_base_probe_budget_, gi_governor_.Scale()));
@@ -5350,7 +5620,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         gi_history_dirty_ = false;
         const u32 now = static_cast<u32>(frameCount_);
         if (ddgi_pass_ && ddgi_pass_->IsInitialized()) {
-            ddgi_pass_->NotifyLightingChanged(now);
+            for (u32 vi=0; vi<ddgi_volume_count_; ++vi)
+                if (ddgi_volumes_[vi]) ddgi_volumes_[vi]->NotifyLightingChanged(now);
         }
         if (surface_cache_pass_ && surface_cache_pass_->IsInitialized()) {
             surface_cache_pass_->RequestTileValidityReset();
@@ -5364,7 +5635,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                " reset+full page budget, SPGI temporal reset at frame " << now
             << std::endl;
     }
-    OnSceneChanged(scene, current_scene_ == nullptr);
+    {cpu_stall_audit::Scope phase("render.scene_change");OnSceneChanged(scene, current_scene_ == nullptr);}
     current_scene_ = &scene;
     frame_view_ = &view;  // consumed by the optional GeometryDebug overlay
     auto startTime = std::chrono::high_resolution_clock::now();
@@ -5379,14 +5650,14 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         target_height_ = targetDesc.size.y;
     }
 
-    UpdatePerFrame(scene, view);
+    {cpu_stall_audit::Scope phase("render.update_per_frame");UpdatePerFrame(scene, view);}
 
     // RG 路径（Nanite 快照）的实例来源：RegisterMeshEntity 注册的 static
     // entities → RenderScene proxies。编辑器前向分支在下方自行同步；非前向
     // 分支（deferred/pass view/截屏）必须在此同步，否则快照 0 实例、
     // GBuffer 系 pass 视图全空（2026-09-20 pass view 排查）。
     if (!editor_mode_ && (!static_entity_ids_.empty() || !pcg_entity_ids_.empty())) {
-        SyncEntitiesToRenderScene(scene);
+        {cpu_stall_audit::Scope phase("render.sync_scene");SyncEntitiesToRenderScene(scene);}
         forward_renderer_->SetRenderScene(&scene);
     }
 
@@ -5423,6 +5694,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
     // Culling
     if (culling_pipeline_ && scene_snapshot_ && gpuDraw.IsInitialized()) {
+        cpu_stall_audit::Scope phase("render.culling");
         culling_pipeline_->Execute(cmd, *scene_snapshot_, view_matrix_, proj_matrix_,
                                     streaming_manager_, cbIdx);
     }
@@ -5432,6 +5704,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         auto cullingResults = culling_pipeline_
             ? culling_pipeline_->GetResults()
             : nanite::CullingResults{};
+        cpu_stall_audit::Scope phase("render.gpu_draw_record");
         gpuDraw.Execute(cmd, *scene_snapshot_, view_matrix_, proj_matrix_,
                         cullingResults, static_cast<u32>(frameCount_), cbIdx);
         // RenderWithCommandBuffer bypasses BuildRenderGraph's NaniteSceneRender
@@ -5522,6 +5795,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         graph.Compile();
         graph.Execute(cmd);
         ReportGraphPassTimes(graph);
+        stats_.passExecutionTimes = graph.GetPassExecutionTimes();
+        stats_.timestampRecordingSequence = graph.GetTimestampRecordingSequence();
+        stats_.timestampResolvedSequence = graph.GetTimestampResolvedSequence();
+        stats_.timestampResultsFresh = graph.HasFreshTimestampResults();
+        stats_.timestampQueryReadOk = graph.WasTimestampQueryReadSuccessful();
+        stats_.timestampQueryReadCpuMs = graph.GetTimestampQueryReadCpuMs();
+        stats_.timestampReadMin = graph.GetTimestampReadMin();
+        stats_.timestampReadMax = graph.GetTimestampReadMax();
+        stats_.timestampPreviousBound = graph.GetTimestampPreviousBound();
         return;
     }
 
@@ -5544,6 +5826,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         graph.Compile();
         graph.Execute(cmd);
         ReportGraphPassTimes(graph);
+        stats_.passExecutionTimes = graph.GetPassExecutionTimes();
+        stats_.timestampRecordingSequence = graph.GetTimestampRecordingSequence();
+        stats_.timestampResolvedSequence = graph.GetTimestampResolvedSequence();
+        stats_.timestampResultsFresh = graph.HasFreshTimestampResults();
+        stats_.timestampQueryReadOk = graph.WasTimestampQueryReadSuccessful();
+        stats_.timestampQueryReadCpuMs = graph.GetTimestampQueryReadCpuMs();
+        stats_.timestampReadMin = graph.GetTimestampReadMin();
+        stats_.timestampReadMax = graph.GetTimestampReadMax();
+        stats_.timestampPreviousBound = graph.GetTimestampPreviousBound();
         return;
     }
 
@@ -5598,6 +5889,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         DeferredLightingInputs deferredIn;
         deferredIn.gpu_draw_pipeline = &gpuDraw;
         deferredIn.ssao_pass = ssao_pass_.get();
+        deferredIn.measured_environment_visibility=EnvironmentVisibilityRequested(device_);
         deferredIn.view_matrix = view_matrix_;
         deferredIn.proj_matrix = proj_matrix_;
         deferredIn.camera_position = camera_position_;
@@ -5842,6 +6134,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     zeroOwners.push_back(math::u32v4{inst.material_id,found&&supported?1u:0u,u32(zeroOwners.size()),u32(frameCount_)});
                 }
             }
+            if (ddgi_pass_ && ddgi_pass_->UsesMeasuredVisibility())
+                surface_cache_pass_->PrepareGeometryConsumer(static_cast<u32>(frameCount_));
             screen_probe_pass_->SetFirstSurfaceInputs(surface_cache_pass_.get(),std::move(zeroOwners),
                 nanite::GPUDrivenDrawPipeline::Get().GetMaterialDataBuffer());
             }
@@ -5859,6 +6153,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             FillDDGISunLight(camData, settings_);
             camData.frame_index = static_cast<u32>(frameCount_);
             camData.gi_frame_index = giFrameT;
+            camData.gi_content_ready = gi_content_ready_frame_!=0xFFFFFFFFu;
             camData.delta_time = settings_.advanced.delta_time_override;
             RGResourceHandle prevColor;
             if (deferredOut.deferred_output_tex != handles::INVALID_RESOURCE)
@@ -5881,7 +6176,23 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 }
                 // 断边默认态：radiance_depth 保持无效 = 屏域 radiance 档关断。
             }
-            ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData, static_cast<u32>(frameCount_), scLightingRG);
+            if (surface_cache_pass_ && ddgi_pass_->UsesMeasuredVisibility()) {
+            const u32 slot=static_cast<u32>(frameCount_)%3u;
+            surface_cache_pass_->PrepareGeometryConsumer(slot);
+            const auto geometryWitness=surface_cache_pass_->GetGeometryWitnessView(slot);
+            for (u32 vi=0;vi<ddgi_volume_count_;++vi) if(ddgi_volumes_[vi])
+                ddgi_volumes_[vi]->SetMeasuredGeometrySource(
+                    surface_cache_pass_->GetGeometryFirstHitBuffer(slot,0),surface_cache_pass_->GetGeometryFirstHitBuffer(slot,1),
+                    surface_cache_pass_->GetGeometryFirstHitBuffer(slot,2),surface_cache_pass_->GetGeometryFirstHitBuffer(slot,3),
+                    surface_cache_pass_->GetCardGenerator().HasOwnerCardDirectory(),
+                    geometryWitness.ready ? geometryWitness.scene_epoch : 0,
+                    geometryWitness.ready ? geometryWitness.source_digest : 0);
+        }
+        if(VarianceFenceRequested(device_)) {
+            const auto varianceWitness=surface_cache_pass_?surface_cache_pass_->GetGeometryWitnessView(cbIdx):lumen::SurfaceCachePass::GeometryWitnessView{};
+            for(auto& volume:ddgi_volumes_)if(volume){volume->SetVarianceFenceSceneProvider(surface_cache_pass_.get());volume->SyncVarianceFenceScene(varianceWitness.scene_epoch,varianceWitness.source_digest);}
+        }
+        ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData, static_cast<u32>(frameCount_), scLightingRG);
 
             // T5.5: secondary volumes (no SC atlas — near-field data only).
             if (lumen::GIDebug().ddgi_far_volume) {
@@ -5965,7 +6276,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             giIn.current_buffer_index = cbIdx;
             giIn.frame_index = static_cast<u32>(frameCount_);
             giIn.fallback_texture = black_texture_;
-            giOut = gi_gather_module_->AddPasses(graph, giIn);
+            ConfigureGatherGeometry(giIn,cbIdx);
+        giOut = gi_gather_module_->AddPasses(graph, giIn);
         }
 
         // --- SSGI (Screen Space GI) ---
@@ -6263,11 +6575,20 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
 
         FusionOutputs fusionOut;
-        // lmMutex：lightmap 激活 ⇒ fusion 不挂（twin 站点同步）。
-        if (!lmMutex && fusion_module_ &&
+        // [2026-11-02 合并轮] lmMutex 语义收窄（twin 站点同步，见上站注）：
+        // 只禁 diffuse GI fusion，environment-specular 通道放行。
+        const bool fuseGI = !lmMutex &&
             (settings_.quality.enable_ssgi || settings_.quality.enable_ssr ||
-             settings_.quality.enable_screen_probes) && lumen::GIDebug().fusion) {
+             settings_.quality.enable_screen_probes) && lumen::GIDebug().fusion;
+        if (fusion_module_ && (fuseGI || deferredOut.environment_specular_rg.IsValid())) {
+            const auto environmentVisibility=AddEnvironmentVisibility(graph,gpuDraw,cbIdx,gbufferDepthRG,gbufferNormalRG,gbufferOrmRG);
             FusionInputs fusionIn;
+            fusionIn.environment_visibility_required=EnvironmentVisibilityRequested(device_);
+            fusionIn.environment_visibility_rg=environmentVisibility.visibility_rg;
+            fusionIn.environment_visibility_tex=environmentVisibility.visibility_tex;
+            fusionIn.environment_specular_rg = deferredOut.environment_specular_rg;
+            fusionIn.environment_specular_tex = deferredOut.environment_specular_tex;
+            fusionIn.environment_only = !fuseGI;
             fusionIn.primary_input_rg = deferredOut.deferred_output_rg;
             fusionIn.primary_input_tex = deferredOut.deferred_output_tex;
             // TEMP diagnosis: SSGI_SILENCE=1 mutes SSGI into fusion (black)
@@ -6316,7 +6637,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             fusionIn.pixel_gi_spgi_only = settings_.lumen.axes.use_screen_probes;
 
             // [REFL R4/R5] twin 站点同步：SSR composite 之后、fusion 之前。
-            if (refl_specular_pass_ && refl_specular_pass_->IsInitialized()) {
+            if (!fusionIn.environment_only && refl_specular_pass_ && refl_specular_pass_->IsInitialized()) {
                 lumen::ReflSpecularTracePass::FrameData reflIn{};
                 reflIn.depth_rg = gbufferDepthDL;
                 reflIn.depth = gpuDraw.GetGBufferDepthSampleable();
@@ -6422,6 +6743,16 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             // Depth reprojection inputs — same gating as BuildRenderGraph.
             PostProcess::TAADepthInputs taaDepthRWCB;
             PostProcess::TAADepthInputs* taaDepthRWCBPtr = nullptr;
+            if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+                taaDepthRWCB.require_raster_jitter = true;
+                taaDepthRWCB.currDepth = gpuDraw.GetGBufferDepthSampleable();
+                taaDepthRWCB.current_depth_rg = gbufferDepthRG.IsValid() ? gbufferDepthRG :
+                    graph.ImportResource("TAA_CanonicalDepth_RWCB",taaDepthRWCB.currDepth);
+                taaDepthRWCB.raster_jitter_provider = [&gpuDraw,frame=static_cast<u32>(frameCount_)](math::v2& j) {
+                    return gpuDraw.GetLastRasterJitterNDC(frame,j);
+                };
+                taaDepthRWCBPtr = &taaDepthRWCB;
+            }
             {
                 const auto prevDepthRWCB = depth_history_
                     ? depth_history_->GetPreviousFrameDepth(static_cast<u32>(frameCount_))
@@ -6432,6 +6763,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     const math::m4x4 currVP_RWCB = proj_matrix_ * view_matrix_;
                     taaDepthRWCB.currDepth = gpuDraw.GetGBufferDepthSampleable();
                     taaDepthRWCB.prevDepth = prevDepthRWCB.texture;
+                    taaDepthRWCB.previous_depth_frame = prevDepthRWCB.frame_index;
                     taaDepthRWCB.currInvViewProj = Inverse(currVP_RWCB);
                     taaDepthRWCB.prevViewProj = prev_taa_view_proj_;
                     taaDepthRWCBPtr = &taaDepthRWCB;
@@ -6446,6 +6778,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     render_width_, render_height_, static_cast<u32>(frameCount_), taaDepthRWCBPtr);
                 hdrCleanRWCB = taaRWCB.output;
             }
+            passcapture::Add(graph, ppInputRG, "taa-before", static_cast<u32>(frameCount_));
+            passcapture::Add(graph, hdrCleanRWCB, "taa-after", static_cast<u32>(frameCount_));
             taaResolvedColorRWCB = hdrCleanRWCB;
             // P1-B/P3: 解析 TAA 输出物理纹理供下一帧 GI-PROBE 一次性读回。
             if (gi_probe_enabled_) {
@@ -6468,6 +6802,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     giAlreadyCompositedRWCB ? RGResourceHandle{} : ssaoOut.ssao_output,
                     giAlreadyCompositedRWCB ? RGResourceHandle{} : ssgiOut.ssgi_output,
                     velRWCB, static_cast<u32>(frameCount_));  // sun-audit P3: 绝对帧号
+            passcapture::Add(graph, toneOutRWCB.output, "tone", static_cast<u32>(frameCount_));
     // ========================================================================
     // Step 10.55 (sun-audit P1 第二层): SC atlas card-space 定点读回
     // ========================================================================
@@ -6551,7 +6886,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         // ① frame 380：CPU 卡片查找（与 SurfaceCacheCapture/LightEval 同一 uv
         // 约定）+ 记录卡片 rect 拷贝 pass。世界点 = 中央地面 ROI 中心视线 ∩
         // y=0 平面。
-        if (std::getenv("GI_LADDER_DUMP") && scLightingRG.IsValid() &&
+        if ([] { const char* v=std::getenv("GI_LADDER_DUMP"); return v && std::strcmp(v,"1")==0; }() && scLightingRG.IsValid() &&
             surface_cache_pass_ && frameCount_ == 380 && !scLadderDone) {
             const math::m4x4 invVP = Inverse(proj_matrix_ * view_matrix_);
             auto xform = [&invVP](float x, float y, float z, float out[4]) {
@@ -6928,6 +7263,22 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         graph.Compile();
         graph.Execute(cmd);
         ReportGraphPassTimes(graph);
+        stats_.passExecutionTimes = graph.GetPassExecutionTimes();
+        stats_.timestampRecordingSequence = graph.GetTimestampRecordingSequence();
+        stats_.timestampResolvedSequence = graph.GetTimestampResolvedSequence();
+        stats_.timestampResultsFresh = graph.HasFreshTimestampResults();
+        stats_.timestampQueryReadOk = graph.WasTimestampQueryReadSuccessful();
+        stats_.timestampQueryReadCpuMs = graph.GetTimestampQueryReadCpuMs();
+        stats_.timestampReadMin = graph.GetTimestampReadMin();
+        stats_.timestampReadMax = graph.GetTimestampReadMax();
+        stats_.timestampPreviousBound = graph.GetTimestampPreviousBound();
+        if (lumencompare::enabled) {
+            lumencompare::Output(device_, cmd, "GI.GBuffer", "albedo", gpuDraw.GetGBufferAlbedo(), false, ResourceState::ShaderResource);
+            lumencompare::Output(device_, cmd, "GI.GBuffer", "normal", gpuDraw.GetGBufferNormal(), false, ResourceState::ShaderResource);
+            lumencompare::Output(device_, cmd, "GI.GBuffer", "orm", gpuDraw.GetGBufferORM(), false, ResourceState::ShaderResource);
+            lumencompare::Output(device_, cmd, "GI.GBuffer", "depth", gpuDraw.GetGBufferDepthSampleable(), false, ResourceState::ShaderResource);
+        }
+
 
         // Depth history for TAA reprojection — mirrors Render()'s end-of-frame
         // store. RWCB's command buffer is caller-owned; the store only records
@@ -6978,6 +7329,15 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         graph.Compile();
         graph.Execute(cmd);
         ReportGraphPassTimes(graph);
+        stats_.passExecutionTimes = graph.GetPassExecutionTimes();
+        stats_.timestampRecordingSequence = graph.GetTimestampRecordingSequence();
+        stats_.timestampResolvedSequence = graph.GetTimestampResolvedSequence();
+        stats_.timestampResultsFresh = graph.HasFreshTimestampResults();
+        stats_.timestampQueryReadOk = graph.WasTimestampQueryReadSuccessful();
+        stats_.timestampQueryReadCpuMs = graph.GetTimestampQueryReadCpuMs();
+        stats_.timestampReadMin = graph.GetTimestampReadMin();
+        stats_.timestampReadMax = graph.GetTimestampReadMax();
+        stats_.timestampPreviousBound = graph.GetTimestampPreviousBound();
 
         // Depth history for TAA reprojection — mirrors Render()'s end-of-frame
         // store. RWCB's command buffer is caller-owned; the store only records
@@ -7058,6 +7418,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
                                      ResourceHandle target, const TextureDesc& targetDesc,
                                      SyncHandle signalFence) {
+    if(environment_visibility_module_)environment_visibility_module_->ResetPairReceipt();
+    if (gi_gather_module_) { gi_gather_module_->ResetCrossRayPairReceipt(); gi_gather_module_->ResetInstancePayloadReceipt(); gi_gather_module_->ResetEqualBoxReceipt(); gi_gather_module_->ResetGeometryCompactTraversalUsed(); gi_gather_module_->ResetGeometryUpperBVHUsed(); gi_gather_module_->ResetGeometryQueryKernelUsed(); gi_gather_module_->ResetGeometryBoundsFirstUsed(); }
     OnSceneChanged(scene, current_scene_ == nullptr);
     current_scene_ = &scene;
     frame_view_ = &view;  // consumed by the optional GeometryDebug overlay
@@ -7184,6 +7546,14 @@ void StandardRenderPipeline::Render(RenderScene& scene, RenderView& view,
     stats_.drawCallCount = cmdStats.drawCallCount;
     stats_.gpuFrameTimeMs = cmdStats.commandExecutionTime;
     stats_.passExecutionTimes = renderGraph_->GetPassExecutionTimes();
+    stats_.timestampRecordingSequence = renderGraph_->GetTimestampRecordingSequence();
+    stats_.timestampResolvedSequence = renderGraph_->GetTimestampResolvedSequence();
+    stats_.timestampResultsFresh = renderGraph_->HasFreshTimestampResults();
+    stats_.timestampQueryReadOk = renderGraph_->WasTimestampQueryReadSuccessful();
+    stats_.timestampQueryReadCpuMs = renderGraph_->GetTimestampQueryReadCpuMs();
+    stats_.timestampReadMin = renderGraph_->GetTimestampReadMin();
+    stats_.timestampReadMax = renderGraph_->GetTimestampReadMax();
+    stats_.timestampPreviousBound = renderGraph_->GetTimestampPreviousBound();
 
     if (gpuOptimizer_) {
         for (const auto& [passName, timeMs] : stats_.passExecutionTimes) {

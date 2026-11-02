@@ -349,6 +349,10 @@ public:
     /// as per-frame pixel crawl.
     void SetJitterEnabled(bool enabled) { jitter_enabled_ = enabled; }
     bool IsJitterEnabled() const { return jitter_enabled_; }
+    bool GetLastRasterJitterNDC(u32 frame, math::v2& value) const {
+        if (last_raster_jitter_frame_ != frame) return false;
+        value=last_raster_jitter_ndc_; return true;
+    }
 
     rhi::ResourceHandle GetGBufferAlbedo() const { return gbuffer_albedo_texture_; }
     rhi::ResourceHandle GetGBufferNormal() const { return gbuffer_normal_texture_; }
@@ -544,6 +548,8 @@ private:
     rhi::ResourceHandle final_depth_texture_{ rhi::handles::INVALID_RESOURCE };
 
     // GBuffer render targets (created in CreateRenderPasses)
+    math::v2 last_raster_jitter_ndc_{0.0f,0.0f};
+    u32 last_raster_jitter_frame_=~u32(0);
     bool jitter_enabled_ = false;   // TAA-only: sub-pixel jitter gate
     math::v2 prev_jitter_{0.0f, 0.0f};  // jitter the previous frame rendered with
     rhi::ResourceHandle gbuffer_albedo_texture_{ rhi::handles::INVALID_RESOURCE };

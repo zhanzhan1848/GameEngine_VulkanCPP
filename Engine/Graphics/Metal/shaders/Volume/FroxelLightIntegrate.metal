@@ -2,6 +2,7 @@
 using namespace metal;
 
 #include "FroxelCommon.metal"
+#include "SparseParticleVolume.metal"
 
 // ============================================================================
 // Pass 2: Froxel Light Integrate
@@ -103,6 +104,9 @@ kernel void froxel_light_integrate(
     texture2d<float, access::sample>  moments_c2     [[texture(6)]],
     texture2d<float, access::sample>  moments_c3     [[texture(7)]],
     texture2d<float, access::sample>  spgi_ambient   [[texture(8)]],
+    texture3d<float, access::sample>  cloud_volume   [[texture(9)]],
+    texture3d<float, access::sample> particle_atlas [[texture(10)]],
+    device const int4* particle_words [[buffer(11)]],
     constant FroxelParams& params                    [[buffer(3)]],
     uint2 gid [[thread_position_in_grid]])
 {
@@ -162,26 +166,32 @@ kernel void froxel_light_integrate(
 
             // 阴影：mode>0 时 march（WP1）或 legacy 单查询；mode 0 恒 lit。
             float shadow = 1.0;
+            float medium_visibility = 1.0;
             if (shadow_mode > 0) {
                 if (march_steps > 0) {
                     float step_len = params.VolumeParams4.y / float(march_steps);
-                    // 半步起步；light_direction 是传播方向，朝光 march 取负
                     float3 lp = world_pos - light_dir * (0.5 * step_len);
-                    float vis = 1.0;
+                    // 多散射八度近似（与 GLSL 同步）
+                    float beer1 = 1.0, beer2 = 1.0, beer3 = 1.0, geo = 1.0;
                     for (int s = 0; s < march_steps; ++s) {
+                        float beer = 0.0;
                         if (uniform_medium) {
-                            vis *= exp(-sigma_t * step_len);
+                            beer = sigma_t * step_len;
                         } else {
                             float3 muvw = froxel_world_to_uvw(lp, params);
                             float d = froxel_density.sample(bilinear, muvw).r;
-                            vis *= exp(-d * extinction_scale * step_len);
+                            beer = d * extinction_scale * step_len;
                         }
-                        vis *= froxel_shadow_query(lp, shadow_mode,
+                        beer1 *= exp(-beer);
+                        beer2 *= exp(-beer * 0.25);
+                        beer3 *= exp(-beer * 0.0625);
+                        geo *= froxel_shadow_query(lp, shadow_mode,
                                                    moments_c0, moments_c1,
                                                    moments_c2, moments_c3, params);
                         lp -= light_dir * step_len;
                     }
-                    shadow = clamp(vis, 0.0, 1.0);
+                    medium_visibility = (beer1 + 0.7 * beer2 + 0.4 * beer3) / 2.1;
+                    shadow = clamp(geo * medium_visibility, 0.0, 1.0);
                 } else {
                     shadow = froxel_shadow_query(world_pos, shadow_mode,
                                                  moments_c0, moments_c1,
@@ -212,6 +222,41 @@ kernel void froxel_light_integrate(
             }
 
             // 散射源项 + audit V6 解析段积分
+            // Match GLSL: directional sky occlusion for the local cloud,
+            // with a multiple-scattering floor; haze keeps its existing fill.
+            if (params.CloudA.x > 0.5 &&
+                all(abs(world_pos - params.CloudB.xyz) < float3(params.CloudA.y))) {
+                // Density-gradient directional sky fill, matching GLSL.
+                float3 cloud_dims = float3(cloud_volume.get_width(), cloud_volume.get_height(), cloud_volume.get_depth());
+                float3 cloud_uv = (world_pos - params.CloudB.xyz) / (2.0 * params.CloudA.y) + 0.5;
+                float3 texel = 1.0 / cloud_dims;
+                float3 grad = float3(0.0);
+                for (int axis = 0; axis < 3; ++axis) {
+                    float3 offset = float3(0.0); offset[axis] = 2.0 * texel[axis];
+                    grad[axis] = cloud_volume.sample(bilinear, cloud_uv + offset).r
+                               - cloud_volume.sample(bilinear, cloud_uv - offset).r;
+                }
+                float sky_facing = 0.65;
+                if (dot(grad, grad) > 1e-10) {
+                    float3 outward = -normalize(grad);
+                    float3 sky_direction = normalize(float3(-0.45, 1.0, -0.25));
+                    float directional = 0.15 + 0.85 * max(dot(outward, sky_direction), 0.0);
+                    sky_facing = mix(0.65f, directional, smoothstep(0.002f, 0.04f, length(grad)));
+                }
+                ambient_term *= sky_facing * (0.35 + 0.65 * medium_visibility);
+            }
+            if (sparseDensity(world_pos, particle_atlas, particle_words) > 0.001) {
+                float h=as_type<float>(particle_words[1].x);
+                float3 grad=float3(0.0);
+                for(int a=0;a<3;++a) {
+                    float3 off=float3(0.0); off[a]=h;
+                    grad[a]=sparseDensity(world_pos+off,particle_atlas,particle_words)-sparseDensity(world_pos-off,particle_atlas,particle_words);
+                }
+                float facing=0.65;
+                if(dot(grad,grad)>1e-10)
+                    facing=mix(0.65f,0.15f+0.85f*max(dot(-normalize(grad),normalize(float3(-0.45,1.0,-0.25))),0.0f),smoothstep(0.002f,0.04f,length(grad)));
+                ambient_term *= facing * (0.35 + 0.65 * medium_visibility);
+            }
             float3 source_j = sigma_s * (light_color * shadow * phase
                                          + ambient_term);
 

@@ -1,9 +1,13 @@
 #version 450 core
 #extension GL_GOOGLE_include_directive : require
-// Vulkan SurfaceCache CardFill — SDF-based atlas filling (Phase 4).
+// Vulkan SurfaceCache CardFill — invalidate unsupported fallback texels.
+// A global distance field and a texture-centre tint do not certify an owning
+// triangle, its UV, material acceptance or surface side. Production therefore
+// preserves only actual capture/static-page measurements. The old SDF fill is
+// retained solely for explicit legacy diagnostics (CardFillParams._pad0 bit31).
 // Entry point: surface_cache_card_fill
 //
-// For each card texel:
+// Retained legacy diagnostic, for each card texel:
 //   1. Compute world-space position on the card's orthographic plane
 //   2. March along the card's forward axis through the GlobalSDF
 //   3. At surface hit: write tint albedo(alpha=1)/SDF-gradient normal/
@@ -11,9 +15,8 @@
 //   4. On miss: write an INVALID texel (alpha=0, depth=-1) — [P0 2026-09-20]
 //      曾写 depth=0 + 硬编码天空渐变光照，伪造测量进入查询
 //
-// card-view capture (T8.12) overwrites visible texels with real material
-// colors; CardFill fills only texels that never received a valid measurement
-// (alpha<=0.5). 有效性语义 = albedo.alpha（跳过谓词）+ depth 符号（查询契约）。
+// Production card-view capture/static pages provide measured surface data.
+// Missing texels remain invalid instead of permanently latching a proxy tint.
 //
 // Dispatch: 1D, total_texels threads. Threadgroup (256,1,1).
 //
@@ -26,6 +29,7 @@
 //   7   = UniformBuffer           CardFillParams (SDF + light + counts)
 //   8   = readonly buffer         CardDispatchInfo[] (std430)
 //   9   = readonly buffer         SurfaceCacheCard[] (std430)
+//   16  = StorageImage(rgba16f)    emissive_atlas (invalid clear)
 
 #extension GL_EXT_samplerless_texture_functions : enable
 
@@ -39,8 +43,9 @@ layout(set = 0, binding = 2) uniform texture3D sdf_cascade_2;
 
 layout(set = 0, binding = 3, rgba8)   uniform image2D albedo_atlas;    // read+write: skip captured texels
 layout(set = 0, binding = 4, rg16f)   writeonly uniform image2D normal_atlas;
-layout(set = 0, binding = 5, r32f)    writeonly uniform image2D depth_atlas;
+layout(set = 0, binding = 5, r32f)    uniform image2D depth_atlas;
 layout(set = 0, binding = 6, rgba16f) writeonly uniform image2D lighting_out;
+layout(set = 0, binding = 16, rgba16f) writeonly uniform image2D emissive_atlas;
 
 layout(set = 0, binding = 8, std430) readonly buffer CardDispatchBuf {
     CardDispatchInfo dispatch[];
@@ -88,22 +93,23 @@ layout(set = 0, binding = 15, std140) uniform WriterParamsBlock {
 // CardFill tags use (last_writer_frame, kind=2/3, card_owner, material_id).
 #endif
 
-// Get per-mesh color by sampling the albedo texture at its center.
-// Guards against black/invalid texture layers that would create permanent
-// dark patches in the atlas (the skip logic preserves non-gray writes).
+bool legacySurfacePolicy() { return (cfp._pad0 & 0x80000000u) != 0u; }
+
+// Texture-centre tint remains a diagnostic approximation, never a production
+// surface measurement. POD indices are integer words, including small IDs.
 vec3 getMeshTint(uint meshInstanceId) {
-    // Default-off POD interpretation correction. Both fields are uint32
-    // words in the uploaded structs, not floats containing numeric indices.
-    bool bits=(cfp._pad0 & 2u)!=0u;
-    if(bits && meshInstanceId>=uint(inst.inst_data.length())/12u) return vec3(0.5);
+    bool legacy = legacySurfacePolicy();
+    bool bits = !legacy || (cfp._pad0 & 2u) != 0u;
+    if (meshInstanceId >= uint(inst.inst_data.length()) / 12u) return vec3(0.0);
     // instance → material_id (offset132 of 192B InstanceData)
     float materialWord=inst.inst_data[meshInstanceId * 12u + 8u].y;
     uint matId=bits ? floatBitsToUint(materialWord) : uint(materialWord);
-    if(bits && matId>=uint(mat.mat_data.length())/3u) return vec3(0.5);
+    if (matId >= uint(mat.mat_data.length()) / 3u) return vec3(0.0);
     // material → albedo_texture_idx
     float textureWord=mat.mat_data[matId * 3u + 0u].x;
     uint texIdx=bits ? floatBitsToUint(textureWord) : uint(textureWord);
-    if (texIdx == 0xFFFFFFFFu) return vec3(0.5);  // invalid material
+    if (texIdx == 0xFFFFFFFFu || texIdx >= uint(textureSize(albedo_textures, 0).z))
+        return legacy ? vec3(0.5) : vec3(0.0);
 
     // Sample albedo texture at center UV
     vec3 tex_color = texture(sampler2DArray(albedo_textures, albedo_sampler),
@@ -113,18 +119,17 @@ vec3 getMeshTint(uint meshInstanceId) {
     // genuinely black material), use a neutral warm-gray fallback instead.
     // This prevents permanent black patches in the atlas.
     float lum = dot(tex_color, vec3(0.2126, 0.7152, 0.0722));
-    if (lum < 0.03) return vec3(0.4, 0.38, 0.35);  // warm gray fallback
+    if (legacy && lum < 0.03) return vec3(0.4, 0.38, 0.35);
 
     return tex_color;
 }
 
 #ifdef SC_CAPTURE_SOURCE_AUDIT_VARIANT
-// A read-only copy of the existing instance → material word decode.  The
-// production tint path above remains untouched; this helper only reports the
-// material index that that path would use, with an explicit UNKNOWN sentinel
-// when the resident table cannot be safely indexed.
+// Report the effective policy's integer material decode, with UNKNOWN when
+// the actual resident table cannot be safely indexed. This is provenance,
+// not a certificate of texture-centre material or true-surface acceptance.
 uint getMeshTintAuditMaterialId(uint meshInstanceId) {
-    bool bits=(cfp._pad0 & 2u)!=0u;
+    bool bits = !legacySurfacePolicy() || (cfp._pad0 & 2u) != 0u;
     uint instance_count = uint(inst.inst_data.length()) / 12u;
     if (meshInstanceId >= instance_count) return 0xFFFFFFFFu;
 
@@ -219,8 +224,30 @@ void surface_cache_card_fill() {
     // 近似覆盖，反弹的材质细节/色彩被洗掉。有效性语义现在只看 alpha
     // （AtlasInit 种子 alpha=0 = 未捕获）。
     vec4 existing_albedo = imageLoad(albedo_atlas, atlas_uv);
-    if (existing_albedo.a > 0.5) {
-        return;  // Valid measurement (capture or prior fill) — don't overwrite
+    const bool legacySurface = legacySurfacePolicy();
+    float existingDepth = imageLoad(depth_atlas, atlas_uv).r;
+    uint existingPayload = uint(round(clamp(existing_albedo.a, 0.0, 1.0) * 255.0));
+    bool measuredSurface = (existingPayload & 128u) != 0u &&
+        !isnan(existingDepth) && !isinf(existingDepth) && existingDepth >= 0.0;
+    if (legacySurface ? existing_albedo.a > 0.5 : measuredSurface) {
+        return;  // Preserve the effective policy's existing surface measurement.
+    }
+
+    if (!legacySurface) {
+        // No owner triangle/UV witness is bound on this fallback path. SDF
+        // proximity, including t=0 or an interior signed value, cannot create
+        // validity. Leave missing coverage explicit until a real writer lands.
+        imageStore(albedo_atlas, atlas_uv, vec4(0.0));
+        imageStore(normal_atlas, atlas_uv, vec4(0.5, 0.5, 0.0, 0.0));
+        imageStore(depth_atlas, atlas_uv, vec4(-1.0, 0.0, 0.0, 0.0));
+        imageStore(emissive_atlas, atlas_uv, vec4(0.0));
+        imageStore(lighting_out, atlas_uv, vec4(0.0));
+#ifdef SC_CAPTURE_SOURCE_AUDIT_VARIANT
+        imageStore(writer_atlas, atlas_uv,
+            makeWriterTag(3u, card.mesh_instance_id,
+                          getMeshTintAuditMaterialId(card.mesh_instance_id)));
+#endif
+        return;
     }
 
     // Texel UV in [0,1] on the card plane.

@@ -49,6 +49,11 @@
 #include <algorithm>
 #include <string>
 #include <cctype>
+#include "Graphics/Volume/FroxelFogPass.h"
+#include "ParticleFX/render/Bridges.h"
+#include "Engine/Common/CoreLogStream.h"
+namespace pfx = primal::pfx;
+
 
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
@@ -229,7 +234,8 @@ bool TestVulkanFroxelRenderGraph::Initialize() {
         setenv("SPONZA_REFERENCE", "1", 1);
         // 常量介质基准（V-Test-A 路径）：G1/G2/G3 在 uniform 相位断言，G4
         // 在 noise 相位断言（相位机切换 density_uniform_debug）。外部可覆盖。
-        setenv("FROXEL_UNIFORM", std::getenv("FROXEL_UNIFORM") ? std::getenv("FROXEL_UNIFORM") : "0.35", 1);
+        setenv("FROXEL_UNIFORM", std::getenv("FROXEL_UNIFORM") ? std::getenv("FROXEL_UNIFORM") :
+               ((EnvEnabled("FROXEL_CLOUD") || EnvEnabled("FROXEL_SPARSE")) ? "-1" : "0.35"), 1);
         setenv("FROXEL_PHASE_G", std::getenv("FROXEL_PHASE_G") ? std::getenv("FROXEL_PHASE_G") : "0.0", 1);
         // WP2 A/B 通道：外部设 FROXEL_SPGI_AMBIENT=1 时门禁的 uniform 相位
         // 也走 SPGI 环境项（默认 0 = 硬编码 fallback 基准）。
@@ -239,7 +245,13 @@ bool TestVulkanFroxelRenderGraph::Initialize() {
     // 门禁配置（计划 §6.2 表）。FROXEL_GATE 默认开；=0 退回窗口长跑。
     {
         const char* e = std::getenv("FROXEL_GATE");
-        gateEnabled_ = !e || e[0] != '0';
+        // Cloud preview is independent of the uniform-medium G1-G5 phase machine.
+        gateEnabled_ = e ? e[0] != '0' : !(EnvEnabled("FROXEL_CLOUD") || EnvEnabled("FROXEL_SPARSE"));
+        if (gateEnabled_ && (EnvEnabled("FROXEL_CLOUD") || EnvEnabled("FROXEL_SPARSE"))) {
+            std::cerr << "[FroxelGate] volume preview requires FROXEL_GATE=0; "
+                         "run G1-G5 with FROXEL_CLOUD=0 and FROXEL_SPARSE=0" << std::endl;
+            return false;
+        }
         e = std::getenv("FROXEL_GATE_FRAME");
         gateFrame_ = e ? (u32)std::atoi(e) : 300u;
         gateFrameB_ = gateFrame_ + 45u;    // G3 no-shadow 读回
@@ -563,6 +575,42 @@ bool TestVulkanFroxelRenderGraph::InitializePipeline() {
         renderSettings.froxel.density_uniform_debug = EnvFloat("FROXEL_UNIFORM", -1.0f);
         renderSettings.froxel.phase_g = EnvFloat("FROXEL_PHASE_G", 0.0f);
         renderSettings.froxel.ambient_source_spgi = EnvEnabled("FROXEL_SPGI_AMBIENT") ? 1u : 0u;
+        if (EnvEnabled("FROXEL_CLOUD") || EnvEnabled("FROXEL_SPARSE")) {
+            auto& fog = renderSettings.froxel;
+            // Dense cumulus: tau >= 4 through the core, feathered outer shell.
+            // Extinction is shared with haze, so increase local cloud density only.
+            fog.cloud_enable = EnvEnabled("FROXEL_CLOUD") ? 1.0f : 0.0f;
+            fog.cloud_radius = std::max(0.1f, EnvFloat("FROXEL_CLOUD_R", 4.0f));
+            fog.cloud_density = std::max(0.0f, EnvFloat("FROXEL_CLOUD_D", 80.0f));
+            fog.cloud_noise_freq = EnvFloat("FROXEL_CLOUD_FREQ", 0.42f);
+            fog.cloud_center[0] = 2.0f;
+            fog.cloud_center[1] = 3.8f;
+            fog.cloud_center[2] = 0.0f;
+            if (const char* pos = std::getenv("FROXEL_CLOUD_POS")) {
+                float x, y, z;
+                if (std::sscanf(pos, "%f,%f,%f", &x, &y, &z) == 3) {
+                    fog.cloud_center[0] = x;
+                    fog.cloud_center[1] = y;
+                    fog.cloud_center[2] = z;
+                }
+            }
+            fog.extinction_scale = std::max(0.001f, EnvFloat("FROXEL_EXT", 0.1f));
+            // The courtyard is largely in roof shadow; calibrate broad sky
+            // fill for this preview's exposure, independently of optical depth.
+            fog.ambient_intensity = std::max(0.0f, EnvFloat("FROXEL_AMBIENT", 12.0f));
+            fog.scattering_albedo = 0.9f;
+            fog.march_steps = (u32)std::clamp(EnvFloat("FROXEL_MARCH", 32.0f), 0.0f, 64.0f);
+            // Resolve the cloud depth instead of spending most slices on distant haze.
+            // Fine surface erosion disappears in an 8px / coarse-depth cell.
+            // Spend the extra froxel budget only in the cloud look preview.
+            fog.grid_width = 480;
+            fog.grid_height = 270;
+            fog.grid_depth = 320;
+            fog.far_plane = 40.0f;
+            std::cerr << "[FroxelVolume] preview enabled (uniform="
+                      << fog.density_uniform_debug << ", density=" << fog.cloud_density
+                      << ", extinction=" << fog.extinction_scale << ")" << std::endl;
+        }
     }
     pipeline_->UpdateSettings(renderSettings);
 
@@ -1512,6 +1560,9 @@ void TestVulkanFroxelRenderGraph::Run() {
     if (!cameraInitialized_) {
         float cx = -12.5f, cy = 1.7f, cz = -0.7f, cpitch = 14.0f, cyaw = 12.0f;
         sponza_reference::Camera(cx, cy, cz, cpitch, cyaw);
+        if (EnvEnabled("FROXEL_CLOUD") || EnvEnabled("FROXEL_SPARSE")) {
+            cx = -5.0f; cy = 3.0f; cz = -2.0f; cpitch = 5.0f; cyaw = 18.0f;
+        }
         if (const char* camEnv = std::getenv("SPGI_CAM")) {
             if (sscanf(camEnv, "%f,%f,%f,%f,%f", &cx, &cy, &cz, &cpitch, &cyaw) == 5) {
                 std::cerr << "[Cam] override " << camEnv << std::endl;
@@ -1555,6 +1606,7 @@ void TestVulkanFroxelRenderGraph::Run() {
     // 相位 A / B 读回帧同时抓离屏最终图像（视觉档案 + 与参考图比对素材）。
     const u64 f = frameCount_;
     const bool captureFrame =
+        (!gateEnabled_ && std::getenv("SPONZA_CAPTURE_DIR") && f == (u64)gateFrame_) ||
         (gateEnabled_ && !gateDone_ &&
          (f == (u64)gateFrame_ || f == (u64)gateFrameB_ || f == (u64)gateFrameE_));
     ResourceHandle captureTarget = handles::INVALID_RESOURCE;
@@ -1563,6 +1615,42 @@ void TestVulkanFroxelRenderGraph::Run() {
         targetDesc.memoryUsage = GPUMemoryUsage::Static;
         captureTarget = device_->CreateTexture(targetDesc);
     }
+
+    #ifndef DISABLE_PARTICLE_FX
+    // Independently selectable sparse particle source. Real PFX alive-row bridge,
+    // with one slowly moving emitter; FROXEL_SPARSE_CLEAR_FRAME exercises removal.
+    if (EnvEnabled("FROXEL_SPARSE")) {
+        if (auto* fog = pipeline_->GetFroxelFogPass(); fog && f % 6 == 0) {
+            pfx::attribute_store store;
+            store.initialize(13, nullptr, 0);
+            const float puffs[][4] = {
+                {0,0,0,1.8f},{-.9f,.4f,0,1.4f},{.8f,.6f,0,1.5f},
+                {0,1.3f,.1f,1.2f},{-1.5f,-.4f,0,1.1f},{1.5f,-.3f,0,1.1f},
+                {0,-1.1f,0,1.4f},{-.8f,0,-1,1.1f},{.8f,.2f,-1,1.2f},
+                {0,.8f,1,1.2f},{-1,.3f,1,1},{1,-.4f,1,1.1f},{0,-.8f,-1,1.1f}};
+            const u64 clearFrame = (u64)std::max(0.0f, EnvFloat("FROXEL_SPARSE_CLEAR_FRAME", 1000000));
+            if (f < clearFrame) for (const auto& p : puffs) {
+                const auto h = store.allocate();
+                *static_cast<primal::math::v4*>(store.resolve(h,pfx::attr::position)) =
+                    {2+p[0]+0.3f*std::sin(float(f)*0.02f),3.8f+p[1],p[2],0};
+                *static_cast<primal::math::v4*>(store.resolve(h,pfx::attr::scale_rotation)) = {p[3],p[3],0,0};
+                *static_cast<primal::math::v4*>(store.resolve(h,pfx::attr::color)) = {1,1,1,1};
+            }
+            const auto particles = pfx::render::pack_volume_particles(store,1.0f,80.0f);
+            volume::SparseVolumeConfig sparse;
+            sparse.voxel_size=std::max(0.025f,EnvFloat("FROXEL_SPARSE_VOXEL",0.1f));
+            std::string error;
+            if (!fog->SetVolumeParticles(particles,sparse,&error)) {
+                PRIMAL_LOG_STREAM(Error,"Engine") << "[SparseVolume] " << error << std::endl;
+            } else if (f==6 || f>=clearFrame) {
+                PRIMAL_LOG_STREAM(Info,"Engine") << "[SparseVolume] frame=" << f
+                    << " particles=" << particles.size() << " bricks=" << fog->GetParticleVolume().BrickCount()
+                    << " atlasBytes=" << fog->GetParticleVolume().atlas.size()*sizeof(float) << std::endl;
+            }
+        }
+    }
+
+    #endif
 
     pipeline_->RenderWithCommandBuffer(
         scene_, view_,
