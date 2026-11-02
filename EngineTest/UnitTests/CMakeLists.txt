@@ -16,12 +16,52 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
 # target runs the copy exactly once and all test targets depend on it.
 # ======================
 set(UNITTEST_ASSETS_STAMP ${CMAKE_BINARY_DIR}/Tests/UnitTests/assets_copy.stamp)
+# Vulkan IBL tests must consume the production module. The historical test
+# asset is a separate WGSL export and can remain stale even after a clean build.
+# Keep this override in the shared copy action so parallel targets have one
+# writer, and depend on the module itself rather than only the assets directory.
+set(UNITTEST_VULKAN_IBL_COPY_COMMAND)
+set(UNITTEST_VULKAN_IBL_COPY_DEPENDS)
+if(ENABLE_VULKAN)
+    set(UNITTEST_VULKAN_IBL_MODULE
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/IBL_SpecularPrefilter.spv)
+    set(UNITTEST_VULKAN_IBL_COPY_COMMAND
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${UNITTEST_VULKAN_IBL_MODULE}
+            ${CMAKE_BINARY_DIR}/Tests/UnitTests/Assets/Shaders/IBL_SpecularPrefilter.spv)
+    set(UNITTEST_VULKAN_IBL_COPY_DEPENDS ${UNITTEST_VULKAN_IBL_MODULE})
+endif()
+
+# Private actual ScreenProbePlace GPU fixture; never overwrites production SPV.
+if(ENABLE_VULKAN)
+    find_program(SPGI_PLACE_TEST_GLSLANG NAMES glslangValidator REQUIRED)
+    set(SPGI_PLACE_TEST_LUMEN ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen)
+    set(SPGI_PLACE_TEST_SPV ${CMAKE_BINARY_DIR}/Tests/UnitTests/ScreenProbePlaceShaders/ScreenProbePlace.comp.spv)
+    add_custom_command(OUTPUT ${SPGI_PLACE_TEST_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/Tests/UnitTests/ScreenProbePlaceShaders
+        COMMAND ${SPGI_PLACE_TEST_GLSLANG} -V -I${SPGI_PLACE_TEST_LUMEN} --source-entrypoint main
+            -e screen_probe_place ${SPGI_PLACE_TEST_LUMEN}/ScreenProbePlace.comp -o ${SPGI_PLACE_TEST_SPV}
+        DEPENDS ${SPGI_PLACE_TEST_LUMEN}/ScreenProbePlace.comp ${SPGI_PLACE_TEST_LUMEN}/ShaderLib/EncodeLib.glsl
+        VERBATIM)
+    add_custom_target(ScreenProbePlaceTestShader DEPENDS ${SPGI_PLACE_TEST_SPV})
+    add_executable(TestVulkanScreenProbePlaceCenter RHI/Core/TestVulkanScreenProbePlaceCenter.cpp)
+    target_include_directories(TestVulkanScreenProbePlaceCenter PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanScreenProbePlaceCenter PRIVATE Engine)
+    target_compile_definitions(TestVulkanScreenProbePlaceCenter PRIVATE ENABLE_VULKAN=1 SPGI_PLACE_TEST_SPV="${SPGI_PLACE_TEST_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanScreenProbePlaceCenter PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanScreenProbePlaceCenter PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanScreenProbePlaceCenter ScreenProbePlaceTestShader)
+    add_test(NAME TestVulkanScreenProbePlaceCenter COMMAND TestVulkanScreenProbePlaceCenter)
+endif()
 add_custom_command(OUTPUT ${UNITTEST_ASSETS_STAMP}
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_SOURCE_DIR}/EngineTest/assets
             ${CMAKE_BINARY_DIR}/Tests/UnitTests/Assets
+    ${UNITTEST_VULKAN_IBL_COPY_COMMAND}
     COMMAND ${CMAKE_COMMAND} -E touch ${UNITTEST_ASSETS_STAMP}
-    DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/assets
+    DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/assets ${UNITTEST_VULKAN_IBL_COPY_DEPENDS}
     COMMENT "Copying EngineTest/assets to Tests/UnitTests/Assets"
     VERBATIM
 )
@@ -228,6 +268,18 @@ if(ENABLE_VULKAN)
     )
 
     # VT M0: readback ring / R16_UINT texelFetch / UpdateTextureRegion / ASTC query
+    find_program(VT_PRIMITIVES_GLSLANG NAMES glslangValidator REQUIRED)
+    set(VT_PRIMITIVES_SHADER_DIR "${CMAKE_BINARY_DIR}/Tests/UnitTests/VTPrimitivesShaders")
+    set(VT_PRIMITIVES_WRITE_SPV "${VT_PRIMITIVES_SHADER_DIR}/VTTest_Write.comp.spv")
+    set(VT_PRIMITIVES_FETCH_SPV "${VT_PRIMITIVES_SHADER_DIR}/VTTest_TexelFetch.comp.spv")
+    foreach(vt_shader IN ITEMS VTTest_Write VTTest_TexelFetch)
+        add_custom_command(OUTPUT "${VT_PRIMITIVES_SHADER_DIR}/${vt_shader}.comp.spv"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${VT_PRIMITIVES_SHADER_DIR}"
+            COMMAND ${VT_PRIMITIVES_GLSLANG} -V "${CMAKE_SOURCE_DIR}/EngineTest/assets/shaders/${vt_shader}.comp"
+                -o "${VT_PRIMITIVES_SHADER_DIR}/${vt_shader}.comp.spv"
+            DEPENDS "${CMAKE_SOURCE_DIR}/EngineTest/assets/shaders/${vt_shader}.comp" VERBATIM)
+    endforeach()
+    add_custom_target(VTPrimitivesTestShaders DEPENDS "${VT_PRIMITIVES_WRITE_SPV}" "${VT_PRIMITIVES_FETCH_SPV}")
     add_executable(TestVulkanVTPrimitives RHI/Core/TestVulkanVTPrimitives.cpp)
     target_include_directories(TestVulkanVTPrimitives PRIVATE
         ${CMAKE_SOURCE_DIR}
@@ -235,12 +287,14 @@ if(ENABLE_VULKAN)
         ${CMAKE_SOURCE_DIR}/Engine/Common
     )
     target_link_libraries(TestVulkanVTPrimitives PRIVATE Engine)
-    target_compile_definitions(TestVulkanVTPrimitives PRIVATE ENABLE_VULKAN=1)
+    target_compile_definitions(TestVulkanVTPrimitives PRIVATE ENABLE_VULKAN=1
+        VT_PRIMITIVES_WRITE_SPV="${VT_PRIMITIVES_WRITE_SPV}"
+        VT_PRIMITIVES_FETCH_SPV="${VT_PRIMITIVES_FETCH_SPV}")
     add_test(NAME TestVulkanVTPrimitives COMMAND TestVulkanVTPrimitives)
     set_target_properties(TestVulkanVTPrimitives PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
-    add_dependencies(TestVulkanVTPrimitives UnitTestAssetsCopy)
+    add_dependencies(TestVulkanVTPrimitives UnitTestAssetsCopy VTPrimitivesTestShaders)
 
     # VT M0 原型: 页表 + 物理 atlas + 两段式采样端到端
     add_executable(TestVulkanVTPrototype RHI/Core/TestVulkanVTPrototype.cpp)
@@ -3653,6 +3707,15 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 add_test(NAME UnitSCSurfacePages COMMAND UnitSCSurfacePages)
 
+# Scale-independent face normal import contract (matches ContentTools fast math).
+add_executable(UnitTriangleNormal Graphics/TestTriangleNormal.cpp)
+target_include_directories(UnitTriangleNormal PRIVATE ${CMAKE_SOURCE_DIR})
+target_compile_features(UnitTriangleNormal PRIVATE cxx_std_17)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(UnitTriangleNormal PRIVATE -O2 -ffast-math)
+endif()
+add_test(NAME UnitTriangleNormal COMMAND UnitTriangleNormal)
+
 add_executable(UnitGeometryFirstHit Graphics/TestGeometryFirstHit.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/Utilities/GeometryFirstHit.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/Utilities/GeometryBVHStore.cpp
@@ -3662,3 +3725,896 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(UnitGeometryFirstHit PRIVATE -O2 -ffast-math)
 endif()
 add_test(NAME UnitGeometryFirstHit COMMAND UnitGeometryFirstHit)
+
+# Independent SAH structure, scene publication, and measurement provenance.
+foreach(sah_test IN ITEMS BinnedSAH SAHWitness InterleavedHistory)
+    add_executable(UnitExperimental${sah_test}
+        ${CMAKE_SOURCE_DIR}/Tools/ExperimentalBVH/${sah_test}Test.cpp)
+    target_include_directories(UnitExperimental${sah_test} PRIVATE ${CMAKE_SOURCE_DIR})
+    target_compile_features(UnitExperimental${sah_test} PRIVATE cxx_std_20)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(UnitExperimental${sah_test} PRIVATE -UNDEBUG)
+    endif()
+    add_test(NAME UnitExperimental${sah_test} COMMAND UnitExperimental${sah_test})
+endforeach()
+
+# Sparse particle density: no GPU dependency; dense analytic interpolation oracle.
+add_executable(UnitSparseParticleVolume TestSparseParticleVolume.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/Volume/SparseParticleVolume.cpp)
+target_include_directories(UnitSparseParticleVolume PRIVATE ${CMAKE_SOURCE_DIR}/Engine)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(UnitSparseParticleVolume PRIVATE -O2 -ffast-math)
+endif()
+add_test(NAME UnitSparseParticleVolume COMMAND UnitSparseParticleVolume)
+
+# Stable DDGI analytic-history wire values and production/diagnostic precedence.
+add_executable(UnitDDGIAnalyticHistoryPolicy Graphics/TestDDGIAnalyticHistoryPolicy.cpp)
+target_include_directories(UnitDDGIAnalyticHistoryPolicy PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME UnitDDGIAnalyticHistoryPolicy COMMAND UnitDDGIAnalyticHistoryPolicy)
+
+# Mode-7 regression owns private generated shaders. It must never consume or
+# overwrite the historical Assets copy or a stale production SPV artifact.
+if(ENABLE_VULKAN)
+    find_program(DDGI_MEASURED_GLSLANG NAMES glslangValidator REQUIRED)
+    set(DDGI_MEASURED_SHADER_DIR ${CMAKE_BINARY_DIR}/Tests/UnitTests/MeasuredVisibilityShaders)
+    set(DDGI_MEASURED_LUMEN_DIR ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen)
+    set(DDGI_MEASURED_SAMPLER_SPV ${DDGI_MEASURED_SHADER_DIR}/DDGIMeasuredSampling.comp.spv)
+    set(DDGI_MEASURED_DEPTH_SPV ${DDGI_MEASURED_SHADER_DIR}/DDGIUpdateDepth.comp.spv)
+    add_custom_command(OUTPUT ${DDGI_MEASURED_SAMPLER_SPV} ${DDGI_MEASURED_DEPTH_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${DDGI_MEASURED_SHADER_DIR}
+        COMMAND ${DDGI_MEASURED_GLSLANG} -V -I${DDGI_MEASURED_LUMEN_DIR}
+            ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/DDGIMeasuredSampling.comp
+            -o ${DDGI_MEASURED_SAMPLER_SPV}
+        COMMAND ${DDGI_MEASURED_GLSLANG} -V -I${DDGI_MEASURED_LUMEN_DIR}
+            -Dddgi_update_depth=main --source-entrypoint main -e ddgi_update_depth
+            ${DDGI_MEASURED_LUMEN_DIR}/DDGIUpdateDepth.comp
+            -o ${DDGI_MEASURED_DEPTH_SPV}
+        DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/DDGIMeasuredSampling.comp
+            ${DDGI_MEASURED_LUMEN_DIR}/DDGIUpdateDepth.comp
+            ${DDGI_MEASURED_LUMEN_DIR}/ShaderLib/ProbeSampleLib.glsl
+        VERBATIM)
+    add_custom_target(DDGIMeasuredVisibilityShaders
+        DEPENDS ${DDGI_MEASURED_SAMPLER_SPV} ${DDGI_MEASURED_DEPTH_SPV})
+    add_executable(TestVulkanDDGIMeasuredSampling RHI/Core/TestVulkanDDGIMeasuredSampling.cpp)
+    target_include_directories(TestVulkanDDGIMeasuredSampling PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIMeasuredSampling PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIMeasuredSampling PRIVATE ENABLE_VULKAN=1
+        DDGI_MEASURED_SAMPLER_SPV="${DDGI_MEASURED_SAMPLER_SPV}"
+        DDGI_MEASURED_DEPTH_SPV="${DDGI_MEASURED_DEPTH_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIMeasuredSampling PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIMeasuredSampling PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIMeasuredSampling DDGIMeasuredVisibilityShaders)
+    add_test(NAME TestVulkanDDGIMeasuredSampling COMMAND TestVulkanDDGIMeasuredSampling)
+endif()
+
+# Timestamp nonblocking experiment: direct production RHI and native availability oracle.
+if(ENABLE_VULKAN)
+    add_executable(TestVulkanPassTimestampAudit RHI/Core/TestVulkanPassTimestampAudit.cpp)
+    target_include_directories(TestVulkanPassTimestampAudit PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanPassTimestampAudit PRIVATE Engine)
+    target_compile_definitions(TestVulkanPassTimestampAudit PRIVATE ENABLE_VULKAN=1)
+    set_target_properties(TestVulkanPassTimestampAudit PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_test(NAME TestVulkanPassTimestampAudit COMMAND TestVulkanPassTimestampAudit)
+    add_executable(TestVulkanTimestampNonblocking RHI/Core/TestVulkanTimestampNonblocking.cpp)
+    target_include_directories(TestVulkanTimestampNonblocking PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanTimestampNonblocking PRIVATE Engine)
+    target_compile_definitions(TestVulkanTimestampNonblocking PRIVATE ENABLE_VULKAN=1)
+    set_target_properties(TestVulkanTimestampNonblocking PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_test(NAME TestVulkanTimestampNonblocking COMMAND TestVulkanTimestampNonblocking)
+endif()
+
+# Production environment visibility GPU contract, isolated from copied Assets.
+if(ENABLE_VULKAN)
+    find_program(ENV_VIS_TEST_GLSLANG NAMES glslangValidator REQUIRED)
+    set(ENV_VIS_TEST_DIR ${CMAKE_BINARY_DIR}/Tests/UnitTests/EnvironmentVisibilityShaders)
+    set(ENV_VIS_TEST_LUMEN ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen)
+    set(ENV_VIS_TEST_TRACE ${ENV_VIS_TEST_DIR}/EnvironmentVisibility_trace.comp.spv)
+    set(ENV_VIS_TEST_RESOLVE ${ENV_VIS_TEST_DIR}/EnvironmentVisibility_resolve.comp.spv)
+    add_custom_command(OUTPUT ${ENV_VIS_TEST_TRACE} ${ENV_VIS_TEST_RESOLVE}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${ENV_VIS_TEST_DIR}
+        COMMAND ${ENV_VIS_TEST_GLSLANG} -V -I${ENV_VIS_TEST_LUMEN}
+            ${ENV_VIS_TEST_LUMEN}/EnvironmentVisibility.comp -o ${ENV_VIS_TEST_TRACE}
+        COMMAND ${ENV_VIS_TEST_GLSLANG} -V -I${ENV_VIS_TEST_LUMEN} -DENV_VIS_RESOLVE=1
+            ${ENV_VIS_TEST_LUMEN}/EnvironmentVisibility.comp -o ${ENV_VIS_TEST_RESOLVE}
+        DEPENDS ${ENV_VIS_TEST_LUMEN}/EnvironmentVisibility.comp
+            ${ENV_VIS_TEST_LUMEN}/GeometryFirstHit.glsl
+        VERBATIM)
+    add_custom_target(EnvironmentVisibilityTestShaders DEPENDS ${ENV_VIS_TEST_TRACE} ${ENV_VIS_TEST_RESOLVE})
+    add_executable(TestVulkanEnvironmentVisibility RHI/Core/TestVulkanEnvironmentVisibility.cpp)
+    target_include_directories(TestVulkanEnvironmentVisibility PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentVisibility PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentVisibility PRIVATE ENABLE_VULKAN=1
+        ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}"
+        ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanEnvironmentVisibility PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanEnvironmentVisibility PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanEnvironmentVisibility EnvironmentVisibilityTestShaders)
+    add_test(NAME TestVulkanEnvironmentVisibility COMMAND TestVulkanEnvironmentVisibility)
+endif()
+
+if(ENABLE_VULKAN)
+    add_executable(TestVulkanTangentFrame RHI/Core/TestVulkanTangentFrame.cpp)
+    target_include_directories(TestVulkanTangentFrame PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanTangentFrame PRIVATE Engine)
+    target_compile_definitions(TestVulkanTangentFrame PRIVATE ENABLE_VULKAN=1)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanTangentFrame PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanTangentFrame PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    set(TANGENT_FRAME_SHADER_DIR ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Nanite)
+    add_test(NAME TestVulkanTangentFrameCanonical COMMAND TestVulkanTangentFrame
+        --vs ${TANGENT_FRAME_SHADER_DIR}/GPUDrivenDrawTangentFrame.spv
+        --fs ${TANGENT_FRAME_SHADER_DIR}/GPUDrivenDrawTangentFrame.spv
+        --variant tangent-z-hand-clamp)
+    add_test(NAME TestVulkanTangentFrameAlbedoMips COMMAND TestVulkanTangentFrame
+        --vs ${TANGENT_FRAME_SHADER_DIR}/GPUDrivenDrawTangentFrame.spv
+        --fs ${TANGENT_FRAME_SHADER_DIR}/GPUDrivenDrawTangentFrameAlbedoMips.frag.spv
+        --variant tangent-z-hand-clamp)
+    set_tests_properties(TestVulkanTangentFrameCanonical TestVulkanTangentFrameAlbedoMips
+        PROPERTIES PASS_REGULAR_EXPRESSION "PASS=11 XFAIL=0"
+        FAIL_REGULAR_EXPRESSION "VUID-;TANGENT_FRAME\\] ERROR;Vulkan validation\\] ERROR")
+endif()
+
+# Isolated actual-production irradiance cold-start old/new GPU contract.
+if(ENABLE_VULKAN)
+    find_program(DDGI_HISTORY_GLSLANG NAMES glslangValidator REQUIRED)
+    set(DDGI_HISTORY_DIR ${CMAKE_BINARY_DIR}/Tests/UnitTests/IrradianceHistoryShaders)
+    set(DDGI_HISTORY_LUMEN ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen)
+    set(DDGI_HISTORY_NEW_SPV ${DDGI_HISTORY_DIR}/DDGIUpdateIrradiance_new.comp.spv)
+    set(DDGI_HISTORY_OLD_SPV ${DDGI_HISTORY_DIR}/DDGIUpdateIrradiance_before.comp.spv)
+    add_custom_command(OUTPUT ${DDGI_HISTORY_NEW_SPV} ${DDGI_HISTORY_OLD_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${DDGI_HISTORY_DIR}
+        COMMAND ${CMAKE_COMMAND} -DCOMPILER=${DDGI_HISTORY_GLSLANG}
+            -DINCLUDE_DIR=${DDGI_HISTORY_LUMEN} -DSOURCE=${DDGI_HISTORY_LUMEN}/DDGIUpdateIrradiance.comp
+            -DOUTPUT=${DDGI_HISTORY_NEW_SPV} -P ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/CompileDDGIIrradianceHistory.cmake
+        COMMAND ${CMAKE_COMMAND} -DCOMPILER=${DDGI_HISTORY_GLSLANG}
+            -DINCLUDE_DIR=${DDGI_HISTORY_LUMEN} -DSOURCE=${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/DDGIIrradianceHistoryBefore.comp
+            -DOUTPUT=${DDGI_HISTORY_OLD_SPV} -P ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/CompileDDGIIrradianceHistory.cmake
+        DEPENDS ${DDGI_HISTORY_LUMEN}/DDGIUpdateIrradiance.comp
+            ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/DDGIIrradianceHistoryBefore.comp
+            ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/CompileDDGIIrradianceHistory.cmake
+            ${DDGI_HISTORY_LUMEN}/ShaderLib/ProbeSampleLib.glsl VERBATIM)
+    add_custom_target(DDGIIrradianceHistoryShaders DEPENDS ${DDGI_HISTORY_NEW_SPV} ${DDGI_HISTORY_OLD_SPV})
+    add_executable(TestVulkanDDGIIrradianceHistory RHI/Core/TestVulkanDDGIIrradianceHistory.cpp)
+    target_include_directories(TestVulkanDDGIIrradianceHistory PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIIrradianceHistory PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIIrradianceHistory PRIVATE ENABLE_VULKAN=1
+        DDGI_HISTORY_NEW_SPV="${DDGI_HISTORY_NEW_SPV}" DDGI_HISTORY_OLD_SPV="${DDGI_HISTORY_OLD_SPV}"
+        DDGI_FAR_DEPTH_SPV="${DDGI_MEASURED_DEPTH_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIIrradianceHistory PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIIrradianceHistory PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIIrradianceHistory DDGIIrradianceHistoryShaders DDGIMeasuredVisibilityShaders)
+    add_test(NAME TestVulkanDDGIIrradianceHistory COMMAND TestVulkanDDGIIrradianceHistory)
+endif()
+
+# Actual production gather: baseline vs geometry-required mode-7 consumer.
+# Private outputs never overwrite production SPV or historical test Assets.
+if(ENABLE_VULKAN)
+    find_program(GG_CONNECTION_GLSLANG NAMES glslangValidator REQUIRED)
+    set(GG_CONNECTION_LUMEN ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen)
+    set(GG_CONNECTION_DIR ${CMAKE_BINARY_DIR}/Tests/UnitTests/GatherConnectionShaders)
+    set(GG_CONNECTION_BASE_SPV ${GG_CONNECTION_DIR}/gather-base.comp.spv)
+    set(GG_CONNECTION_GEOMETRY_SPV ${GG_CONNECTION_DIR}/gather-geometry.comp.spv)
+    file(GLOB GG_CONNECTION_HEADERS CONFIGURE_DEPENDS
+        ${GG_CONNECTION_LUMEN}/*.glsl ${GG_CONNECTION_LUMEN}/ShaderLib/*.glsl)
+    add_custom_command(OUTPUT ${GG_CONNECTION_BASE_SPV} ${GG_CONNECTION_GEOMETRY_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN}
+            -Dddgi_gi_gather=main --source-entrypoint main -e ddgi_gi_gather
+            ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp -o ${GG_CONNECTION_BASE_SPV}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN}
+            -DDDGI_GEOMETRY_CONNECTIONS=1 -Dddgi_gi_gather=main --source-entrypoint main -e ddgi_gi_gather
+            ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp -o ${GG_CONNECTION_GEOMETRY_SPV}
+        DEPENDS ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
+    add_custom_target(GatherConnectionTestShaders DEPENDS ${GG_CONNECTION_BASE_SPV} ${GG_CONNECTION_GEOMETRY_SPV})
+    add_executable(TestVulkanDDGIGatherConnections RHI/Core/TestVulkanDDGIGatherConnections.cpp)
+    target_include_directories(TestVulkanDDGIGatherConnections PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIGatherConnections PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIGatherConnections PRIVATE ENABLE_VULKAN=1
+        GG_CONNECTION_BASE_SPV="${GG_CONNECTION_BASE_SPV}"
+        GG_CONNECTION_GEOMETRY_SPV="${GG_CONNECTION_GEOMETRY_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIGatherConnections PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIGatherConnections PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIGatherConnections GatherConnectionTestShaders)
+    add_test(NAME TestVulkanDDGIGatherConnections COMMAND TestVulkanDDGIGatherConnections)
+    # Exercise the actual production geometry-replace gather, privately built.
+    set(GG_REPLACE_SPV ${GG_CONNECTION_DIR}/gather-replace.comp.spv)
+    add_custom_command(OUTPUT ${GG_REPLACE_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN}
+            -DDDGI_GEOMETRY_CONNECTIONS=1 -DDDGI_GEOMETRY_REPLACE=1
+            -Dddgi_gi_gather=main --source-entrypoint main -e ddgi_gi_gather
+            ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp -o ${GG_REPLACE_SPV}
+        DEPENDS ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
+    add_custom_target(GatherGeometryReplaceTestShaders DEPENDS ${GG_REPLACE_SPV})
+    add_executable(TestVulkanDDGIGatherGeometryReplace RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+    target_include_directories(TestVulkanDDGIGatherGeometryReplace PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIGatherGeometryReplace PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIGatherGeometryReplace PRIVATE ENABLE_VULKAN=1
+        GG_CONNECTION_BASE_SPV="${GG_CONNECTION_GEOMETRY_SPV}"
+        GG_CONNECTION_GEOMETRY_SPV="${GG_REPLACE_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIGatherGeometryReplace PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIGatherGeometryReplace PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIGatherGeometryReplace GatherConnectionTestShaders GatherGeometryReplaceTestShaders)
+    add_test(NAME TestVulkanDDGIGatherGeometryReplace COMMAND TestVulkanDDGIGatherGeometryReplace)
+    # Compare closest replacement against any-hit on the same actual GPU inputs.
+    set(GG_ANYHIT_SPV ${GG_CONNECTION_DIR}/gather-anyhit.comp.spv)
+    add_custom_command(OUTPUT ${GG_ANYHIT_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN}
+            -DDDGI_GEOMETRY_CONNECTIONS=1 -DDDGI_GEOMETRY_REPLACE=1 -DDDGI_GEOMETRY_ANY_HIT=1
+            -Dddgi_gi_gather=main --source-entrypoint main -e ddgi_gi_gather
+            ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp -o ${GG_ANYHIT_SPV}
+        DEPENDS ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
+    add_custom_target(GatherGeometryAnyHitTestShaders DEPENDS ${GG_ANYHIT_SPV})
+    add_executable(TestVulkanDDGIGatherGeometryAnyHit RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+    target_include_directories(TestVulkanDDGIGatherGeometryAnyHit PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIGatherGeometryAnyHit PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIGatherGeometryAnyHit PRIVATE ENABLE_VULKAN=1
+        GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_BASE_SPV="${GG_REPLACE_SPV}"
+        GG_CONNECTION_GEOMETRY_SPV="${GG_ANYHIT_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIGatherGeometryAnyHit PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIGatherGeometryAnyHit PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIGatherGeometryAnyHit GatherGeometryReplaceTestShaders GatherGeometryAnyHitTestShaders)
+    add_test(NAME TestVulkanDDGIGatherGeometryAnyHit COMMAND TestVulkanDDGIGatherGeometryAnyHit)
+    add_executable(TestVulkanDDGIGatherGeometryUpper RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+    target_include_directories(TestVulkanDDGIGatherGeometryUpper PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIGatherGeometryUpper PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIGatherGeometryUpper PRIVATE ENABLE_VULKAN=1
+        GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_UPPER_TEST=1
+        GG_CONNECTION_BASE_SPV="${GG_ANYHIT_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_ANYHIT_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIGatherGeometryUpper PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIGatherGeometryUpper PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIGatherGeometryUpper GatherGeometryAnyHitTestShaders)
+    add_test(NAME TestVulkanDDGIGatherGeometryUpper COMMAND TestVulkanDDGIGatherGeometryUpper)
+    # Query-kernel equivalence uses exactly the same scene and buffers in both dispatches.
+    set(GG_QUERY_KERNEL_SPV ${GG_CONNECTION_DIR}/gather-query-kernel.comp.spv)
+    add_custom_command(OUTPUT ${GG_QUERY_KERNEL_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN}
+            -DDDGI_GEOMETRY_CONNECTIONS=1 -DDDGI_GEOMETRY_REPLACE=1 -DDDGI_GEOMETRY_ANY_HIT=1 -DDDGI_GEOMETRY_QUERY_KERNEL=1
+            -Dddgi_gi_gather=main --source-entrypoint main -e ddgi_gi_gather
+            ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp -o ${GG_QUERY_KERNEL_SPV}
+        DEPENDS ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
+    add_custom_target(GatherQueryKernelTestShaders DEPENDS ${GG_QUERY_KERNEL_SPV})
+    foreach(query_target IN ITEMS TestVulkanDDGIGatherGeometryQueryKernel TestVulkanDDGIGatherGeometryQueryKernelUpper)
+        add_executable(${query_target} RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+        target_include_directories(${query_target} PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+        target_link_libraries(${query_target} PRIVATE Engine)
+        target_compile_definitions(${query_target} PRIVATE ENABLE_VULKAN=1 GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_QUERY_KERNEL_TEST=1
+            GG_CONNECTION_BASE_SPV="${GG_ANYHIT_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_QUERY_KERNEL_SPV}")
+        if(query_target STREQUAL "TestVulkanDDGIGatherGeometryQueryKernelUpper")
+            target_compile_definitions(${query_target} PRIVATE GG_CONNECTION_UPPER_TEST=1)
+        endif()
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(${query_target} PRIVATE -fno-fast-math)
+        endif()
+        set_target_properties(${query_target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+        add_dependencies(${query_target} GatherGeometryAnyHitTestShaders GatherQueryKernelTestShaders)
+        add_test(NAME ${query_target} COMMAND ${query_target})
+    endforeach()
+    # Independent cache modules; existing SPVs are never outputs of this rule.
+    add_custom_target(GatherInstanceCacheTestShaders
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/build_ddgi_instance_cache_spv.py
+        DEPENDS ${GG_CONNECTION_LUMEN}/DDGIInstanceNormalProduce.comp ${GG_CONNECTION_LUMEN}/DDGIInstanceNormalVerify.comp
+            ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
+    add_executable(TestVulkanDDGIInstanceNormalCache RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+    target_include_directories(TestVulkanDDGIInstanceNormalCache PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIInstanceNormalCache PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIInstanceNormalCache PRIVATE ENABLE_VULKAN=1 GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_QUERY_KERNEL_TEST=1 GG_INSTANCE_CACHE_TEST=1
+        GG_CONNECTION_BASE_SPV="${GG_QUERY_KERNEL_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_CONNECTION_LUMEN}/DDGIGIGather_instance_cache.comp.spv"
+        GG_INSTANCE_PRODUCER_SPV="${GG_CONNECTION_LUMEN}/DDGIInstanceNormalProduce.comp.spv" GG_INSTANCE_VERIFY_SPV="${GG_CONNECTION_LUMEN}/DDGIInstanceNormalVerify.comp.spv")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIInstanceNormalCache PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIInstanceNormalCache PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIInstanceNormalCache GatherQueryKernelTestShaders GatherInstanceCacheTestShaders)
+    add_test(NAME TestVulkanDDGIInstanceNormalCache COMMAND TestVulkanDDGIInstanceNormalCache)
+    set(GG_BOUNDS_FIRST_SPV ${GG_CONNECTION_DIR}/gather-bounds-first.comp.spv)
+    add_custom_command(OUTPUT ${GG_BOUNDS_FIRST_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN}
+            -DDDGI_GEOMETRY_CONNECTIONS=1 -DDDGI_GEOMETRY_REPLACE=1 -DDDGI_GEOMETRY_ANY_HIT=1 -DDDGI_GEOMETRY_QUERY_KERNEL=1 -DDDGI_GEOMETRY_BOUNDS_FIRST=1
+            -Dddgi_gi_gather=main --source-entrypoint main -e ddgi_gi_gather
+            ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp -o ${GG_BOUNDS_FIRST_SPV}
+        DEPENDS ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
+    add_custom_target(GatherBoundsFirstTestShaders DEPENDS ${GG_BOUNDS_FIRST_SPV})
+    add_executable(TestVulkanDDGIGatherBoundsFirst RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+    target_include_directories(TestVulkanDDGIGatherBoundsFirst PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIGatherBoundsFirst PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIGatherBoundsFirst PRIVATE ENABLE_VULKAN=1 GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_QUERY_KERNEL_TEST=1 GG_BOUNDS_FIRST_TEST=1
+        GG_CONNECTION_BASE_SPV="${GG_QUERY_KERNEL_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_BOUNDS_FIRST_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIGatherBoundsFirst PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIGatherBoundsFirst PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIGatherBoundsFirst GatherQueryKernelTestShaders GatherBoundsFirstTestShaders)
+    add_test(NAME TestVulkanDDGIGatherBoundsFirst COMMAND TestVulkanDDGIGatherBoundsFirst)
+    add_executable(TestComputeWorkgroupExperiment RHI/Core/TestComputeWorkgroupExperiment.cpp)
+    target_include_directories(TestComputeWorkgroupExperiment PRIVATE ${CMAKE_SOURCE_DIR}/Engine)
+    set_target_properties(TestComputeWorkgroupExperiment PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_test(NAME TestComputeWorkgroupExperiment COMMAND TestComputeWorkgroupExperiment)
+    foreach(wg_size IN ITEMS 64 32)
+        set(wg_target TestVulkanDDGIGatherCacheless${wg_size})
+        if(wg_size EQUAL 32)
+            set(wg_local_y 4)
+        else()
+            set(wg_local_y 8)
+        endif()
+        add_executable(${wg_target} RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+        target_include_directories(${wg_target} PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+        target_link_libraries(${wg_target} PRIVATE Engine)
+        target_compile_definitions(${wg_target} PRIVATE ENABLE_VULKAN=1 GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_QUERY_KERNEL_TEST=1 GG_CACHELESS_TEST=1 GG_CACHELESS_LOCAL_Y=${wg_local_y}
+            GG_CONNECTION_BASE_SPV="${GG_QUERY_KERNEL_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_CONNECTION_LUMEN}/DDGIGIGather_geometry_cacheless${wg_size}.comp.spv")
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(${wg_target} PRIVATE -fno-fast-math)
+        endif()
+        set_target_properties(${wg_target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+        add_dependencies(${wg_target} GatherQueryKernelTestShaders)
+        add_test(NAME ${wg_target} COMMAND ${wg_target})
+    endforeach()
+    add_executable(TestVulkanEnvironmentVisibilityWG32 RHI/Core/TestVulkanEnvironmentVisibility.cpp)
+    target_include_directories(TestVulkanEnvironmentVisibilityWG32 PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentVisibilityWG32 PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentVisibilityWG32 PRIVATE ENABLE_VULKAN=1 ENV_VIS_WG32_TEST=1
+        ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}"
+        ENV_VIS_WG32_SPV="${GG_CONNECTION_LUMEN}/EnvironmentVisibility_trace_wg32.comp.spv")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanEnvironmentVisibilityWG32 PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanEnvironmentVisibilityWG32 PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanEnvironmentVisibilityWG32 EnvironmentVisibilityTestShaders)
+    add_test(NAME TestVulkanEnvironmentVisibilityWG32 COMMAND TestVulkanEnvironmentVisibilityWG32)
+    add_executable(TestVulkanDDGIGatherEqualBox RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+    target_include_directories(TestVulkanDDGIGatherEqualBox PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIGatherEqualBox PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIGatherEqualBox PRIVATE ENABLE_VULKAN=1 GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_QUERY_KERNEL_TEST=1 GG_EQUAL_BOX_TEST=1
+        GG_CONNECTION_BASE_SPV="${GG_QUERY_KERNEL_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_CONNECTION_LUMEN}/DDGIGIGather_geometry_equal_box.comp.spv")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIGatherEqualBox PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIGatherEqualBox PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIGatherEqualBox GatherQueryKernelTestShaders)
+    add_test(NAME TestVulkanDDGIGatherEqualBox COMMAND TestVulkanDDGIGatherEqualBox)
+    set(DDGI_EQUAL_REPLAY_SRC ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/DDGIEqualBoxReplay.comp)
+    set(DDGI_EQUAL_REPLAY_REF ${GG_CONNECTION_DIR}/equal-box-replay-reference.spv)
+    set(DDGI_EQUAL_REPLAY_CAND ${GG_CONNECTION_DIR}/equal-box-replay-candidate.spv)
+    add_custom_command(OUTPUT ${DDGI_EQUAL_REPLAY_REF} ${DDGI_EQUAL_REPLAY_CAND}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN} ${DDGI_EQUAL_REPLAY_SRC} -o ${DDGI_EQUAL_REPLAY_REF}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN} -DDDGI_GEOMETRY_EQUAL_BOX=1 ${DDGI_EQUAL_REPLAY_SRC} -o ${DDGI_EQUAL_REPLAY_CAND}
+        DEPENDS ${DDGI_EQUAL_REPLAY_SRC} ${GG_CONNECTION_LUMEN}/GeometryFirstHit.glsl VERBATIM)
+    add_custom_target(DDGIEqualBoxReplayShaders DEPENDS ${DDGI_EQUAL_REPLAY_REF} ${DDGI_EQUAL_REPLAY_CAND})
+    add_executable(TestVulkanDDGIEqualBoxReplay RHI/Core/TestVulkanDDGIEqualBoxReplay.cpp)
+    target_include_directories(TestVulkanDDGIEqualBoxReplay PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIEqualBoxReplay PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIEqualBoxReplay PRIVATE ENABLE_VULKAN=1
+        REPLAY_REFERENCE_SPV="${DDGI_EQUAL_REPLAY_REF}" REPLAY_CANDIDATE_SPV="${DDGI_EQUAL_REPLAY_CAND}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIEqualBoxReplay PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIEqualBoxReplay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    # Explicit fixture: requires the local archived 9344-record capture and PBVH.
+    add_dependencies(TestVulkanDDGIEqualBoxReplay DDGIEqualBoxReplayShaders)
+    add_executable(TestVulkanDDGIGatherInstancePayload RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+    target_include_directories(TestVulkanDDGIGatherInstancePayload PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIGatherInstancePayload PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIGatherInstancePayload PRIVATE ENABLE_VULKAN=1 GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_QUERY_KERNEL_TEST=1 GG_INSTANCE_PAYLOAD_TEST=1
+        GG_CONNECTION_BASE_SPV="${GG_QUERY_KERNEL_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_CONNECTION_LUMEN}/DDGIGIGather_geometry_instance_payload.comp.spv")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIGatherInstancePayload PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIGatherInstancePayload PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIGatherInstancePayload GatherQueryKernelTestShaders)
+    add_test(NAME TestVulkanDDGIGatherInstancePayload COMMAND TestVulkanDDGIGatherInstancePayload)
+    set(DDGI_PAYLOAD_REPLAY_SRC ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/DDGIInstancePayloadReplay.comp)
+    set(DDGI_PAYLOAD_REPLAY_REF ${GG_CONNECTION_DIR}/instance-payload-replay-reference.spv)
+    set(DDGI_PAYLOAD_REPLAY_CAND ${GG_CONNECTION_DIR}/instance-payload-replay-candidate.spv)
+    add_custom_command(OUTPUT ${DDGI_PAYLOAD_REPLAY_REF} ${DDGI_PAYLOAD_REPLAY_CAND}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN} ${DDGI_PAYLOAD_REPLAY_SRC} -o ${DDGI_PAYLOAD_REPLAY_REF}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN} -DDDGI_INSTANCE_PAYLOAD_CACHE=1 ${DDGI_PAYLOAD_REPLAY_SRC} -o ${DDGI_PAYLOAD_REPLAY_CAND}
+        DEPENDS ${DDGI_PAYLOAD_REPLAY_SRC} ${GG_CONNECTION_LUMEN}/GeometryFirstHit.glsl VERBATIM)
+    add_custom_target(DDGIInstancePayloadReplayShaders DEPENDS ${DDGI_PAYLOAD_REPLAY_REF} ${DDGI_PAYLOAD_REPLAY_CAND})
+    add_executable(TestVulkanDDGIInstancePayloadReplay RHI/Core/TestVulkanDDGIInstancePayloadReplay.cpp)
+    target_include_directories(TestVulkanDDGIInstancePayloadReplay PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIInstancePayloadReplay PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIInstancePayloadReplay PRIVATE ENABLE_VULKAN=1 REPLAY_REFERENCE_SPV="${DDGI_PAYLOAD_REPLAY_REF}" REPLAY_CANDIDATE_SPV="${DDGI_PAYLOAD_REPLAY_CAND}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIInstancePayloadReplay PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIInstancePayloadReplay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIInstancePayloadReplay DDGIInstancePayloadReplayShaders)
+    # Explicit fixture: requires local archived 9344-ray inputs and PBVH.
+    set(ENV_PAIR_AUDIT_SRC ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/EnvironmentVisibilityPairAudit.comp)
+    set(ENV_PAIR_AUDIT_REF_SRC ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/EnvironmentVisibilityPairAuditReference.comp)
+    set(ENV_PAIR_AUDIT_REF ${GG_CONNECTION_DIR}/env-pair-audit-reference.spv)
+    set(ENV_PAIR_AUDIT_CAND ${GG_CONNECTION_DIR}/env-pair-audit-candidate.spv)
+    add_custom_command(OUTPUT ${ENV_PAIR_AUDIT_REF} ${ENV_PAIR_AUDIT_CAND}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN} ${ENV_PAIR_AUDIT_REF_SRC} -o ${ENV_PAIR_AUDIT_REF}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN} -DENV_VIS_PAIR=1 ${ENV_PAIR_AUDIT_SRC} -o ${ENV_PAIR_AUDIT_CAND}
+        DEPENDS ${ENV_PAIR_AUDIT_SRC} ${ENV_PAIR_AUDIT_REF_SRC} ${GG_CONNECTION_LUMEN}/EnvironmentVisibilityPair.glsl ${GG_CONNECTION_LUMEN}/GeometryFirstHit.glsl VERBATIM)
+    add_custom_target(EnvironmentPairAuditShaders DEPENDS ${ENV_PAIR_AUDIT_REF} ${ENV_PAIR_AUDIT_CAND})
+    add_executable(TestVulkanEnvironmentPairAudit RHI/Core/TestVulkanEnvironmentPairAudit.cpp)
+    target_include_directories(TestVulkanEnvironmentPairAudit PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentPairAudit PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentPairAudit PRIVATE ENABLE_VULKAN=1 ENV_PAIR_AUDIT_REF_SPV="${ENV_PAIR_AUDIT_REF}" ENV_PAIR_AUDIT_CAND_SPV="${ENV_PAIR_AUDIT_CAND}"
+        ENV_PAIR_AUDIT_OLD_REF_SPV="${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-direction-20261102/starting-modules/env-pair-audit-reference.spv"
+        ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_LUMEN}/EnvironmentVisibility_trace.comp.spv" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_LUMEN}/EnvironmentVisibility_resolve.comp.spv")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanEnvironmentPairAudit PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanEnvironmentPairAudit PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanEnvironmentPairAudit EnvironmentPairAuditShaders)
+    # Explicit diagnostic target: requires readonly archived data.
+    add_executable(TestVulkanEnvironmentVisibilityPair RHI/Core/TestVulkanEnvironmentVisibility.cpp)
+    target_include_directories(TestVulkanEnvironmentVisibilityPair PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentVisibilityPair PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentVisibilityPair PRIVATE ENABLE_VULKAN=1 ENV_VIS_PAIR_TEST=1
+        ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}"
+        ENV_VIS_PAIR_SPV="${GG_CONNECTION_LUMEN}/EnvironmentVisibility_trace_pair.comp.spv")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanEnvironmentVisibilityPair PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanEnvironmentVisibilityPair PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanEnvironmentVisibilityPair EnvironmentVisibilityTestShaders)
+    add_test(NAME TestVulkanEnvironmentVisibilityPair COMMAND TestVulkanEnvironmentVisibilityPair)
+    add_executable(TestVulkanDDGIGatherPair RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+    target_include_directories(TestVulkanDDGIGatherPair PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIGatherPair PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIGatherPair PRIVATE ENABLE_VULKAN=1 GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_QUERY_KERNEL_TEST=1 GG_PAIR_TEST=1
+        GG_CONNECTION_BASE_SPV="${GG_QUERY_KERNEL_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_CONNECTION_LUMEN}/DDGIGIGather_geometry_pair.comp.spv")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIGatherPair PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIGatherPair PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIGatherPair GatherQueryKernelTestShaders)
+    add_test(NAME TestVulkanDDGIGatherPair COMMAND TestVulkanDDGIGatherPair)
+    add_executable(TestVulkanEnvironmentArchivedReplay RHI/Core/TestVulkanEnvironmentArchivedReplay.cpp)
+    target_include_directories(TestVulkanEnvironmentArchivedReplay PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentArchivedReplay PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentArchivedReplay PRIVATE ENABLE_VULKAN=1
+        ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_LUMEN}/EnvironmentVisibility_trace.comp.spv" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_LUMEN}/EnvironmentVisibility_resolve.comp.spv")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanEnvironmentArchivedReplay PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanEnvironmentArchivedReplay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    # Explicit target only: original archived native239 inputs are required.
+    # Diagnostic only: requires local archived endpoint/CSV/PBVH records;
+    # no general CTest registration and no use in production timing.
+    set(DDGI_PAIR_SRC ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/DDGICrossRayPairReplay.comp)
+    set(DDGI_PAIR_REF ${GG_CONNECTION_DIR}/cross-ray-pair-reference.spv)
+    set(DDGI_PAIR_CAND ${GG_CONNECTION_DIR}/cross-ray-pair-candidate.spv)
+    set(DDGI_PAIR_FORCED ${GG_CONNECTION_DIR}/cross-ray-pair-forced.spv)
+    add_custom_command(OUTPUT ${DDGI_PAIR_REF} ${DDGI_PAIR_CAND} ${DDGI_PAIR_FORCED}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan -I${GG_CONNECTION_LUMEN} ${DDGI_PAIR_SRC} -o ${DDGI_PAIR_REF}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan -I${GG_CONNECTION_LUMEN} -DDDGI_PAIR_CANDIDATE=1 ${DDGI_PAIR_SRC} -o ${DDGI_PAIR_CAND}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan -I${GG_CONNECTION_LUMEN} -DDDGI_PAIR_CANDIDATE=1 -DDDGI_PAIR_PHYSICAL_LIMIT=1 ${DDGI_PAIR_SRC} -o ${DDGI_PAIR_FORCED}
+        DEPENDS ${DDGI_PAIR_SRC} ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/GeometryFirstHitPairReplayReference.glsl ${GG_CONNECTION_LUMEN}/GeometryFirstHitPair.glsl VERBATIM)
+    add_custom_target(DDGICrossRayPairReplayShaders DEPENDS ${DDGI_PAIR_REF} ${DDGI_PAIR_CAND} ${DDGI_PAIR_FORCED})
+    add_executable(TestVulkanDDGICrossRayPairReplay RHI/Core/TestVulkanDDGICrossRayPairReplay.cpp)
+    target_include_directories(TestVulkanDDGICrossRayPairReplay PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGICrossRayPairReplay PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGICrossRayPairReplay PRIVATE ENABLE_VULKAN=1 REPLAY_REFERENCE_SPV="${DDGI_PAIR_REF}" REPLAY_CANDIDATE_SPV="${DDGI_PAIR_CAND}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGICrossRayPairReplay PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGICrossRayPairReplay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGICrossRayPairReplay DDGICrossRayPairReplayShaders)
+    add_executable(TestVulkanDDGICrossRayPairSynthetic RHI/Core/TestVulkanDDGICrossRayPairReplay.cpp)
+    target_include_directories(TestVulkanDDGICrossRayPairSynthetic PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGICrossRayPairSynthetic PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGICrossRayPairSynthetic PRIVATE ENABLE_VULKAN=1 PAIR_SYNTHETIC=1 REPLAY_REFERENCE_SPV="${DDGI_PAIR_REF}" REPLAY_CANDIDATE_SPV="${DDGI_PAIR_CAND}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGICrossRayPairSynthetic PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGICrossRayPairSynthetic PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGICrossRayPairSynthetic DDGICrossRayPairReplayShaders)
+    add_test(NAME TestVulkanDDGICrossRayPairSynthetic COMMAND TestVulkanDDGICrossRayPairSynthetic)
+    add_executable(TestVulkanDDGICrossRayPairOverflowReplay RHI/Core/TestVulkanDDGICrossRayPairReplay.cpp)
+    target_include_directories(TestVulkanDDGICrossRayPairOverflowReplay PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGICrossRayPairOverflowReplay PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGICrossRayPairOverflowReplay PRIVATE ENABLE_VULKAN=1 PAIR_FORCE_OVERFLOW=1 REPLAY_REFERENCE_SPV="${DDGI_PAIR_REF}" REPLAY_CANDIDATE_SPV="${DDGI_PAIR_FORCED}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGICrossRayPairOverflowReplay PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGICrossRayPairOverflowReplay PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGICrossRayPairOverflowReplay DDGICrossRayPairReplayShaders)
+
+    set(GG_TRAVERSAL_SPV ${GG_CONNECTION_DIR}/gather-traversal-audit.comp.spv)
+    add_custom_command(OUTPUT ${GG_TRAVERSAL_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN}
+            -DDDGI_GEOMETRY_CONNECTIONS -DDDGI_GEOMETRY_REPLACE -DDDGI_GEOMETRY_ANY_HIT -DDDGI_TRAVERSAL_AUDIT
+            -Dddgi_gi_gather=main --source-entrypoint main -e ddgi_gi_gather
+            ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp -o ${GG_TRAVERSAL_SPV}
+        DEPENDS ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
+    add_custom_target(GatherTraversalAuditTestShaders DEPENDS ${GG_TRAVERSAL_SPV})
+    add_executable(TestVulkanDDGITraversalAudit RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+    target_include_directories(TestVulkanDDGITraversalAudit PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGITraversalAudit PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGITraversalAudit PRIVATE ENABLE_VULKAN=1
+        GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_UPPER_TEST=1 GG_CONNECTION_TRAVERSAL_TEST=1
+        GG_CONNECTION_BASE_SPV="${GG_ANYHIT_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_TRAVERSAL_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGITraversalAudit PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGITraversalAudit PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGITraversalAudit GatherGeometryAnyHitTestShaders GatherTraversalAuditTestShaders)
+    add_test(NAME TestVulkanDDGITraversalAudit COMMAND TestVulkanDDGITraversalAudit)
+    set(GEOMETRY_BOX_TEST_SPV ${GG_CONNECTION_DIR}/geometry-box-test.comp.spv)
+    add_custom_command(OUTPUT ${GEOMETRY_BOX_TEST_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN}
+            -Dgeometry_box_test=main --source-entrypoint main -e geometry_box_test
+            ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/GeometryBoxContainment.comp -o ${GEOMETRY_BOX_TEST_SPV}
+        DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/GeometryBoxContainment.comp
+            ${GG_CONNECTION_LUMEN}/GeometryFirstHit.glsl VERBATIM)
+    add_custom_target(GeometryBoxContainmentShaders DEPENDS ${GEOMETRY_BOX_TEST_SPV})
+    add_executable(TestVulkanGeometryBoxContainment RHI/Core/TestVulkanGeometryBoxContainment.cpp)
+    target_include_directories(TestVulkanGeometryBoxContainment PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanGeometryBoxContainment PRIVATE Engine)
+    target_compile_definitions(TestVulkanGeometryBoxContainment PRIVATE ENABLE_VULKAN=1
+        GEOMETRY_BOX_TEST_SPV="${GEOMETRY_BOX_TEST_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanGeometryBoxContainment PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanGeometryBoxContainment PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanGeometryBoxContainment GeometryBoxContainmentShaders)
+    add_test(NAME TestVulkanGeometryBoxContainment COMMAND TestVulkanGeometryBoxContainment)
+    set(GEOMETRY_BOX_BOUNDS_SPV ${GG_CONNECTION_DIR}/geometry-box-bounds-first.comp.spv)
+    add_custom_command(OUTPUT ${GEOMETRY_BOX_BOUNDS_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN} -DDDGI_GEOMETRY_BOUNDS_FIRST=1
+            -Dgeometry_box_test=main --source-entrypoint main -e geometry_box_test
+            ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/GeometryBoxContainment.comp -o ${GEOMETRY_BOX_BOUNDS_SPV}
+        DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/GeometryBoxContainment.comp ${GG_CONNECTION_LUMEN}/GeometryFirstHit.glsl VERBATIM)
+    add_custom_target(GeometryBoxBoundsFirstShaders DEPENDS ${GEOMETRY_BOX_BOUNDS_SPV})
+    add_executable(TestVulkanGeometryBoxBoundsFirst RHI/Core/TestVulkanGeometryBoxContainment.cpp)
+    target_include_directories(TestVulkanGeometryBoxBoundsFirst PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanGeometryBoxBoundsFirst PRIVATE Engine)
+    target_compile_definitions(TestVulkanGeometryBoxBoundsFirst PRIVATE ENABLE_VULKAN=1 GEOMETRY_BOX_TEST_SPV="${GEOMETRY_BOX_BOUNDS_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanGeometryBoxBoundsFirst PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanGeometryBoxBoundsFirst PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanGeometryBoxBoundsFirst GeometryBoxBoundsFirstShaders)
+    add_test(NAME TestVulkanGeometryBoxBoundsFirst COMMAND TestVulkanGeometryBoxBoundsFirst)
+    set(GG_COMPACT_SPV ${GG_CONNECTION_DIR}/gather-compact.comp.spv)
+    add_custom_command(OUTPUT ${GG_COMPACT_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN}
+            -DDDGI_GEOMETRY_CONNECTIONS=1 -DDDGI_GEOMETRY_REPLACE=1
+            -DDDGI_GEOMETRY_ANY_HIT=1 -DDDGI_GEOMETRY_COMPACT_STACKS=1
+            -Dddgi_gi_gather=main --source-entrypoint main -e ddgi_gi_gather
+            ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp -o ${GG_COMPACT_SPV}
+        DEPENDS ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
+    add_custom_target(GatherGeometryCompactTestShaders DEPENDS ${GG_COMPACT_SPV})
+    add_executable(TestVulkanDDGIGatherGeometryCompact RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+    target_include_directories(TestVulkanDDGIGatherGeometryCompact PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIGatherGeometryCompact PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIGatherGeometryCompact PRIVATE ENABLE_VULKAN=1
+        GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_COMPACT_TEST=1
+        GG_CONNECTION_BASE_SPV="${GG_ANYHIT_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_COMPACT_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIGatherGeometryCompact PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIGatherGeometryCompact PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIGatherGeometryCompact GatherGeometryAnyHitTestShaders GatherGeometryCompactTestShaders)
+    add_test(NAME TestVulkanDDGIGatherGeometryCompact COMMAND TestVulkanDDGIGatherGeometryCompact)
+    set(GG_PACKED_SPV ${GG_CONNECTION_DIR}/gather-packed.comp.spv)
+    add_custom_command(OUTPUT ${GG_PACKED_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
+        COMMAND ${GG_CONNECTION_GLSLANG} -V -I${GG_CONNECTION_LUMEN}
+            -DDDGI_GEOMETRY_CONNECTIONS=1 -DDDGI_GEOMETRY_REPLACE=1
+            -DDDGI_GEOMETRY_ANY_HIT=1 -DDDGI_GEOMETRY_COMPACT_STACKS=1
+            -DDDGI_GEOMETRY_COMPACT_PACKED=1
+            -Dddgi_gi_gather=main --source-entrypoint main -e ddgi_gi_gather
+            ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp -o ${GG_PACKED_SPV}
+        DEPENDS ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
+    add_custom_target(GatherGeometryPackedTestShaders DEPENDS ${GG_PACKED_SPV})
+    add_executable(TestVulkanDDGIGatherGeometryPacked RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
+    target_include_directories(TestVulkanDDGIGatherGeometryPacked PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanDDGIGatherGeometryPacked PRIVATE Engine)
+    target_compile_definitions(TestVulkanDDGIGatherGeometryPacked PRIVATE ENABLE_VULKAN=1
+        GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_COMPACT_TEST=1
+        GG_CONNECTION_BASE_SPV="${GG_ANYHIT_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_PACKED_SPV}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanDDGIGatherGeometryPacked PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanDDGIGatherGeometryPacked PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanDDGIGatherGeometryPacked GatherGeometryAnyHitTestShaders GatherGeometryPackedTestShaders)
+    add_test(NAME TestVulkanDDGIGatherGeometryPacked COMMAND TestVulkanDDGIGatherGeometryPacked)
+endif()
+
+# Opt-in Vulkan albedo array mip correctness; no shared shader/asset rebuild.
+if(ENABLE_VULKAN)
+    add_executable(TestVulkanAlbedoMipmaps RHI/Core/TestVulkanAlbedoMipmaps.cpp)
+    target_include_directories(TestVulkanAlbedoMipmaps PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanAlbedoMipmaps PRIVATE Engine)
+    target_compile_definitions(TestVulkanAlbedoMipmaps PRIVATE ENABLE_VULKAN=1)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanAlbedoMipmaps PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanAlbedoMipmaps PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_test(NAME TestVulkanAlbedoMipmaps COMMAND TestVulkanAlbedoMipmaps)
+endif()
+
+# Actual production TAA execution CB/history identity/jitter contract, private fixture.
+if(ENABLE_VULKAN)
+    add_executable(TestVulkanTAAJitterContract RHI/Core/TestVulkanTAAJitterContract.cpp)
+    target_include_directories(TestVulkanTAAJitterContract PRIVATE
+        ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common ${CMAKE_SOURCE_DIR}/EngineTest)
+    target_link_libraries(TestVulkanTAAJitterContract PRIVATE Engine)
+    target_compile_definitions(TestVulkanTAAJitterContract PRIVATE ENABLE_VULKAN=1)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanTAAJitterContract PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanTAAJitterContract PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_test(NAME TestVulkanTAAJitterContract COMMAND TestVulkanTAAJitterContract)
+    add_dependencies(TestVulkanTAAJitterContract VulkanShadersCopy)
+endif()
+
+# Explicit far update transaction / bootstrap / bounded coverage policy.
+add_executable(UnitDDGIFarUpdatePolicy Graphics/TestDDGIFarUpdatePolicy.cpp)
+target_include_directories(UnitDDGIFarUpdatePolicy PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME UnitDDGIFarUpdatePolicy COMMAND UnitDDGIFarUpdatePolicy)
+
+# Fenced DDGI variance ticket is pure CPU; no engine or GPU required.
+add_executable(UnitDDGIVarianceFence Graphics/TestDDGIVarianceFence.cpp)
+target_include_directories(UnitDDGIVarianceFence PRIVATE ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+add_test(NAME UnitDDGIVarianceFence COMMAND UnitDDGIVarianceFence)
+
+add_executable(UnitVulkanPassTimestampTicket Graphics/TestVulkanPassTimestampTicket.cpp)
+target_include_directories(UnitVulkanPassTimestampTicket PRIVATE ${CMAKE_SOURCE_DIR}/Engine)
+add_test(NAME UnitVulkanPassTimestampTicket COMMAND UnitVulkanPassTimestampTicket)
+
+# Explicit isolated Environment pair virtual/physical-stack boundary test.
+if(ENABLE_VULKAN)
+    find_program(ENV_BOUNDARY_GLSLANG glslangValidator REQUIRED)
+    set(ENV_BOUNDARY_LUMEN ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen)
+    set(ENV_BOUNDARY_SOURCE ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/EnvironmentPairBoundary.comp)
+    set(ENV_BOUNDARY_DIR ${CMAKE_BINARY_DIR}/Tests/UnitTests/EnvironmentPairBoundaryShaders)
+    set(ENV_BOUNDARY_REFERENCE ${ENV_BOUNDARY_DIR}/reference.spv)
+    set(ENV_BOUNDARY_PAIR ${ENV_BOUNDARY_DIR}/pair.spv)
+    set(ENV_BOUNDARY_SMALL ${ENV_BOUNDARY_DIR}/physical1.spv)
+    add_custom_command(OUTPUT ${ENV_BOUNDARY_REFERENCE} ${ENV_BOUNDARY_PAIR} ${ENV_BOUNDARY_SMALL}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${ENV_BOUNDARY_DIR}
+        COMMAND ${ENV_BOUNDARY_GLSLANG} -V -I${ENV_BOUNDARY_LUMEN} ${ENV_BOUNDARY_SOURCE} -o ${ENV_BOUNDARY_REFERENCE}
+        COMMAND ${ENV_BOUNDARY_GLSLANG} -V -I${ENV_BOUNDARY_LUMEN} -DENV_BOUNDARY_PAIR=1 ${ENV_BOUNDARY_SOURCE} -o ${ENV_BOUNDARY_PAIR}
+        COMMAND ${ENV_BOUNDARY_GLSLANG} -V -I${ENV_BOUNDARY_LUMEN} -DENV_BOUNDARY_PAIR=1 -DENV_PAIR_PHYSICAL_LIMIT=1 ${ENV_BOUNDARY_SOURCE} -o ${ENV_BOUNDARY_SMALL}
+        DEPENDS ${ENV_BOUNDARY_SOURCE} ${ENV_BOUNDARY_LUMEN}/EnvironmentVisibilityPair.glsl ${ENV_BOUNDARY_LUMEN}/GeometryFirstHit.glsl VERBATIM)
+    add_custom_target(EnvironmentPairBoundaryShaders DEPENDS ${ENV_BOUNDARY_REFERENCE} ${ENV_BOUNDARY_PAIR} ${ENV_BOUNDARY_SMALL})
+    add_executable(TestVulkanEnvironmentPairBoundary RHI/Core/TestVulkanEnvironmentPairBoundary.cpp)
+    target_include_directories(TestVulkanEnvironmentPairBoundary PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentPairBoundary PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentPairBoundary PRIVATE ENABLE_VULKAN=1 ENV_BOUNDARY_REFERENCE_SPV="${ENV_BOUNDARY_REFERENCE}" ENV_BOUNDARY_PAIR_SPV="${ENV_BOUNDARY_PAIR}" ENV_BOUNDARY_SMALL_SPV="${ENV_BOUNDARY_SMALL}")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanEnvironmentPairBoundary PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanEnvironmentPairBoundary PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    add_dependencies(TestVulkanEnvironmentPairBoundary EnvironmentPairBoundaryShaders)
+endif()
+
+# Explicit archived-input B/C ablation fixtures; no production shader overwritten.
+if(ENABLE_VULKAN)
+    find_program(ENV_COST_GLSLANG glslangValidator REQUIRED)
+    set(ENV_COST_LUMEN ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen)
+    set(ENV_COST_SRC ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/EnvironmentVisibilityCostAudit.comp)
+    set(ENV_COST_DIR ${CMAKE_BINARY_DIR}/Tests/UnitTests/EnvironmentCostShaders)
+    foreach(arm B C)
+        set(ENV_COST_AUDIT_${arm} ${ENV_COST_DIR}/audit-${arm}.spv)
+        add_custom_command(OUTPUT ${ENV_COST_AUDIT_${arm}}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${ENV_COST_DIR}
+            COMMAND ${ENV_COST_GLSLANG} -V -I${ENV_COST_LUMEN} -DENV_VIS_PAIR=1 -DENV_COST_${arm}=1 ${ENV_COST_SRC} -o ${ENV_COST_AUDIT_${arm}}
+            DEPENDS ${ENV_COST_SRC} ${ENV_COST_LUMEN}/GeometryFirstHit.glsl ${ENV_COST_LUMEN}/EnvironmentVisibilityPair.glsl VERBATIM)
+        add_custom_target(EnvironmentCostAudit${arm}Shader DEPENDS ${ENV_COST_AUDIT_${arm}})
+        add_executable(TestVulkanEnvironmentCostAudit${arm} RHI/Core/TestVulkanEnvironmentCostAudit.cpp)
+        target_include_directories(TestVulkanEnvironmentCostAudit${arm} PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+        target_link_libraries(TestVulkanEnvironmentCostAudit${arm} PRIVATE Engine)
+        target_compile_definitions(TestVulkanEnvironmentCostAudit${arm} PRIVATE ENABLE_VULKAN=1 ENV_COST_AUDIT_SPV="${ENV_COST_AUDIT_${arm}}"
+          ENV_PAIR_AUDIT_OLD_REF_SPV="${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-direction-20261102/starting-modules/env-pair-audit-reference.spv"
+          ENV_PAIR_AUDIT_REF_SPV="${GG_CONNECTION_DIR}/env-pair-audit-reference.spv" ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}")
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(TestVulkanEnvironmentCostAudit${arm} PRIVATE -fno-fast-math)
+        endif()
+        set_target_properties(TestVulkanEnvironmentCostAudit${arm} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+        add_dependencies(TestVulkanEnvironmentCostAudit${arm} EnvironmentCostAudit${arm}Shader)
+    endforeach()
+endif()
+
+if(ENABLE_VULKAN)
+    add_executable(TestVulkanEnvironmentCostTiming RHI/Core/TestVulkanEnvironmentCostTiming.cpp)
+    target_include_directories(TestVulkanEnvironmentCostTiming PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentCostTiming PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentCostTiming PRIVATE ENABLE_VULKAN=1 ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}"
+        ENV_COST_PROD_B="${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-cost-20261102/prod-B.spv"
+        ENV_COST_PROD_C="${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-cost-20261102/prod-C.spv"
+        ENV_COST_PROD_D="${ENV_COST_LUMEN}/EnvironmentVisibility_trace_pair.comp.spv")
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestVulkanEnvironmentCostTiming PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestVulkanEnvironmentCostTiming PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+endif()
+
+if(ENABLE_VULKAN)
+    set(ENV_COST_E_PROD ${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-cost-20261102/prod-E.spv)
+    set(ENV_COST_E_AUDIT ${CMAKE_BINARY_DIR}/Tests/UnitTests/EnvironmentCostShaders/audit-E.spv)
+    add_custom_command(OUTPUT ${ENV_COST_E_AUDIT}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${ENV_COST_DIR}
+        COMMAND ${ENV_COST_GLSLANG} -V -I${ENV_COST_LUMEN} -DENV_VIS_PAIR=1 -DENV_COST_E=1 ${ENV_COST_SRC} -o ${ENV_COST_E_AUDIT}
+        DEPENDS ${ENV_COST_SRC} ${ENV_COST_LUMEN}/GeometryFirstHit.glsl ${ENV_COST_LUMEN}/EnvironmentVisibilityPair.glsl VERBATIM)
+    add_custom_target(EnvironmentCostAuditEShader DEPENDS ${ENV_COST_E_AUDIT})
+    add_executable(TestVulkanEnvironmentCostAuditE RHI/Core/TestVulkanEnvironmentCostAudit.cpp)
+    target_include_directories(TestVulkanEnvironmentCostAuditE PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentCostAuditE PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentCostAuditE PRIVATE ENABLE_VULKAN=1 ENV_COST_REQUIRE_PAIR=1 ENV_COST_AUDIT_SPV="${ENV_COST_E_AUDIT}"
+        ENV_PAIR_AUDIT_OLD_REF_SPV="${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-direction-20261102/starting-modules/env-pair-audit-reference.spv"
+        ENV_PAIR_AUDIT_REF_SPV="${GG_CONNECTION_DIR}/env-pair-audit-reference.spv" ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}")
+    add_dependencies(TestVulkanEnvironmentCostAuditE EnvironmentCostAuditEShader)
+    add_executable(TestVulkanEnvironmentCostImagesE RHI/Core/TestVulkanEnvironmentVisibility.cpp)
+    target_include_directories(TestVulkanEnvironmentCostImagesE PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentCostImagesE PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentCostImagesE PRIVATE ENABLE_VULKAN=1 ENV_VIS_PAIR_TEST=1 ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}" ENV_VIS_PAIR_SPV="${ENV_COST_E_PROD}")
+    add_dependencies(TestVulkanEnvironmentCostImagesE EnvironmentVisibilityTestShaders)
+    add_executable(TestVulkanEnvironmentCostTimingE RHI/Core/TestVulkanEnvironmentCostTimingE.cpp)
+    target_include_directories(TestVulkanEnvironmentCostTimingE PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentCostTimingE PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentCostTimingE PRIVATE ENABLE_VULKAN=1 ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}"
+        ENV_COST_PROD_B="${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-cost-20261102/prod-B.spv" ENV_COST_PROD_C="${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-cost-20261102/prod-C.spv" ENV_COST_PROD_D="${ENV_COST_LUMEN}/EnvironmentVisibility_trace_pair.comp.spv" ENV_COST_PROD_E="${ENV_COST_E_PROD}")
+    foreach(target TestVulkanEnvironmentCostAuditE TestVulkanEnvironmentCostImagesE TestVulkanEnvironmentCostTimingE)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(${target} PRIVATE -fno-fast-math)
+        endif()
+        set_target_properties(${target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    endforeach()
+endif()
+
+if(ENABLE_VULKAN)
+    set(ENV_COST_F_PROD ${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-cost-20261102/prod-F.spv)
+    set(ENV_COST_F_AUDIT ${CMAKE_BINARY_DIR}/Tests/UnitTests/EnvironmentCostShaders/audit-F.spv)
+    set(ENV_COST_F_AUDIT_SRC ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/EnvironmentVisibilityCostAuditF.comp)
+    set(ENV_COST_F_HELPER ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/EnvironmentVisibilityPairF.glsl)
+    add_custom_command(OUTPUT ${ENV_COST_F_AUDIT}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${ENV_COST_DIR}
+        COMMAND ${ENV_COST_GLSLANG} -V -I${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan -I${ENV_COST_LUMEN} -DENV_VIS_PAIR=1 -DENV_COST_E=1 ${ENV_COST_F_AUDIT_SRC} -o ${ENV_COST_F_AUDIT}
+        DEPENDS ${ENV_COST_F_AUDIT_SRC} ${ENV_COST_F_HELPER} ${ENV_COST_LUMEN}/GeometryFirstHit.glsl VERBATIM)
+    add_custom_target(EnvironmentCostAuditFShader DEPENDS ${ENV_COST_F_AUDIT})
+    add_executable(TestVulkanEnvironmentCostAuditF RHI/Core/TestVulkanEnvironmentCostAudit.cpp)
+    target_include_directories(TestVulkanEnvironmentCostAuditF PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentCostAuditF PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentCostAuditF PRIVATE ENABLE_VULKAN=1 ENV_COST_REQUIRE_PAIR=1 ENV_COST_AUDIT_SPV="${ENV_COST_F_AUDIT}"
+        ENV_PAIR_AUDIT_OLD_REF_SPV="${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-direction-20261102/starting-modules/env-pair-audit-reference.spv"
+        ENV_PAIR_AUDIT_REF_SPV="${GG_CONNECTION_DIR}/env-pair-audit-reference.spv" ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}")
+    add_dependencies(TestVulkanEnvironmentCostAuditF EnvironmentCostAuditFShader)
+    add_executable(TestVulkanEnvironmentCostImagesF RHI/Core/TestVulkanEnvironmentVisibility.cpp)
+    target_include_directories(TestVulkanEnvironmentCostImagesF PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentCostImagesF PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentCostImagesF PRIVATE ENABLE_VULKAN=1 ENV_VIS_PAIR_TEST=1 ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}" ENV_VIS_PAIR_SPV="${ENV_COST_F_PROD}")
+    add_dependencies(TestVulkanEnvironmentCostImagesF EnvironmentVisibilityTestShaders)
+    add_executable(TestVulkanEnvironmentCostTimingF RHI/Core/TestVulkanEnvironmentCostTimingF.cpp)
+    target_include_directories(TestVulkanEnvironmentCostTimingF PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentCostTimingF PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentCostTimingF PRIVATE ENABLE_VULKAN=1 ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}"
+        ENV_COST_PROD_D="${ENV_COST_LUMEN}/EnvironmentVisibility_trace_pair.comp.spv" ENV_COST_PROD_E="${ENV_COST_E_PROD}" ENV_COST_PROD_F="${ENV_COST_F_PROD}")
+    foreach(target TestVulkanEnvironmentCostAuditF TestVulkanEnvironmentCostImagesF TestVulkanEnvironmentCostTimingF)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(${target} PRIVATE -fno-fast-math)
+        endif()
+        set_target_properties(${target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    endforeach()
+endif()
+
+# Explicit GPU-source Environment rays and CPU TLAS leaf coverage screening.
+if(ENABLE_VULKAN)
+    add_executable(TestVulkanEnvironmentRealQueryCapture RHI/Core/TestVulkanEnvironmentRealQueryCapture.cpp)
+    target_include_directories(TestVulkanEnvironmentRealQueryCapture PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentRealQueryCapture PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentRealQueryCapture PRIVATE ENABLE_VULKAN=1
+        ENV_PAIR_AUDIT_OLD_REF_SPV="${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-direction-20261102/starting-modules/env-pair-audit-reference.spv"
+        ENV_PAIR_AUDIT_REF_SPV="${GG_CONNECTION_DIR}/env-pair-audit-reference.spv" ENV_PAIR_AUDIT_CAND_SPV="${GG_CONNECTION_DIR}/env-pair-audit-candidate.spv"
+        ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}")
+    add_executable(TestEnvironmentLeafCoverage RHI/Core/TestEnvironmentLeafCoverage.cpp)
+    target_include_directories(TestEnvironmentLeafCoverage PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestEnvironmentLeafCoverage PRIVATE Engine)
+    foreach(target TestVulkanEnvironmentRealQueryCapture TestEnvironmentLeafCoverage)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(${target} PRIVATE -fno-fast-math)
+        endif()
+        set_target_properties(${target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    endforeach()
+endif()
+
+# Standalone per-leaf-oracle proposal experiment; source geometry is private replay.
+if(ENABLE_VULKAN)
+    set(ENV_LEAF_FIELD_DIR ${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-sdf-hybrid-20261102)
+    add_executable(TestVulkanEnvironmentLeafField RHI/Core/TestVulkanEnvironmentLeafField.cpp)
+    target_include_directories(TestVulkanEnvironmentLeafField PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentLeafField PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentLeafField PRIVATE ENABLE_VULKAN=1 ENV_FIELD_AUDIT_SPV="${ENV_LEAF_FIELD_DIR}/leaf-field-audit.spv"
+      ENV_PAIR_AUDIT_OLD_REF_SPV="${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-direction-20261102/starting-modules/env-pair-audit-reference.spv" ENV_PAIR_AUDIT_REF_SPV="${GG_CONNECTION_DIR}/env-pair-audit-reference.spv"
+      ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}")
+    add_executable(TestVulkanEnvironmentLeafFieldTiming RHI/Core/TestVulkanEnvironmentLeafFieldTiming.cpp)
+    target_include_directories(TestVulkanEnvironmentLeafFieldTiming PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestVulkanEnvironmentLeafFieldTiming PRIVATE Engine)
+    target_compile_definitions(TestVulkanEnvironmentLeafFieldTiming PRIVATE ENABLE_VULKAN=1 ENV_FIELD_PROD_SPV="${ENV_LEAF_FIELD_DIR}/leaf-field-production.spv" ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}")
+    foreach(target TestVulkanEnvironmentLeafField TestVulkanEnvironmentLeafFieldTiming)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(${target} PRIVATE -fno-fast-math)
+        endif()
+        set_target_properties(${target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    endforeach()
+endif()
+
+# Sidecar negative controls use the identical frozen audit shader and PBVH.
+if(ENABLE_VULKAN)
+    foreach(mode ForceProposal InvalidIndex)
+        add_executable(TestVulkanEnvironmentLeafField${mode} RHI/Core/TestVulkanEnvironmentLeafField.cpp)
+        target_include_directories(TestVulkanEnvironmentLeafField${mode} PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+        target_link_libraries(TestVulkanEnvironmentLeafField${mode} PRIVATE Engine)
+        target_compile_definitions(TestVulkanEnvironmentLeafField${mode} PRIVATE ENABLE_VULKAN=1 ENV_FIELD_AUDIT_SPV="${ENV_LEAF_FIELD_DIR}/leaf-field-audit.spv"
+          ENV_PAIR_AUDIT_OLD_REF_SPV="${CMAKE_SOURCE_DIR}/Docs/reports/primal-environment-pair-direction-20261102/starting-modules/env-pair-audit-reference.spv" ENV_PAIR_AUDIT_REF_SPV="${GG_CONNECTION_DIR}/env-pair-audit-reference.spv"
+          ENV_VIS_TEST_TRACE_SPV="${ENV_VIS_TEST_TRACE}" ENV_VIS_TEST_RESOLVE_SPV="${ENV_VIS_TEST_RESOLVE}")
+        if(mode STREQUAL "ForceProposal")
+            target_compile_definitions(TestVulkanEnvironmentLeafField${mode} PRIVATE ENV_FIELD_FORCE_PROPOSAL=1)
+        else()
+            target_compile_definitions(TestVulkanEnvironmentLeafField${mode} PRIVATE ENV_FIELD_INVALID_INDEX=1)
+        endif()
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(TestVulkanEnvironmentLeafField${mode} PRIVATE -fno-fast-math)
+        endif()
+        set_target_properties(TestVulkanEnvironmentLeafField${mode} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+    endforeach()
+endif()
+
+# Fixed-asset CPU certificate; explicit test target requires local Sponza cache.
+if(ENABLE_VULKAN)
+    add_executable(TestEnvironmentHybridCertificate RHI/Core/TestEnvironmentHybridCertificate.cpp)
+    target_include_directories(TestEnvironmentHybridCertificate PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+    target_link_libraries(TestEnvironmentHybridCertificate PRIVATE Engine)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(TestEnvironmentHybridCertificate PRIVATE -fno-fast-math)
+    endif()
+    set_target_properties(TestEnvironmentHybridCertificate PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
+endif()

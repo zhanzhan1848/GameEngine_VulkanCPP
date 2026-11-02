@@ -211,7 +211,12 @@ private:
     // to host-visible staging at the end of Execute() and read it on the NEXT
     // frame (after WaitForCompletion in the test loop). Required because the
     // indirect_args buffer itself is GPU-only (host-invisible) on Vulkan.
-    std::array<rhi::ResourceHandle, 3> indirect_readback_staging_{ rhi::handles::INVALID_RESOURCE };
+    // Initialization-time diagnostic policy; no live toggle can retire a
+    // staging buffer while its copy is in flight. Production Stage7 is separate.
+    bool vk_cull_diagnostics_enabled_{true};
+    std::array<rhi::ResourceHandle, 3> indirect_readback_staging_{
+        rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE};
     u32 indirect_readback_idx_{ 0 };          // triple-buffer ring slot
     u32 indirect_readback_filled_{ 0 };       // count of staged frames (gates readback)
 

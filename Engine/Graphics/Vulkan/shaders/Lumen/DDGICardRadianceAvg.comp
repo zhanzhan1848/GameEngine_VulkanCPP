@@ -6,8 +6,8 @@
 // Samples a 4x4 block grid across each card's area in the Surface Cache
 // Lighting Atlas. Each block samples a 2x2 texel footprint and writes a
 // coverage-weighted average radiance. The w component carries the fraction of
-// the block's samples that held any energy — downstream
-// DDGIProbeIrradianceFromCards uses it as block validity.
+// the block's samples with measured surface validity, including valid black.
+// Explicit legacy policy alone preserves the old nonzero-energy gate.
 //
 // Dispatch: (CardCount * 16, 1, 1), threadGroupSize = (64, 1, 1)
 //
@@ -17,6 +17,8 @@
 //   binding 2 = readonly buffer SurfaceCacheCard cards[] (std430 SSBO)
 //   binding 3 = buffer vec4     card_radiance[] (16 blocks/card;
 //                                               xyz=avg radiance, w=coverage)
+//   binding 4 = SampledImage measured albedo/payload
+//   binding 5 = SampledImage measured depth
 
 #extension GL_EXT_samplerless_texture_functions : enable
 
@@ -28,6 +30,8 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 // Bindings (flat — see header)
 // --------------------------------------------------------------------------------
 layout(set = 0, binding = 0) uniform texture2D lighting_atlas;
+layout(set = 0, binding = 4) uniform texture2D albedo_atlas;
+layout(set = 0, binding = 5) uniform texture2D depth_atlas;
 
 layout(set = 0, binding = 1, std140) uniform ParamBlock {
     SurfaceCacheParams params;
@@ -38,7 +42,7 @@ layout(set = 0, binding = 2, std430) readonly buffer CardBuffer {
 };
 
 // One vec4 per card block: xyz = average radiance, w = coverage fraction
-// (0..1) of sampled texels that held energy. Flattened index is
+// (0..1) of sampled texels with measured surface validity. Flattened index is
 // card_index * 16 + block_y * 4 + block_x.
 layout(set = 0, binding = 3, std430) buffer CardRadianceBuffer {
     vec4 card_radiance[];
@@ -62,8 +66,7 @@ void ddgi_card_radiance_avg() {
     uint blockX = blockIndex % 4u;
     uint blockY = blockIndex / 4u;
     // Each block covers one quarter of the card dimension and takes 2x2
-    // samples. Never-captured atlas texels read as zero, so coverage is also
-    // the validity signal consumed by the probe pass.
+    // samples. Coverage follows actual surface validity, not radiance energy.
     float res = float(card.resolution);
     vec3 sum = vec3(0.0);
     float valid = 0.0;
@@ -73,7 +76,15 @@ void ddgi_card_radiance_avg() {
                 int(float(card.atlas_offset_x) + res * (float(blockX * 2u + i) + 0.5) / 8.0),
                 int(float(card.atlas_offset_y) + res * (float(blockY * 2u + j) + 0.5) / 8.0));
             vec3 r = texelFetch(lighting_atlas, uv, 0).xyz;
-            if (dot(r, r) > 1e-6) {
+            bool legacySurface = (pb.params._pad & 1u) != 0u;
+            vec4 albedo = texelFetch(albedo_atlas, uv, 0);
+            float depth = texelFetch(depth_atlas, uv, 0).r;
+            uint payload = uint(round(clamp(albedo.a, 0.0, 1.0) * 255.0));
+            bool measuredSurface = (payload & 128u) != 0u &&
+                !isnan(depth) && !isinf(depth) && depth >= 0.0 &&
+                !any(isnan(albedo)) && !any(isinf(albedo)) &&
+                !any(isnan(r)) && !any(isinf(r));
+            if (legacySurface ? dot(r, r) > 1e-6 : measuredSurface) {
                 sum += r;
                 valid += 1.0;
             }

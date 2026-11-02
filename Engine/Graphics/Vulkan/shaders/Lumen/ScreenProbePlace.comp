@@ -211,7 +211,7 @@ void screen_probe_place() {
                 vec2 anchorUV = (vec2(anchorTexel) + 0.5) / vec2(renderW, renderH);
                 vec3 anchorPos = reconstructWorldPos(anchorUV, anchorDepth,
                                                      global.inv_view_projection);
-                vec2 uv = pixel / vec2(renderW, renderH);
+                vec2 uv = (vec2(texel) + 0.5) / vec2(renderW, renderH);
                 vec3 worldPos = reconstructWorldPos(uv, depth, global.inv_view_projection);
                 // Same threshold knob as the F4 tile-level test; quadrants
                 // sit half a cell from the anchor so the same world-space
@@ -241,7 +241,7 @@ void screen_probe_place() {
             return;
         }
 
-        vec2 uv = pixel / vec2(renderW, renderH);
+        vec2 uv = (vec2(texel) + 0.5) / vec2(renderW, renderH);
         vec3 worldPos = reconstructWorldPos(uv, depth, global.inv_view_projection);
         vec3 normal = normalize(texelFetch(normalTexture, texel, 0).rgb * 2.0 - 1.0);
         // normals.w carries the slot's ray tier when PRIMAL_SPGI_TIER_RAYS=1
@@ -303,8 +303,10 @@ void screen_probe_place() {
         : vec2(0.0);
 
     vec2 pixel = pixelCenter + jitterPx;
-    vec2 uv = pixel / vec2(renderW, renderH);
     ivec2 depthTexel = clampTexel(pixel, renderW, renderH);
+    // Depth and normal are point-fetched: the corresponding ray goes through
+    // the clamped texel center, not the continuous probe-jitter coordinate.
+    vec2 uv = (vec2(depthTexel) + 0.5) / vec2(renderW, renderH);
     float depth = texelFetch(depthTexture, depthTexel, 0).r;
 
     // World-space amplitude clamp (re-sample on the rare clamp path).
@@ -316,8 +318,8 @@ void screen_probe_place() {
         float delta = distance(worldC, worldJ);
         if (delta > jitterMaxWorld) {
             pixel = pixelCenter + jitterPx * (jitterMaxWorld / max(delta, 1e-5));
-            uv = pixel / vec2(renderW, renderH);
             depthTexel = clampTexel(pixel, renderW, renderH);
+            uv = (vec2(depthTexel) + 0.5) / vec2(renderW, renderH);
             depth = texelFetch(depthTexture, depthTexel, 0).r;
         }
     }

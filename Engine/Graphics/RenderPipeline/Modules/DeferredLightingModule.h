@@ -13,6 +13,8 @@ struct DeferredLightingInputs {
     nanite::GPUDrivenDrawPipeline* gpu_draw_pipeline = nullptr;
     lumen::LumenSSAOPass* ssao_pass = nullptr;
 
+    bool measured_environment_visibility = false;
+
     // sun-audit P2 第二步: DDGI 探针深度可见性（PRIMAL_PROBE_OCC 变体）。
     // probe_depth_buf = 128 floats/probe 的 SSBO（64 mean + 64 variance，
     // 8×8 octahedral）；origin/spacing/counts 来自 DDGIVolumeData。句柄
@@ -59,7 +61,10 @@ struct DeferredLightingInputs {
 
 struct DeferredLightingOutputs {
     rendergraph::RGResourceHandle deferred_output_rg;
-    rhi::ResourceHandle deferred_output_tex;
+    rhi::ResourceHandle deferred_output_tex{rhi::handles::INVALID_RESOURCE};
+    // Display-only environment reflection. Never use as screen-space GI radiance.
+    rendergraph::RGResourceHandle environment_specular_rg{};
+    rhi::ResourceHandle environment_specular_tex{rhi::handles::INVALID_RESOURCE};
 };
 
 class DeferredLightingModule {
@@ -102,6 +107,11 @@ private:
     };
 
     rhi::ResourceHandle output_textures_[3]{
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE
+    };
+    rhi::ResourceHandle environment_textures_[3]{
         rhi::handles::INVALID_RESOURCE,
         rhi::handles::INVALID_RESOURCE,
         rhi::handles::INVALID_RESOURCE

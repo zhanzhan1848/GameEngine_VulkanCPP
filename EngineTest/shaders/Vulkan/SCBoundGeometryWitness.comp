@@ -1,0 +1,20 @@
+#version 450 core
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x=8,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) readonly buffer Queries { uvec4 header; vec4 rays[]; } query;
+layout(set=0,binding=1,std430) writeonly buffer Results { vec4 records[]; } result;
+// The live SC buffers use the canonical production layout and closest helper.
+#include "GeometryFirstHit.glsl"
+void main(){
+    uint index=gl_GlobalInvocationID.x,count=query.header.x;
+    if(index>=count)return;
+    vec4 origin=query.rays[index*2u],direction=query.rays[index*2u+1u];
+    float t=direction.w;uint owner=0xffffffffu,primitive=0xffffffffu;
+    bool valid=!any(isnan(origin))&&!any(isinf(origin))&&!any(isnan(direction))&&!any(isinf(direction))&&
+        abs(dot(direction.xyz,direction.xyz)-1.0)<=2e-5&&origin.w>=0.&&direction.w>origin.w;
+    int status=valid?geometryFirstHit(origin.xyz,direction.xyz,origin.w,direction.w,t,owner,primitive):-1;
+    uint base=index*4u;
+    result.records[base]=origin;result.records[base+1u]=direction;
+    result.records[base+2u]=vec4(float(status),t,uintBitsToFloat(owner),uintBitsToFloat(primitive));
+    result.records[base+3u]=vec4(uintBitsToFloat(index),uintBitsToFloat(query.header.y),uintBitsToFloat(query.header.z),uintBitsToFloat(query.header.w));
+}

@@ -1,3 +1,4 @@
+#include "Engine/Graphics/Utilities/CPUStallAudit.h"
 #include "Engine/Graphics/Lumen/SurfaceCache/BoundaryPointIndex.h"
 #include "Graphics/RHI/Core/CardSurfaceIdentity.h"
 #include <iomanip>
@@ -10,8 +11,10 @@
 // TestVulkanStandardPipelineRender_Windowed test produced via manual sync.
 
 #include "TestVulkanSponzaRenderGraph.h"
+#include "EnvironmentSAHInterleavedHistory.h"
 #include "SponzaReference.h"
 #include "Engine/Graphics/RenderPipeline/PassChainCapture.h"
+#include "Engine/Graphics/RenderGraph/LumenCompareCapture.h"
 
 #include "Engine/Graphics/RHI/Core/RHIDeviceFactory.h"
 #include "Engine/Graphics/RHI/Core/RHIDevice.h"
@@ -19,6 +22,7 @@
 #include "Engine/Graphics/RHI/Core/RHITypes.h"
 #include "Engine/Graphics/RHI/Core/RHIMath.h"
 #include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
+#include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanPassTimestampAudit.h"
 #include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
 #include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanSampler.h"
 #if defined(__APPLE__) && __has_include(<MoltenVK/mvk_private_api.h>)
@@ -41,6 +45,7 @@
 #include "Engine/Graphics/Lumen/GIDebugParams.h"
 
 #include <cstdlib>
+#include <cstdint>
 
 #define STBI_NO_THREAD_LOCALS
 #include "stb_image.h"
@@ -59,11 +64,16 @@
 #include <cctype>
 #include <limits>
 #include <stdexcept>
+#include <unordered_map>
 
 using namespace primal::graphics;
 using namespace primal::graphics::rhi;
 using namespace primal::math;
 namespace rhimath = primal::graphics::rhi::math;
+
+#ifdef PRIMAL_RC_INTEGRATION_TEST
+#include "RC/SponzaRC.h"
+#endif
 
 namespace {
 
@@ -208,6 +218,7 @@ std::string ResolveTexturePath(const std::string& base, const std::string& filen
 }
 
 #include "SCGeometrySupportProof.inl"
+#include "SCBoundGeometryWitness.inl"
 #include "SCGeometryFirstHitTest.inl"
 #include "SCBoundaryIndexTest.inl"
 #include "DDGIFirstSurfaceCandidate.inl"
@@ -1132,9 +1143,9 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         proxy.entityId = meshInfo.meshEntityId;
         proxy.meshId = clusterComp;
         proxy.transform = rhimath::MatrixIdentity();
-        // P2-B: 布料实例标注透光掩码（audit §4.7——石墙严格 0，薄布料开启）。
-        // pipeline 格式的 mesh 名是通用名（Mesh_N_M），材质身份在贴图路径里
-        // ——按 diffuse 文件名匹配帘幕/织物；其余（石材、金属链等）保持 0。
+        // Cloth in this test scene is opaque. Texture names only identify
+        // hanging thin geometry for the existing thickness payload; neither
+        // a texture name nor sampled alpha supplies BSDF transmission.
         {
             std::string lowerName = meshInfo.diffuseTexturePath;
             for (auto& ch : lowerName) ch = (char)tolower((unsigned char)ch);
@@ -1142,15 +1153,14 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
                 lowerName.find("fabric") != std::string::npos ||
                 lowerName.find("cloth") != std::string::npos ||
                 lowerName.find("banner") != std::string::npos) {
-                proxy.transmission = 0.7f;
+                proxy.transmission = 0.0f;
                 // Keep the GPU material table in sync with the per-instance
                 // transport annotation.  Nanite GBuffer/CardCapture consume
                 // MaterialData, while the proxy value is used by the legacy
                 // forward path; setting both avoids a backend-dependent cloth
                 // transmission split.
                 matInst->SetTransmissionFactor(proxy.transmission);
-                // Thin hanging cloth: normalized optical path used by the
-                // Surface Cache back-light transmission term.
+                // Preserve thin-sheet thickness independently of transmission.
                 matInst->SetThicknessFactor(0.15f);
             }
         }
@@ -1511,6 +1521,38 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     // so even without this marker the abort is gone — but skipping the
     // redundant call keeps the diagnostic log clean.
     (void)texSampler_;
+
+    // A capture's first measured view must not race the lazy global geometry
+    // publication in Execute(). All source meshes/textures are loaded above,
+    // but without this upload the first cull still sees totalMeshlets == 0.
+    // Prepare only geometry; no view or GI pass is executed here.
+    if (const char* captureDirectory = std::getenv("LUMEN_COMPARE_DIR");
+        captureDirectory && !std::getenv("LUMEN_COMPARE_RAW_STARTUP")) {
+        RenderSceneSnapshot preparedScene;
+        if (!preparedScene.Initialize(device_) || !preparedScene.Rebind(scene_) ||
+            preparedScene.GetInstanceCount() != scene_.GetProxies().size()) {
+            preparedScene.Shutdown();
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LUMEN_COMPARE] scene preparation failed" << std::endl;
+            return false;
+        }
+        gpuDraw.UpdateGeometryData(preparedScene);
+        device_->WaitIdle();
+        const bool complete = gpuDraw.GetTotalMeshletCount() > 0 &&
+            gpuDraw.GetClusterMapEntryCount() == preparedScene.GetClusterRefCount();
+        std::filesystem::create_directories(captureDirectory);
+        std::ofstream proof(std::filesystem::path(captureDirectory) / "scene-readiness.json");
+        proof << "{\"verified\":" << (complete ? "true" : "false")
+              << ",\"instances\":" << preparedScene.GetInstanceCount()
+              << ",\"expected_instances\":" << scene_.GetProxies().size()
+              << ",\"meshlets\":" << gpuDraw.GetTotalMeshletCount()
+              << ",\"cluster_map_entries\":" << gpuDraw.GetClusterMapEntryCount()
+              << ",\"gpu_completion_checked\":true,\"views_rendered_before_preparation\":0,\"gi_warmup_views\":0}\n";
+        proof.close();
+        preparedScene.Shutdown();
+        if (!complete || !proof) return false;
+        PRIMAL_LOG_STREAM(Info, "Render") << "[LUMEN_COMPARE] geometry ready before first view: meshlets="
+            << gpuDraw.GetTotalMeshletCount() << std::endl;
+    }
 
     // Load offline per-mesh SDF from the pipeline model and merge into the
     // global 384³ volume. DDGI's SDF trace needs this precision — the runtime
@@ -2017,6 +2059,21 @@ bool TestVulkanSponzaRenderGraph::InitializeIBL() {
 }
 
 void TestVulkanSponzaRenderGraph::Run() {
+    primal::graphics::cpu_stall_audit::RunGuard cpuAudit(frameCount_);
+    using FrameClock = std::chrono::steady_clock;
+    static const bool timingOnly = [] { const char* e=std::getenv("SPONZA_TIMING_ONLY");return e&&std::strcmp(e,"1")==0; }();
+    static const bool timingEnabled = [] { const char* e=std::getenv("PRIMAL_FRAME_TIMING");return e&&std::strcmp(e,"1")==0; }();
+    static FrameClock::time_point lastRun{};
+    const auto runStart = timingEnabled ? FrameClock::now() : FrameClock::time_point{};
+    const double intervalMs = timingEnabled && lastRun != FrameClock::time_point{}
+        ? std::chrono::duration<double,std::milli>(runStart-lastRun).count() : 0.0;
+    if (timingEnabled) lastRun = runStart;
+    // RG pass capture is requested by environment from inside the pipeline.
+    // Refuse this incompatible combination rather than silently capturing.
+    if (timingOnly && (std::getenv("SPONZA_CAPTURE_FRAMES") || std::getenv("SPONZA_PASS_CAPTURE_DIR"))) {
+        std::cerr << "[FRAME_TIMING] incompatible pass capture environment" << std::endl;
+        std::exit(2);
+    }
     // T4.6.5 part 30.4: safety-net close check. applicationShouldTerminateAfterLastWindowClosed
     // is the primary path, but some edge cases (e.g. window never ordered front) skip it.
     if (window_.is_closed()) {
@@ -2250,9 +2307,40 @@ void TestVulkanSponzaRenderGraph::Run() {
     } else if (!std::getenv("SPGI_CAM_LOCK")) {
         camera_.Update(dt);
     }
+    if (!activeScene_) activeScene_=&scene_;
+    bool switchedSceneThisFrame=false;
+    const char* farSwitchFrame=std::getenv("DDGI_FAR_SCENE_SWITCH_FRAME");
+    const char* varianceSwitchFrame=std::getenv("DDGI_VARIANCE_SCENE_SWITCH_FRAME");
+    if(farSwitchFrame && varianceSwitchFrame) {
+        PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_VARIANCE_SCENE_SWITCH] conflicting scene switch controls" << std::endl;std::exit(2);
+    }
+    if(varianceSwitchFrame) {
+        const char* enabled=std::getenv("PRIMAL_DDGI_VARIANCE_FENCED");
+        if(!enabled || std::strcmp(enabled,"1")!=0) {PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_VARIANCE_SCENE_SWITCH] requires fenced candidate" << std::endl;std::exit(2);}
+    }
+    if (const char* switchFrame=varianceSwitchFrame?varianceSwitchFrame:farSwitchFrame) {
+        // The test keeps the original proxies/transforms/materials and leaf set.
+        // A different persistent object exercises real OnSceneChanged identity,
+        // snapshot rebinding and content-ready; it is not an asset replacement.
+        if (*switchFrame && std::strspn(switchFrame,"0123456789")==std::strlen(switchFrame) &&
+            frameCount_==std::strtoull(switchFrame,nullptr,10) && !farSwitchScene_) {
+            if (frameCount_==0 || !pipeline_->GetDDGIVolume(1) ||
+                (!varianceSwitchFrame && !pipeline_->GetDDGIVolume(1)->UsesFarUpdatePolicy()) || !scene_.GetStreamingMeshes().empty()) {
+                PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_SCENE_SWITCH] rejected: requires prior frame, second volume, no streaming mesh records and far policy for far switch" << std::endl;
+                std::exit(2);
+            }
+            farSwitchScene_=std::make_unique<primal::graphics::RenderScene>();
+            for (const auto& proxy:scene_.GetProxies()) farSwitchScene_->AddProxy(proxy);
+            for (const auto& light:scene_.GetLights()) farSwitchScene_->AddLight(light);
+            for (const auto& plane:scene_.GetReflectionPlanes()) farSwitchScene_->AddReflectionPlane(plane);
+            activeScene_=farSwitchScene_.get();
+            switchedSceneThisFrame=true;
+        }
+    }
+    auto& activeScene=*activeScene_;
     view_.SetViewMatrix(camera_.GetViewMatrix());
     view_.UpdateFrustum();
-    view_.Cull(scene_);
+    view_.Cull(activeScene);
 
     // T4.6.5 part 38: advance particle simulation each frame. dt=1/60 matches
     // the CFRunLoopTimer cadence. ForwardSceneRenderer::Render → Pass 4c drains
@@ -2314,15 +2402,45 @@ void TestVulkanSponzaRenderGraph::Run() {
         }
     }
 
+    const u32 comparisonPrepViews = !timingOnly && std::getenv("LUMEN_COMPARE_DIR") && std::getenv("LUMEN_COMPARE_PREP_VIEWS")
+        ? static_cast<u32>(std::clamp(std::atoi(std::getenv("LUMEN_COMPARE_PREP_VIEWS")), 0, 64)) : 0u;
+    static RenderPipelineSettings comparisonSettings;
+    if (comparisonPrepViews && frameCount_ == 0) {
+        comparisonSettings = pipeline_->GetSettings();
+        auto rasterOnly = comparisonSettings;
+        rasterOnly.quality.enable_ddgi = false;
+        rasterOnly.quality.enable_surface_cache = false;
+        rasterOnly.quality.enable_screen_probes = false;
+        rasterOnly.quality.enable_ssgi = false;
+        rasterOnly.quality.enable_ssr = false;
+        pipeline_->UpdateSettings(rasterOnly);
+    }
+    if (comparisonPrepViews && frameCount_ == comparisonPrepViews) {
+        pipeline_->UpdateSettings(comparisonSettings);
+        pipeline_->ResetComparisonGIHistory();
+        std::ofstream preparation(std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR")) / "raster-preparation.json");
+        preparation << "{\"raster_only_views\":" << comparisonPrepViews
+            << ",\"gi_enabled_during_preparation\":false,\"gi_history_recreated\":true,\"native_frame_origin\":"
+            << pipeline_->GetFrameCount() << "}\n";
+    }
+
     ResourceHandle backBuffer;
     SyncHandle signalFence;
-    if (!renderSystem_.BeginFrame(backBuffer, signalFence)) {
+    const auto beginStart = timingEnabled ? FrameClock::now() : FrameClock::time_point{};
+    bool beginOk=false;
+    { primal::graphics::cpu_stall_audit::Scope phase("frame.begin");beginOk=renderSystem_.BeginFrame(backBuffer, signalFence); }
+    cpuAudit.BeginResult(beginOk);
+    if (!beginOk) {
+        if(timingEnabled) std::cerr << "[FRAME_TIMING] begin_failed frame=" << frameCount_ << std::endl;
         return;
     }
+    const double beginMs = timingEnabled ? std::chrono::duration<double,std::milli>(FrameClock::now()-beginStart).count() : 0.0;
 
     auto cmd = renderSystem_.GetCurrentCommandBuffer();
     auto cmdHandle = renderSystem_.GetCurrentCommandBufferHandle();
     u32 frameIdx = renderSystem_.GetCurrentFrameIndex();
+    { const auto& ft=renderSystem_.GetFrameTiming();
+      primal::graphics::cpu_stall_audit::BindSlot(frameIdx,ft.completionSerial,ft.fenceCompleted,ft.enabled); }
 
     // T4.6.5 part 30.14: BeginFrame's 2nd param is the CPU-GPU fence, NOT the
     // GPU-GPU acquire semaphore. The acquire semaphore is exposed separately.
@@ -2332,6 +2450,7 @@ void TestVulkanSponzaRenderGraph::Run() {
 
     if (!cmd->Reset()) return;
     if (!cmd->Begin()) return;
+    const u64 passTimestampTicket=pass_timestamp::instance.Begin(static_cast<VulkanDevice*>(device_),static_cast<VulkanCommandBuffer*>(cmd),cmdHandle,frameIdx,renderSystem_.GetFrameFence(frameIdx),frameCount_);
 
     TextureDesc targetDesc = renderSystem_.GetBackBufferDesc();
     const char* requestedFrame = std::getenv("SPONZA_CAPTURE_FRAME");
@@ -2345,15 +2464,15 @@ void TestVulkanSponzaRenderGraph::Run() {
     // A sequence is directory-based, so SPONZA_CAPTURE_DIR is sufficient to
     // activate it.  Keep SPONZA_CAPTURE as the legacy single-file trigger.
     const bool discreteCapture = std::getenv("SPONZA_CAPTURE_FRAMES") != nullptr;
-    const bool referenceCapture = discreteCapture
+    const bool referenceCapture = !timingOnly && (discreteCapture
         ? captureDir && passcapture::Requested(frameCount_)
         : (capturePath || (captureCount > 1u && captureDir)) &&
-          frameCount_ >= captureStart && frameCount_ < captureStart + captureCount;
-    const bool diagnosticCapture = std::getenv("SPONZA_DIAGNOSTIC_CAPTURE") &&
+          frameCount_ >= captureStart && frameCount_ < captureStart + captureCount);
+    const bool diagnosticCapture = !timingOnly && std::getenv("SPONZA_DIAGNOSTIC_CAPTURE") &&
         (frameCount_ == 60 || frameCount_ == 61 || frameCount_ == 360 ||
          frameCount_ == 361 || frameCount_ == 1800);
     // sun-audit P3: 切镜收敛采样帧（360+{1,2,4,8,16,60}）也需要离屏 target
-    bool cutSampleFrame = std::getenv("SPONZA_CAM_SCRIPT") != nullptr && frameCount_ > 360;
+    bool cutSampleFrame = !timingOnly && std::getenv("SPONZA_CAM_SCRIPT") != nullptr && frameCount_ > 360;
     if (cutSampleFrame) {
         cutSampleFrame = false;
         for (u32 k : {1u, 2u, 4u, 8u, 16u, 60u}) {
@@ -2367,10 +2486,422 @@ void TestVulkanSponzaRenderGraph::Run() {
         captureTarget = device_->CreateTexture(targetDesc);
     }
 
+    // Same-process A/B/B/A experiment. This is explicitly opt-in and changes
+    // only the environment visibility BVH selector before each graph build.
+    // Frame labels below are observation frames, not timestamp source frames.
+    static const bool interleaved = [] {
+        const char* value = std::getenv("ENV_SAH_INTERLEAVED");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    int interleavedBlock = -1;
+    int interleavedMode = 0;
+    u32 interleavedOffset = 0;
+    if (interleaved) {
+        if (frameCount_ >= 120) {
+            interleavedBlock = static_cast<int>((frameCount_ - 120) / 60);
+            interleavedOffset = static_cast<u32>((frameCount_ - 120) % 60);
+            const int sequence[] = {0, 1, 1, 0};
+            interleavedMode = sequence[interleavedBlock % 4];
+        }
+        static int previousBlock = -2;
+        if (interleavedBlock != previousBlock) {
+#if defined(_WIN32)
+            const int setResult = _putenv_s("PRIMAL_EXPERIMENT_ENV_SAH", interleavedMode ? "1" : "0");
+#else
+            const int setResult = setenv("PRIMAL_EXPERIMENT_ENV_SAH", interleavedMode ? "1" : "0", 1);
+#endif
+            if (setResult != 0) {
+                std::cerr << "[ENV_SAH_INTERLEAVED] unable to set mode; aborting" << std::endl;
+                std::exit(2);
+            }
+            std::cout << "[ENV_SAH_INTERLEAVED] block frame=" << frameCount_
+                      << " block=" << interleavedBlock << " mode=" << interleavedMode
+                      << " warmup=" << (interleavedBlock < 0 ? 1 : 0) << std::endl;
+            previousBlock = interleavedBlock;
+        }
+    }
+    // Test-local paired traversal experiment. Both pipelines are created at
+    // initialization; switching here changes no inputs, geometry or GI budget.
+    static const bool gatherTraversalInterleaved = [] {
+        const char* value = std::getenv("DDGI_TRAVERSAL_INTERLEAVED");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    int gatherTraversalBlock = -1;
+    int gatherTraversalMode = 0;
+    u32 gatherTraversalOffset = 0;
+    if (gatherTraversalInterleaved) {
+        if (!timingEnabled || !timingOnly || interleaved || !pipeline_->GetGIGatherModule()) {
+            std::cerr << "[DDGI_TRAVERSAL_BENCH] incompatible timing/module configuration" << std::endl;
+            std::exit(2);
+        }
+        if (frameCount_ >= 120) {
+            gatherTraversalBlock = static_cast<int>((frameCount_ - 120) / 60);
+            gatherTraversalOffset = static_cast<u32>((frameCount_ - 120) % 60);
+            const int sequence[] = {0, 1, 1, 0};
+            gatherTraversalMode = sequence[gatherTraversalBlock % 4];
+        }
+        pipeline_->GetGIGatherModule()->SetGeometryCompactTraversalEnabled(gatherTraversalMode != 0);
+    }
+    // Only Gather's private BLAS node selection changes. Both trees are
+    // prepared before the measured blocks; no diagnostic readback is added.
+    static const bool gatherUpperInterleaved = [] {
+        const char* value = std::getenv("DDGI_UPPER_BVH_INTERLEAVED");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    int gatherUpperBlock = -1;
+    int gatherUpperMode = 0;
+    u32 gatherUpperOffset = 0;
+    if (gatherUpperInterleaved) {
+        if (!timingEnabled || !timingOnly || interleaved || gatherTraversalInterleaved ||
+            !pipeline_->GetGIGatherModule()) {
+            std::cerr << "[DDGI_UPPER_BVH_BENCH] incompatible timing/module configuration" << std::endl;
+            std::exit(2);
+        }
+        if (frameCount_ >= 120) {
+            gatherUpperBlock = static_cast<int>((frameCount_ - 120) / 60);
+            gatherUpperOffset = static_cast<u32>((frameCount_ - 120) % 60);
+            const int sequence[] = {0, 1, 1, 0, 1, 0, 0, 1};
+            gatherUpperMode = sequence[gatherUpperBlock % 8];
+        }
+        pipeline_->GetGIGatherModule()->SetGeometryUpperBVHEnabled(gatherUpperMode != 0);
+    }
+    static const bool gatherQueryInterleaved = [] {
+        const char* value = std::getenv("DDGI_QUERY_KERNEL_INTERLEAVED");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    int gatherQueryBlock=-1, gatherQueryMode=0;
+    u32 gatherQueryOffset=0;
+    if (gatherQueryInterleaved) {
+        if (!timingEnabled || !timingOnly || interleaved || gatherTraversalInterleaved || gatherUpperInterleaved || !pipeline_->GetGIGatherModule()) {
+            std::cerr << "[DDGI_QUERY_KERNEL_BENCH] incompatible timing/module configuration" << std::endl;
+            std::exit(2);
+        }
+        if (frameCount_ >= 120) {
+            gatherQueryBlock=static_cast<int>((frameCount_-120)/60);
+            gatherQueryOffset=static_cast<u32>((frameCount_-120)%60);
+            const int sequence[]={0,1,1,0,1,0,0,1};
+            gatherQueryMode=sequence[gatherQueryBlock%8];
+        }
+        pipeline_->GetGIGatherModule()->SetGeometryQueryKernelEnabled(gatherQueryMode!=0);
+    }
+    static const bool normalCacheInterleaved=[] {const char* v=std::getenv("DDGI_INSTANCE_CACHE_INTERLEAVED");return v&&std::strcmp(v,"1")==0;}();
+    int normalCacheBlock=-1,normalCacheMode=0;u32 normalCacheOffset=0;
+    if(normalCacheInterleaved) {
+        if(!timingEnabled||!timingOnly||interleaved||gatherTraversalInterleaved||gatherUpperInterleaved||gatherQueryInterleaved||!pipeline_->GetGIGatherModule()) {
+            std::cerr<<"[DDGI_INSTANCE_CACHE_BENCH] incompatible timing/module configuration"<<std::endl;std::exit(2);
+        }
+        if(frameCount_>=120){normalCacheBlock=int((frameCount_-120)/60);normalCacheOffset=u32((frameCount_-120)%60);const int sequence[]={0,1,1,0,1,0,0,1};normalCacheMode=sequence[normalCacheBlock%8];}
+        pipeline_->GetGIGatherModule()->SetInstanceNormalCacheEnabled(normalCacheMode!=0);
+        pipeline_->GetGIGatherModule()->SetGeometryQueryKernelEnabled(true);
+        pipeline_->GetGIGatherModule()->SetGeometryUpperBVHEnabled(false);
+    }
+    static const bool boundsInterleaved=[] {const char* v=std::getenv("DDGI_BOUNDS_FIRST_INTERLEAVED");return v&&std::strcmp(v,"1")==0;}();
+    int boundsBlock=-1,boundsMode=0;u32 boundsOffset=0;
+    if(boundsInterleaved) {
+        if(!timingEnabled||!timingOnly||interleaved||gatherTraversalInterleaved||gatherUpperInterleaved||gatherQueryInterleaved||normalCacheInterleaved||!pipeline_->GetGIGatherModule()) {
+            std::cerr<<"[DDGI_BOUNDS_FIRST_BENCH] incompatible timing/module configuration"<<std::endl;std::exit(2);
+        }
+        if(frameCount_>=120){boundsBlock=int((frameCount_-120)/60);boundsOffset=u32((frameCount_-120)%60);const int sequence[]={0,1,1,0,1,0,0,1};boundsMode=sequence[boundsBlock%8];}
+        pipeline_->GetGIGatherModule()->SetGeometryBoundsFirstEnabled(boundsMode!=0);
+    }
+    // Opt-in real lighting mutation, matching the existing half-life route.
+    // This changes scene LightEval and deferred/DDGI lighting together.
+    if (pipeline_->GetDDGIVolume(1) && pipeline_->GetDDGIVolume(1)->UsesFarUpdatePolicy()) {
+        const char* step=std::getenv("DDGI_FAR_LIGHT_STEP_FRAME");
+        if(step && frameCount_==std::strtoul(step,nullptr,10)) {
+            float scale=.1f;
+            if(const char* value=std::getenv("DDGI_FAR_LIGHT_STEP_SCALE")) scale=static_cast<float>(std::atof(value));
+            if(std::isfinite(scale) && scale>=0.f && scale<=4.f) {
+                auto settings=pipeline_->GetSettings();
+                settings.lighting.light_color.x*=scale;
+                settings.lighting.light_color.y*=scale;
+                settings.lighting.light_color.z*=scale;
+                // Probe lighting has its own authored intensity; scale it
+                // independently to preserve the existing direct/probe ratio.
+                settings.lighting.ddgi_light_color.x*=scale;
+                settings.lighting.ddgi_light_color.y*=scale;
+                settings.lighting.ddgi_light_color.z*=scale;
+                pipeline_->UpdateLightingSettings(settings);
+                auto sun=giHalflifeSun_; sun.intensity*=scale;
+                activeScene.UpdateLight(sun.entityId,sun);
+                PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_FAR_LIGHT_STEP] native_frame=" << frameCount_
+                    << " scale=" << scale << " scene_light_updated=1 settings_updated=1"
+                    << " direct_rgb=" << pipeline_->GetSettings().lighting.light_color.x << ","
+                    << pipeline_->GetSettings().lighting.light_color.y << "," << pipeline_->GetSettings().lighting.light_color.z
+                    << " probe_rgb=" << pipeline_->GetSettings().lighting.ddgi_light_color.x << ","
+                    << pipeline_->GetSettings().lighting.ddgi_light_color.y << "," << pipeline_->GetSettings().lighting.ddgi_light_color.z
+                    << std::endl;
+            }
+        }
+        const char* reset=std::getenv("DDGI_FAR_FIELD_RESET_FRAME");
+        if(reset && frameCount_==std::strtoul(reset,nullptr,10)) {
+            pipeline_->ResetDDGIProbeFieldsForTest();
+            PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_FAR_FIELD_RESET] native_frame=" << frameCount_
+                << " scope=all_ddgi_volumes actual_scene_switch=0" << std::endl;
+        }
+    }
+    lumencompare::Begin(frameCount_ >= comparisonPrepViews
+        ? static_cast<u32>(frameCount_ - comparisonPrepViews + 1) : 0u);
+    if (timingOnly) lumencompare::enabled = false;
+    const auto renderStart = timingEnabled ? FrameClock::now() : FrameClock::time_point{};
+    const u64 varianceSubmissionTicket=pipeline_->BeginVarianceFenceFrame(frameIdx,cmdHandle,renderSystem_.GetFrameFence(frameIdx),frameCount_);
     pipeline_->RenderWithCommandBuffer(
-        scene_, view_,
+        activeScene, view_,
         captureTarget != handles::INVALID_RESOURCE ? captureTarget : backBuffer, targetDesc,
         cmd, frameIdx, cmdHandle, imageAvailable);
+    if(primal::graphics::cpu_stall_audit::state.active && pipeline_->GetSurfaceCachePass()) {
+        const auto witness=pipeline_->GetSurfaceCachePass()->GetGeometryWitnessView(frameIdx);
+        primal::graphics::cpu_stall_audit::SceneWitness(witness.scene_epoch,witness.source_digest);
+    }
+    if(const char* audit=std::getenv("PRIMAL_PAIR_FRAME_AUDIT");audit && std::strcmp(audit,"1")==0) {
+        GIGatherModule::PairReceipt g{};workgroup_experiment::Receipt gw{},e{};u32 ep0=0,ep1=0;
+        if(const auto* module=pipeline_->GetGIGatherModule()){g=module->GetCrossRayPairReceipt();gw=module->GetWorkgroupReceipt();}
+        if(const auto* module=pipeline_->GetEnvironmentVisibilityModule()){e=module->GetPairReceipt();ep0=module->GetPairPolicy0();ep1=module->GetPairPolicy1();}
+        // Pair receipt is reset each frame; the general workgroup receipt may
+        // predate this frame if Gather was not added to the graph at all.
+        // Do not report its older dispatch/source as a current observation.
+        if(!g.actual)gw={};
+        auto requested=[](const char* name){const char* v=std::getenv(name);return v&&std::strcmp(v,"1")==0;};
+        PRIMAL_LOG_STREAM(Info,"Render") << "[PAIR_FRAME_AUDIT] native_frame=" << frameCount_
+            << " gather_requested=" << requested("PRIMAL_DDGI_CROSS_RAY_PAIR") << " gather_actual=" << g.actual << " gather_dispatch_known=" << g.actual << " gather_dispatched=" << gw.dispatched
+            << " gather_slot=" << gw.slot << " gather_shader_fnv1a64=" << (g.actual?g.shader_hash:gw.shader_fnv1a64)
+            << " gather_epoch=" << gw.scene_epoch << " gather_digest=" << gw.source_digest << " gather_qualified=" << gw.source_qualified
+            << " gather_source0=" << gw.buffers[0] << " gather_source1=" << gw.buffers[1] << " gather_source2=" << gw.buffers[2] << " gather_source3=" << gw.buffers[3]
+            << " env_requested=" << requested("PRIMAL_ENV_CROSS_RAY_PAIR") << " env_actual=" << e.actual << " env_dispatched=" << e.dispatched
+            << " env_slot=" << e.slot << " env_shader_fnv1a64=" << e.shader_fnv1a64 << " env_policy0=" << ep0 << " env_policy1=" << ep1 << " env_qualified=" << e.source_qualified
+            << " env_source0=" << e.buffers[0] << " env_source1=" << e.buffers[1] << " env_source2=" << e.buffers[2] << " env_source3=" << e.buffers[3] << std::endl;
+    }
+    if(const char* audit=std::getenv("PRIMAL_PAIR_FRAME_AUDIT");audit && std::strcmp(audit,"1")==0){
+        EnvironmentVisibilityModule::HybridReceipt h{};workgroup_experiment::Receipt e{};
+        if(const auto* module=pipeline_->GetEnvironmentVisibilityModule()){h=module->GetHybridReceipt();e=module->GetPairReceipt();}
+        const char* flag=std::getenv("PRIMAL_ENV_SDF_HYBRID");const bool requested=flag && std::strcmp(flag,"1")==0;
+        PRIMAL_LOG_STREAM(Info,"Render") << "[ENV_FIELD_FRAME] native_frame=" << frameCount_ << " requested=" << requested << " actual=" << h.actual << " qualified=" << h.qualified << " dispatched=" << h.dispatched << " slot=" << h.slot << " shader_fnv1a64=" << h.shader << " field_fnv1a64=" << h.field_hash << " field_buffer=" << h.field_buffer << " scene_epoch=" << h.binding.epoch << " source_digest=" << h.binding.digest << " generation=" << h.binding.generation << " completion_serial=" << h.frame_completion << " upload_completion_serial=" << h.binding.completion
+            << " source0=" << e.buffers[0] << " source1=" << e.buffers[1] << " source2=" << e.buffers[2] << " source3=" << e.buffers[3]
+            << " allocated0=" << h.binding.allocated[0] << " allocated1=" << h.binding.allocated[1] << " allocated2=" << h.binding.allocated[2] << " allocated3=" << h.binding.allocated[3]
+            << " logical0=" << h.binding.logical[0] << " logical1=" << h.binding.logical[1] << " logical2=" << h.binding.logical[2] << " logical3=" << h.binding.logical[3] << std::endl;
+    }
+    if (switchedSceneThisFrame) {
+        PRIMAL_LOG_STREAM(Info,"Render") << (varianceSwitchFrame?"[DDGI_VARIANCE_SCENE_SWITCH] native_frame=":"[DDGI_FAR_SCENE_SWITCH] native_frame=") << frameCount_
+            << " actual_scene_switch=1 same_assets=1 same_proxy_content=1 asset_replacement=0"
+            << " from=" << static_cast<const void*>(&scene_) << " to=" << static_cast<const void*>(&activeScene)
+            << " proxies=" << activeScene.GetProxies().size() << " lights=" << activeScene.GetLights().size()
+            << " reflection_planes=" << activeScene.GetReflectionPlanes().size()
+            << " source_rebind_completion=not_observed" << std::endl;
+    }
+    if(const char* audit=std::getenv("DDGI_FAR_UPDATE_AUDIT"); audit && std::strcmp(audit,"1")==0) {
+        const auto* near=pipeline_->GetDDGIVolume(0); const auto* far=pipeline_->GetDDGIVolume(1);
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_FAR_FRAME] native_frame=" << frameCount_
+            << " near_count=" << (near?near->GetLastUpdateCount():0)
+            << " far_count=" << (far?far->GetLastUpdateCount():0)
+            << " far_policy=" << (far&&far->UsesFarUpdatePolicy()) << std::endl;
+    }
+    const double renderMs = timingEnabled ? std::chrono::duration<double,std::milli>(FrameClock::now()-renderStart).count() : 0.0;
+    if(frameCount_==119 || frameCount_==239) {
+        auto emitWorkgroup=[&](const char* tag,const auto& r) {
+            std::cout << tag << " native_frame=" << frameCount_ << " requested=" << r.requested << " actual=" << r.actual
+                << " dispatched=" << r.dispatched << " local_x=" << r.local_x << " local_y=" << r.local_y
+                << " group_x=" << r.group_x << " group_y=" << r.group_y << " width=" << r.width << " height=" << r.height
+                << " slot=" << r.slot << " scene_epoch=" << r.scene_epoch << " source_digest=" << r.source_digest
+                << " source_qualified=" << r.source_qualified << " shader_fnv1a64=" << r.shader_fnv1a64 << " source0=" << r.buffers[0] << " source1=" << r.buffers[1] << " source2=" << r.buffers[2] << " source3=" << r.buffers[3] << std::endl;
+        };
+        if(std::getenv("PRIMAL_DDGI_GATHER_WORKGROUP") && pipeline_->GetGIGatherModule())
+            emitWorkgroup("[DDGI_GATHER_WORKGROUP]",pipeline_->GetGIGatherModule()->GetWorkgroupReceipt());
+        if(std::getenv("PRIMAL_ENV_TRACE_WORKGROUP") && pipeline_->GetEnvironmentVisibilityModule())
+            emitWorkgroup("[ENV_TRACE_WORKGROUP]",pipeline_->GetEnvironmentVisibilityModule()->GetWorkgroupReceipt());
+    }
+    if((frameCount_==119 || frameCount_==239) && std::getenv("PRIMAL_ENV_CROSS_RAY_PAIR") && pipeline_->GetEnvironmentVisibilityModule()) {
+        const auto& e=pipeline_->GetEnvironmentVisibilityModule()->GetPairReceipt();
+        PRIMAL_LOG_STREAM(Info,"Render") << "[ENV_CROSS_RAY_PAIR] native_frame=" << frameCount_ << " requested=" << e.requested << " actual=" << e.actual
+            << " slot=" << e.slot << " shader_fnv1a64=" << e.shader_fnv1a64 << " source0=" << e.buffers[0] << " source1=" << e.buffers[1] << " source2=" << e.buffers[2] << " source3=" << e.buffers[3] << std::endl;
+    }
+    if((frameCount_==119 || frameCount_==239) && std::getenv("PRIMAL_DDGI_CROSS_RAY_PAIR") && pipeline_->GetGIGatherModule()) {
+        const auto& e=pipeline_->GetGIGatherModule()->GetCrossRayPairReceipt();
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_CROSS_RAY_PAIR] native_frame=" << frameCount_ << " requested=" << e.requested << " actual=" << e.actual
+            << " slot=" << e.slot << " scene_epoch=" << e.epoch << " source_digest=" << e.digest << " shader_fnv1a64=" << e.shader_hash
+            << " source0=" << e.sources[0] << " source1=" << e.sources[1] << " source2=" << e.sources[2] << " source3=" << e.sources[3] << std::endl;
+    }
+    if((frameCount_==119 || frameCount_==239) && std::getenv("PRIMAL_DDGI_INSTANCE_PAYLOAD_CACHE") && pipeline_->GetGIGatherModule()) {
+        const auto& e=pipeline_->GetGIGatherModule()->GetInstancePayloadReceipt();
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_INSTANCE_PAYLOAD] native_frame=" << frameCount_ << " requested=" << e.requested << " actual=" << e.actual
+            << " slot=" << e.slot << " scene_epoch=" << e.epoch << " source_digest=" << e.digest << " shader_fnv1a64=" << e.shader_hash
+            << " source0=" << e.sources[0] << " source1=" << e.sources[1] << " source2=" << e.sources[2] << " source3=" << e.sources[3] << std::endl;
+    }
+    if((frameCount_==119 || frameCount_==239) && std::getenv("PRIMAL_DDGI_GEOMETRY_EQUAL_BOX") && pipeline_->GetGIGatherModule()) {
+        const auto& e=pipeline_->GetGIGatherModule()->GetEqualBoxReceipt();
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_EQUAL_BOX] native_frame=" << frameCount_ << " requested=" << e.requested << " actual=" << e.actual
+            << " slot=" << e.slot << " scene_epoch=" << e.epoch << " source_digest=" << e.digest << " payload_hash=" << e.payload_hash
+            << " flags_hash=" << e.flags_hash << " sidecar=" << e.buffer << " bytes=" << e.bytes << " serial=" << e.serial
+            << " source0=" << e.sources[0] << " source1=" << e.sources[1] << " source2=" << e.sources[2] << " source3=" << e.sources[3] << std::endl;
+    }
+    if (frameCount_ == 119) {
+        const char* audit = std::getenv("DDGI_TRAVERSAL_AUDIT");
+        if (audit && std::strcmp(audit, "1") == 0 && pipeline_->GetGIGatherModule()) {
+            std::cout << "[DDGI_TRAVERSAL_AUDIT] frame=" << frameCount_
+                      << " actual_compact=" << pipeline_->GetGIGatherModule()->WasCompactGeometryUsed()
+                      << std::endl;
+        }
+    }
+    if (frameCount_ == 119 || frameCount_ == 239) {
+        const char* audit = std::getenv("DDGI_UPPER_BVH_AUDIT");
+        if (audit && std::strcmp(audit, "1") == 0 && pipeline_->GetGIGatherModule() && pipeline_->GetSurfaceCachePass()) {
+            const auto witness = pipeline_->GetSurfaceCachePass()->GetGeometryWitnessView(frameIdx);
+            std::cout << "[DDGI_UPPER_BVH_AUDIT] frame=" << frameCount_
+                      << " actual_upper=" << static_cast<u32>(pipeline_->GetGIGatherModule()->WasUpperBVHUsed())
+                      << " slot=" << witness.slot << " scene_epoch=" << witness.scene_epoch
+                      << " source_digest=" << witness.source_digest
+                      << " original_bottom=" << witness.buffers[1] << " private_bottom=" << witness.upper_buffer
+                      << " private_ready=" << static_cast<u32>(witness.upper_ready)
+                      << " original_payload=" << witness.upper_original_hash
+                      << " candidate_payload=" << witness.upper_candidate_hash
+                      << std::endl;
+        }
+    }
+    if (frameCount_ == 119 || frameCount_ == 239) {
+        const char* audit=std::getenv("DDGI_QUERY_KERNEL_AUDIT");
+        if(audit && std::strcmp(audit,"1")==0 && pipeline_->GetGIGatherModule() && pipeline_->GetSurfaceCachePass()) {
+            const auto* gather=pipeline_->GetGIGatherModule();
+            const auto witness=pipeline_->GetSurfaceCachePass()->GetGeometryWitnessView(frameIdx);
+            std::cout << "[DDGI_QUERY_KERNEL_AUDIT] frame=" << frameCount_
+                      << " requested_kernel=" << gather->IsGeometryQueryKernelRequested()
+                      << " actual_kernel=" << gather->WasGeometryQueryKernelUsed()
+                      << " actual_bounds=" << gather->WasGeometryBoundsFirstUsed()
+                      << " active_upper=" << gather->WasUpperBVHUsed()
+                      << " slot=" << witness.slot << " scene_epoch=" << witness.scene_epoch
+                      << " source_digest=" << witness.source_digest
+                      << " shader_fnv1a64=" << gather->GeometryQueryKernelActiveShaderHash() << std::endl;
+        }
+    }
+    if(auto* gather=pipeline_->GetGIGatherModule()) {
+        const char* audit=std::getenv("DDGI_INSTANCE_CACHE_AUDIT");
+        if(normalCacheInterleaved || ((frameCount_==119||frameCount_==239)&&audit&&std::strcmp(audit,"1")==0)) {
+            std::cout<<"[DDGI_INSTANCE_CACHE_BENCH] frame="<<frameCount_<<" block="<<normalCacheBlock<<" offset="<<normalCacheOffset
+                <<" requested_cache="<<gather->IsInstanceNormalCacheRequested()<<" actual_cache="<<gather->WasInstanceNormalCacheUsed()
+                <<" actual_query="<<gather->WasGeometryQueryKernelUsed()<<" actual_upper="<<gather->WasUpperBVHUsed()<<" interval_ms="<<intervalMs<<std::endl;
+            if(normalCacheInterleaved&&frameCount_>=120&&(gather->WasInstanceNormalCacheUsed()!=(normalCacheMode!=0)||gather->WasUpperBVHUsed()||(!normalCacheMode&&!gather->WasGeometryQueryKernelUsed()))) {
+                std::cerr<<"[DDGI_INSTANCE_CACHE_BENCH] requested pipeline was not dispatched"<<std::endl;std::exit(2);
+            }
+        }
+    }
+    if(auto* gather=pipeline_->GetGIGatherModule()) {
+        const char* audit=std::getenv("DDGI_BOUNDS_FIRST_AUDIT");
+        if(boundsInterleaved || ((frameCount_==119||frameCount_==239)&&audit&&std::strcmp(audit,"1")==0)) {
+            const auto* near=pipeline_->GetDDGIPass();const auto* far=pipeline_->GetDDGIVolume(1);
+            const auto* sc=pipeline_->GetSurfaceCachePass();
+            const auto witness=sc?sc->GetGeometryWitnessView(frameIdx):lumen::SurfaceCachePass::GeometryWitnessView{};
+            std::cout << (boundsInterleaved?"[DDGI_BOUNDS_FIRST_BENCH] frame=":"[DDGI_BOUNDS_FIRST_AUDIT] frame=") << frameCount_ << " block=" << boundsBlock << " offset=" << boundsOffset
+                << " requested_bounds=" << gather->IsGeometryBoundsFirstRequested() << " active_bounds=" << gather->WasGeometryBoundsFirstUsed() << " actual_bounds=" << gather->WasGeometryBoundsFirstUsed()
+                << " active_kernel=" << gather->WasGeometryQueryKernelUsed() << " active_upper=" << gather->WasUpperBVHUsed()
+                << " near_count=" << (near?near->GetLastUpdateCount():0) << " far_count=" << (far?far->GetLastUpdateCount():0)
+                << " near_rays=" << (near?near->GetVolumeData().RaysPerProbe:0) << " far_rays=" << (far?far->GetVolumeData().RaysPerProbe:0)
+                << " slot=" << witness.slot << " scene_epoch=" << witness.scene_epoch << " source_digest=" << witness.source_digest
+                << " shader_fnv1a64=" << gather->GeometryBoundsFirstActiveShaderHash() << " interval_ms=" << intervalMs << std::endl;
+            if(boundsInterleaved && frameCount_>=120 && (gather->WasGeometryBoundsFirstUsed()!=(boundsMode!=0) || !gather->WasGeometryQueryKernelUsed() || gather->WasUpperBVHUsed())) {
+                std::cerr<<"[DDGI_BOUNDS_FIRST_BENCH] requested pipeline was not dispatched"<<std::endl;std::exit(2);
+            }
+        }
+    }
+    if (gatherQueryInterleaved) {
+        const bool active=pipeline_->GetGIGatherModule()->WasGeometryQueryKernelUsed();
+        std::cout << "[DDGI_QUERY_KERNEL_BENCH] frame=" << frameCount_ << " block=" << gatherQueryBlock
+                  << " offset=" << gatherQueryOffset << " requested_kernel=" << gatherQueryMode
+                  << " active_kernel=" << active << " interval_ms=" << intervalMs
+                  << " active_upper=" << pipeline_->GetGIGatherModule()->WasUpperBVHUsed() << std::endl;
+        if (frameCount_>=120 && active!=(gatherQueryMode!=0)) {
+            std::cerr << "[DDGI_QUERY_KERNEL_BENCH] requested kernel was not dispatched" << std::endl;
+            std::exit(2);
+        }
+    }
+    if (gatherUpperInterleaved) {
+        const bool active = pipeline_->GetGIGatherModule()->WasUpperBVHUsed();
+        std::cout << "[DDGI_UPPER_BVH_BENCH] frame=" << frameCount_
+                  << " block=" << gatherUpperBlock << " offset=" << gatherUpperOffset
+                  << " requested_upper=" << gatherUpperMode << " active_upper=" << active
+                  << " interval_ms=" << intervalMs << std::endl;
+        if (frameCount_ >= 120 && active != (gatherUpperMode != 0)) {
+            std::cerr << "[DDGI_UPPER_BVH_BENCH] requested tree was not dispatched" << std::endl;
+            std::exit(2);
+        }
+    }
+    if (gatherTraversalInterleaved) {
+        const bool active = pipeline_->GetGIGatherModule()->WasCompactGeometryUsed();
+        std::cout << "[DDGI_TRAVERSAL_BENCH] frame=" << frameCount_
+                  << " block=" << gatherTraversalBlock << " offset=" << gatherTraversalOffset
+                  << " requested_compact=" << gatherTraversalMode << " active_compact=" << active
+                  << " interval_ms=" << intervalMs << std::endl;
+        if (frameCount_ >= 120 && active != (gatherTraversalMode != 0)) {
+            std::cerr << "[DDGI_TRAVERSAL_BENCH] requested traversal was not dispatched" << std::endl;
+            std::exit(2);
+        }
+    }
+    if (interleaved) {
+        struct SampleOrigin { u64 frame; int block; int mode; u32 offset; };
+        static std::unordered_map<u64, SampleOrigin> origins;
+        static u64 lastRecording = 0, lastResolved = 0;
+        static EnvironmentSAHInterleavedHistory completionHistory;
+        const auto& stats = pipeline_->GetStats();
+        const u64 recording = stats.timestampRecordingSequence;
+        const u64 source = stats.timestampResolvedSequence;
+        const bool stableCompletion = completionHistory.Observe(
+            device_->FrameSlotCompletions(), frameIdx, recording, frameCount_, interleavedMode);
+        const bool recordingAdvanced = recording > lastRecording;
+        if (recordingAdvanced) {
+            origins.emplace(recording, SampleOrigin{frameCount_, interleavedBlock, interleavedMode, interleavedOffset});
+            lastRecording = recording;
+            for (auto it = origins.begin(); it != origins.end();) {
+                if (it->first < recording && recording - it->first > 16) it = origins.erase(it);
+                else ++it;
+            }
+        }
+        const auto origin = origins.find(source);
+        const bool provenanceValid = recordingAdvanced && stats.timestampResultsFresh &&
+            source > lastResolved && source < recording && recording - source <= 8 && origin != origins.end();
+        if (!provenanceValid) {
+            std::cerr << "[ENV_SAH_INTERLEAVED] rejected_provenance observation_frame=" << frameCount_
+                      << " recording=" << recording << " source=" << source
+                      << " fresh=" << stats.timestampResultsFresh << " read_ok=" << stats.timestampQueryReadOk
+                      << " min_tick=" << stats.timestampReadMin << " max_tick=" << stats.timestampReadMax
+                      << " previous_bound=" << stats.timestampPreviousBound << std::endl;
+        } else {
+            lastResolved = source;
+            const auto sample = origin->second;
+            // Discard the first eight *source* recordings of each block.
+            if (sample.block < 0 || sample.offset < 8) {
+                origins.erase(origin);
+            } else if (!stableCompletion || sample.mode != interleavedMode) {
+                std::cerr << "[ENV_SAH_INTERLEAVED] rejected_completion_history observation_frame="
+                          << frameCount_ << " query_recording=" << source
+                          << " consecutive=" << completionHistory.consecutive << std::endl;
+                origins.erase(origin);
+            } else {
+        const auto& times = stats.passExecutionTimes;
+        auto trace = times.find("EnvironmentVisibility.Trace");
+        auto resolve = times.find("EnvironmentVisibility.Resolve");
+        auto spgi = times.find("ScreenProbeGI");
+        double total = 0.0;
+        bool valid = trace != times.end() && resolve != times.end() && spgi != times.end();
+        for (const auto& [name, ms] : times) {
+            (void)name;
+            valid = valid && std::isfinite(ms) && ms >= 0;
+            total += ms;
+        }
+        if (valid && trace->second > 0 && resolve->second > 0 && spgi->second > 0) {
+            std::cout << "[ENV_SAH_INTERLEAVED] sample observation_frame=" << frameCount_
+                      << " query_recording_frame=" << sample.frame << " recording=" << recording
+                      << " query_recording=" << source << " query_age=" << recording - source
+                      << " block=" << sample.block << " offset=" << sample.offset
+                      << " mode=" << sample.mode << " timestamp=delayed read_ok=" << stats.timestampQueryReadOk
+                      << " min_tick=" << stats.timestampReadMin << " max_tick=" << stats.timestampReadMax
+                      << " previous_bound=" << stats.timestampPreviousBound
+                      << " trace_ms=" << trace->second << " resolve_ms=" << resolve->second
+                      << " spgi_ms=" << spgi->second << " total_pass_ms=" << total << std::endl;
+        } else {
+            std::cerr << "[ENV_SAH_INTERLEAVED] missing_or_invalid_timestamp observation_frame="
+                      << frameCount_ << " source=" << source << " block=" << sample.block << std::endl;
+        }
+            origins.erase(origin);
+            }
+        }
+    }
 
     // T4.6.5 part 30.6 (X3 fix): StandardRenderPipeline's FinalBlit pass leaves
     // the backbuffer in COLOR_ATTACHMENT_OPTIMAL. Vulkan spec requires
@@ -2387,7 +2918,7 @@ void TestVulkanSponzaRenderGraph::Run() {
         cmd->InsertBarrier(&toPresent, 1);
     }
 
-    cmd->End();
+    const bool varianceCommandEnded=cmd->End();
 
     // T4.6.5 part 30.13 (X5 fix): pick render-done semaphore by acquired
     // image index. FIFO Present keeps the semaphore in flight until that
@@ -2401,9 +2932,112 @@ void TestVulkanSponzaRenderGraph::Run() {
     submitInfo.waitSemaphore = imageAvailable;
     submitInfo.signalSemaphore = renderDoneSem;
     submitInfo.signalFence = renderSystem_.GetFrameFence(frameIdx);
-    device_->Submit(submitInfo);
-
-    renderSystem_.EndFrame(renderDoneSem);
+    const auto submitStart = timingEnabled ? FrameClock::now() : FrameClock::time_point{};
+    bool submitted=false;
+    { primal::graphics::cpu_stall_audit::Scope phase("frame.submit");submitted=device_->Submit(submitInfo); }
+    cpuAudit.SubmitResult(submitted);
+    pass_timestamp::instance.Commit(frameIdx,cmdHandle,submitInfo.signalFence,frameCount_,passTimestampTicket,varianceCommandEnded,submitted);
+    pipeline_->CommitVarianceFenceFrame(frameIdx,cmdHandle,submitInfo.signalFence,frameCount_,varianceSubmissionTicket,submitted && varianceCommandEnded);
+    const double submitMs = timingEnabled ? std::chrono::duration<double,std::milli>(FrameClock::now()-submitStart).count() : 0.0;
+    const auto presentStart = timingEnabled ? FrameClock::now() : FrameClock::time_point{};
+    { primal::graphics::cpu_stall_audit::Scope phase("frame.end");renderSystem_.EndFrame(renderDoneSem); }
+    const double presentMs = timingEnabled ? std::chrono::duration<double,std::milli>(FrameClock::now()-presentStart).count() : 0.0;
+    if (timingEnabled) {
+        const auto& f=renderSystem_.GetFrameTiming();const auto& s=pipeline_->GetStats();
+        const auto& t=s.passExecutionTimes;
+        const auto value=[&](const char* name){auto it=t.find(name);return it==t.end()?-1.0:it->second;};
+        double total=0.0;for(const auto& [name,ms]:t){(void)name;total+=ms;}
+        const int phase = !camScript ? -1 : frameCount_<120 ? 0 : frameCount_<240 ? 1 :
+            frameCount_<300 ? 2 : frameCount_<360 ? 3 : 4;
+        std::cout << "[FRAME_TIMING] frame=" << frameCount_ << " slot=" << frameIdx
+                  << " phase=" << phase << " timing_only=" << timingOnly
+                  << " interval_ms=" << intervalMs << " begin_ms=" << beginMs
+                  << " fence_ms=" << f.fenceWaitMs << " fence_valid=" << f.fenceCompleted
+                  << " fence_serial=" << f.completionSerial << " acquire_ms=" << f.acquireMs
+                  << " acquire_ok=" << f.acquireSucceeded << " render_cpu_ms=" << renderMs
+                  << " submit_ms=" << submitMs << " endframe_ms=" << presentMs
+                  << " gpu_recording=" << s.timestampRecordingSequence << " gpu_source_query=" << s.timestampResolvedSequence
+                  << " gpu_fresh=" << s.timestampResultsFresh << " gpu_read_ok=" << s.timestampQueryReadOk
+                  << " gpu_query_cpu_ms=" << s.timestampQueryReadCpuMs
+                  << " gpu_min_tick=" << s.timestampReadMin << " gpu_max_tick=" << s.timestampReadMax
+                  << " gpu_previous_bound=" << s.timestampPreviousBound
+                  << " gpu_trace_ms=" << value("EnvironmentVisibility.Trace")
+                  << " gpu_resolve_ms=" << value("EnvironmentVisibility.Resolve")
+                  << " gpu_ddgi_gather_ms=" << value("DDGIGIGather")
+                  << " gpu_ddgi_near_ms=" << value("LumenDDGI")
+                  << " gpu_ddgi_far_ms=" << value("LumenDDGI_Far")
+                  << " gpu_spgi_ms=" << value("ScreenProbeGI")
+                  << " gpu_sc_ms=" << value("LumenSurfaceCache") << " gpu_pass_total_ms=" << (t.empty() ? -1.0 : total)
+                  << " gpu_attribution=query_recording_not_cpu_frame" << std::endl;
+    }
+#ifdef PRIMAL_RC_INTEGRATION_TEST
+    // Separate opt-in executable only. Checked completion precedes all shared
+    // reads and descriptor/UBO reuse; RC never modifies production textures.
+    if (frameCount_ >= 120) {
+        static sponza_rc::Test* rcTest = nullptr;
+        try {
+            if (!std::getenv("RC_TEST_ENABLE") || std::strcmp(std::getenv("RC_TEST_ENABLE"),"1") != 0)
+                throw std::runtime_error("RC_TEST_ENABLE=1 is required for the isolated RC test");
+            if (!device_->WaitForSync(renderSystem_.GetFrameFence(frameIdx), ~u32(0)))
+                throw std::runtime_error("RC production frame fence");
+            if (!rcTest) rcTest = new sponza_rc::Test(device_);
+            if (rcTest->run(pipeline_.get(), view_, camera_.GetPosition(), frameIdx, frameCount_)) {
+                delete rcTest; rcTest=nullptr; Shutdown(); std::exit(0);
+            }
+        } catch (const std::exception& e) {
+            PRIMAL_LOG_STREAM(Error,"Render") << "[SPONZA_RC] FAIL " << e.what();
+            delete rcTest;rcTest=nullptr;Shutdown();std::exit(2);
+        }
+    }
+#endif
+    if (!timingOnly) {
+    // Diagnostic-only provenance for this selected capture. The later Drain
+    // waits on its own command, not on the frame fence. Vulkan's two submit
+    // implementations use this device's graphics queue, so successful frame
+    // submission followed by successful Drain on that same unchanged queue
+    // proves queue completion; it does not claim a separate frame-fence wait.
+    const bool bridgeReceiptSelected = lumencompare::enabled &&
+        lumencompare::Selected("GIGather.Inputs") &&
+        device_->GetPlatform() == RHIPlatform::Vulkan;
+    const u32 bridgeOrdinal = bridgeReceiptSelected ? lumencompare::ordinal : 0;
+    const u64 bridgeNativeFrame = bridgeReceiptSelected ? pipeline_->GetFrameCount() - 1 : 0;
+    auto* bridgeVk = bridgeReceiptSelected ? static_cast<VulkanDevice*>(device_) : nullptr;
+    const auto bridgeQueueBefore = bridgeVk
+        ? reinterpret_cast<std::uintptr_t>(bridgeVk->GetGraphicsQueue()) : 0;
+    const u32 bridgeQueueFamily = bridgeVk ? bridgeVk->GetGraphicsQueueFamily() : ~u32(0);
+    const u32 bridgeCommandFamily = bridgeVk
+        ? static_cast<VulkanCommandBuffer*>(cmd)->GetNativeQueueFamilyIndex() : ~u32(0);
+    const bool bridgeDrainOk = lumencompare::Drain(device_, pipeline_->GetFrameCount() - 1, pipeline_->GetGIFrameIndex());
+    if (!bridgeDrainOk) {
+        PRIMAL_LOG_STREAM(Error,"Render") << "[LUMEN_COMPARE] readback failed" << std::endl;
+        Shutdown(); std::exit(2);
+    }
+    if (bridgeReceiptSelected) {
+        const auto bridgeQueueAfter = reinterpret_cast<std::uintptr_t>(bridgeVk->GetGraphicsQueue());
+        const bool sameQueueByImplementation = bridgeQueueBefore != 0 &&
+            bridgeQueueBefore == bridgeQueueAfter && bridgeQueueFamily != ~u32(0) &&
+            bridgeCommandFamily == bridgeQueueFamily;
+        const auto bridgeDirectory = std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR")) /
+            ("frame-" + std::to_string(bridgeOrdinal));
+        std::ofstream receipt(bridgeDirectory / "bridge-command-receipt.json");
+        receipt << "{\"schema\":1,\"native_frame\":" << bridgeNativeFrame
+                << ",\"ordinal\":" << bridgeOrdinal << ",\"slot\":" << frameIdx
+                << ",\"command_handle\":" << cmd->GetHandle()
+                << ",\"submitted_command_handle\":" << submitInfo.cmdBuffer
+                << ",\"signal_fence_handle\":" << submitInfo.signalFence
+                << ",\"command_end_ok\":" << (varianceCommandEnded ? "true" : "false")
+                << ",\"frame_submit_ok\":" << (submitted ? "true" : "false")
+                << ",\"drain_ok\":" << (bridgeDrainOk ? "true" : "false")
+                << ",\"graphics_queue_before\":" << bridgeQueueBefore
+                << ",\"graphics_queue_after\":" << bridgeQueueAfter
+                << ",\"command_queue_family\":" << bridgeCommandFamily
+                << ",\"graphics_queue_family\":" << bridgeQueueFamily
+                << ",\"same_graphics_queue_by_implementation\":" << (sameQueueByImplementation ? "true" : "false")
+                << ",\"frame_fence_separately_waited\":false"
+                << ",\"completion_basis\":\"frame End and Submit, followed by successful Drain on VulkanDevice graphics queue\"}\n";
+        receipt.close();
+        if (!receipt) PRIMAL_LOG_STREAM(Error,"Render") << "[LUMEN_COMPARE] bridge command receipt write failed";
+    }
     static const auto captureClockStart = std::chrono::steady_clock::now();
     static u64 captureProbeUpdates = 0;
     if (auto* ddgi=pipeline_->GetDDGIPass()) captureProbeUpdates += ddgi->GetLastUpdateCount();
@@ -2417,6 +3051,18 @@ void TestVulkanSponzaRenderGraph::Run() {
             if(!sc || !sc->ReadbackBoundaryLightingProof(destination.c_str())){
                 PRIMAL_LOG_STREAM(Error,"Render")<<"[SC_BOUNDARY_LIGHT_PROOF] checked readback failed"<<std::endl;
                 Shutdown();std::exit(2);}
+        }
+    }
+    // Zero GPU work/resources unless explicitly requested. The frame is absolute native.
+    static const char* boundWitnessPrefix=std::getenv("SC_BOUND_GEOMETRY_RAYS_PREFIX");
+    if(boundWitnessPrefix && boundWitnessPrefix[0]) {
+        const char* requested=std::getenv("SC_BOUND_GEOMETRY_RAYS_FRAME");
+        if(frameCount_==u32(requested?std::atoi(requested):119)) {
+            if(!RunSCBoundGeometryWitness(device_,pipeline_->GetSurfaceCachePass(),pipeline_->GetDDGIPass(),
+                 frameCount_,boundWitnessPrefix,std::getenv("SC_BOUND_GEOMETRY_RAYS"))) {
+                PRIMAL_LOG_STREAM(Error,"Render")<<"[SC_BOUND_GEOMETRY_RAYS] checked witness failed";
+                Shutdown();std::exit(2);
+            }
         }
     }
     if (const char* audit = std::getenv("SC_RAY_ORACLE_PREFIX"); audit && audit[0]) {
@@ -2476,7 +3122,16 @@ void TestVulkanSponzaRenderGraph::Run() {
     // source usage and must never be accessed after Present releases them.
     bool captureSequenceVerifyFailed = false;
     auto capturePPM = [&](const char* tag) {
-        if (captureTarget == handles::INVALID_RESOURCE) return;
+        const auto captureFailure = [&](const char* operation) {
+            PRIMAL_LOG_STREAM(Error, "Render") << "[SPONZA_CAPTURE] " << operation
+                << " failed at frame " << frameCount_ << "; screenshot unavailable, exiting without releasing potentially pending resources"
+                << std::endl;
+            std::_Exit(7);
+        };
+        if (captureTarget == handles::INVALID_RESOURCE) {
+            if (referenceCapture || diagnosticCapture || cutSampleFrame) captureFailure("capture target");
+            return; // No screenshot was requested on this frame.
+        }
         u32 capW = targetDesc.size.x;
         u32 capH = targetDesc.size.y;
         BufferDesc sbDesc{};
@@ -2484,11 +3139,14 @@ void TestVulkanSponzaRenderGraph::Run() {
         sbDesc.usage = GPUMemoryUsage::Staging;
         sbDesc.memoryUsage = GPUMemoryUsage::Staging;
         ResourceHandle stagingBuf = device_->CreateBuffer(sbDesc);
+        if (stagingBuf == handles::INVALID_RESOURCE) captureFailure("staging buffer creation");
 
         auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
-        if (capCmdHandle != handles::INVALID_COMMAND_BUFFER) {
+        if (capCmdHandle == handles::INVALID_COMMAND_BUFFER) captureFailure("command buffer creation");
+        {
             auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
-            capCmd->Begin();
+            if (!capCmd) captureFailure("command buffer lookup");
+            if (!capCmd->Begin()) captureFailure("command buffer begin");
 
             // The offscreen final blit ended in RenderTarget state.
             ResourceBarrier toCopy{};
@@ -2504,6 +3162,8 @@ void TestVulkanSponzaRenderGraph::Run() {
             region.imageSubresource = {0, 0, 1};
             region.imageExtent = {capW, capH, 1};
             capCmd->CopyTextureToBuffer(captureTarget, stagingBuf, &region, 1);
+            capCmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
+                                  AccessFlag::TransferWrite, AccessFlag::HostRead);
 
             ResourceBarrier toPresent{};
             toPresent.resource = captureTarget;
@@ -2512,13 +3172,19 @@ void TestVulkanSponzaRenderGraph::Run() {
             toPresent.subresource = 0xFFFFFFFF;
             capCmd->InsertBarrier(&toPresent, 1);
 
-            capCmd->End();
-            capCmd->Submit();
-            capCmd->WaitForCompletion();
+            if (!capCmd->End()) captureFailure("command buffer end");
+            if (!capCmd->Submit()) captureFailure("command buffer submit");
+            // Test-only fault injection occurs after a real submit. Treat its
+            // completion as unknown and leave all GPU resources to process exit.
+            const char* forceFailure = std::getenv("SPONZA_CAPTURE_TEST_FORCE_COMPLETION_FAILURE");
+            if (forceFailure && std::strcmp(forceFailure, "1") == 0)
+                captureFailure("forced post-submit completion");
+            if (!capCmd->WaitForCompletion()) captureFailure("command buffer completion");
             device_->DestroyCommandBuffer(capCmdHandle);
         }
 
         auto* mapped = static_cast<u8*>(device_->MapBuffer(stagingBuf));
+        if (!mapped) captureFailure("staging buffer map");
         if (mapped) {
             const char* capDir = std::getenv("SPONZA_CAPTURE_DIR");
             std::string ppmPath;
@@ -4110,7 +4776,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                 const u32 materialCount = materialRegistry_
                     ? materialRegistry_->GetMaterialCount() : 0u;
                 bool valid = prefix[0] && materialCount > 0;
-                const auto& proxies = scene_.GetProxies();
+                const auto& proxies = activeScene.GetProxies();
                 const auto identity = rhimath::MatrixIdentity();
                 for (u32 mi = 0; mi < sceneMeshes_.size(); ++mi) {
                     const auto& info = sceneMeshes_[mi];
@@ -5066,7 +5732,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                         lightDump && std::strcmp(lightDump, "1") == 0) {
                         auto* sc = pipeline_ ? pipeline_->GetSurfaceCachePass() : nullptr;
                         requireReadback(sc != nullptr, "SC lighting source pass");
-                        const ResourceHandle sources[] = {sc->GetLightInfoBuffer(),
+                        const ResourceHandle sources[] = {sc->GetLightInfoBuffer(frameIdx),
                             sc->GetLightingParamsBuffer(frameIdx), sc->GetShadowParamsBuffer(frameIdx)};
                         const char* names[] = {"sc_light_info.raw", "sc_light_params.raw", "sc_shadow_params.raw"};
                         u64 sizes[3]{};
@@ -5286,7 +5952,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                         requireReadback(RunDDGIFirstDefaultOracle(
                             device_, pass, fidx, listed, sourceRecordsForProof,
                             u32(normalCapacity), raysPerProbe, sceneMeshes_,
-                            materialRegistry_, scene_.GetProxies()),
+                            materialRegistry_, activeScene.GetProxies()),
                             "complete default first oracle");
                     }
                     // Opt-in history replay: Vulkan previousIndex is read-only
@@ -5869,10 +6535,29 @@ void TestVulkanSponzaRenderGraph::Run() {
     if (frameCount_ > 400 && frameCount_ % 1800 == 0) {
         capturePPM("late");
     }
-
+    } // diagnostic captures/readbacks are suppressed in timing-only mode
 
 
     if (captureTarget != handles::INVALID_RESOURCE) device_->DestroyTexture(captureTarget);
+    if(const char* audit=std::getenv("DDGI_VARIANCE_FENCE_AUDIT");audit && std::strcmp(audit,"1")==0) {
+        const char* maxFrames=std::getenv("SPONZA_MAX_FRAMES");
+        const bool last=maxFrames && std::atoi(maxFrames)>0 && frameCount_+1>=u32(std::atoi(maxFrames));
+        if(frameCount_==119 || frameCount_==239 || last) for(u32 vi=0;vi<4;++vi) {
+            auto* volume=pipeline_->GetDDGIVolume(vi);if(!volume)continue;
+            const auto a=volume->GetVarianceFenceAudit();
+            PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_VARIANCE_FENCE_AUDIT] frame=" << frameCount_ << " volume=" << (vi==0?"Near":vi==1?"Far":"Other")
+                << " volume_index=" << vi << " enabled=" << a.enabled << " accepted_frame=" << a.accepted_frame
+                << " accepted_count=" << a.accepted_count << " submitted_count=" << a.submitted_count
+                << " source_frame=" << a.source_frame << " source_native=" << a.source_native << " source_ticket=" << a.source_ticket
+                << " completion_serial=" << a.completion_serial << " source_epoch=" << a.source_epoch << " source_digest=" << a.source_digest
+                << " source_generation=" << a.source_generation << " current_generation=" << a.current_generation
+                << " current_epoch=" << a.current_epoch << " current_digest=" << a.current_digest
+                << " skip0=" << a.skip_counts[0] << " skip1=" << a.skip_counts[1] << " skip2=" << a.skip_counts[2]
+                << " skip3=" << a.skip_counts[3] << " skip4=" << a.skip_counts[4] << " skip5=" << a.skip_counts[5]
+                << " skip6=" << a.skip_counts[6] << std::endl;
+        }
+    }
+    cpuAudit.ReachedFrameTail();
     frameCount_++;
 
     // GI ownership baseline (2026-09-18 plan Phase 0): env-gated auto-exit so
@@ -5883,13 +6568,14 @@ void TestVulkanSponzaRenderGraph::Run() {
         if (frameCount_ >= (u32)std::atoi(mf)) {
             std::cout << "[SponzaRun] SPONZA_MAX_FRAMES=" << mf
                       << " reached — clean exit at frame " << frameCount_ << std::endl;
+            cpuAudit.Finish();
             std::_Exit(0);
         }
     }
 
     // T2.1 (F7): GI numerical band gate — frame 90 (env-overridable), then
     // _Exit(0/1). GI_VERIFY=1 activates; default off keeps windowed behavior.
-    if (std::getenv("GI_VERIFY") && !giVerified_) {
+    if (!timingOnly && std::getenv("GI_VERIFY") && !giVerified_) {
         static u32 verifyFrame = [] {
             const char* e = std::getenv("GI_VERIFY_FRAME");
             return e ? (u32)std::atoi(e) : 90u;
@@ -5906,7 +6592,7 @@ void TestVulkanSponzaRenderGraph::Run() {
     // rebuild would reset the probe field and measure re-init — samples the
     // camera-cell L0 every frame, and at GI_HALFLIFE_WINDOW (default 150)
     // frames asserts half-life ≤ GI_HALFLIFE_MAX (default 60) then _Exit.
-    if (std::getenv("GI_HALFLIFE")) {
+    if (!timingOnly && std::getenv("GI_HALFLIFE")) {
         static u32 toggleFrame = [] {
             const char* e = std::getenv("GI_HALFLIFE_FRAME");
             return e ? (u32)std::atoi(e) : 90u;
@@ -5955,7 +6641,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                 primal::graphics::RenderLight dim = giHalflifeSun_;
                 dim.color = dim.color * 0.1f;
                 dim.intensity *= 0.1f;
-                scene_.UpdateLight(dim.entityId, dim);
+                activeScene.UpdateLight(dim.entityId, dim);
             }
             std::cout << "[GIHalflife] sun stepped to 10% at frame "
                       << frameCount_ << ", start L0 lum=" << giHalflifeStartLum_ << std::endl;
@@ -6540,6 +7226,10 @@ void TestVulkanSponzaRenderGraph::Shutdown() {
     if (device_) {
         std::cerr << "[Part35.7] WaitIdle..." << std::endl;
         device_->WaitIdle();
+        if(device_->GetPlatform()==RHIPlatform::Vulkan) {
+            auto* vk=static_cast<VulkanDevice*>(device_);
+            if(vk->GetLastWaitIdleResult()==VK_SUCCESS)pass_timestamp::instance.ReleaseAfterIdle(vk);
+        }
         std::cerr << "[Part35.7] WaitIdle done" << std::endl;
     }
 

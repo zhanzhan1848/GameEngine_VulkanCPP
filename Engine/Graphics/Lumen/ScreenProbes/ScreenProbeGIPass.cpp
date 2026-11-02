@@ -1,3 +1,4 @@
+#include "Graphics/RenderGraph/LumenCompareCapture.h"
 #include "ScreenProbeGIPass.h"
 #include "Graphics/Lumen/SurfaceCache/SurfaceCachePass.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
@@ -346,6 +347,7 @@ void ScreenProbeGIPass::Shutdown() {
         b=handles::INVALID_RESOURCE;
     }
     first_owners_.clear();first_cache_=nullptr;first_materials_=handles::INVALID_RESOURCE;
+    ddgi_measured_visibility_=false;
     initialized_ = false;
     device_ = nullptr;
 }
@@ -711,12 +713,17 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // inputSH (readonly)
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // outputSH (read-write)
             {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // probePos (readonly)
-            {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // {totalProbes, gridW, sigma, pad}
+            {3, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // {totalProbes, gridW, sigma, flags}
+            {4, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // current normals
+            {5, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // scene TLAS
+            {6, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // scene BLAS
+            {7, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // triangles
+            {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // instances
         };
-        // Mark read-only SSBOs
-        bindings[0].readonly = true;  // inputSH
-        bindings[2].readonly = true;  // probePos
-        spatial_set_layout_ = device_->CreateDescriptorSetLayout({4, bindings});
+        bindings[0].readonly = true;
+        bindings[2].readonly = true;
+        for (u32 i=4;i<9;++i) bindings[i].readonly = true;
+        spatial_set_layout_ = device_->CreateDescriptorSetLayout({9, bindings});
     } else {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // input SH (read)
@@ -1965,6 +1972,18 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 auto* p=device_->MapBuffer(first_owner_buffers_[frameIdx]);
                 if(p) {std::memcpy(p,first_owners_.data(),first_owners_.size()*16);device_->UnmapBuffer(first_owner_buffers_[frameIdx]);} else firstReady=false;
             }
+            // Mode7 spatial visibility is independent of zero-hit owner/material
+            // eligibility. Only a current ready BVH epoch can prove an open segment.
+            const bool measuredVisibility = splitIsVk && ddgi_measured_visibility_;
+            ResourceHandle spatialGeometry[4]{dummy_buffer_,dummy_buffer_,dummy_buffer_,dummy_buffer_};
+            bool spatialGeometryReady = measuredVisibility && first_cache_ &&
+                probe_normals_buffer_[frameIdx] != handles::INVALID_RESOURCE &&
+                first_cache_->PrepareGeometryConsumer(frameIdx);
+            for(u32 i=0;i<4 && spatialGeometryReady;++i) {
+                spatialGeometry[i]=first_cache_->GetGeometryFirstHitBuffer(frameIdx,i);
+                spatialGeometryReady &= spatialGeometry[i]!=handles::INVALID_RESOURCE;
+            }
+            if(!spatialGeometryReady) for(auto& b:spatialGeometry)b=dummy_buffer_;
             if(!firstReady) for(auto& b:firstGeometry)b=dummy_buffer_;
             const bool firstOwner=firstReady && std::strcmp(firstEnv,"2")==0 && first_cache_->GetCardGenerator().HasOwnerCardDirectory();
             // no-op，停在 SRO 时发转换。
@@ -2154,9 +2173,10 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 const float sdfStepScale = requestedStepScale >= 0.75f && requestedStepScale <= 1.2f
                     ? requestedStepScale : 1.0f;
                 const char* visibilityEnv = std::getenv("SPGI_DDGI_VISIBILITY");
-                const int visibilityMode = visibilityEnv ? std::atoi(visibilityEnv) : 0;
+                const int visibilityMode = visibilityEnv ? std::atoi(visibilityEnv) : (measuredVisibility ? 2 : 0);
                 const bool visibilityReady = ddgi_depth_buffer_ != handles::INVALID_RESOURCE &&
                     ddgi_relocated_origins_ != handles::INVALID_RESOURCE;
+                if (measuredVisibility && !visibilityReady) gd.ddgi_fb[1].w = 0.0f;
                 gd.hint_params = {kTrilinearHint, std::getenv("SPGI_RAY_SAMPLES_FLOOR") ? 1.0f : 0.0f, sdfStepScale,
                     visibilityReady && visibilityMode >= 1 && visibilityMode <= 2
                         ? float(visibilityMode) : 0.0f};
@@ -2207,7 +2227,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                                       const char* e = std::getenv("PRIMAL_SPGI_HINT_SOFT");
                                       return (e && e[0] == '1') ? 1.0f : 0.0f;
                                   }(),
-                                  0.0f};
+                                  measuredVisibility ? 1.0f : 0.0f};
             }
 
             // Split kernels take the global data through the pool UBO
@@ -2301,6 +2321,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 cmd->Dispatch((slot_count_ + 63) / 64, 1, 1);
                 SpgiStageMark(frameIdx, "place");
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "ScreenProbe.place", "positions", probe_positions_buffer_[frameIdx], true);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "ScreenProbe.place", "normals", probe_normals_buffer_[frameIdx], true);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "ScreenProbe.place", "constants", global_cb_[frameIdx], true);
             }
 
             // Barrier: probe buffers written
@@ -2351,6 +2374,8 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, compact_layout_, 0, 1, cSets, 0, nullptr);
                 cmd->Dispatch((slot_count_ + 63) / 64, 1, 1);
                 SpgiStageMark(frameIdx, "compact");
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "ScreenProbe.compact", "slot-map", slot_to_compact_buffer_, true);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "ScreenProbe.compact", "compact-list", compact_list_buffer_, true);
                 // Maps write → trace/avg read.
                 cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                    AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
@@ -2487,6 +2512,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         if (!splitIsVk) cmd->SetComputeBytes(3, &gd, sizeof(ScreenProbeGlobalData));
                         cmd->Dispatch(dispatchX, 1, 1);
                         SpgiStageMark(frameIdx, "hzb");
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "ScreenProbe.hzb", "hit-distance", hit_distance_buffer_, true);
                         // L2 visibility before the SDF kernel reads the hit buffer.
                         cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                            AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
@@ -2579,6 +2605,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     if (!splitIsVk) cmd->SetComputeBytes(3, &gd, sizeof(ScreenProbeGlobalData));
                     cmd->Dispatch(dispatchX, 1, 1);
                     SpgiStageMark(frameIdx, "sdf");
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "ScreenProbe.sdf", "hit-distance", hit_distance_buffer_, true);
                     cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                        AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
 
@@ -2667,6 +2694,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     if (!splitIsVk) cmd->SetComputeBytes(3, &gd, sizeof(ScreenProbeGlobalData));
                     cmd->Dispatch(dispatchX, 1, 1);
                     SpgiStageMark(frameIdx, "finalize");
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "ScreenProbe.finalize", "ray-radiance", probe_radiance_buffer_, true);
                 } else if (!SpgiStageSkipped("trace")) {
                     // Monolithic fallback — Vulkan flat bindings 0..13 (fixed:
                     // previously wrote Metal overlapping numbers on both platforms).
@@ -2802,8 +2830,13 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
                 cmd->Dispatch(slot_count_, 1, 1);
                 SpgiStageMark(frameIdx, "avg");
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "ScreenProbe.avg", "SH", probe_avg_radiance_[frameIdx], true);
             }
 
+            // Vulkan InsertBarrier currently handles images only; make the
+            // SSBO producer visible to the next compute consumer.
+            if (splitIsVk) cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
             // Barrier: avg radiance written
             {
                 ResourceBarrier barrier{};
@@ -2876,6 +2909,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 cmd->Dispatch((slot_count_ + 63) / 64, 1, 1);
                 filteredSH = probe_temporal_radiance_[frameIdx];
                 SpgiStageMark(frameIdx, "temporal");
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "ScreenProbe.temporal", "SH", probe_temporal_radiance_[frameIdx], true);
             }
 
             // Barrier: temporal output written
@@ -2893,26 +2927,53 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             // ==================================================================
             if (spatial_pipeline_ != handles::INVALID_PIPELINE &&
                 !SpgiStageSkipped("post") && !SpgiStageSkipped("spatial")) {
-                struct SpatialCB { u32 totalProbes; u32 gridW; float sigma; float pad; };
+                struct SpatialCB { u32 totalProbes; u32 gridW; float sigma; u32 flags; };
                 const ResourceHandle spatialOutput = filteredSH == probe_avg_radiance_[frameIdx]
                     ? probe_temporal_radiance_[frameIdx] : probe_avg_radiance_[frameIdx];
                 // P2: same slot-lattice reinterpretation as the temporal pass.
                 SpatialCB scb{slot_count_,
-                              tier3_enabled_ ? grid_width_ * 4u : grid_width_, 2.0f, 0.0f};
+                              tier3_enabled_ ? grid_width_ * 4u : grid_width_, 2.0f,
+                              (measuredVisibility ? 1u : 0u) | (spatialGeometryReady ? 2u : 0u)};
                 static_assert(sizeof(SpatialCB) == 16);
+                bool spatialConstantsReady = false;
                 if (auto* cb = device_->MapBuffer(spatial_cb_[frameIdx])) {
                     std::memcpy(cb, &scb, sizeof(scb));
                     device_->UnmapBuffer(spatial_cb_[frameIdx]);
+                    spatialConstantsReady = true;
                 }
+                // A failed upload must not dispatch mode7 with stale ready flags.
+                // Keep the existing center/temporal SH and its normal history copy.
+                if (!measuredVisibility || spatialConstantsReady) {
+                if (measuredVisibility && (camera_data.frame_index < 6u || camera_data.frame_index % 120u == 0u)) {
+                    PRIMAL_LOG_STREAM(Info, "Render") << "[MeasuredVisibility] frame=" << camera_data.frame_index
+                        << " spatial_flags=" << scb.flags << " slot=" << frameIdx
+                        << " geometry_ready=" << spatialGeometryReady;
+                }
+                if (lumencompare::enabled)
+                    lumencompare::Output(device_, cmd, "ScreenProbe.spatial", "constants", spatial_cb_[frameIdx], true);
 
                 DescriptorData params[] = {
                     {0, DescriptorType::StorageBuffer, filteredSH},
                     {1, DescriptorType::StorageBuffer, spatialOutput},
                     {2, DescriptorType::StorageBuffer, probe_positions_buffer_[frameIdx]},
                     {3, DescriptorType::UniformBuffer, spatial_cb_[frameIdx]},
+                    {4, DescriptorType::StorageBuffer, probe_normals_buffer_[frameIdx] != handles::INVALID_RESOURCE
+                        ? probe_normals_buffer_[frameIdx] : dummy_buffer_},
+                    {5, DescriptorType::StorageBuffer, spatialGeometry[0]},
+                    {6, DescriptorType::StorageBuffer, spatialGeometry[1]},
+                    {7, DescriptorType::StorageBuffer, spatialGeometry[2]},
+                    {8, DescriptorType::StorageBuffer, spatialGeometry[3]},
                 };
-                UpdateDescriptorSet(device_, spatial_ds_[frameIdx], params, 4);
+                UpdateDescriptorSet(device_, spatial_ds_[frameIdx], params, splitIsVk ? 9 : 4);
 
+                if (measuredVisibility) {
+                    // InsertBarrier is image-only on Vulkan: establish actual
+                    // SSBO producer and host-upload dependencies explicitly.
+                    cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                        AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+                    cmd->MemoryBarrier(PipelineStage::Host, PipelineStage::ComputeShader,
+                        AccessFlag::HostWrite, AccessFlag::ShaderRead);
+                }
                 cmd->BindComputePipeline(spatial_pipeline_);
                 const DescriptorSetHandle sets[] = { spatial_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, spatial_layout_, 0, 1, sets, 0, nullptr);
@@ -2921,6 +2982,8 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 cmd->Dispatch((slot_count_ + 63) / 64, 1, 1);
                 filteredSH = spatialOutput;
                 SpgiStageMark(frameIdx, "spatial");
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "ScreenProbe.spatial", "SH", spatialOutput, true);
+                }
             }
 
             // If either optional filter is unavailable, preserve its last valid
@@ -2939,14 +3002,22 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 copies[1].afterState = ResourceState::CopyDest;
                 copies[1].subresource = 0xFFFFFFFF;
                 cmd->InsertBarrier(copies, 2);
+                if (splitIsVk) cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
+                    AccessFlag::ShaderRead | AccessFlag::ShaderWrite, AccessFlag::TransferRead | AccessFlag::TransferWrite);
                 cmd->CopyBuffer(filteredSH, probe_avg_radiance_[frameIdx], 0, 0,
                                 static_cast<u64>(slot_count_) * 4 * sizeof(math::v4));
                 copies[1].beforeState = ResourceState::CopyDest;
                 copies[1].afterState = ResourceState::ShaderResource;
                 cmd->InsertBarrier(&copies[1], 1);
+                if (splitIsVk) cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::ComputeShader,
+                    AccessFlag::TransferWrite, AccessFlag::ShaderRead | AccessFlag::ShaderWrite);
                 filteredSH = probe_avg_radiance_[frameIdx];
             }
 
+            // Vulkan InsertBarrier currently handles images only; make the
+            // SSBO producer visible to the next compute consumer.
+            if (splitIsVk) cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
+                AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
             // Barrier: spatial output written; previous-frame SH stays read-only.
             {
                 ResourceBarrier barrier{};

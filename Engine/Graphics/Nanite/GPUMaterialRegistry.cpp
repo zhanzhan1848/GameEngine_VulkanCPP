@@ -147,7 +147,7 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         if (!texCtx.uniqueAlbedo.empty()) {
             if (!MaterialDataBuilder::CreateTextureArray(
                 device, cmdBuffer, texCtx.uniqueAlbedo,
-                "AlbedoTextureArray", albedoTextureArray_
+                "AlbedoTextureArray", albedoTextureArray_, TextureArrayChannel::Albedo
             )) {
                 PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: Failed to create albedo texture array" << std::endl;
                 success = false;

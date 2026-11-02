@@ -1,4 +1,5 @@
 #pragma once
+#include "Graphics/Lumen/DDGI/VarianceFenceTicket.h"
 
 #include "CommonHeaders.h"
 #include "Graphics/RHI/Core/RHITypes.h"
@@ -7,12 +8,14 @@
 #include "Graphics/Lumen/GIDebugParams.h"
 #include "Graphics/Lumen/GICacheView.h"
 #include "Graphics/Lumen/DDGISlotMap.h"
+#include "FarUpdatePolicy.h"
 #include "Graphics/RHI/Core/RHIReadbackRing.h"
 #include <vector>
 #include <memory>
 
 namespace primal::graphics::rhi {
     class RHIDeviceBase;
+    class RHICommandBuffer;
 }
 
 namespace primal::graphics::rendergraph {
@@ -23,6 +26,7 @@ namespace primal::graphics::lumen {
 
 // Forward declaration
 class StaticProbeVolume;
+class SurfaceCachePass;
 struct DDGIShProducerAudit;
 
 // ============================================================================
@@ -52,6 +56,8 @@ struct DDGIRuntimeParams {
     float irradiance_temporal_weight = 0.05f;   // EMA alpha for irradiance
     float depth_temporal_weight = 0.2f;         // EMA alpha for depth
     float ray_max_distance = 50.0f;             // Must reach geometry across probe grid
+    bool deferred_field_reset = false;        // Vulkan far experiment, all volumes
+    u32 far_update_budget = 0;                 // 0=legacy; explicit 512/2048 far only
     u32   max_probes_per_frame = 16384;          // Update ALL probes every frame (no flicker)
     // Scene-fit grids (Docs/completed/2026-09-18-ddgi-scene-fit-probe-grid-plan.md §5.2):
     // false = legacy centered origin (default), true = probe_origin is the
@@ -73,6 +79,7 @@ struct DDGICameraData {
     // GI-local startup clock. Unlike frame_index (absolute frame / readback
     // ring identity), this starts at zero only after cards + SDF are ready.
     u32        gi_frame_index = 0;
+    bool       gi_content_ready = false; // Explicit source latch, independent of warmup length
     float      delta_time;
     // Vulkan screen-hit validation. Missing depth rejects screen samples;
     // Surface Cache / world probes remain available as fallback.
@@ -142,7 +149,7 @@ struct DDGIVolumeData {
     math::v4 LightDirection;          // offset 272: xyz = light dir, w unused
     math::v4 LightColor;              // offset 288: xyz = light color, w = intensity
     // Mode 11 (MeshletDynamicDDGI) canonical radiance inputs — match bake's ProbeBakingScene
-    math::v4 SkyColor;                // offset 304: xyz = sky color, w unused
+    math::v4 SkyColor;                // offset 304: xyz = sky color, w = analytic history (legacy0/off1/Lambert2)
     math::v4 Albedo;                  // offset 320: xyz = uniform albedo, w unused
 };
 
@@ -190,6 +197,21 @@ public:
         rendergraph::RGResourceHandle sc_lighting_atlas = {});
 
     bool IsInitialized() const { return initialized_; }
+    // Explicit host submission handshake; other callers never authorize a read.
+    void BeginVarianceFenceFrame(u32 slot,rhi::CommandBufferHandle command,rhi::SyncHandle fence,u64 nativeFrame,u64 ticket);
+    void CommitVarianceFenceFrame(u32 slot,rhi::CommandBufferHandle command,rhi::SyncHandle fence,u64 nativeFrame,u64 ticket,bool success);
+    void ValidateVarianceFenceCommand(u32 slot,rhi::CommandBufferHandle command);
+    struct VarianceFenceAuditView {
+        bool enabled=false,accepted_frame=false;
+        u64 accepted_count=0,submitted_count=0,source_frame=~u64(0),source_native=~u64(0),source_ticket=0,completion_serial=0;
+        u64 source_epoch=0,source_digest=0,source_generation=0,current_generation=0,current_epoch=0,current_digest=0;
+        u64 skip_counts[7]{};
+    };
+    VarianceFenceAuditView GetVarianceFenceAudit() const;
+    void SyncVarianceFenceScene(u64 sceneEpoch,u64 sourceDigest);
+    void SetVarianceFenceSceneProvider(const SurfaceCachePass* provider);
+    bool VarianceFenceSceneStillCurrent();
+
 
     // Accessors for probe data (for sampling in other passes)
     // frame_idx = 绝对帧号（不是槽号）：内部经 DDGISlotMap.h 派生槽位。
@@ -209,6 +231,14 @@ public:
     // history) so a scene switch can never inherit the previous scene's GI.
     // The normal trace/update loop re-seeds within a few frames.
     void ClearProbeField();
+    struct FarUpdateAudit {
+        u32 native_frame=0, count=0, rotation=0, max_age=0;
+        u64 epoch=0, list_hash=0;
+        bool bootstrap=false, source_ready=false, warmup=false, uploaded=false, recorded=false;
+    };
+    const FarUpdateAudit& GetFarUpdateAudit() const { return far_update_audit_; }
+    bool UsesFarUpdatePolicy() const { return params_.far_update_budget!=0; }
+
     // T4.1 (D8): reset convergence ages so ALL probes become high-priority
     // in the partial-update scheduler — used on scene/dirty-transform events.
     void BoostProbePriority();
@@ -216,6 +246,7 @@ public:
     // BoostProbePriority + 事件驱动 TemporalAlpha 抬升窗（0.35，30 帧——
     // 复用 PRIMAL_DDGI_ALPHA_HOLD 机制改为事件驱动）。
     void NotifyLightingChanged(u32 frame) {
+        if (params_.far_update_budget) { ClearProbeField(); return; }
         BoostProbePriority();
         alpha_hold_until_frame_ = frame + 30u;
     }
@@ -407,7 +438,20 @@ public:
 
     // T8.9b diagnostic: probes refreshed by the latest trace dispatch, so
     // CPU-side ray-buffer reads can skip stale/unwritten slots.
-    u32 GetLastUpdateCount() const { return volume_data_.ProbeUpdateCount; }
+    void SetMeasuredGeometrySource(rhi::ResourceHandle top, rhi::ResourceHandle bottom,
+                                   rhi::ResourceHandle triangles, rhi::ResourceHandle instances, bool ownerDirectoryReady=false,
+                                   u64 sceneEpoch=0, u64 sourceDigest=0) {
+        measured_owner_directory_ready_=ownerDirectoryReady;
+        measured_geometry_epoch_=sceneEpoch; measured_geometry_digest_=sourceDigest;
+        measured_geometry_[0]=top; measured_geometry_[1]=bottom;
+        measured_geometry_[2]=triangles; measured_geometry_[3]=instances;
+    }
+    rhi::ResourceHandle GetMeasuredGeometrySource(u32 i) const {
+        return i<4?measured_geometry_[i]:rhi::handles::INVALID_RESOURCE;
+    }
+    bool UsesMeasuredVisibility() const { return ray_sample_mode_ == 7u; }
+
+    u32 GetLastUpdateCount() const { return last_recorded_update_count_; }
 
     // X2/A3: 统一 Cache View —— 消费者（SPGI 回退、GIGather 远场）从这里取
     // volume 数据快照，不再逐个摸 pass 内部 getter。irradiance 取
@@ -415,6 +459,7 @@ public:
     // origin/counts/spacing 与旧上传字段逐一对应。
     DDGIVolumeView GetVolumeView(u32 frame_idx) const {
         DDGIVolumeView view;
+        view.measured_visibility = UsesMeasuredVisibility();
         view.irradiance = irradiance_buffers_[DDGISlotsForFrame(frame_idx).currentIndex];
         view.depth = depth_buffers_[DDGISlotsForFrame(frame_idx).currentIndex];
         view.origin = math::v3{ volume_data_.ProbeOrigin.x,
@@ -437,6 +482,7 @@ public:
     // 传入 DDGISlotsForFrame(frame) 的具名槽（previousIndex/currentIndex）。
     DDGIVolumeView GetVolumeViewBySlot(u32 slot) const {
         DDGIVolumeView view;
+        view.measured_visibility = UsesMeasuredVisibility();
         view.irradiance = irradiance_buffers_[slot];
         view.depth = depth_buffers_[slot];
         view.origin = math::v3{ volume_data_.ProbeOrigin.x,
@@ -625,6 +671,17 @@ private:
     void CreateConstantBuffers();
     // T1.3 (C5): async variance readback ring (3 slots x probeCount*128 floats)
     void CreateDepthReadbackRing();
+    bool CreateFieldResetTemplate();
+    void RecordFieldReset(rhi::RHICommandBuffer* cmd);
+    void InheritProbeHistory(rhi::RHICommandBuffer* cmd, u32 out, u32 history);
+    void PublishFarUpdateAudit(rhi::RHICommandBuffer* cmd, u32 slot);
+    FarUpdatePolicy far_update_policy_;
+    FarUpdateAudit far_update_audit_{};
+    u32 last_recorded_update_count_=0;
+    rhi::ResourceHandle field_reset_template_=rhi::handles::INVALID_RESOURCE;
+    u64 reset_zero_bytes_=0, reset_depth_offset_=0, reset_confidence_offset_=0;
+    bool field_reset_pending_=false;
+
     void CreateProbeTextures();
     void InitializeProbesFromStatic();
 
@@ -779,6 +836,11 @@ private:
     // the unchanged N/5N/9N regions and are never bound in the default path.
     bool query_source_audit_enabled_{false};
     bool material_projection_enabled_{false}; // Vulkan evidence experiment, allocation-latched.
+    bool measured_geometry_requested_{false};
+    u64 measured_geometry_epoch_{0}, measured_geometry_digest_{0}; // CPU publication identity for diagnostics.
+    bool measured_owner_directory_ready_{false};
+    rhi::ResourceHandle measured_geometry_[4]{rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE,
+                                             rhi::handles::INVALID_RESOURCE, rhi::handles::INVALID_RESOURCE};
     bool first_surface_requested_{false};
     bool first_surface_enabled_{false};
     bool first_zero_cross_requested_{false};
@@ -890,8 +952,18 @@ private:
 
     // T1.3 (C5): async readback ring for probe-depth variance scheduling —
     // replaces the per-frame MapBuffer of the GPU-hot depth history.
+    VarianceFenceTicket variance_fence_ticket_;
+    VarianceSceneIdentity variance_identity_;
+    VarianceFenceAuditView variance_audit_{};
+    u64 variance_generation_=0;
+
+    const SurfaceCachePass* variance_scene_provider_=nullptr;
+    bool variance_cpu_confirmed_=false,variance_identity_valid_=false;
+    u64 variance_scene_epoch_=0,variance_source_digest_=0;
     rhi_readback_ring depth_readback_ring_;
     u32 depth_ring_copies_ = 0;    // copies issued; consumer waits for > 2
+    u32 depth_ring_recorded_frame_[3]{~u32(0),~u32(0),~u32(0)}; // command recording only, not completion
+    u64 depth_ring_recorded_native_[3]{~u64(0),~u64(0),~u64(0)};
     // T1.5 (R4): DispatchIndirect smoke consumer — probe-update dispatch count
     // (group count, platform-encoded) uploaded per frame; opt-in via
     // PRIMAL_DDGI_INDIRECT=1 so the default path stays CPU-computed dispatch.

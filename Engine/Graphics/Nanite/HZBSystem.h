@@ -80,6 +80,11 @@ public:
      */
     bool IsReady() const { return initialized_ && hzb_texture_ != rhi::handles::INVALID_RESOURCE; }
 
+    // Allocation readiness does not imply occluder depth exists. Cull before
+    // the first successful GPU build must conservatively keep geometry.
+    // The caller submits the recorded build before a later frame consumes it.
+    bool HasValidHistory() const { return IsReady() && history_valid_; }
+
     /**
      * @brief Get HZB mip level count
      */
@@ -140,6 +145,7 @@ private:
 
     u32 mip_levels_{ 0 };
     bool initialized_{ false };
+    bool history_valid_{ false };
     std::mutex mutex_;
 };
 

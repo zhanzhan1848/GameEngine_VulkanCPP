@@ -1,0 +1,71 @@
+#version 450 core
+#extension GL_GOOGLE_include_directive : require
+#define DDGI_GEOMETRY_REPLACE 1
+#define DDGI_GEOMETRY_ANY_HIT 1
+#define DDGI_GEOMETRY_QUERY_KERNEL 1
+#define DDGI_EQUAL_BOX_REPLAY 1
+uint replayTop=0u,replayBottom=0u,replayInstances=0u,replayTriangles=0u,replaySkipTop=0u,replaySkipBottom=0u,replayMetadata=0u;
+#include "GeometryFirstHit.glsl"
+const uvec4 connectionPolicy=uvec4(1,0,0,0);
+int qualifiedProbeConnection(vec3 receiver,vec3 probe) {
+    if(connectionPolicy.x!=1u || any(isnan(receiver)) || any(isinf(receiver)) ||
+       any(isnan(probe)) || any(isinf(probe))) return 0;
+    vec3 delta=probe-receiver;float distance=length(delta);
+    if(isnan(distance)||isinf(distance))return 0;
+    if(distance<=2e-5)return 0;
+    if(geometryTop.data.length()==0||geometryBottom.data.length()==0||
+       geometryTriangles.data.length()==0||geometryInstances.data.length()==0)return 0;
+    float t;uint owner,primitive;
+#ifdef DDGI_GEOMETRY_REPLACE
+    // Extend only this experimental query by 20 µm on each end. If the
+    // displacement cannot be represented at this world scale, it is unknown.
+    const float endpointEpsilon=2e-5;
+    // Independently bound float32 spacing to <= 2 µm (10% of epsilon).
+    // Integer exponent checks cannot be reassociated into the requested shift.
+    // Coordinates with exponent >= 132 have ULP >= 2^-18 m (> 2 µm).
+    const uvec3 maxEndpointExponent=uvec3(132u<<23u);
+    if(any(greaterThanEqual(floatBitsToUint(receiver)&uvec3(0x7f800000u),maxEndpointExponent)) ||
+       any(greaterThanEqual(floatBitsToUint(probe)&uvec3(0x7f800000u),maxEndpointExponent))) return 0;
+    if(distance<=2.0*endpointEpsilon)return 0;
+    vec3 direction=delta/distance;
+    vec3 start=receiver-direction*endpointEpsilon;
+    vec3 end=probe+direction*endpointEpsilon;
+    float farT=distance+2.0*endpointEpsilon;
+    vec3 startShift=receiver-start;
+    vec3 endShift=end-probe;
+    float startMove=dot(startShift,direction);
+    float endMove=dot(endShift,direction);
+    float startSide=length(startShift-startMove*direction);
+    float endSide=length(endShift-endMove*direction);
+    float farExtension=farT-distance;
+    if(any(isnan(direction))||any(isinf(direction)) ||
+       any(isnan(start))||any(isinf(start)) || any(isnan(end))||any(isinf(end)) ||
+       isnan(farT)||isinf(farT) || isnan(farExtension)||isinf(farExtension) ||
+       farExtension<endpointEpsilon*1.8 || farExtension>endpointEpsilon*2.2 ||
+       isnan(startSide)||isinf(startSide)||isnan(endSide)||isinf(endSide) ||
+       startSide>endpointEpsilon*0.1 || endSide>endpointEpsilon*0.1 ||
+       isnan(startMove)||isinf(startMove)||isnan(endMove)||isinf(endMove) ||
+       startMove<endpointEpsilon*0.9 || startMove>endpointEpsilon*1.1 ||
+       endMove<endpointEpsilon*0.9 || endMove>endpointEpsilon*1.1) return 0;
+    int hit=geometryFirstHit(start,direction,0.,farT,t,owner,primitive);
+    if(hit<0)return 0;
+    if(hit>0) {
+        float originalT=t-endpointEpsilon;
+        return (!isnan(originalT)&&!isinf(originalT)&&
+                originalT>endpointEpsilon&&originalT<distance-endpointEpsilon)?-1:0;
+    }
+#else
+    int hit=geometryFirstHit(receiver,delta/distance,0.,distance,t,owner,primitive);
+    if(hit<0)return 0;
+    // Endpoints are not evidence of clear space. Keep endpoint-only hits
+    // unknown instead of silently ignoring a thin opaque cloth/surface.
+    if(hit>0)return (!isnan(t)&&!isinf(t)&&t>2e-5&&t<distance-2e-5)?-1:0;
+#endif
+    return 1;
+}
+layout(local_size_x=64) in;
+struct Query {uint group,probe;float ax,ay,az,bx,by,bz;};
+struct Result {int status;uint top,bottom,instances,triangles,skipTop,skipBottom,metadata;};
+layout(set=0,binding=0,std430) readonly buffer Inputs {Query q[];};
+layout(set=0,binding=1,std430) writeonly buffer Outputs {Result result[];};
+void main(){uint i=gl_GlobalInvocationID.x;if(i>=q.length())return;Query x=q[i];int status=qualifiedProbeConnection(vec3(x.ax,x.ay,x.az),vec3(x.bx,x.by,x.bz));result[i]=Result(status,replayTop,replayBottom,replayInstances,replayTriangles,replaySkipTop,replaySkipBottom,replayMetadata);}

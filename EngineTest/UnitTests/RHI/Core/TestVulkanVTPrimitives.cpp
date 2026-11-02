@@ -17,6 +17,7 @@
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHIReadbackRing.h"
+#include "Graphics/Lumen/DDGI/VarianceFenceTicket.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHITypes.h"
 
@@ -87,7 +88,7 @@ TestResult TestVT_ReadbackRing() {
     DeviceFixture fx;
     TEST_ASSERT(fx.Init(), "Vulkan device init");
 
-    auto cs = ReadSPV("Assets/Shaders/VTTest_Write.comp.spv");
+    auto cs = ReadSPV(VT_PRIMITIVES_WRITE_SPV);
     TEST_ASSERT(!cs.empty(), "Read VTTest_Write SPIR-V (run build_spv.sh if missing)");
     ShaderHandle computeShader = fx.base->CreateShader(cs.data(), cs.size(), ShaderStage::Compute, "main");
     TEST_ASSERT(computeShader != handles::INVALID_SHADER, "CreateShader vtWriteCS");
@@ -157,7 +158,9 @@ TestResult TestVT_ReadbackRing() {
     TEST_ASSERT(ring.initialize(fx.base, bufBytes, rhi_readback_ring::kDefaultRingSize),
                 "readback ring initialize");
 
-    const u32 kFrames = 5;  // > ringSize(3),覆盖 slot 复用
+    primal::graphics::lumen::VarianceFenceTicket varianceTicket;
+    primal::graphics::rhi::FrameSlotCompletion completion;
+    const u32 kFrames = 7;  // > ringSize(3),覆盖 slot 复用
     for (u32 frame = 0; frame < kFrames; ++frame) {
         const u32 tag = 0xA0 + frame;
         WriteParams params{tag, kRingElems, 0, 0};
@@ -166,6 +169,16 @@ TestResult TestVT_ReadbackRing() {
 
         CommandBufferHandle cmd = fx.base->CreateCommandBuffer(CommandQueueType::Graphics);
         VulkanCommandBuffer* vcmd = fx.vk->GetCommandBuffer(cmd);
+        const u32 slot = ring.slot_for_frame(frame);
+        completion.Invalidate();TEST_ASSERT(completion.Publish(slot),"publish completed host slot");
+        TEST_ASSERT(varianceTicket.Begin(completion,slot,cmd,ring.fence(slot),frame,u64(frame)+1),"begin certified ticket");
+        const auto* prior=varianceTicket.Take(ring.buffer(slot),bufBytes);
+        TEST_ASSERT((frame<3 && !prior) || (frame>=3 && prior && prior->source_frame==frame-3),"only prior completed same-slot copy eligible");
+        if(prior) {
+            const auto* old=static_cast<const u32*>(ring.map(fx.base,slot));TEST_ASSERT(old,"map authenticated prior");
+            for(u32 i=0;i<kRingElems;++i)TEST_ASSERT(old[i]==(0xA0u+frame-3u)*0x01010101u+i,"authenticated prior bits");
+            ring.unmap(fx.base,slot);
+        }
         TEST_ASSERT(vcmd->Reset() && vcmd->Begin(), "Begin cmd");
 
         vcmd->BindComputePipeline(pipe);
@@ -175,16 +188,20 @@ TestResult TestVT_ReadbackRing() {
         vcmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
                             AccessFlag::ShaderWrite, AccessFlag::TransferRead);
 
-        const u32 slot = ring.slot_for_frame(frame);
+        TEST_ASSERT(varianceTicket.Record(ring.buffer(slot),bufBytes,gpuOut,frame),"record exact ticket");
         vcmd->CopyBuffer(gpuOut, ring.buffer(slot), 0, 0, bufBytes);
-
+        vcmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,AccessFlag::TransferWrite,AccessFlag::HostRead);
+        TEST_ASSERT(!varianceTicket.Take(ring.buffer(slot),bufBytes),"unsubmitted copy cannot be read");
         TEST_ASSERT(vcmd->End(), "End cmd");
 
         QueueSubmitInfo si{};
         si.cmdBuffer = cmd;
         ring.attach_fence(si, slot);
         auto t0 = std::chrono::steady_clock::now();
-        TEST_ASSERT(fx.base->Submit(si), "Submit(frame)");
+        const bool submitted=fx.base->Submit(si);
+        TEST_ASSERT(varianceTicket.Commit(slot,cmd,ring.fence(slot),frame,u64(frame)+1,submitted),"commit exact successful submit");
+        TEST_ASSERT(!varianceTicket.Take(ring.buffer(slot),bufBytes),"submission alone cannot authorize map");
+        TEST_ASSERT(submitted, "Submit(frame)");
         TEST_ASSERT(ring.wait(fx.base, slot, 5000), "ring.wait (fence 5s)");
         auto t1 = std::chrono::steady_clock::now();
         double waitMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -230,7 +247,7 @@ TestResult TestVT_RegionUploadTexelFetch() {
 
     constexpr u32 kTexW = 256, kTexH = 256;
 
-    auto cs = ReadSPV("Assets/Shaders/VTTest_TexelFetch.comp.spv");
+    auto cs = ReadSPV(VT_PRIMITIVES_FETCH_SPV);
     TEST_ASSERT(!cs.empty(), "Read VTTest_TexelFetch SPIR-V (run build_spv.sh if missing)");
     ShaderHandle computeShader = fx.base->CreateShader(cs.data(), cs.size(), ShaderStage::Compute, "main");
     TEST_ASSERT(computeShader != handles::INVALID_SHADER, "CreateShader vtFetchCS");
@@ -465,8 +482,8 @@ void RegisterVulkanVTPrimitivesTests() {
 
 int main() {
     RegisterVulkanVTPrimitivesTests();
-    TestRunner::RunAllSuites();
-    return 0;
+    const auto stats=TestRunner::RunAllSuites();
+    return stats.totalTests==3 && stats.passedTests==3 && stats.failedTests==0 && stats.skippedTests==0 ? 0 : 1;
 }
 
 #else // ENABLE_VULKAN undefined

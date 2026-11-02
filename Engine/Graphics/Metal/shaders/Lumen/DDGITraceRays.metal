@@ -620,6 +620,46 @@ static float3 scSamplePrevProbeGrid(float3 pos, float3 N,
     return float3(0.0f);
 }
 
+// Analytic-only normalized cosine history. Keep the legacy helper above for
+// unrelated screen/history consumers, especially the older test fixture.
+constant float DDGI_HISTORY_LEGACY_RADIANCE = 0.0f;
+constant float DDGI_HISTORY_DISABLED = 1.0f;
+constant float DDGI_HISTORY_LAMBERT_DIFFUSE = 2.0f;
+static float3 scSampleDiffuseHistoryIrradianceOverPi(float3 pos, float3 N,
+                                    constant DDGIVolumeData& volume,
+                                    device const float4* irradiance_history) {
+    // SkyColor.w wire values: legacy0 / disabled1 / Lambert2 (production).
+    if (volume.SkyColor.w == DDGI_HISTORY_DISABLED) return float3(0.0f);
+    const bool diffuseHistory = volume.SkyColor.w == DDGI_HISTORY_LAMBERT_DIFFUSE;
+    float3 origin = volume.ProbeOrigin.xyz;
+    float spacing = volume.ProbeSpacing;
+    uint3 counts = ddgiGetProbeCounts(volume);
+    float3 gp = (pos - origin) / spacing;
+    float3 gridMax = float3(counts - 1u);
+    if (any(gp < float3(0.0f)) || any(gp > gridMax)) return float3(0.0f);
+
+    SCTetraResult tet = scTetrahedral(gp, counts);
+    float3 result = float3(0.0f);
+    float totalWeight = 0.0f;
+    for (uint p = 0u; p < 4u; ++p) {
+        if (tet.bw[p] < 0.001f) continue;
+        uint base = tet.pi[p] * 9u;
+        float3 sh[9];
+        for (uint i = 0u; i < 9u; ++i) sh[i] = irradiance_history[base + i].xyz;
+        if (diffuseHistory) {
+            for (uint i = 1u; i < 4u; ++i) sh[i] *= (2.0f / 3.0f);
+            for (uint i = 4u; i < 9u; ++i) sh[i] *= 0.25f;
+        }
+        result += scShDot9(sh, N) * tet.bw[p];
+        totalWeight += tet.bw[p];
+    }
+    if (totalWeight > 0.0f) {
+        float3 value = result / totalWeight;
+        return diffuseHistory ? max(value, float3(0.0f)) : value;
+    }
+    return float3(0.0f);
+}
+
 kernel void ddgi_trace_finalize(
     uint2 tid2d [[thread_position_in_threadgroup]],
     uint2 gid2d [[threadgroup_position_in_grid]],
@@ -711,7 +751,7 @@ kernel void ddgi_trace_finalize(
             }
         }
         float3 albedo = scSampleHitAlbedo(hitPos, view_projection, volume.Albedo.xyz, gbuffer_albedo);
-        float3 L_i_prev = scSamplePrevProbeGrid(hitPos, N, volume, irradiance_history);
+        float3 L_i_prev = scSampleDiffuseHistoryIrradianceOverPi(hitPos, N, volume, irradiance_history);
 
         float3 radiance;
         bool radianceFound = false;

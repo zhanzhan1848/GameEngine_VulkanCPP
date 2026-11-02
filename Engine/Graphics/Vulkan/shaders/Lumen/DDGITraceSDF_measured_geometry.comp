@@ -1,0 +1,7 @@
+// Vulkan opt-in geometry-primary candidate. Compile this wrapper with
+// -DDDGI_MEASURED_GEOMETRY=1; entry point ddgi_trace_sdf. Build inlines the
+// include so the canonical source retains the first #version directive.
+#include "DDGITraceSDF.comp"
+#ifndef DDGI_MEASURED_GEOMETRY
+#error "measured geometry wrapper requires DDGI_MEASURED_GEOMETRY=1"
+#endif

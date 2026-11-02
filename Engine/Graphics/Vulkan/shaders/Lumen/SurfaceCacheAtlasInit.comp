@@ -1,12 +1,11 @@
 #version 450 core
 #extension GL_GOOGLE_include_directive : require
-// Vulkan SurfaceCache AtlasInit — populates card atlas regions with default
-// material data so LightEval has valid albedo (alpha=1) to process.
-// Without this (or a full Capture graphics pass), albedo_atlas alpha is 0 and
-// LightEval early-returns on every texel (albedo.a < 0.01 check).
+// Vulkan SurfaceCache AtlasInit — initializes the complete allocation invalid
+// before real card capture. No card-dispatch upload is needed for production.
+// SurfaceCacheParams._pad bit0 preserves the old per-card diagnostic dispatch.
 //
 // Entry point: surface_cache_atlas_init
-// Dispatch: 1D, total_texels threads (same as LightEval).
+// Dispatch: 1D, atlas width*height threads (legacy: per-card total_texels).
 //
 // Flat bindings:
 //   0 = StorageImage(rgba8)  albedo_atlas   (write)
@@ -15,6 +14,7 @@
 //   3 = StorageImage(rgba16f) emissive_atlas (write)
 //   4 = UniformBuffer        FlattenedLightingParams (for card_dispatch)
 //   5 = readonly buffer      CardDispatchInfo card_dispatch[] (std430)
+//   6 = buffer              triangle identity atlas (invalid clear)
 
 #include "SurfaceCacheData.glsl"
 
@@ -37,27 +37,29 @@ layout(set=0,binding=6,std430) buffer AtlasTriangles { uint data[]; } atlasTrian
 
 void surface_cache_atlas_init() {
     uint tid = gl_GlobalInvocationID.x;
-    if (tid >= pb.params.total_texels) return;
-
-    // Binary search: find card whose [texel_offset, texel_offset+texel_count) contains tid.
-    uint lo = 0u;
-    uint hi = pb.params.card_count;
-    while (lo < hi) {
-        uint mid = (lo + hi) >> 1u;
-        if (cd.dispatch[mid].texel_offset + cd.dispatch[mid].texel_count <= tid)
-            lo = mid + 1u;
-        else
-            hi = mid;
+    const bool legacySurface = (pb.params.sc_params._pad & 1u) != 0u;
+    ivec2 dims = imageSize(depth_atlas);
+    ivec2 atlas_uv;
+    if (legacySurface) {
+        if (tid >= pb.params.total_texels) return;
+        uint lo = 0u;
+        uint hi = pb.params.card_count;
+        while (lo < hi) {
+            uint mid = (lo + hi) >> 1u;
+            if (cd.dispatch[mid].texel_offset + cd.dispatch[mid].texel_count <= tid)
+                lo = mid + 1u;
+            else
+                hi = mid;
+        }
+        if (lo >= pb.params.card_count) return;
+        uint local_texel = tid - cd.dispatch[lo].texel_offset;
+        uint res = cd.dispatch[lo].resolution;
+        atlas_uv = ivec2(int(cd.dispatch[lo].atlas_offset_x + local_texel % res),
+                         int(cd.dispatch[lo].atlas_offset_y + local_texel / res));
+    } else {
+        if (tid >= uint(dims.x) * uint(dims.y)) return;
+        atlas_uv = ivec2(int(tid % uint(dims.x)), int(tid / uint(dims.x)));
     }
-    if (lo >= pb.params.card_count) return;
-
-    uint local_texel = tid - cd.dispatch[lo].texel_offset;
-    uint res = cd.dispatch[lo].resolution;
-    uint local_x = local_texel % res;
-    uint local_y = local_texel / res;
-    ivec2 atlas_uv = ivec2(
-        int(cd.dispatch[lo].atlas_offset_x + local_x),
-        int(cd.dispatch[lo].atlas_offset_y + local_y));
 
     atlasTriangles.data[uint(atlas_uv.y)*uint(imageSize(depth_atlas).x)+uint(atlas_uv.x)]=0xffffffffu;
 
@@ -70,5 +72,5 @@ void surface_cache_atlas_init() {
     imageStore(albedo_atlas,   atlas_uv, vec4(0.0, 0.0, 0.0, 0.0));
     imageStore(normal_atlas,   atlas_uv, vec4(0.5, 0.5, 0.0, 1.0));
     imageStore(depth_atlas,    atlas_uv, vec4(-1.0, 0.0, 0.0, 1.0));
-    imageStore(emissive_atlas, atlas_uv, vec4(0.0, 0.0, 0.0, 1.0));
+    imageStore(emissive_atlas, atlas_uv, legacySurface ? vec4(0.0, 0.0, 0.0, 1.0) : vec4(0.0));
 }

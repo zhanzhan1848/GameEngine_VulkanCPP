@@ -1,4 +1,9 @@
+#include "Graphics/Utilities/CPUStallAudit.h"
+#include "Graphics/Lumen/SurfaceCache/SurfaceCachePass.h"
+#include <bit>
+#include "Graphics/RenderGraph/LumenCompareCapture.h"
 #include "LumenDDGIPass.h"
+#include "DDGIAnalyticHistoryPolicy.h"
 #include "Engine/Graphics/Lumen/GIDebugParams.h"
 #include "Engine/Graphics/Lumen/GIWarmup.h"
 #include "Engine/Graphics/Lumen/DDGISlotMap.h"
@@ -405,6 +410,11 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
 
     device_ = device;
     params_ = params;
+    if (params_.deferred_field_reset && device_->GetPlatform()!=RHIPlatform::Vulkan) return false;
+    if (params_.far_update_budget && (!params_.deferred_field_reset || params_.rays_per_probe!=128 ||
+        (params_.far_update_budget!=512 && params_.far_update_budget!=2048))) return false;
+    if (params_.far_update_budget) far_update_policy_.Initialize(
+        params_.probe_count_x*params_.probe_count_y*params_.probe_count_z,params_.far_update_budget);
     depth_provenance_enabled_=device_->GetPlatform()==RHIPlatform::Vulkan &&
         std::getenv("DDGI_DEPTH_PROVENANCE")!=nullptr;
 
@@ -421,10 +431,10 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
     ray_sample_mode_ = 0;
     if (const char* env = std::getenv("DDGI_RAY_SAMPLE")) {
         int m = atoi(env);
-        if (m >= 0 && m <= 5 && (m != 5 || device_->GetPlatform() == RHIPlatform::Vulkan)) {
+        if (((m >= 0 && m <= 5) || m == 7) && ((m != 5 && m != 7) || device_->GetPlatform() == RHIPlatform::Vulkan) && (m != 7 || params_.rays_per_probe == 128)) {
             ray_sample_mode_ = (u32)m;
         } else {
-            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] DDGI_RAY_SAMPLE='" << env << "' invalid (0/1/2/3/4 or Vulkan-only 5), keeping default" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] DDGI_RAY_SAMPLE='" << env << "' invalid (0..4; Vulkan-only 5 or 7 with 128 rays), keeping default" << std::endl;
         }
     }
     PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] RaySampleMode = " << ray_sample_mode_
@@ -433,8 +443,13 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
                   : ray_sample_mode_ == 2 ? " (cosine mixture around light)"
                   : ray_sample_mode_ == 3 ? " (fixed stratified latitude)"
                   : ray_sample_mode_ == 4 ? " (legacy rays, depth-hole fill on Vulkan)"
+                                          : ray_sample_mode_ == 7 ? " (measured oct strata, 128 primary rays)"
                                           : " (legacy radiance, independent oct depth rays)")
               << std::endl;
+
+    const char* measuredGeometryEnv=std::getenv("DDGI_MEASURED_GEOMETRY");
+    measured_geometry_requested_=UsesMeasuredVisibility() && measuredGeometryEnv &&
+        std::strcmp(measuredGeometryEnv,"1")==0;
 
     // The first-surface distance candidate is intentionally a Vulkan-only,
     // scalar-mode experiment.  Latching the exact request before descriptor
@@ -727,6 +742,10 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
     // Initialize probes from static bake data (or sky estimate fallback)
     InitializeProbesFromStatic();
 
+    if (params_.deferred_field_reset) {
+        if (!CreateFieldResetTemplate()) return false;
+        field_reset_pending_=true;
+    }
     initialized_ = true;
 
     PRIMAL_LOG_STREAM(Info, "Render") << "[LumenDDGI] Initialized (grid: "
@@ -1228,7 +1247,11 @@ void LumenDDGIPass::Shutdown() {
     if (!initialized_ && !device_) return;
     initialized_ = false;
     sh_producer_audit_.reset();
+    if(field_reset_template_!=handles::INVALID_RESOURCE) device_->DestroyBuffer(field_reset_template_);
+    field_reset_template_=handles::INVALID_RESOURCE;
+    field_reset_pending_=false;
 
+    variance_fence_ticket_.Reset();variance_cpu_confirmed_=false;variance_identity_valid_=false;variance_scene_epoch_=0;variance_source_digest_=0;variance_identity_.Reset();variance_scene_provider_=nullptr;
     depth_readback_ring_.shutdown(device_);
     for (auto& buffer:depth_provenance_buffers_) {
         if (buffer!=handles::INVALID_RESOURCE) device_->DestroyBuffer(buffer);
@@ -1590,6 +1613,10 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             {11, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr},  // detail slot table
             // 2026-09-17 P0：重定位后有效起点（writeonly，绝对 probeIdx）。
             {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // relocated origins (write)
+            {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {15, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
+            {16, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},
         };
         sdfTraceBindings[0].is3D = true;
         sdfTraceBindings[1].is3D = true;
@@ -1602,7 +1629,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             sdfTraceBindings[bi].is3D = true;
             sdfTraceBindings[bi].unfilterableFloat = true;
         }
-        DescriptorSetLayoutDesc layoutDesc{13, sdfTraceBindings};
+        for (u32 bi=13; bi<17; ++bi) sdfTraceBindings[bi].readonly=true;
+        DescriptorSetLayoutDesc layoutDesc{measured_geometry_requested_ ? 17u : 13u, sdfTraceBindings};
         sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
 
         // DDGI_FIRST_SURFACE=1 and DDGI_FIRST_ZERO_CROSS=1 share this
@@ -1861,6 +1889,10 @@ void LumenDDGIPass::CreatePipelines() {
             (std::string(name) == "DDGITraceFinalize")) {
             effectiveName = "DDGITraceFinalize_legacy";
         }
+        if (measured_geometry_requested_ && std::string(name)=="DDGITraceSDF")
+            effectiveName="DDGITraceSDF_measured_geometry";
+        if (measured_geometry_requested_ && std::string(name)=="DDGITraceFinalize")
+            effectiveName=std::getenv("DDGI_PATH_DEBUG") ? "DDGITraceFinalize_measured_geometry_pathdbg" : "DDGITraceFinalize_measured_geometry";
         auto code = LoadShaderBytecode(effectiveName.c_str(), device_);
         if (code.empty()) return handles::INVALID_SHADER;
         return device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
@@ -2160,7 +2192,7 @@ void LumenDDGIPass::CreateDepthReadbackRing() {
     static constexpr u32 kFloatsPerProbe = 128;   // [mean64 | var64]
     const u64 probeCount = (u64)params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
     const u64 bytes = probeCount * kFloatsPerProbe * sizeof(float);
-    if (!depth_readback_ring_.initialize(device_, bytes, 3)) {
+    if (!params_.far_update_budget && !depth_readback_ring_.initialize(device_, bytes, 3)) {
         PRIMAL_LOG_STREAM(Warn, "Render")
             << "[LumenDDGI] depth readback ring init failed — scheduler falls back to distance/age priority."
             << std::endl;
@@ -2254,8 +2286,8 @@ void LumenDDGIPass::CreateProbeTextures() {
     static constexpr u32 DDGI_DEPTH_TEXELS = DDGI_DEPTH_RES * DDGI_DEPTH_RES; // 64
     static constexpr u32 DDGI_FLOATS_PER_PROBE = DDGI_DEPTH_TEXELS * 2; // 128
     u64 depthSize = (u64)totalProbes * DDGI_FLOATS_PER_PROBE * sizeof(float);
-    float depthMeanInit = params_.ray_max_distance;  // start "open" — no occlusion assumed
-    float depthVarInit  = params_.probe_spacing * params_.probe_spacing * 0.25f; // non-zero avoids Chebyshev singularity
+    float depthMeanInit = ray_sample_mode_ == 7u ? -1.0f : params_.ray_max_distance;  // mode7 starts unmeasured; legacy modes retain open initialization
+    float depthVarInit  = ray_sample_mode_ == 7u ? 0.0f : params_.probe_spacing * params_.probe_spacing * 0.25f; // non-zero avoids Chebyshev singularity
 
     for (int i = 0; i < 3; i++) {
         BufferDesc desc{};
@@ -2319,7 +2351,7 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.structured.elementCount = totalProbes * 4;
         desc.structured.elementStride = sizeof(float);
 
-        float initAge = (static_volume_ && static_volume_->IsLoaded()) ? 0.5f : 0.0f;
+        float initAge = (static_volume_ && static_volume_->IsLoaded() && ray_sample_mode_ != 7u) ? 0.5f : 0.0f;
         confidence_buffer_ = device_->CreateBuffer(desc);
 
         float* mapped = static_cast<float*>(device_->MapBuffer(confidence_buffer_));
@@ -2564,8 +2596,161 @@ void LumenDDGIPass::BoostProbePriority() {
     }
 }
 
+bool LumenDDGIPass::CreateFieldResetTemplate() {
+    const u64 n=u64(params_.probe_count_x)*params_.probe_count_y*params_.probe_count_z;
+    reset_zero_bytes_=n*(depth_provenance_enabled_?2048u:144u);
+    reset_depth_offset_=reset_zero_bytes_;
+    reset_confidence_offset_=reset_depth_offset_+n*512u;
+    BufferDesc desc{}; desc.size=reset_confidence_offset_+n*16u;
+    desc.type=BufferType::Structured; desc.memoryUsage=GPUMemoryUsage::Dynamic;
+    desc.usage=GPUMemoryUsage::Dynamic; desc.bindFlags=static_cast<u32>(BufferUsageFlags::TransferSrc);
+    field_reset_template_=device_->CreateBuffer(desc);
+    if(field_reset_template_==handles::INVALID_RESOURCE) return false;
+    auto* bytes=static_cast<unsigned char*>(device_->MapBuffer(field_reset_template_));
+    if(!bytes) return false;
+    std::memset(bytes,0,desc.size);
+    auto* depth=reinterpret_cast<float*>(bytes+reset_depth_offset_);
+    for(u64 p=0;p<n;++p) for(u32 j=0;j<128;++j)
+        depth[p*128+j]=j<64 ? (ray_sample_mode_==7u?-1.f:params_.ray_max_distance)
+            : (ray_sample_mode_==7u?0.f:params_.probe_spacing*params_.probe_spacing*.25f);
+    auto* confidence=reinterpret_cast<float*>(bytes+reset_confidence_offset_);
+    for(u64 p=0;p<n;++p) confidence[p*4+2]=1.f; // zero age => first observation replaces EMA
+    device_->UnmapBuffer(field_reset_template_);
+    return true;
+}
+
+void LumenDDGIPass::RecordFieldReset(RHICommandBuffer* cmd) {
+    if(!field_reset_pending_ || field_reset_template_==handles::INVALID_RESOURCE) return;
+    const u64 n=u64(params_.probe_count_x)*params_.probe_count_y*params_.probe_count_z;
+    // Same graphics queue: wait on prior frames' readers/writers before changing
+    // all slots. Immutable upload contents never race a pending GPU read.
+    cmd->MemoryBarrier(PipelineStage::AllCommands | PipelineStage::Host,PipelineStage::Transfer,
+        AccessFlag::MemoryRead | AccessFlag::MemoryWrite | AccessFlag::HostWrite,
+        AccessFlag::TransferRead | AccessFlag::TransferWrite);
+    const auto copy=[&](ResourceHandle dst,u64 src,u64 size) {
+        if(dst!=handles::INVALID_RESOURCE) cmd->CopyBuffer(field_reset_template_,dst,src,0,size);
+    };
+    for(u32 i=0;i<3;++i) {
+        copy(irradiance_buffers_[i],0,n*144u);
+        copy(depth_buffers_[i],reset_depth_offset_,n*512u);
+        copy(depth_provenance_buffers_[i],0,n*2048u);
+    }
+    copy(confidence_buffer_,reset_confidence_offset_,n*16u);
+    copy(opensky_buffer_,0,n*8u);
+    copy(relocated_origins_,0,n*16u);
+    cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::ComputeShader | PipelineStage::Transfer,
+        AccessFlag::TransferWrite,AccessFlag::ShaderRead | AccessFlag::ShaderWrite | AccessFlag::TransferRead | AccessFlag::TransferWrite);
+    field_reset_pending_=false;
+}
+
+void LumenDDGIPass::InheritProbeHistory(RHICommandBuffer* cmd,u32 out,u32 history) {
+    const u64 n=u64(params_.probe_count_x)*params_.probe_count_y*params_.probe_count_z;
+    cmd->MemoryBarrier(PipelineStage::AllCommands,PipelineStage::Transfer,
+        AccessFlag::MemoryRead | AccessFlag::MemoryWrite,AccessFlag::TransferRead | AccessFlag::TransferWrite);
+    cmd->CopyBuffer(irradiance_buffers_[history],irradiance_buffers_[out],0,0,n*144u);
+    cmd->CopyBuffer(depth_buffers_[history],depth_buffers_[out],0,0,n*512u);
+    if(depth_provenance_enabled_) cmd->CopyBuffer(depth_provenance_buffers_[history],depth_provenance_buffers_[out],0,0,n*2048u);
+    cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::ComputeShader,
+        AccessFlag::TransferWrite,AccessFlag::ShaderRead | AccessFlag::ShaderWrite);
+}
+
+void LumenDDGIPass::PublishFarUpdateAudit(RHICommandBuffer* cmd,u32 slot) {
+    const auto& a=far_update_audit_;
+    const char* env=std::getenv("DDGI_FAR_UPDATE_AUDIT");
+    if(env && std::strcmp(env,"1")==0)
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_FAR_UPDATE] native_frame=" << a.native_frame
+            << " volume=" << rg_name_prefix_ << " budget=" << params_.far_update_budget
+            << " total=" << params_.probe_count_x*params_.probe_count_y*params_.probe_count_z
+            << " count=" << a.count << " list_hash=" << a.list_hash << " bootstrap=" << a.bootstrap
+            << " epoch=" << a.epoch << " rotation=" << a.rotation << " max_age=" << a.max_age
+            << " max_age_unit=recorded_updates source_ready=" << a.source_ready << " warmup=" << a.warmup
+            << " uploaded=" << a.uploaded << " recorded=" << a.recorded << std::endl;
+    if(rg_name_prefix_!="Far" || !lumencompare::enabled || !lumencompare::Selected("DDGI.FarState")) return;
+    const u64 n=u64(params_.probe_count_x)*params_.probe_count_y*params_.probe_count_z;
+    const auto capture=[&](const char* label,ResourceHandle h,u64 size) {
+        if(h!=handles::INVALID_RESOURCE && size) lumencompare::BufferSlice(device_,cmd,"DDGI.FarState",label,h,0,size);
+    };
+    capture("sh",irradiance_buffers_[slot],n*144u); capture("depth",depth_buffers_[slot],n*512u);
+    capture("confidence",confidence_buffer_,n*16u); capture("opensky",opensky_buffer_,n*8u);
+    capture("relocated-origins",relocated_origins_,n*16u);
+    capture("update-list",probe_update_list_buffers_[slot],u64(a.count)*4u);
+    capture("volume",volume_cb_[slot],sizeof(DDGIVolumeData));
+    const auto dir=std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR"))/("frame-"+std::to_string(lumencompare::ordinal));
+    std::filesystem::create_directories(dir);
+    std::ofstream meta(dir/"far-state.json");
+    meta << "{\"native_frame\":" << a.native_frame << ",\"slot\":" << slot
+        << ",\"epoch\":" << a.epoch << ",\"count\":" << a.count << ",\"budget\":" << params_.far_update_budget
+        << ",\"rotation\":" << a.rotation << ",\"bootstrap\":" << a.bootstrap
+        << ",\"list_hash\":" << a.list_hash << ",\"max_age\":" << a.max_age
+        << ",\"source_ready\":" << a.source_ready << ",\"uploaded\":" << a.uploaded << ",\"recorded\":" << a.recorded
+        << ",\"source_epoch\":" << measured_geometry_epoch_ << ",\"source_digest\":" << measured_geometry_digest_
+        << ",\"age_unit\":\"successful recorded updates\",\"completion\":\"capture fence only; recorded is not GPU completion\"}\n";
+}
+
+static bool VarianceFenceEnabled(const rhi::RHIDeviceBase* device) {
+    static const bool requested=[] {const char* value=std::getenv("PRIMAL_DDGI_VARIANCE_FENCED");return value && std::strcmp(value,"1")==0;}();
+    return requested && device && device->GetPlatform()==rhi::RHIPlatform::Vulkan;
+}
+static bool VarianceFenceAuditEnabled() {
+    static const bool enabled=[] {const char* v=std::getenv("DDGI_VARIANCE_FENCE_AUDIT");return v && std::strcmp(v,"1")==0;}();
+    return enabled;
+}
+LumenDDGIPass::VarianceFenceAuditView LumenDDGIPass::GetVarianceFenceAudit() const {
+    auto result=variance_audit_;result.enabled=VarianceFenceEnabled(device_);result.current_generation=variance_generation_;
+    result.current_epoch=variance_scene_epoch_;result.current_digest=variance_source_digest_;return result;
+}
+void LumenDDGIPass::SetVarianceFenceSceneProvider(const SurfaceCachePass* provider) {
+    if(!VarianceFenceEnabled(device_) || variance_scene_provider_==provider)return;
+    variance_fence_ticket_.Reset();variance_cpu_confirmed_=false;variance_identity_valid_=false;
+    ++variance_generation_;variance_scene_epoch_=0;variance_source_digest_=0;variance_identity_.Reset();variance_scene_provider_=provider;
+    for(auto& state:probe_states_)state.max_depth_variance=0.f;
+}
+void LumenDDGIPass::SyncVarianceFenceScene(u64 sceneEpoch,u64 sourceDigest) {
+    if(!VarianceFenceEnabled(device_))return;
+    const bool previouslyConfirmed=variance_cpu_confirmed_;
+    const auto action=ReconcileVarianceScene(variance_identity_,variance_fence_ticket_,variance_cpu_confirmed_,probe_states_,sceneEpoch,sourceDigest);
+    if(action==VarianceIdentityAction::Invalidate || (!sceneEpoch && previouslyConfirmed))++variance_generation_;
+    variance_scene_epoch_=sceneEpoch;
+    variance_source_digest_=sourceDigest;
+    variance_identity_valid_=variance_identity_.Available();
+}
+bool LumenDDGIPass::VarianceFenceSceneStillCurrent() {
+    if(!VarianceFenceEnabled(device_))return false;
+    if(!variance_scene_provider_) {SyncVarianceFenceScene(0,0);return false;}
+    const auto witness=variance_scene_provider_->GetGeometryWitnessView(0);
+    SyncVarianceFenceScene(witness.scene_epoch,witness.source_digest);
+    return variance_identity_valid_ && variance_fence_ticket_.Active();
+}
+void LumenDDGIPass::BeginVarianceFenceFrame(u32 slot,rhi::CommandBufferHandle command,rhi::SyncHandle fence,u64 nativeFrame,u64 ticket) {
+    if(VarianceFenceAuditEnabled())variance_audit_.accepted_frame=false;
+    if(VarianceFenceEnabled(device_) && variance_identity_valid_) {
+        auto* cmd=rhi::GetCommandBuffer(command);
+        if(!cmd || cmd->GetType()!=rhi::CommandQueueType::Graphics) {variance_fence_ticket_.Reject();return;}
+        variance_fence_ticket_.Begin(device_->FrameSlotCompletions(),slot,command,fence,nativeFrame,ticket);
+    }
+}
+void LumenDDGIPass::CommitVarianceFenceFrame(u32 slot,rhi::CommandBufferHandle command,rhi::SyncHandle fence,u64 nativeFrame,u64 ticket,bool success) {
+    if(VarianceFenceEnabled(device_)) {
+        const bool committed=variance_fence_ticket_.Commit(slot,command,fence,nativeFrame,ticket,success);
+        if(committed && VarianceFenceAuditEnabled())++variance_audit_.submitted_count;
+    }
+}
+void LumenDDGIPass::ValidateVarianceFenceCommand(u32 slot,rhi::CommandBufferHandle command) {
+    if(VarianceFenceEnabled(device_) && !variance_fence_ticket_.Matches(slot,command))variance_fence_ticket_.Reject();
+}
 void LumenDDGIPass::ClearProbeField() {
+    ++variance_generation_;
+    variance_fence_ticket_.Reset();variance_cpu_confirmed_=false;variance_identity_valid_=false;variance_scene_epoch_=0;variance_source_digest_=0;variance_identity_.Reset();
     if (!device_ || !initialized_) return;
+    if(params_.deferred_field_reset) {
+        field_reset_pending_=true;
+        last_recorded_update_count_=0;
+        if(params_.far_update_budget) far_update_policy_.Reset();
+        for(auto& ps:probe_states_) ps={};
+        probe_update_offset_=0; depth_ring_copies_=0; for(auto& f:depth_ring_recorded_frame_)f=~u32(0); for(auto& f:depth_ring_recorded_native_)f=~u64(0);
+        volume_data_.ProbeUpdateCount=0;
+        return;
+    }
     const u32 probeCount = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
     for (int f = 0; f < 3; f++) {
         if (depth_provenance_buffers_[f]!=handles::INVALID_RESOURCE) {
@@ -2589,8 +2774,8 @@ void LumenDDGIPass::ClearProbeField() {
         if (depth_buffers_[f] != rhi::handles::INVALID_RESOURCE) {
             constexpr u32 kDepthTexels = 64;            // 8×8 octahedral
             constexpr u32 kFloatsPerProbe = kDepthTexels * 2;
-            const float depthMeanInit = params_.ray_max_distance;
-            const float depthVarInit = params_.probe_spacing * params_.probe_spacing * 0.25f;
+            const float depthMeanInit = ray_sample_mode_ == 7u ? -1.0f : params_.ray_max_distance;
+            const float depthVarInit = ray_sample_mode_ == 7u ? 0.0f : params_.probe_spacing * params_.probe_spacing * 0.25f;
             if (float* dep = static_cast<float*>(device_->MapBuffer(depth_buffers_[f]))) {
                 for (u32 pIdx = 0; pIdx < probeCount; ++pIdx) {
                     float* probe = dep + (u64)pIdx * kFloatsPerProbe;
@@ -2608,7 +2793,7 @@ void LumenDDGIPass::ClearProbeField() {
     // selecting a different fixed point than a frame-0 registration.
     if (confidence_buffer_ != rhi::handles::INVALID_RESOURCE) {
         if (float* conf = static_cast<float*>(device_->MapBuffer(confidence_buffer_))) {
-            const float initAge = (static_volume_ && static_volume_->IsLoaded()) ? 0.5f : 0.0f;
+            const float initAge = (static_volume_ && static_volume_->IsLoaded() && ray_sample_mode_ != 7u) ? 0.5f : 0.0f;
             for (u32 p = 0; p < probeCount; ++p) {
                 conf[p * 4 + 0] = 0.0f;
                 conf[p * 4 + 1] = 0.0f;
@@ -2626,7 +2811,7 @@ void LumenDDGIPass::ClearProbeField() {
     }
     for (auto& ps : probe_states_) ps = {};
     probe_update_offset_ = 0;
-    depth_ring_copies_ = 0;
+    depth_ring_copies_ = 0; for(auto& f:depth_ring_recorded_frame_)f=~u32(0); for(auto& f:depth_ring_recorded_native_)f=~u64(0);
     PRIMAL_LOG_STREAM(Info, "Render")
         << "[LumenDDGI] Probe field cleared — re-seeding irradiance/depth/confidence/open-sky."
         << std::endl;
@@ -2635,7 +2820,7 @@ void LumenDDGIPass::ClearProbeField() {
 void LumenDDGIPass::InitializeProbesFromStatic() {
     u32 probeCount = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
 
-    if (static_volume_ && static_volume_->IsLoaded()) {
+    if (static_volume_ && static_volume_->IsLoaded() && ray_sample_mode_ != 7u) {
         // Validate dimensions match (Errata E9)
         if (static_volume_->GridDimX() != params_.probe_count_x ||
             static_volume_->GridDimY() != params_.probe_count_y ||
@@ -2762,6 +2947,9 @@ void LumenDDGIPass::SetSurfaceCacheResources(const SurfaceCacheView& view)
 
     // Store SC params in DDGIVolumeData (triple-buffered, confirmed working)
     // instead of a separate sc_params buffer (binding 6 was not working).
+    const bool reportCacheConfiguration = !sc_enabled_ ||
+        volume_data_.SCLookupCount != view.lookup_count ||
+        volume_data_.SCAtlasSize != view.atlas_size;
     volume_data_.SCLookupCount = view.lookup_count;
     volume_data_.SCAtlasSize = view.atlas_size;
 
@@ -2770,7 +2958,7 @@ void LumenDDGIPass::SetSurfaceCacheResources(const SurfaceCacheView& view)
                    view.card_data != handles::INVALID_RESOURCE &&
                    view.lookup_count > 0);
 
-    if (sc_enabled_) {
+    if (sc_enabled_ && reportCacheConfiguration) {
         PRIMAL_LOG_STREAM(Info, "Render") << "[LumenDDGI] Surface Cache enabled: atlas_size=" << view.atlas_size
                   << ", lookup_count=" << view.lookup_count << std::endl;
     }
@@ -2872,6 +3060,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
     RGResourceHandle sc_lighting_atlas)
 {
     LumenDDGIOutput output{};
+    last_recorded_update_count_=0;
 
     // Phase 1d: 槽位单一事实源 DDGISlotMap.h（writeIndex = currentIndex =
     // 本帧写槽；previousIndex = 上一完成帧，语义同原 histIdx）。
@@ -2947,6 +3136,25 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
 
+            const bool farPolicy=params_.far_update_budget!=0;
+            if(params_.deferred_field_reset) RecordFieldReset(cmd);
+            if(farPolicy) {
+                // Also preserve history when warmup, missing sources or a failed
+                // upload prevents dispatch. A slot number is not a completion proof.
+                InheritProbeHistory(cmd,outIdx,histIdx);
+                far_update_audit_={}; far_update_audit_.native_frame=current_frame_index;
+                far_update_audit_.epoch=far_update_policy_.Epoch();
+                far_update_audit_.rotation=far_update_policy_.Rotation();
+                far_update_audit_.bootstrap=far_update_policy_.BootstrapPending();
+                far_update_audit_.max_age=far_update_policy_.MaxAge();
+                far_update_audit_.warmup=camera_data.gi_frame_index<GIWarmupFrames();
+                volume_data_.ProbeUpdateCount=0;
+            }
+            struct FarAuditScope {
+                LumenDDGIPass* pass; RHICommandBuffer* cmd; u32 slot; bool enabled;
+                ~FarAuditScope() {if(enabled) pass->PublishFarUpdateAudit(cmd,slot);}
+            } farAuditScope{this,cmd,outIdx,farPolicy};
+
             // T4.5: unified debug knobs — freeze frame / per-pass toggle.
             // Skipping dispatches keeps the triple-buffered probe data at its
             // last-written content (readers still get valid slots).
@@ -2990,7 +3198,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // canonical runtime path runs every frame. Static data still seeds frame 0
             // (InitializeProbesFromStatic copied it into all 3 irradiance_buffers_),
             // then EMA blends toward canonical dynamic DDGI.
-            if (static_volume_ && static_volume_->IsLoaded() && !dynamic_mode_) {
+            if (static_volume_ && static_volume_->IsLoaded() && !dynamic_mode_ && ray_sample_mode_ != 7u) {
                 return;
             }
 
@@ -3048,6 +3256,31 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     }
                     sdfAvailable = (sdfTextures[0] != handles::INVALID_RESOURCE);
                 }
+            }
+
+            FarUpdatePolicy::Plan farPlan;
+            if(farPolicy) {
+                bool ready=camera_data.gi_content_ready && sdfAvailable && dynamic_mode_ &&
+                    sdf_trace_pipeline_!=handles::INVALID_PIPELINE && finalize_pipeline_!=handles::INVALID_PIPELINE &&
+                    irradiance_pipeline_!=handles::INVALID_PIPELINE && depth_pipeline_!=handles::INVALID_PIPELINE &&
+                    hit_distance_buffer_!=handles::INVALID_RESOURCE && ray_data_buffer_!=handles::INVALID_RESOURCE &&
+                    probe_update_list_buffers_[frameIdx]!=handles::INVALID_RESOURCE &&
+                    irradiance_buffers_[outIdx]!=handles::INVALID_RESOURCE && irradiance_buffers_[histIdx]!=handles::INVALID_RESOURCE &&
+                    depth_buffers_[outIdx]!=handles::INVALID_RESOURCE && depth_buffers_[histIdx]!=handles::INVALID_RESOURCE &&
+                    global_cb_[frameIdx]!=handles::INVALID_RESOURCE && volume_cb_[frameIdx]!=handles::INVALID_RESOURCE &&
+                    finalize_vp_cb_[frameIdx]!=handles::INVALID_RESOURCE && detail_table_cb_[frameIdx]!=handles::INVALID_RESOURCE &&
+                    confidence_buffer_!=handles::INVALID_RESOURCE && opensky_buffer_!=handles::INVALID_RESOURCE &&
+                    relocated_origins_!=handles::INVALID_RESOURCE &&
+                    sdf_trace_ds_[frameIdx]!=handles::INVALID_DESCRIPTOR_SET && finalize_ds_[frameIdx]!=handles::INVALID_DESCRIPTOR_SET &&
+                    irradiance_ds_[frameIdx]!=handles::INVALID_DESCRIPTOR_SET && depth_ds_[frameIdx]!=handles::INVALID_DESCRIPTOR_SET;
+                if(measured_geometry_requested_) {
+                    ready &= measured_geometry_epoch_!=0 && measured_geometry_digest_!=0;
+                    for(auto h:measured_geometry_) ready &= h!=handles::INVALID_RESOURCE;
+                }
+                far_update_audit_.source_ready=ready;
+                farPlan=far_update_policy_.Select(ready,far_update_audit_.warmup);
+                updateCount=static_cast<u32>(farPlan.indices.size());
+                if(!updateCount) return;
             }
 
             // Ensure SDF cascade textures are in SHADER_READ_ONLY layout for trace.
@@ -3163,6 +3396,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 };
 
                 auto* mapped = static_cast<GlobalShaderData*>(device_->MapBuffer(global_cb_[frameIdx]));
+                if(farPolicy && !mapped) return;
                 if (mapped) {
                     mapped->View = camera_data.view_matrix;
                     mapped->Projection = camera_data.proj_matrix;
@@ -3194,6 +3428,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             }
 
             _t2 = chr::steady_clock::now();
+            bool volumeUploaded=false;
             // ---- Upload DDGIVolumeData ----
             {
                 auto* mapped = static_cast<DDGIVolumeData*>(device_->MapBuffer(volume_cb_[frameIdx]));
@@ -3273,7 +3508,10 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     // 只表达低频环境，逃逸比例天然高，全额天空会让远场探针
                     // 成为封闭区的隐性泵浦（分类加权的供给端补充）。
                     vd.SkyColor = {sky * far_sky_scale_, sky * far_sky_scale_,
-                                   sky * far_sky_scale_, 0.0f};
+                                   sky * far_sky_scale_, static_cast<float>(ResolveDDGIAnalyticHistoryMode(
+                                       std::getenv("DDGI_ANALYTIC_NO_HISTORY"),
+                                       std::getenv("DDGI_ANALYTIC_LEGACY_RADIANCE"),
+                                       std::getenv("DDGI_ANALYTIC_IRRADIANCE")))};
                     // Albedo.w is an unused DDGI VolumeData component across
                     // all current consumers (Albedo.xyz remains the material
                     // fallback).  Vulkan split shaders use it only as the
@@ -3331,6 +3569,13 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         vd.SdfCascadeCount = sdf.GetConfig().cascade_count;
                     }
 
+                    if (measured_geometry_requested_) {
+                        bool ready=true;
+                        for (const auto buffer:measured_geometry_) ready &= buffer!=handles::INVALID_RESOURCE;
+                        vd.SdfVoxelSizes[2].w=ready ? 1.0f : 0.0f;
+                        vd.SdfVoxelSizes[2].z=ready && measured_owner_directory_ready_ && sc_lookup_count_>0u ? 1.0f : 0.0f;
+                    }
+
                     vd.ProbeUpdateCount = updateCount;  // matches actual dispatch count
                     vd.ProbeRelocationShift[0] = relocation_shift_[0];
                     vd.ProbeRelocationShift[1] = relocation_shift_[1];
@@ -3370,8 +3615,6 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                                 }
                             }
                         }
-                        if (std::getenv("DDGI_ANALYTIC_NO_HISTORY")) vd.SkyColor.w=1.f;
-                        else if (std::getenv("DDGI_ANALYTIC_IRRADIANCE")) vd.SkyColor.w=2.f;
                         // Matches the appended capacity allocated at init.
                         if (analytic_audit_enabled_) vd.SdfVoxelSizes[0].w=1.f;
                         if (material_projection_enabled_ && offline_hit_evidence_>0)
@@ -3404,6 +3647,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
                     // Store for C++ access via GetVolumeData()
                     volume_data_ = vd;
+                    volumeUploaded=true;
                 }
             }
 
@@ -3432,14 +3676,55 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // WASM keeps its fallback only when the ring is unavailable.
             const bool isWasm = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
             const bool ringReady = depth_ring_copies_ > 2 && depth_readback_ring_.is_initialized();
-            if ((!ringReady ? !isWasm : true) &&
-                !isFirstFrame &&
-                probe_states_.size() == probeCountTotal &&
-                probe_update_list_buffers_[frameIdx] != handles::INVALID_RESOURCE) {
-                const u32 rbSlot = depth_readback_ring_.slot_for_frame(camera_data.frame_index - 2u);
-                float* depthData = ringReady
+            const bool varianceFenced=VarianceFenceEnabled(device_);
+            if(varianceFenced)VarianceFenceSceneStillCurrent();
+            auto* cpuHistory=cpu_stall_audit::NewHistory();
+            if(cpuHistory) {cpu_stall_audit::VolumeName(*cpuHistory,rg_name_prefix_.empty()?"Near":rg_name_prefix_.c_str());
+                cpuHistory->probe_count=probeCountTotal;cpuHistory->volume_frame=camera_data.frame_index;cpuHistory->slot=frameIdx;cpuHistory->first=isFirstFrame;
+                cpuHistory->far=farPolicy;cpuHistory->copies=depth_ring_copies_;cpuHistory->rays=params_.rays_per_probe;
+                cpuHistory->variance_fenced=varianceFenced;cpuHistory->variance_confirmed=variance_cpu_confirmed_;cpuHistory->variance_skip=5;
+                cpuHistory->mode=volume_data_.RaySampleMode;cpuHistory->budget=max_probes_per_frame_;cpuHistory->gi_frame=camera_data.gi_frame_index;
+                cpuHistory->delta_bits=std::bit_cast<u32>(camera_data.delta_time);cpuHistory->volume_uploaded=volumeUploaded;
+                cpuHistory->warmup=GIWarmupFrames()>0u && camera_data.gi_frame_index<GIWarmupFrames();}
+            auto segmentStart=cpu_stall_audit::state.active && cpu_stall_audit::Timing()?cpu_stall_audit::Clock::now():cpu_stall_audit::Clock::time_point{};
+            auto segment=[&](const char* name) {if(cpu_stall_audit::state.active && cpu_stall_audit::Timing()) {auto now=cpu_stall_audit::Clock::now();cpu_stall_audit::Add(name,std::chrono::duration<double,std::milli>(now-segmentStart).count());segmentStart=now;}};
+            if(cpuHistory)cpuHistory->ready=ringReady;
+            const bool varianceScheduled=!farPolicy && (!ringReady ? !isWasm : true) && !isFirstFrame &&
+                probe_states_.size() == probeCountTotal && probe_update_list_buffers_[frameIdx] != handles::INVALID_RESOURCE;
+            if(varianceFenced && VarianceFenceAuditEnabled() && !varianceScheduled)++variance_audit_.skip_counts[5];
+            if (varianceScheduled) {
+                const u32 rbSlot = varianceFenced ? variance_fence_ticket_.Slot() : depth_readback_ring_.slot_for_frame(camera_data.frame_index - 2u);
+                const VarianceFenceTicket::Entry* certified=nullptr;
+                bool sourceMismatch=false;
+                if(varianceFenced && ringReady && rbSlot<3) {
+                    certified=variance_fence_ticket_.Take(depth_readback_ring_.buffer(rbSlot),(u64)probeCountTotal*128u*sizeof(float));
+                    if(certified && (certified->scene_epoch!=variance_scene_epoch_ || certified->source_digest!=variance_source_digest_ ||
+                        certified->source_generation!=variance_generation_ || certified->source_frame>u64(~u32(0)) ||
+                        certified->source!=depth_buffers_[DDGISlotsForFrame(u32(certified->source_frame)).writeIndex])){sourceMismatch=true;certified=nullptr;}
+                }
+                if(cpuHistory) {cpuHistory->variance_skip=varianceFenced?(!ringReady?6:rbSlot>=3?1:sourceMismatch?3:certified?0:2):0;
+                    if(certified){cpuHistory->variance_source_frame=u32(certified->source_frame);cpuHistory->variance_source_native=certified->context.frame;cpuHistory->variance_source_ticket=certified->context.ticket;cpuHistory->variance_completed_serial=device_->FrameSlotCompletions().Serial(rbSlot);}
+                    cpuHistory->ring_slot=rbSlot;cpuHistory->ring_recorded=rbSlot<3?depth_ring_recorded_frame_[rbSlot]:~u32(0);
+                    cpuHistory->completion_serial=device_->FrameSlotCompletions().Serial(rbSlot);cpuHistory->ring_recorded_native=rbSlot<3?depth_ring_recorded_native_[rbSlot]:~u64(0);}
+                segmentStart=cpu_stall_audit::state.active && cpu_stall_audit::Timing()?cpu_stall_audit::Clock::now():cpu_stall_audit::Clock::time_point{};
+                float* depthData = ringReady && (!varianceFenced || certified)
                     ? static_cast<float*>(depth_readback_ring_.map(device_, rbSlot))
                     : nullptr;
+                segment("ddgi.variance_map");
+                if(cpuHistory){cpuHistory->map_ok=depthData!=nullptr;
+                    if(varianceFenced && certified && !depthData)cpuHistory->variance_skip=4;
+                    cpuHistory->variance_accepted=varianceFenced && certified && depthData;}
+                if(varianceFenced && VarianceFenceAuditEnabled()) {
+                    const u32 skip=!ringReady?6:rbSlot>=3?1:sourceMismatch?3:!certified?2:!depthData?4:0;
+                    ++variance_audit_.skip_counts[skip];
+                    if(skip==0) {
+                        variance_audit_.accepted_frame=true;++variance_audit_.accepted_count;
+                        variance_audit_.source_frame=certified->source_frame;variance_audit_.source_native=certified->context.frame;
+                        variance_audit_.source_ticket=certified->context.ticket;variance_audit_.completion_serial=device_->FrameSlotCompletions().Serial(rbSlot);
+                        variance_audit_.source_epoch=certified->scene_epoch;variance_audit_.source_digest=certified->source_digest;
+                        variance_audit_.source_generation=certified->source_generation;
+                    }
+                }
                 if (depthData) {
                     static constexpr u32 DDGI_DEPTH_TEXELS = 64;
                     static constexpr u32 DDGI_FLOATS_PER_PROBE = DDGI_DEPTH_TEXELS * 2;
@@ -3450,8 +3735,12 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         }
                         probe_states_[i].max_depth_variance = maxVar;
                     }
+                    if(varianceFenced)variance_cpu_confirmed_=true;
+                    if(cpuHistory)cpuHistory->variance_confirmed=variance_cpu_confirmed_;
+                    segment("ddgi.variance_scan");
                     if (ringReady) depth_readback_ring_.unmap(device_, rbSlot);
                     else device_->UnmapBuffer(depth_buffers_[histIdx]);
+                    segment("ddgi.variance_unmap");
                 }
 
                 // Compute priority scores and select top-N probes
@@ -3492,8 +3781,13 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     float ageScore = (cappedAge ? std::min(age, 30.0f) : age) / 30.0f;
 
                     priorities[i] = { i, distScore + varianceScore * 0.5f + ageScore * 0.3f };
+                    if(cpuHistory) {cpu_stall_audit::Hash(cpuHistory->max_hash,std::bit_cast<u32>(probe_states_[i].max_depth_variance));
+                        cpu_stall_audit::Hash(cpuHistory->score_hash,std::bit_cast<u32>(priorities[i].score));
+                        cpu_stall_audit::Hash(cpuHistory->age_hash,probe_states_[i].last_update_frame);}
                 }
 
+                if(cpuHistory)cpuHistory->scores_valid=true;
+                segment("ddgi.priority");
                 // Partial sort: top-N only
                 updateCount = std::min(max_probes_per_frame_, probeCountTotal);
                 std::partial_sort(priorities.begin(), priorities.begin() + updateCount,
@@ -3501,14 +3795,20 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                                       return a.score > b.score;
                                   });
 
+                segment("ddgi.priority_sort");
                 // Write update list buffer
                 u32* updateList = static_cast<u32*>(device_->MapBuffer(probe_update_list_buffers_[frameIdx]));
+                segment("ddgi.list_map");
+                if(cpuHistory)cpuHistory->list_ok=updateList!=nullptr;
                 if (updateList) {
                     for (u32 i = 0; i < updateCount; ++i) {
                         updateList[i] = priorities[i].index;
+                        if(cpuHistory)cpu_stall_audit::Selection(*cpuHistory,updateList[i]);
                         probe_states_[priorities[i].index].last_update_frame = current_frame_index;
                     }
+                    segment("ddgi.list_fill");
                     device_->UnmapBuffer(probe_update_list_buffers_[frameIdx]);
+                    segment("ddgi.list_unmap");
                 }
 
                 // 2026-09-17 P0（probe-selection-density-audit §3.3/§9-P2）：
@@ -3624,14 +3924,98 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             }
 
             // First frame: fill update list with all probe indices (0..N-1)
-            if (isFirstFrame && probe_update_list_buffers_[frameIdx] != handles::INVALID_RESOURCE) {
+            if (!farPolicy && isFirstFrame && probe_update_list_buffers_[frameIdx] != handles::INVALID_RESOURCE) {
+                segmentStart=cpu_stall_audit::state.active && cpu_stall_audit::Timing()?cpu_stall_audit::Clock::now():cpu_stall_audit::Clock::time_point{};
                 u32* updateList = static_cast<u32*>(device_->MapBuffer(probe_update_list_buffers_[frameIdx]));
+                segment("ddgi.list_map");
+                if(cpuHistory){cpuHistory->list_ok=updateList!=nullptr;cpuHistory->updates=updateCount;}
                 if (updateList) {
                     for (u32 i = 0; i < updateCount; ++i) {
                         updateList[i] = i;
+                        if(cpuHistory)cpu_stall_audit::Selection(*cpuHistory,updateList[i]);
                     }
+                    segment("ddgi.list_fill");
                     device_->UnmapBuffer(probe_update_list_buffers_[frameIdx]);
+                    segment("ddgi.list_unmap");
                 }
+            }
+
+            if(farPolicy) {
+                if(!volumeUploaded) {volume_data_.ProbeUpdateCount=0;return;}
+                segmentStart=cpu_stall_audit::state.active && cpu_stall_audit::Timing()?cpu_stall_audit::Clock::now():cpu_stall_audit::Clock::time_point{};
+                auto* list=static_cast<u32*>(device_->MapBuffer(probe_update_list_buffers_[frameIdx]));
+                segment("ddgi.list_map");
+                if(cpuHistory){cpuHistory->list_ok=list!=nullptr;cpuHistory->updates=updateCount;}
+                if(!list) {volume_data_.ProbeUpdateCount=0;return;}
+                std::memcpy(list,farPlan.indices.data(),updateCount*sizeof(u32));
+                if(cpuHistory)for(u32 i=0;i<updateCount;++i)cpu_stall_audit::Selection(*cpuHistory,farPlan.indices[i]);
+                segment("ddgi.list_fill");
+                device_->UnmapBuffer(probe_update_list_buffers_[frameIdx]);
+                segment("ddgi.list_unmap");
+                // Preflight the finalizer uniform upload before any trace writes.
+                auto* vp=static_cast<FinalizeViewData*>(device_->MapBuffer(finalize_vp_cb_[frameIdx]));
+                if(!vp) {volume_data_.ProbeUpdateCount=0;return;}
+                vp->currentVP=current_view_projection_;
+                vp->radianceVP=camera_data.radiance_is_previous_frame
+                    ? camera_data.prev_proj_matrix*camera_data.prev_view_matrix : current_view_projection_;
+                vp->inverseCurrentVP=rhi::math::Inverse(vp->currentVP);
+                vp->inverseRadianceVP=rhi::math::Inverse(vp->radianceVP);
+                vp->validity=math::v4{screenDepthTex!=handles::INVALID_RESOURCE?1.f:0.f,
+                    radianceDepthTex!=handles::INVALID_RESOURCE?1.f:0.f,.15f,0.f};
+                device_->UnmapBuffer(finalize_vp_cb_[frameIdx]);
+                far_update_audit_.uploaded=true;
+                far_update_audit_.list_hash=FarUpdatePolicy::Hash(farPlan);
+                cmd->MemoryBarrier(PipelineStage::Host,PipelineStage::ComputeShader,
+                    AccessFlag::HostWrite,AccessFlag::ShaderRead | AccessFlag::UniformRead);
+            }
+
+            // Explicit bounded diagnostics: only selected probes, and only on
+            // selected capture frames. Ray slots outside the update prefix are stale.
+            std::vector<u32> historyProbes;
+            const char* historySelection=std::getenv("DDGI_HISTORY_PROBES");
+            if (historySelection && *historySelection && rg_name_prefix_.empty() &&
+                device_->GetPlatform()==RHIPlatform::Vulkan && lumencompare::enabled &&
+                lumencompare::Selected("DDGI.History")) {
+                std::istringstream input(historySelection); std::string token;
+                bool valid=historySelection[std::strlen(historySelection)-1]!=',';
+                while (std::getline(input,token,',')) {
+                    if (token.empty() || token.size()>9 ||
+                        token.find_first_not_of("0123456789")!=std::string::npos) {valid=false;break;}
+                    const auto pid=std::strtoul(token.c_str(),nullptr,10);
+                    if (pid>=probeCountTotal || historyProbes.size()>=16 ||
+                        std::find(historyProbes.begin(),historyProbes.end(),u32(pid))!=historyProbes.end()) {valid=false;break;}
+                    historyProbes.push_back(u32(pid));
+                }
+                if (!valid) {
+                    historyProbes.clear();
+                    PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI.History] invalid probe selection" << std::endl;
+                }
+            }
+            const auto historySlice=[&](const char* stage, const char* label, ResourceHandle buffer, u64 stride) {
+                for (u32 pid:historyProbes)
+                    lumencompare::BufferSlice(device_,cmd,stage,std::string(label)+"-"+std::to_string(pid),buffer,u64(pid)*stride,stride);
+            };
+            if (!historyProbes.empty()) {
+                historySlice("DDGI.History.PreTrace","origin",relocated_origins_,16);
+                historySlice("DDGI.History.PreTrace","depth",depth_buffers_[histIdx],512);
+                historySlice("DDGI.History.PreTrace","sh",irradiance_buffers_[histIdx],144);
+                if (updateCount) lumencompare::BufferSlice(device_,cmd,"DDGI.History.PreTrace","update-list",
+                    probe_update_list_buffers_[frameIdx],0,u64(updateCount)*sizeof(u32));
+                const auto directory=std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR"))/("frame-"+std::to_string(lumencompare::ordinal));
+                std::filesystem::create_directories(directory);
+                std::ofstream meta(directory/"ddgi-history-near.json");
+                meta << "{\"ordinal\":" << lumencompare::ordinal << ",\"native_frame\":" << current_frame_index
+                     << ",\"descriptor_slot\":" << frameIdx << ",\"history_slot\":" << histIdx << ",\"write_slot\":" << outIdx
+                     << ",\"update_count\":" << updateCount << ",\"probe_count\":" << probeCountTotal
+                     << ",\"rays_per_probe\":" << params_.rays_per_probe
+                     << ",\"history_handle\":" << depth_buffers_[histIdx] << ",\"output_handle\":" << depth_buffers_[outIdx]
+                     << ",\"origins_handle\":" << relocated_origins_ << ",\"scene_epoch\":" << measured_geometry_epoch_
+                     << ",\"source_digest\":" << measured_geometry_digest_ << ",\"owner_directory_ready\":" << (measured_owner_directory_ready_?"true":"false")
+                     << ",\"geometry_handles\":[";
+                for (u32 i=0;i<4;++i) meta << (i?",":"") << measured_geometry_[i];
+                meta << "],\"probes\":[";
+                for (size_t i=0;i<historyProbes.size();++i) meta << (i?",":"") << historyProbes[i];
+                meta << "],\"validity\":\"Only update-list prefix produces observations; offsets and sizes are in capture.json; origin and scene identity are evidence to compare, not implicit certification\"}\n";
             }
 
             // Sparse updates must begin from the complete previous probe field.
@@ -3639,7 +4023,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // this inheritance, untouched probes retain whatever happened to be
             // in outIdx three frames ago and the rotating buffers develop three
             // different brightness states.
-            if (updateCount < probeCountTotal) {
+            if (!farPolicy && updateCount < probeCountTotal) {
                 const u64 irradianceBytes = (u64)probeCountTotal * 9u * sizeof(math::v4);
                 static constexpr u32 kDepthFloatsPerProbe = 64u * 2u;
                 const u64 depthBytes = (u64)probeCountTotal * kDepthFloatsPerProbe * sizeof(float);
@@ -3720,6 +4104,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         };
                         static_assert(sizeof(DetailTableGPU) == 656, "detail table layout drift");
                         auto* tm = static_cast<DetailTableGPU*>(device_->MapBuffer(detail_table_cb_[frameIdx]));
+                        if(farPolicy && !tm) {volume_data_.ProbeUpdateCount=0; return;}
                         if (tm) {
                             tm->header = math::v4{(f32)detail_sdf_slot_count_, 0.f, 0.f, 0.f};
                             for (u32 s = 0; s < 4; ++s) {
@@ -3741,6 +4126,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             device_->UnmapBuffer(detail_table_cb_[frameIdx]);
                         }
                     }
+
+                    if(farPolicy) cmd->MemoryBarrier(PipelineStage::Host,PipelineStage::ComputeShader,
+                        AccessFlag::HostWrite,AccessFlag::ShaderRead | AccessFlag::UniformRead);
 
                     // Detail textures: real slots, unused slots fall back to
                     // the (always valid, always 3D) SDF cascade texture — the
@@ -3773,7 +4161,13 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         // 2026-09-17 P0：重定位后有效起点（本 pass 写，finalize/gather 读）
                         {splitIsVk ? 12u : 6u, DescriptorType::StorageBuffer, relocated_origins_},
                     };
-                    if (useFirstNativeNormal || useFirstSurface || useFirstZeroCross) {
+                    if (measured_geometry_requested_) {
+                        cmd->MemoryBarrier(PipelineStage::Host, PipelineStage::ComputeShader,
+                                           AccessFlag::HostWrite, AccessFlag::ShaderRead);
+                        for (u32 i=0;i<4;++i) sdfTraceParams[13+i]={13+i,DescriptorType::StorageBuffer,
+                            measured_geometry_[i]!=handles::INVALID_RESOURCE ? measured_geometry_[i] : probe_update_list_buffers_[frameIdx]};
+                        UpdateDescriptorSet(device_,sdf_trace_ds_[frameIdx],sdfTraceParams,17);
+                    } else if (useFirstNativeNormal || useFirstSurface || useFirstZeroCross) {
                         // The immutable BVH upload is a host/transfer producer;
                         // make that dependency explicit before the compute
                         // shader reads the new storage buffers.  The ordinary
@@ -3841,6 +4235,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                                             0, 1, &traceSet, 0, nullptr);
 
                     cmd->Dispatch(updateCount, 1, 1);
+                    if (lumencompare::enabled) lumencompare::Output(device_, cmd, "DDGI.TraceSDF", rg_name_prefix_+"hit-distance", hit_distance_buffer_, true);
+                    if (lumencompare::enabled) lumencompare::Output(device_, cmd, "DDGI.TraceSDF", rg_name_prefix_+"hit-normal", hit_normal_buffer_, true);
                 }
 
                 // Barrier: end encoder for strict Apple Silicon synchronization.
@@ -3851,7 +4247,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 // dependency for hit_distance, hit_normal and the optional
                 // ray-source tail. Finalize both reads and writes that SSBO.
                 const AccessFlag finalizeAccess =
-                    (analytic_audit_enabled_ || first_surface_enabled_ || first_zero_cross_enabled_ || first_native_normal_enabled_ ||
+                    (measured_geometry_requested_ || analytic_audit_enabled_ || first_surface_enabled_ || first_zero_cross_enabled_ || first_native_normal_enabled_ ||
                      analytic_first_rho_enabled_)
                     ? (AccessFlag::ShaderRead | AccessFlag::ShaderWrite)
                     : AccessFlag::ShaderRead;
@@ -3891,7 +4287,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         analytic_first_rho_albedo_sampler_ != handles::INVALID_SAMPLER;
 
                     // Match each screen source to its own projection and depth.
-                    if (finIsVk && finalize_vp_cb_[frameIdx] != handles::INVALID_RESOURCE) {
+                    if (!farPolicy && finIsVk && finalize_vp_cb_[frameIdx] != handles::INVALID_RESOURCE) {
                         auto* vpm = static_cast<FinalizeViewData*>(
                             device_->MapBuffer(finalize_vp_cb_[frameIdx]));
                         if (vpm) {
@@ -3974,6 +4370,79 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             {17, DescriptorType::StorageBuffer, relocated_origins_},   // P0: relocated origins (read)
                         };
                         UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 18);
+                        // Source attribution observes the ordinary near finalizer,
+                        // not a replacement shader. Only the requested native F2/F3
+                        // executions (display ordinals 3/4) expose these snapshots.
+                        if (lumencompare::enabled && lumencompare::ordinal <= 6 &&
+                            (lumencompare::ordinal == 3 || lumencompare::ordinal == 4) &&
+                            rg_name_prefix_.empty() &&
+                            lumencompare::Selected("DDGI.SourceInputsNear")) {
+                            struct SourceInput { u32 binding; const char* name; bool buffer; };
+                            const SourceInput sources[] = {
+                                {0, "sc-lighting", false}, {13, "sc-depth", false},
+                                {6, "card-data", true}, {5, "card-lookup", true},
+                                {11, "grid-offsets", true}, {12, "grid-cards", true},
+                                {7, "view-params", true}, {8, "prev-screen-radiance", false},
+                                {9, "gbuffer-albedo", false}, {15, "screen-depth", false},
+                                {16, "radiance-depth", false}, {10, "SH-history", true},
+                                {1, "volume", true}, {3, "update-list", true},
+                                {17, "relocated-origins", true}, {2, "hit-distance", true}
+                            };
+                            for (const auto& source : sources) {
+                                const auto& bound = finalizeParams[source.binding];
+                                lumencompare::Output(device_, cmd, "DDGI.SourceInputsNear", source.name,
+                                    bound.resource, source.buffer,
+                                    source.buffer ? ResourceState::UnorderedAccess : ResourceState::ShaderResource);
+                            }
+                            // The global UBO is supplemental frame context, not a
+                            // bound descriptor of this split-finalize shader.
+                            lumencompare::Output(device_, cmd, "DDGI.SourceInputsNear", "global", global_cb_[frameIdx], true);
+                        }
+                        if (lumencompare::enabled && lumencompare::ordinal <= 6 &&
+                            (lumencompare::ordinal == 3 || lumencompare::ordinal == 4) &&
+                            rg_name_prefix_.empty() &&
+                            (lumencompare::Selected("DDGI.SourceInputsNear") ||
+                             lumencompare::Selected("DDGI.SourceWitnessNear"))) {
+                            const auto directory = std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR")) /
+                                ("frame-" + std::to_string(lumencompare::ordinal));
+                            std::filesystem::create_directories(directory);
+                            std::ofstream meta(directory / "source-audit-near.json");
+                            const u64 n = u64(probeCountTotal) * params_.rays_per_probe;
+                            const u32 normalMultiplier = query_source_audit_enabled_ ? 27u :
+                                (ray_source_audit_enabled_ ? 9u : (analytic_audit_enabled_ ? 5u : 1u));
+                            meta << "{\"frame\":" << lumencompare::ordinal << ",\"native_frame\":" << current_frame_index
+                                 << ",\"descriptor_slot\":" << frameIdx << ",\"write_slot\":" << outIdx
+                                 << ",\"history_slot\":" << histIdx << ",\"probe_count\":" << probeCountTotal
+                                 << ",\"rays_per_probe\":" << params_.rays_per_probe << ",\"update_count\":" << updateCount
+                                 << ",\"N\":" << n << ",\"normal_vec4_multiplier\":" << normalMultiplier
+                                 << ",\"normal_expected_bytes\":" << n * normalMultiplier * 16u
+                                 << ",\"analytic_vec4_offset\":" << n << ",\"source_vec4_offset\":" << 5u * n
+                                 << ",\"query_vec4_offset\":" << 9u * n
+                                 << ",\"analytic_records_per_ray\":4,\"source_records_per_ray\":4,\"query_records_per_ray\":18"
+                                 << ",\"source_audit_enabled\":" << (ray_source_audit_enabled_ ? "true" : "false")
+                                 << ",\"query_audit_enabled\":" << (query_source_audit_enabled_ ? "true" : "false")
+                                 << ",\"analytic_audit_enabled\":" << (analytic_audit_enabled_ ? "true" : "false")
+                                 << ",\"analytic_history_default_mode\":2"
+                                 << ",\"analytic_history_effective_mode\":" << volume_data_.SkyColor.w
+                                 << ",\"analytic_history_default_operator\":\"lambert_diffuse_E_over_pi\""
+                                 << ",\"analytic_history_effective_operator\":\""
+                                 << DDGIAnalyticHistoryOperatorName(static_cast<DDGIAnalyticHistoryMode>(static_cast<u32>(volume_data_.SkyColor.w))) << '"'
+                                 << ",\"material_projection_enabled\":" << (material_projection_enabled_ ? "true" : "false")
+                                 << ",\"path_debug_env_present\":" << (std::getenv("DDGI_PATH_DEBUG") ? "true" : "false")
+                                 << ",\"sc_enabled\":" << (sc_enabled_ ? "true" : "false")
+                                 << ",\"sc_atlas_size\":" << sc_atlas_size_ << ",\"sc_lookup_count\":" << sc_lookup_count_
+                                 << ",\"card_stride_bytes\":" << sizeof(SurfaceCacheCard)
+                                 << ",\"card_valid_count\":null,\"card_valid_count_source\":\"bound grid-offsets header u32[3] (byte12); do not use allocation capacity\""
+                                 << ",\"sc_source_identity\":\"binding0 = sc_enabled ? sc_lighting_atlas : actual prev-screen source\""
+                                 << ",\"global_handle\":" << global_cb_[frameIdx]
+                                 << ",\"global_is_finalize_binding\":false,\"ordinary_finalize_pipeline_handle\":" << finalize_pipeline_
+                                 << ",\"bindings\":[";
+                            for (u32 i = 0; i < 18; ++i)
+                                meta << (i ? "," : "") << "{\"binding\":" << finalizeParams[i].binding
+                                     << ",\"resource_handle\":" << finalizeParams[i].resource << '}';
+                            meta << "],\"validity\":\"witness indexed by update-slot; rayData indexed by absolute probe; only update_count list prefix and fresh frame/probe/ray stamps qualify tails; unwritten capacity is not evidence\","
+                                 << "\"observer_note\":\"diagnostic copies add transfer dependencies and may affect latent production synchronization races\"}\n";
+                        }
                     } else {
                         DescriptorData finalizeParams[] = {
                             {3, DescriptorType::SampledImage,  lightingAtlasTex},
@@ -4007,6 +4476,19 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, finalizeLayout, 0, 1, sets, 0, nullptr);
 
                     cmd->Dispatch(updateCount, 1, 1);
+                    if (lumencompare::enabled && lumencompare::ordinal <= 6 &&
+                        (lumencompare::ordinal == 3 || lumencompare::ordinal == 4) &&
+                        rg_name_prefix_.empty() && finIsVk && !useAnalyticFirstRho &&
+                        lumencompare::Selected("DDGI.SourceWitnessNear"))
+                        lumencompare::Output(device_, cmd, "DDGI.SourceWitnessNear", "source-witness", hit_normal_buffer_, true);
+                    if (lumencompare::enabled) lumencompare::Output(device_, cmd, "DDGI.Finalize", rg_name_prefix_+"ray-radiance-distance", ray_data_buffer_, true);
+                    if (measured_geometry_requested_ && lumencompare::enabled) lumencompare::Output(device_, cmd, "DDGI.Finalize", rg_name_prefix_+"hit-normal-source", hit_normal_buffer_, true);
+                    if (measured_geometry_requested_ && measured_owner_directory_ready_ && sc_lookup_count_>0u && lumencompare::enabled) {
+                        lumencompare::Output(device_,cmd,"DDGI.Finalize",rg_name_prefix_+"owner-directory",sc_card_lookup_buffer_,true);
+                        lumencompare::Output(device_,cmd,"DDGI.Finalize",rg_name_prefix_+"owner-cards",sc_card_data_buffer_,true);
+                    }
+                    if (lumencompare::enabled) lumencompare::Output(device_, cmd, "DDGI.Finalize", rg_name_prefix_+"volume-constants", volume_cb_[frameIdx], true);
+                    if (lumencompare::enabled) lumencompare::Output(device_, cmd, "DDGI.Finalize", rg_name_prefix_+"update-list", probe_update_list_buffers_[frameIdx], true);
                     {
                         static bool splitOnce = false;
                         if (!splitOnce) {
@@ -4161,7 +4643,40 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     (device_->GetPlatform() == RHIPlatform::Metal)
                         ? updateCount
                         : ((updateCount + 63) / 64);
+                const char* matureCapture = std::getenv("DDGI_RUNTIME_MATURE");
+                const char* selectedFrames = std::getenv("LUMEN_COMPARE_FRAMES");
+                const bool runtimeCaptureFrame = lumencompare::ordinal <= 6 ||
+                    (matureCapture && std::strcmp(matureCapture,"1") == 0 &&
+                     selectedFrames && *selectedFrames);
+                if (lumencompare::enabled && runtimeCaptureFrame &&
+                    lumencompare::Selected("DDGI.RuntimeBefore")) {
+                    lumencompare::Output(device_, cmd, "DDGI.RuntimeBefore", rg_name_prefix_+"SH-current", irradianceParams[4].resource, true);
+                    lumencompare::Output(device_, cmd, "DDGI.RuntimeBefore", rg_name_prefix_+"SH-history", irradianceParams[3].resource, true);
+                    lumencompare::Output(device_, cmd, "DDGI.RuntimeBefore", rg_name_prefix_+"confidence", irradianceParams[6].resource, true);
+                    lumencompare::Output(device_, cmd, "DDGI.RuntimeBefore", rg_name_prefix_+"global", irradianceParams[0].resource, true);
+                    lumencompare::Output(device_, cmd, "DDGI.RuntimeBefore", rg_name_prefix_+"volume", irradianceParams[1].resource, true);
+                    lumencompare::Output(device_, cmd, "DDGI.RuntimeBefore", rg_name_prefix_+"update-list", irradianceParams[5].resource, true);
+                    const auto directory = std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR")) /
+                        ("frame-" + std::to_string(lumencompare::ordinal));
+                    std::filesystem::create_directories(directory);
+                    std::ofstream meta(directory / ("ddgi-runtime-" +
+                        (rg_name_prefix_.empty() ? std::string("near") : rg_name_prefix_) + ".json"));
+                    meta << "{\"frame\":" << lumencompare::ordinal << ",\"native_frame\":" << current_frame_index
+                         << ",\"descriptor_slot\":" << frameIdx << ",\"write_slot\":" << outIdx
+                         << ",\"history_slot\":" << histIdx << ",\"probe_count\":" << probeCountTotal
+                         << ",\"update_count\":" << updateCount << ",\"dispatch_groups\":" << irradianceGroups
+                         << ",\"rays_per_probe\":" << params_.rays_per_probe
+                         << ",\"current_handle\":" << irradianceParams[4].resource
+                         << ",\"history_handle\":" << irradianceParams[3].resource
+                         << ",\"confidence_handle\":" << irradianceParams[6].resource
+                         << ",\"validity\":\"update-list prefix update_count; SH probe_count*9 vec4; confidence per-probe; unused capacity is not evidence\"}\n";
+                }
                 cmd->Dispatch(irradianceGroups, 1, 1);
+                if (lumencompare::enabled && runtimeCaptureFrame &&
+                    lumencompare::Selected("DDGI.RuntimeAfter"))
+                    lumencompare::Output(device_, cmd, "DDGI.RuntimeAfter", rg_name_prefix_+"confidence", irradianceParams[6].resource, true);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "DDGI.UpdateIrradiance", rg_name_prefix_+"SH-current", irradiance_buffers_[outIdx], true);
+                if (lumencompare::enabled) lumencompare::Output(device_, cmd, "DDGI.UpdateIrradiance", rg_name_prefix_+"SH-history", irradiance_buffers_[histIdx], true);
                 if (updateCount && sh_producer_audit_)
                     sh_producer_audit_->After(cmd, frameIdx, updateCount, producerSources, irradiance_buffers_[outIdx]);
             }
@@ -4186,6 +4701,40 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 UpdateDescriptorSet(device_, depth_ds_[frameIdx], depthParams,
                     device_->GetPlatform() == RHIPlatform::Vulkan ? (depth_provenance_enabled_?9u:7u) : 6u);
 
+                if (!historyProbes.empty()) {
+                    historySlice("DDGI.History.PreDepth","origin",relocated_origins_,16);
+                    historySlice("DDGI.History.PreDepth","rays",ray_data_buffer_,u64(params_.rays_per_probe)*16);
+                    lumencompare::Output(device_,cmd,"DDGI.History.PreDepth","global",global_cb_[frameIdx],true);
+                    lumencompare::Output(device_,cmd,"DDGI.History.PreDepth","volume",volume_cb_[frameIdx],true);
+                }
+                // Selected-frame, near-volume producer evidence. No allocation
+                // or readback on the default path; old ray slots outside the
+                // actual update-list prefix are explicitly not observations.
+                const char* depthWitnessSetting = std::getenv("DDGI_DEPTH_MOMENTS_WITNESS");
+                const bool depthWitness = device_->GetPlatform() == RHIPlatform::Vulkan &&
+                    rg_name_prefix_.empty() && lumencompare::enabled &&
+                    depthWitnessSetting && std::strcmp(depthWitnessSetting, "1") == 0 &&
+                    lumencompare::Selected("DDGI.DepthMomentsBefore");
+                if (depthWitness) {
+                    lumencompare::Output(device_, cmd, "DDGI.DepthMomentsBefore", "global", depthParams[0].resource, true);
+                    lumencompare::Output(device_, cmd, "DDGI.DepthMomentsBefore", "volume", depthParams[1].resource, true);
+                    lumencompare::Output(device_, cmd, "DDGI.DepthMomentsBefore", "rays", depthParams[2].resource, true);
+                    lumencompare::Output(device_, cmd, "DDGI.DepthMomentsBefore", "history", depthParams[3].resource, true);
+                    lumencompare::Output(device_, cmd, "DDGI.DepthMomentsBefore", "update-list", depthParams[5].resource, true);
+                    lumencompare::Output(device_, cmd, "DDGI.DepthMomentsBefore", "origins", relocated_origins_, true);
+                    const auto directory = std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR")) /
+                        ("frame-" + std::to_string(lumencompare::ordinal));
+                    std::filesystem::create_directories(directory);
+                    std::ofstream meta(directory / "ddgi-depth-moments-near.json");
+                    meta << "{\"ordinal\":" << lumencompare::ordinal << ",\"native_frame\":" << current_frame_index
+                         << ",\"descriptor_slot\":" << frameIdx << ",\"history_slot\":" << histIdx
+                         << ",\"write_slot\":" << outIdx << ",\"probe_count\":" << probeCountTotal
+                         << ",\"update_count\":" << updateCount << ",\"rays_per_probe\":" << params_.rays_per_probe
+                         << ",\"history_handle\":" << depthParams[3].resource << ",\"output_handle\":" << depthParams[4].resource
+                         << ",\"origins_handle\":" << relocated_origins_
+                         << ",\"validity\":\"only update-list[0:update_count] produces new observations; rays and depth use mapped probe index; history origin lineage not certified\"}\n";
+                }
+
                 cmd->BindComputePipeline(depth_pipeline_);
                 const DescriptorSetHandle sets[] = { depth_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, depth_layout_, 0, 1, sets, 0, nullptr);
@@ -4199,12 +4748,20 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 // Opt-in so the default dispatch stays unchanged.
                 static const bool useIndirectDispatch =
                     std::getenv("PRIMAL_DDGI_INDIRECT") != nullptr;
-                if (useIndirectDispatch &&
+                if (!farPolicy && useIndirectDispatch &&
                     probe_dispatch_count_buffer_ != handles::INVALID_RESOURCE) {
                     cmd->DispatchIndirect(probe_dispatch_count_buffer_, 0);
                 } else {
                     cmd->Dispatch(depthGroups, 1, 1);
                 }
+
+                if (depthWitness)
+                    lumencompare::Output(device_, cmd, "DDGI.DepthMomentsAfter", "output", depthParams[4].resource, true);
+                if (!historyProbes.empty()) {
+                    historySlice("DDGI.History.PostDepth","depth",depth_buffers_[outIdx],512);
+                    historySlice("DDGI.History.PostDepth","sh",irradiance_buffers_[outIdx],144);
+                }
+
 
                 // T1.3 (C5): async variance readback — copy the freshly
                 // written depth field into this frame's ring slot. The
@@ -4212,18 +4769,39 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 // Map-ing the GPU-hot depth buffer. Slot reuse safety uses
                 // the same bound as the staging pool: the per-frame fence
                 // waited in BeginFrame covers slot age = 3 frames.
-                if (depth_readback_ring_.is_initialized()) {
-                    const u32 rbSlot = depth_readback_ring_.slot_for_frame(camera_data.frame_index);
+                if (!farPolicy && depth_readback_ring_.is_initialized()) {
+                    const u32 rbSlot = varianceFenced ? variance_fence_ticket_.Slot() : depth_readback_ring_.slot_for_frame(camera_data.frame_index);
                     const u64 depthBytes = (u64)probeCountTotal * 128u * sizeof(float);
-                    cmd->CopyBuffer(depth_buffers_[outIdx],
-                                    depth_readback_ring_.buffer(rbSlot),
-                                    0, 0, depthBytes);
-                    ++depth_ring_copies_;
+                    const bool recordCopy=rbSlot<3 && (!varianceFenced || (VarianceFenceSceneStillCurrent() && depthBytes<=depth_readback_ring_.buffer_size() &&
+                        variance_fence_ticket_.Record(depth_readback_ring_.buffer(rbSlot),depthBytes,depth_buffers_[outIdx],current_frame_index,
+                            variance_scene_epoch_,variance_source_digest_,variance_generation_)));
+                    if(recordCopy) {
+                        if(varianceFenced)cmd->MemoryBarrier(PipelineStage::ComputeShader,PipelineStage::Transfer,AccessFlag::ShaderWrite,AccessFlag::TransferRead);
+                        cmd->CopyBuffer(depth_buffers_[outIdx],depth_readback_ring_.buffer(rbSlot),0,0,depthBytes);
+                        if(varianceFenced)cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::Host,AccessFlag::TransferWrite,AccessFlag::HostRead);
+                        ++depth_ring_copies_;
+                    }
+                    if(recordCopy && cpu_stall_audit::History() && cpu_stall_audit::state.active && rbSlot<3) {
+                        depth_ring_recorded_frame_[rbSlot]=camera_data.frame_index;
+                        depth_ring_recorded_native_[rbSlot]=cpu_stall_audit::state.frame;
+                    }
                 }
             }
             cmd->MemoryBarrier(
                 PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                 AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+
+            if(cpuHistory)cpuHistory->updates=updateCount;
+            last_recorded_update_count_=updateCount;
+            if(farPolicy) {
+                // All four production dispatches have been recorded; this is not
+                // a GPU completion flag. Queue submission is owned by the caller.
+                far_update_audit_.recorded=far_update_policy_.Commit(farPlan,far_update_audit_.uploaded,true);
+                far_update_audit_.count=updateCount;
+                far_update_audit_.rotation=far_update_policy_.Rotation();
+                far_update_audit_.max_age=far_update_policy_.MaxAge();
+                for(auto index:farPlan.indices) probe_states_[index].last_update_frame=current_frame_index;
+            }
 
             // === [Mode11 Perf] report ===
             _t5 = chr::steady_clock::now();

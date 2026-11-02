@@ -4,11 +4,14 @@
 #include "Graphics/Lumen/SurfaceCache/SurfaceCacheTypes.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
+#include "Graphics/RenderGraph/LumenCompareCapture.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <sstream>
 #include <vector>
 #include "Engine/Common/CoreLogStream.h"
 
@@ -80,19 +83,21 @@ bool SCDDGIIntegrationModule::Initialize(RHIDeviceBase* device,
     const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan;
 
     if (card_radiance_shader != handles::INVALID_SHADER) {
-        DescriptorSetLayoutBinding bindings[4];
+        DescriptorSetLayoutBinding bindings[6];
         if (isVk) {
             bindings[0] = {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr};  // lighting atlas
             bindings[1] = {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr};  // SurfaceCacheParams
             bindings[2] = {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr};  // cards
             bindings[3] = {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr};  // card_radiance (out)
+            bindings[4] = {4, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr};  // measured material validity
+            bindings[5] = {5, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr};  // measured surface depth
         } else {
             bindings[0] = {0, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr};  // SurfaceCacheParams
             bindings[1] = {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr};  // cards
             bindings[2] = {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr};  // card_radiance (out)
             bindings[3] = {0, DescriptorType::SampledImage,  1, ShaderStage::Compute, nullptr};  // lighting atlas
         }
-        card_radiance_set_layout_ = device->CreateDescriptorSetLayout({4, bindings});
+        card_radiance_set_layout_ = device->CreateDescriptorSetLayout({isVk ? 6u : 4u, bindings});
         card_radiance_layout_ = device->CreatePipelineLayout({1, &card_radiance_set_layout_});
 
         ComputePipelineDesc pd{};
@@ -524,12 +529,18 @@ bool SCDDGIIntegrationModule::BuildCardProbeAssignment(lumen::LumenDDGIPass* ddg
     }
     {
         auto* mapped = static_cast<lumen::SurfaceCacheParams*>(device_->MapBuffer(sc_params_cb_));
+        if (!mapped) return false; // Never dispatch with unknown validity policy/size.
         if (mapped) {
             lumen::SurfaceCacheParams params{};
             params.atlas_size = sc->GetAtlasSize();
             params.page_size = sc->GetPageSize();
             params.max_cards = cardCount;
             params.lookup_count = sc->GetCardGenerator().GetLookupCount();
+            // Preserve the wire layout; only Vulkan consumes this policy bit.
+            // Explicit opt-in exists for same-binary legacy diagnostics.
+            const char* legacy = std::getenv("PRIMAL_SC_LEGACY_SURFACE");
+            params._pad = device_->GetPlatform() == RHIPlatform::Vulkan &&
+                legacy && std::strcmp(legacy, "1") == 0 ? 1u : 0u;
             *mapped = params;
             device_->UnmapBuffer(sc_params_cb_);
         }
@@ -567,15 +578,24 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
     (void)traceOnce;
 
     struct PassData {};
+    // Vulkan's new measured-validity inputs participate in the same RG
+    // identity as their real capture/LightEval producers, including layouts.
+    rendergraph::RGResourceHandle albedoRG{}, depthRG{};
+    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        albedoRG = graph.ImportResource("SCDDGI_SurfaceAlbedo", inputs.surface_cache_pass->GetAlbedoAtlas());
+        depthRG = graph.ImportResource("SCDDGI_SurfaceDepth", inputs.surface_cache_pass->GetDepthAtlas());
+    }
 
     graph.AddPass<PassData>("SC_DDGI_Integration",
         rendergraph::RGPassType::Compute,
         rendergraph::RGPassCategory::Lighting,
         [scRG = inputs.sc_lighting_rg,
          irrRG = inputs.ddgi_irradiance,
-         irrHistRG = inputs.ddgi_irradiance_hist](PassData&, rendergraph::RenderGraphBuilder& builder) {
+         irrHistRG = inputs.ddgi_irradiance_hist, albedoRG, depthRG](PassData&, rendergraph::RenderGraphBuilder& builder) {
             if (scRG.IsValid())
                 builder.Read(scRG, ResourceState::ShaderResource);
+            if (albedoRG.IsValid()) builder.Read(albedoRG, ResourceState::ShaderResource);
+            if (depthRG.IsValid()) builder.Read(depthRG, ResourceState::ShaderResource);
             // Ordering guard: DDGI's update writes these buffers first; this
             // pass read+modifies them (bypasses RG via direct buffer access),
             // and DDGIGIGather reads the result afterwards.
@@ -875,16 +895,64 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
             const auto scSlots = lumen::DDGISlotsForFrame(inputs.frame_index);
             const u32 frameIdx = scSlots.writeIndex;
             const u32 histIdx = scSlots.previousIndex;
+            // Begin() enables only explicitly requested capture ordinals;
+            // mature-frame validity needs the same actual inputs as startup.
+            const bool compareFrame = lumencompare::enabled;
+            auto compare = [&](const char* stage, const char* name, ResourceHandle resource,
+                               bool buffer, ResourceState state = ResourceState::UnorderedAccess) {
+                if (compareFrame && lumencompare::Selected(stage))
+                    lumencompare::Output(device_, cmd, stage, name, resource, buffer, state);
+            };
+            if (compareFrame && (lumencompare::Selected("SCDDGI.CardAvgInputs") ||
+                                 lumencompare::Selected("SCDDGI.CardAvgOutput") ||
+                                 lumencompare::Selected("SCDDGI.InjectInputs") ||
+                                 lumencompare::Selected("SCDDGI.InjectOutput"))) {
+                const auto directory = std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR")) /
+                    ("frame-" + std::to_string(lumencompare::ordinal));
+                std::filesystem::create_directories(directory);
+                std::ofstream meta(directory / "scddgi.json");
+                meta << "{\"frame\":" << lumencompare::ordinal << ",\"native_frame\":" << inputs.frame_index
+                     << ",\"write_slot\":" << frameIdx << ",\"history_slot\":" << histIdx
+                     << ",\"card_count\":" << cardCount << ",\"allocation_epoch\":" << sc->GetCardGenerator().GetAllocationEpoch()
+                     << ",\"assignment_card_count\":" << assignment_card_count_
+                     << ",\"blocks_per_card\":" << SC_CARD_BLOCK_COUNT
+                     << ",\"radiance_block_count\":" << cardCount * SC_CARD_BLOCK_COUNT
+                     << ",\"probe_count\":" << ddgi->GetVolumeData().ProbeCountTotal
+                     << ",\"inject_enabled\":" << (std::getenv("SC_INJECT_OFF") ? "false" : "true")
+                     << ",\"settled_mode\":" << ((std::getenv("PRIMAL_SC_INJECT_SETTLED") &&
+                         std::atoi(std::getenv("PRIMAL_SC_INJECT_SETTLED")) == 0) ? "false" : "true")
+                     << ",\"lighting_handle\":" << sc->GetLightingAtlas(frameIdx)
+                     << ",\"albedo_handle\":" << sc->GetAlbedoAtlas()
+                     << ",\"depth_handle\":" << sc->GetDepthAtlas()
+                     << ",\"card_data_handle\":" << sc->GetCardDataBuffer()
+                     << ",\"card_params_handle\":" << sc_params_cb_
+                     << ",\"current_handle\":" << ddgi->GetIrradianceBufferBySlot(frameIdx)
+                     << ",\"history_handle\":" << ddgi->GetIrradianceBufferBySlot(histIdx)
+                     << ",\"surface_policy\":\""
+                     << ((device_->GetPlatform() == RHIPlatform::Vulkan &&
+                          std::getenv("PRIMAL_SC_LEGACY_SURFACE") &&
+                          std::strcmp(std::getenv("PRIMAL_SC_LEGACY_SURFACE"), "1") == 0)
+                             ? "legacy_energy_validity" :
+                         device_->GetPlatform() == RHIPlatform::Vulkan
+                             ? "measured_surface_validity" : "backend_legacy_validity")
+                     << "\",\"surface_policy_wire\":"
+                     << ((device_->GetPlatform() == RHIPlatform::Vulkan &&
+                          std::getenv("PRIMAL_SC_LEGACY_SURFACE") &&
+                          std::strcmp(std::getenv("PRIMAL_SC_LEGACY_SURFACE"), "1") == 0) ? 1u : 0u)
+                     << ",\"validity\":\"card-data prefix card_count; card-radiance prefix radiance_block_count; contrib-list only ranges[start,count]; Vulkan measured policy reads actual albedo payload bit7 and finite nonnegative depth; finite black radiance remains valid\"}\n";
+            }
 
             // --- Sub-pass 1: CardRadianceAvg ---
             {
-                DescriptorData params[4];
+                DescriptorData params[6];
                 if (device_->GetPlatform() == RHIPlatform::Vulkan) {
                     DescriptorData p[] = {
                         {0, DescriptorType::SampledImage,  sc->GetLightingAtlas(frameIdx)},
                         {1, DescriptorType::UniformBuffer, sc_params_cb_},
                         {2, DescriptorType::StorageBuffer, sc->GetCardDataBuffer()},
                         {3, DescriptorType::StorageBuffer, card_radiance_buf_},
+                        {4, DescriptorType::SampledImage,  sc->GetAlbedoAtlas()},
+                        {5, DescriptorType::SampledImage,  sc->GetDepthAtlas()},
                     };
                     memcpy(params, p, sizeof(p));
                 } else {
@@ -896,7 +964,13 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                     };
                     memcpy(params, p, sizeof(p));
                 }
-                UpdateDescriptorSet(device_, card_radiance_ds_[frameIdx], params, 4);
+                UpdateDescriptorSet(device_, card_radiance_ds_[frameIdx], params,
+                    device_->GetPlatform() == RHIPlatform::Vulkan ? 6u : 4u);
+                compare("SCDDGI.CardAvgInputs", "lighting", sc->GetLightingAtlas(frameIdx), false, ResourceState::ShaderResource);
+                compare("SCDDGI.CardAvgInputs", "albedo", sc->GetAlbedoAtlas(), false, ResourceState::ShaderResource);
+                compare("SCDDGI.CardAvgInputs", "depth", sc->GetDepthAtlas(), false, ResourceState::ShaderResource);
+                compare("SCDDGI.CardAvgInputs", "card-data", sc->GetCardDataBuffer(), true);
+                compare("SCDDGI.CardAvgInputs", "params", sc_params_cb_, true);
 
                 cmd->BindComputePipeline(card_radiance_pipeline_);
                 const DescriptorSetHandle sets[] = { card_radiance_ds_[frameIdx] };
@@ -908,6 +982,9 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 // it in the next compute dispatch.
                 cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                    AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+                compare("SCDDGI.CardAvgOutput", "card-radiance", card_radiance_buf_, true);
+                compare("SCDDGI.CardAvgOutput", "contrib-ranges", probe_contrib_range_buf_, true);
+                compare("SCDDGI.CardAvgOutput", "contrib-list", flat_contrib_buf_, true);
             }
 
             // Barrier: card_radiance write → read
@@ -953,7 +1030,31 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
             // the two-state oscillation (probes then carry only the DDGI
             // trace/update result).
             const u32 totalProbes = ddgi->GetVolumeData().ProbeCountTotal;
+            // Match the bounded DDGI producer selection. A missing publication
+            // record (including an earlier pass return) is unqualified evidence.
+            std::vector<u32> historyProbes;
+            const char* selection=std::getenv("DDGI_HISTORY_PROBES");
+            if (selection && *selection && device_->GetPlatform()==RHIPlatform::Vulkan &&
+                lumencompare::enabled && lumencompare::Selected("DDGI.History")) {
+                std::istringstream stream(selection);std::string token;
+                bool valid=selection[std::strlen(selection)-1]!=',';
+                while (std::getline(stream,token,',')) {
+                    if(token.empty()||token.size()>9||token.find_first_not_of("0123456789")!=std::string::npos){valid=false;break;}
+                    const auto pid=std::strtoul(token.c_str(),nullptr,10);
+                    if(pid>=totalProbes||historyProbes.size()>=16||std::find(historyProbes.begin(),historyProbes.end(),u32(pid))!=historyProbes.end()){valid=false;break;}
+                    historyProbes.push_back(u32(pid));
+                }
+                if(!valid)historyProbes.clear();
+            }
+            const auto publishHistory=[&](const char* stage) {
+                for(u32 pid:historyProbes) lumencompare::BufferSlice(device_,cmd,stage,"sh-"+std::to_string(pid),
+                    ddgi->GetIrradianceBufferBySlot(frameIdx),u64(pid)*144u,144u);
+            };
+            publishHistory("DDGI.History.PreInject");
             if (std::getenv("SC_INJECT_OFF")) {
+                // Identity observation only: no injection dispatch or fake writer output.
+                compare("SCDDGI.InjectSkipped", "SH-current", ddgi->GetIrradianceBufferBySlot(frameIdx), true);
+                compare("SCDDGI.InjectSkipped", "SH-history", ddgi->GetIrradianceBufferBySlot(histIdx), true);
                 // Still service the staging dump so the numeric series stays
                 // comparable (copy current probe state).
                 if (dumpCards && dump_pending_frame_ == inputs.frame_index &&
@@ -1010,6 +1111,11 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                     {7, DescriptorType::UniformBuffer, sc_inject_cb_},
                 };
                 UpdateDescriptorSet(device_, probe_irradiance_ds_[frameIdx], params, 8);
+                compare("SCDDGI.InjectInputs", "SH-current", params[5].resource, true);
+                compare("SCDDGI.InjectInputs", "SH-history", params[4].resource, true);
+                compare("SCDDGI.InjectInputs", "confidence", params[6].resource, true);
+                compare("SCDDGI.InjectInputs", "volume", params[0].resource, true);
+                compare("SCDDGI.InjectInputs", "params", params[7].resource, true);
 
                 cmd->BindComputePipeline(probe_irradiance_pipeline_);
                 const DescriptorSetHandle sets[] = { probe_irradiance_ds_[frameIdx] };
@@ -1024,6 +1130,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 // buffers is a no-op in the Vulkan backend today.
                 cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                                    AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+                compare("SCDDGI.InjectOutput", "SH-current", params[5].resource, true);
 
                 // Same debug dump frame: copy the just-updated probe L0s so
                 // the print can track card vs probe energy separately.
@@ -1042,6 +1149,18 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                         dump_probe_count_ = totalProbes;
                     }
                 }
+            }
+
+            publishHistory("DDGI.History.Publish");
+            if(!historyProbes.empty()) {
+                lumencompare::Output(device_,cmd,"DDGI.History.Publish","inject-params",sc_inject_cb_,true);
+                const auto directory=std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR"))/("frame-"+std::to_string(lumencompare::ordinal));
+                std::filesystem::create_directories(directory);
+                std::ofstream meta(directory/"ddgi-history-publication.json");
+                meta << "{\"native_frame\":" << inputs.frame_index << ",\"write_slot\":" << frameIdx
+                     << ",\"history_slot\":" << histIdx << ",\"sh_handle\":" << ddgi->GetIrradianceBufferBySlot(frameIdx)
+                     << ",\"injection_dispatched\":" << (std::getenv("SC_INJECT_OFF")?"false":"true")
+                     << ",\"valid\":true}\n";
             }
 
             // Metal publishes one canonical probe field after SC injection.

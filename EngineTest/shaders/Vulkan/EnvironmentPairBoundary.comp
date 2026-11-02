@@ -1,0 +1,95 @@
+#version 450 core
+#extension GL_GOOGLE_include_directive : require
+#include "GeometryFirstHit.glsl"
+bool finite3(vec3 v){return !any(isnan(v))&&!any(isinf(v));}
+bool finite1(float v){return !isnan(v)&&!isinf(v);}
+uint auditTop,auditBottom,auditInstances,auditTriangles,auditDigest;
+uint auditDigestStep(uint h,uint kind,uint id,uint inst){h=(h^kind)*16777619u;h=(h^id)*16777619u;return (h^inst)*16777619u;}
+bool environmentNodeValid(GeometryNode node) {
+    return finite3(node.lo.xyz)&&finite3(node.hi.xyz)&&
+        all(lessThanEqual(node.lo.xyz,node.hi.xyz));
+}
+int environmentAnyHit(vec3 origin,vec3 direction,float nearT,float farT) {
+    if(!finite3(origin)||!finite3(direction)||!finite1(nearT)||!finite1(farT)||
+       nearT<0.||farT<=nearT||dot(direction,direction)<=0.)return -1;
+    bool endpoint=false;
+    uint topStack[64];uint topSize=1u,topVisited=0u;topStack[0]=0u;
+    while(topSize!=0u) {
+        if(topVisited++>=geometryTop.data.length())return -1;
+        uint at=topStack[--topSize];++auditTop;auditDigest=auditDigestStep(auditDigest,1u,at,0u);if(at>=geometryTop.data.length())return -1;
+        GeometryNode node=geometryTop.data[at];if(!environmentNodeValid(node))return -1;
+        if(!geometryBox(node,origin,direction,nearT,farT))continue;
+        if(node.links.w==0u) {
+            if(topSize+2u>64u||node.links.x>=geometryTop.data.length()||node.links.y>=geometryTop.data.length())return -1;
+            topStack[topSize++]=node.links.x;topStack[topSize++]=node.links.y;continue;
+        }
+        if(node.links.w!=1u||node.links.z>=geometryInstances.data.length())return -1;
+        ++auditInstances;auditDigest=auditDigestStep(auditDigest,2u,node.links.z,0u);GeometryInstance instance=geometryInstances.data[node.links.z];
+        if(any(isnan(instance.inverse0))||any(isinf(instance.inverse0))||
+           any(isnan(instance.inverse1))||any(isinf(instance.inverse1))||
+           any(isnan(instance.inverse2))||any(isinf(instance.inverse2)))return -1;
+        float inverseDet=dot(instance.inverse0.xyz,cross(instance.inverse1.xyz,instance.inverse2.xyz));
+        if(!finite1(inverseDet)||inverseDet==0.)return -1;
+        vec3 localOrigin=vec3(dot(instance.inverse0,vec4(origin,1)),
+            dot(instance.inverse1,vec4(origin,1)),dot(instance.inverse2,vec4(origin,1)));
+        // Preserve WORLD t; inverse-scaled local direction is not normalized.
+        vec3 localDirection=vec3(dot(instance.inverse0.xyz,direction),
+            dot(instance.inverse1.xyz,direction),dot(instance.inverse2.xyz,direction));
+        float directionSquared=dot(localDirection,localDirection);
+        if(!finite3(localOrigin)||!finite3(localDirection)||!finite1(directionSquared)||directionSquared<=0.)return -1;
+        uint bottomStack[64];uint bottomSize=1u,bottomVisited=0u;bottomStack[0]=instance.identity.x;
+        while(bottomSize!=0u) {
+            if(bottomVisited++>=geometryBottom.data.length())return -1;
+            at=bottomStack[--bottomSize];++auditBottom;auditDigest=auditDigestStep(auditDigest,3u,at,node.links.z);if(at>=geometryBottom.data.length())return -1;
+            GeometryNode bottom=geometryBottom.data[at];if(!environmentNodeValid(bottom))return -1;
+            if(!geometryBox(bottom,localOrigin,localDirection,nearT,farT))continue;
+            if(bottom.links.w==0u) {
+                if(bottomSize+2u>64u||bottom.links.x>=geometryBottom.data.length()||bottom.links.y>=geometryBottom.data.length())return -1;
+                bottomStack[bottomSize++]=bottom.links.x;bottomStack[bottomSize++]=bottom.links.y;continue;
+            }
+            if(bottom.links.z>geometryTriangles.data.length()||bottom.links.w>geometryTriangles.data.length()-bottom.links.z)return -1;
+            for(uint i=0u;i<bottom.links.w;++i) {
+                ++auditTriangles;auditDigest=auditDigestStep(auditDigest,4u,bottom.links.z+i,node.links.z);GeometryTriangle triangle=geometryTriangles.data[bottom.links.z+i];
+                if(!finite3(triangle.a.xyz)||!finite3(triangle.e1.xyz)||!finite3(triangle.e2.xyz))return -1;
+                vec3 p=cross(localDirection,triangle.e2.xyz);float det=dot(triangle.e1.xyz,p);
+                if(!finite1(det))return -1;if(det==0.)continue;
+                vec3 delta=localOrigin-triangle.a.xyz;float u=dot(delta,p)/det;
+                if(!finite1(u))return -1;if(u<0.||u>1.)continue;
+                vec3 q=cross(delta,triangle.e1.xyz);float v=dot(localDirection,q)/det;
+                if(!finite1(v))return -1;if(v<0.||u+v>1.)continue;
+                // Same compensated plane solve as the mature closest helper;
+                // only run it after containment, then stop at the first proof.
+                vec3 normal=geometryTriangleNormal(triangle.e1.xyz,triangle.e2.xyz);
+                float planeDet=dot(localDirection,normal);
+                if(!finite3(normal)||!finite1(planeDet)||planeDet==0.)return -1;
+                float t=dot(triangle.a.xyz-localOrigin,normal)/planeDet;
+                if(!finite1(t))return -1;if(t<nearT||t>farT)continue;
+                if(t<=nearT+2e-5||t>=farT-2e-5){endpoint=true;continue;}
+                return 1;
+            }
+        }
+    }
+    return endpoint?-1:0;
+}
+
+#define ENV_PAIR_DIAGNOSTICS 1
+#include "EnvironmentVisibilityPair.glsl"
+layout(local_size_x=64) in;
+struct Query{uint group,probe;float ax,ay,az,bx,by,bz;};
+struct Result{int status;uint top,bottom,instances,triangles,order;};
+struct PairStats{uint nodes,instances,triangles,kind;uint attemptNodes,attemptInstances,attemptTriangles,pad;uvec4 attempt0[2],attempt1[2],retry0[2],retry1[2];};
+layout(set=0,binding=0,std430) readonly buffer Inputs {Query q[];};
+layout(set=0,binding=1,std430) writeonly buffer Outputs {Result result[];};
+layout(set=0,binding=2,std430) writeonly buffer Totals {PairStats pairStats[];};
+Result scalar(uint i,out uvec4 v0,out uvec4 v1){Query x=q[i];auditTop=0u;auditBottom=0u;auditInstances=0u;auditTriangles=0u;auditDigest=2166136261u;vec3 a=vec3(x.ax,x.ay,x.az),b=vec3(x.bx,x.by,x.bz);vec3 delta=b-a;float len=length(delta);vec3 direction=delta/len;v0=uvec4(floatBitsToUint(a),floatBitsToUint(0.));v1=uvec4(floatBitsToUint(direction),floatBitsToUint(len));int status=environmentAnyHit(a,direction,0.,len);return Result(status,auditTop,auditBottom,auditInstances,auditTriangles,auditDigest);}
+void main(){uint ix=gl_GlobalInvocationID.x,i=ix*2u;if(i+1u>=q.length())return;PairStats stats;
+ for(uint r=0u;r<2u;++r){stats.attempt0[r]=uvec4(0);stats.attempt1[r]=uvec4(0);stats.retry0[r]=uvec4(0);stats.retry1[r]=uvec4(0);}
+#ifdef ENV_BOUNDARY_PAIR
+ vec3 o[2],d[2];float farT[2];for(uint r=0u;r<2u;++r){Query x=q[i+r];o[r]=vec3(x.ax,x.ay,x.az);vec3 delta=vec3(x.bx,x.by,x.bz)-o[r];farT[r]=length(delta);d[r]=delta/farT[r];stats.attempt0[r]=uvec4(floatBitsToUint(o[r]),floatBitsToUint(0.));stats.attempt1[r]=uvec4(floatBitsToUint(d[r]),floatBitsToUint(farT[r]));}
+ EnvironmentPairResult p;bool ok=environmentAnyHitPair(o,d,farT,p);stats.attemptNodes=p.nodeLoads;stats.attemptInstances=p.instanceLoads;stats.attemptTriangles=p.triangleLoads;stats.pad=0u;
+ if(ok){for(uint r=0u;r<2u;++r){uvec4 c=r==0u?p.counts0:p.counts1;result[i+r]=Result(p.status[r],c.x,c.y,c.z,c.w,p.order[r]);}stats.nodes=p.nodeLoads;stats.instances=p.instanceLoads;stats.triangles=p.triangleLoads;stats.kind=1u;pairStats[ix]=stats;return;}
+ Result a=scalar(i,stats.retry0[0],stats.retry1[0]),b=scalar(i+1u,stats.retry0[1],stats.retry1[1]);result[i]=a;result[i+1u]=b;stats.nodes=p.nodeLoads+a.top+a.bottom+b.top+b.bottom;stats.instances=p.instanceLoads+a.instances+b.instances;stats.triangles=p.triangleLoads+a.triangles+b.triangles;stats.kind=3u;pairStats[ix]=stats;return;
+#else
+ Result a=scalar(i,stats.retry0[0],stats.retry1[0]),b=scalar(i+1u,stats.retry0[1],stats.retry1[1]);result[i]=a;result[i+1u]=b;stats.nodes=a.top+a.bottom+b.top+b.bottom;stats.instances=a.instances+b.instances;stats.triangles=a.triangles+b.triangles;stats.kind=0u;stats.attemptNodes=0u;stats.attemptInstances=0u;stats.attemptTriangles=0u;stats.pad=0u;pairStats[ix]=stats;
+#endif
+}

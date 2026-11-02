@@ -171,7 +171,7 @@ void ddgi_update_irradiance() {
         vec3 radiance = ray_buffer[rayIdx].radiance_and_dist.xyz;
         float hitDist = ray_buffer[rayIdx].radiance_and_dist.w;
 
-        if (hitDist <= -1.5) {
+        if (volume.RaySampleMode == 7 ? hitDist == -2.0 : hitDist <= -1.5) {
             // 逃逸→沿用 Finalize 写入的 EvaluateSkyBase × SkyColor.xyz
             //（Phase 1.2：不再覆盖成硬编码常量）。
             ++escapeCount;
@@ -238,7 +238,10 @@ void ddgi_update_irradiance() {
     // first sample directly, then use the configured temporal filter.
     uint confidenceBase = probeIdx * 4u;
     float conv = probe_confidence[confidenceBase + 3u];
-    bool firstUpdate = conv < 0.5;
+    // Mode7 publishes only the actual cold start directly. Using conv<.5
+    // here bypassed the entire young-probe EMA ramp for the first 16 updates.
+    // Legacy modes retain their established history behavior unchanged.
+    bool firstUpdate = volume.RaySampleMode == 7 ? conv <= 0.0 : conv < 0.5;
     // Young probes blend aggressively (alpha 0.35, τ≈3 frames) so the
     // multi-bounce SC↔probe loop becomes VISIBLE within the first seconds
     // instead of needing 300+ frames; alpha settles to the configured

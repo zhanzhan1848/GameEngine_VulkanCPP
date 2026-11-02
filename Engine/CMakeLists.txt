@@ -795,3 +795,11 @@ elseif(UNIX)
         PLATFORM_LINUX=1
     )
 endif()
+# Bounded opt-in cache allocations fail back to the original Gather. Keep the
+# exception island local, following Script.cpp's established compile override.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Utilities/GeometryBVHStore.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderPipeline/Modules/InstanceNormalCache.cpp"
+        PROPERTIES COMPILE_FLAGS "-fexceptions")
+endif()

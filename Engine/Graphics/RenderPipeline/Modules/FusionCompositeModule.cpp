@@ -1,3 +1,5 @@
+#include "Graphics/RenderGraph/LumenCompareCapture.h"
+#include "Graphics/RenderPipeline/PassChainCapture.h"
 #include "FusionCompositeModule.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.h"
@@ -13,6 +15,8 @@
 #include <vector>
 #include <cstdio>
 #include <string>
+#include <filesystem>
+#include <fstream>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics {
@@ -205,8 +209,8 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         // bindings: 0=scene, 1=indirect, 2=volume_scatter, 3=ssr, 4=orm,
         //           5=albedo, 6=ddgi_specular (T4.3), [7=sampler(Vk)],
         //           8=refl_specular (R4/R5 offscreen specular)
-        const u32 compositeBindingCount = isVk ? 9 : 7;
-        DescriptorSetLayoutBinding bindings[9];
+        const u32 compositeBindingCount = isVk ? 12 : 7;
+        DescriptorSetLayoutBinding bindings[12];
         bindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // scene
         bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // indirect
         bindings[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // volume_scatter
@@ -217,6 +221,21 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         if (isVk) {
             bindings[7] = {7, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr};   // sampler
             bindings[8] = {8, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr}; // refl_specular
+            bindings[9] = {9, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr}; // environment
+            bindings[10] = {10, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel, nullptr};
+            bindings[11] = {11, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};
+            BufferDesc paramsDesc{};
+            paramsDesc.size = sizeof(math::v4);
+            paramsDesc.type = BufferType::Constant;
+            paramsDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+            for (auto& params : environment_params_) {
+                params = device->CreateBuffer(paramsDesc);
+                if (params == handles::INVALID_RESOURCE) {
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[FusionComposite] Environment parameters allocation failed" << std::endl;
+                    Shutdown();
+                    return false;
+                }
+            }
         }
         composite_set_layout_ = device->CreateDescriptorSetLayout({compositeBindingCount, bindings});
         composite_layout_ = device->CreatePipelineLayout({1, &composite_set_layout_});
@@ -314,6 +333,11 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
 }
 
 void FusionCompositeModule::Shutdown() {
+    for (auto& params : environment_params_) {
+        if (device_ && params != handles::INVALID_RESOURCE)
+            device_->DestroyBuffer(params);
+        params = handles::INVALID_RESOURCE;
+    }
     for (auto& source : roi_audit_sources_) {
         if (device_ && source.staging!=handles::INVALID_RESOURCE)
             device_->DestroyBuffer(source.staging);
@@ -406,6 +430,10 @@ void GiLadderXform(const math::m4x4& m, float x, float y, float z, float out[4])
 
 void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,
                      ResourceHandle spgiTex, ResourceHandle indirectTex) {
+    // This diagnostic performs synchronous GPU readback and prints thousands
+    // of rows. Keep ordinary rendering free of its frame-360 hitch.
+    const char* requested = std::getenv("GI_LADDER_DUMP");
+    if (!requested || std::strcmp(requested, "1") != 0) return;
     static bool dumped = false;
     if (dumped) return;
     static const u32 ladderFrame = [] {
@@ -803,7 +831,19 @@ void RunGiLoopDcGainMeter(RHIDeviceBase* device, ResourceHandle indirectTex,
 
 } // namespace
 
-FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& inputs) {
+FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& requestedInputs) {
+    FusionInputs inputs = requestedInputs;
+    if (inputs.environment_only) {
+        // The post-GI display composite must not reconnect disabled GI edges.
+        inputs.ssgi_rg = {}; inputs.ssgi_tex = handles::INVALID_RESOURCE;
+        inputs.ddgi_rg = {}; inputs.ddgi_tex = handles::INVALID_RESOURCE;
+        inputs.spgi_rg = {}; inputs.spgi_tex = handles::INVALID_RESOURCE;
+        inputs.spgi_pass = nullptr;
+        inputs.ssao_rg = {}; inputs.ssao_tex = handles::INVALID_RESOURCE;
+        inputs.ddgi_specular_rg = {}; inputs.ddgi_specular_tex = handles::INVALID_RESOURCE;
+        inputs.ssr_rg = {}; inputs.ssr_tex = handles::INVALID_RESOURCE;
+        inputs.refl_specular_rg = {}; inputs.refl_specular_tex = handles::INVALID_RESOURCE;
+    }
     FusionOutputs outputs{};
     // Phase 1d（时钟统一，审计 §2.4 新发现①）: 三缓冲槽位从 cbIdx（swapchain
     // 槽）改为绝对帧号——cbIdx 与 frameCount%3 之间无同步不变量（resize/多
@@ -835,10 +875,10 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
     outputs.output_tex = fusion_output_[cbIdx];
 
     // Resolve helper
-    auto resolve = [&](rendergraph::RGResourceHandle h) -> ResourceHandle {
-        if (!h.IsValid()) return inputs.black_texture;
+    auto resolve = [&graph, blackTexture = inputs.black_texture](rendergraph::RGResourceHandle h) -> ResourceHandle {
+        if (!h.IsValid()) return blackTexture;
         auto* res = graph.GetResource(h);
-        return res ? res->GetPhysicalHandle() : inputs.black_texture;
+        return res ? res->GetPhysicalHandle() : blackTexture;
     };
 
     // --- Pass 1: FusionIndirect (full-res) ---
@@ -858,7 +898,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             data.output = builder.Write(indirectRG, ResourceState::RenderTarget);
 
             rendergraph::RGRenderPassDesc rpDesc;
-            rpDesc.colors.push_back({.texture = data.output, .loadOp = LoadAction::DontCare, .storeOp = StoreAction::Store, .clearColor = {math::v4{0, 0, 0, 0}}});
+            rpDesc.colors.push_back({.texture = data.output, .loadOp = LoadAction::Clear, .storeOp = StoreAction::Store, .clearColor = {math::v4{0, 0, 0, 0}}});
             builder.DeclareRenderPass(rpDesc);
         },
         [this, inputs, cbIdx, prevIdx, resolve](const IndirectData&, rendergraph::RenderGraphContext& context) {
@@ -1066,8 +1106,15 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             // TEMP diagnosis: readback the "black" texture — if the heap-
             // recycled contents are non-zero, the SPGI/AO fallback slots
             // sample recycled scene data instead of black.
+            static const bool blackTextureDiagnostic = [] {
+                const char* value = std::getenv("PRIMAL_FUSION_BLACK_TEXTURE_DIAGNOSTIC");
+                const bool enabled = !(value && std::strcmp(value, "0") == 0);
+                PRIMAL_LOG_STREAM(Info, "Render") << "[BLACK_TEX_DIAGNOSTIC] enabled="
+                    << unsigned(enabled) << " diagnostic_only=1" << std::endl;
+                return enabled;
+            }();
             static bool s_blackDumped = false;
-            if (!s_blackDumped && inputs.black_texture != handles::INVALID_RESOURCE) {
+            if (blackTextureDiagnostic && !s_blackDumped && inputs.black_texture != handles::INVALID_RESOURCE) {
                 s_blackDumped = true;
                 auto ch2 = device_->CreateCommandBuffer(CommandQueueType::Graphics);
                 auto* c3 = rhi::GetCommandBuffer(ch2);
@@ -1110,7 +1157,8 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::PostProcess,
         [primaryRG = inputs.primary_input_rg, volumeRG = inputs.volume_scatter_rg, ssrRG = inputs.ssr_rg,
-         specRG = inputs.ddgi_specular_rg, reflRG = inputs.refl_specular_rg, indirectRG, fusionOutRG](ComposeData& data, rendergraph::RenderGraphBuilder& builder) {
+         specRG = inputs.ddgi_specular_rg, reflRG = inputs.refl_specular_rg,
+         environmentRG = inputs.environment_specular_rg, environmentVisibilityRG=inputs.environment_visibility_rg, indirectRG, fusionOutRG](ComposeData& data, rendergraph::RenderGraphBuilder& builder) {
             builder.SideEffect(); // prevent RG culling
             if (primaryRG.IsValid()) builder.Read(primaryRG, ResourceState::ShaderResource);
             builder.Read(indirectRG, ResourceState::ShaderResource);
@@ -1118,10 +1166,12 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             if (ssrRG.IsValid()) builder.Read(ssrRG, ResourceState::ShaderResource);
             if (specRG.IsValid()) builder.Read(specRG, ResourceState::ShaderResource);
             if (reflRG.IsValid()) builder.Read(reflRG, ResourceState::ShaderResource);
+            if (environmentRG.IsValid()) builder.Read(environmentRG, ResourceState::ShaderResource);
+            if (environmentVisibilityRG.IsValid()) builder.Read(environmentVisibilityRG,ResourceState::ShaderResource);
             data.output = builder.Write(fusionOutRG, ResourceState::RenderTarget);
 
             rendergraph::RGRenderPassDesc rpDesc;
-            rpDesc.colors.push_back({.texture = data.output, .loadOp = LoadAction::DontCare, .storeOp = StoreAction::Store, .clearColor = {math::v4{0, 0, 0, 1}}});
+            rpDesc.colors.push_back({.texture = data.output, .loadOp = LoadAction::Clear, .storeOp = StoreAction::Store, .clearColor = {math::v4{0, 0, 0, 1}}});
             builder.DeclareRenderPass(rpDesc);
         },
         [this, inputs, cbIdx, indirectTex = indirect_output_[cbIdx], resolve](const ComposeData&, rendergraph::RenderGraphContext& context) {
@@ -1166,14 +1216,39 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             if (albedoTex == handles::INVALID_RESOURCE) albedoTex = inputs.black_texture;
 
             const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
-            const u32 paramCount = isVk ? 9 : 7;
+            const u32 paramCount = isVk ? 12 : 7;
             // [R4/R5] 屏幕外 specular 输入（ReflSpecularTrace）；缺席 → black
             //（合成式退化为 v1：SSR + glossy relay）。
             ResourceHandle reflTex = inputs.refl_specular_tex;
             if (reflTex == handles::INVALID_RESOURCE && inputs.refl_specular_rg.IsValid())
                 reflTex = resolve(inputs.refl_specular_rg);
             if (reflTex == handles::INVALID_RESOURCE) reflTex = inputs.black_texture;
-            DescData params[9] = {
+            ResourceHandle environmentTex = inputs.environment_specular_tex;
+            if (environmentTex == handles::INVALID_RESOURCE && inputs.environment_specular_rg.IsValid())
+                environmentTex = resolve(inputs.environment_specular_rg);
+            const bool environmentValid = environmentTex != handles::INVALID_RESOURCE && environmentTex != inputs.black_texture;
+            if (!environmentValid) environmentTex = inputs.black_texture;
+            if (isVk) {
+                // This display-only switch never changes the direct radiance or GI update inputs.
+                static const float environmentScale = [] {
+                    const char* value = std::getenv("PRIMAL_IBL_SPECULAR_SCALE");
+                    const float parsed = value ? std::strtof(value, nullptr) : 0.5f;
+                    return std::isfinite(parsed) ? std::max(0.0f, parsed) : 0.5f;
+                }();
+                if (auto* mapped = static_cast<math::v4*>(device_->MapBuffer(environment_params_[cbIdx]))) {
+                    *mapped = math::v4{environmentValid ? 1.0f : 0.0f, environmentScale,
+                                       inputs.environment_only ? 1.0f : 0.0f, inputs.environment_visibility_required ? 1.0f : 0.0f};
+                    device_->UnmapBuffer(environment_params_[cbIdx]);
+                } else {
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[EnvironmentVisibility] composite parameters unavailable" << std::endl;
+                    return; // Clear attachment remains black; never reuse stale mask policy.
+                }
+            }
+            ResourceHandle environmentVisibility=inputs.environment_visibility_tex;
+            if(environmentVisibility==handles::INVALID_RESOURCE && inputs.environment_visibility_rg.IsValid())
+                environmentVisibility=resolve(inputs.environment_visibility_rg);
+            if(environmentVisibility==handles::INVALID_RESOURCE) environmentVisibility=inputs.black_texture;
+            DescData params[12] = {
                 {0, DescriptorType::SampledImage, inputs.primary_input_tex},
                 {1, DescriptorType::SampledImage, indirectTex},
                 {2, DescriptorType::SampledImage, volTex},
@@ -1183,6 +1258,9 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                 {6, DescriptorType::SampledImage, specTex},
                 {7, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},
                 {8, DescriptorType::SampledImage, reflTex},
+                {9, DescriptorType::SampledImage, environmentTex},
+                {10, DescriptorType::UniformBuffer, environment_params_[cbIdx]},
+                {11, DescriptorType::SampledImage, environmentVisibility},
             };
             // Capture the exact handles that reach the live FusionComposite
             // descriptor set.  The later GI_ROI_AUDIT pass consumes this
@@ -1198,6 +1276,10 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                     roi_audit_composite_bound_frame_[cbIdx] = inputs.frame_index;
                     roi_audit_composite_bound_valid_[cbIdx] = true;
                 }
+            }
+            if(isVk && lumencompare::enabled && lumencompare::Selected("FusionComposite.Inputs")) {
+                for(u32 b=0;b<12;++b) environment_audit_inputs_[cbIdx][b]=params[b].resource;
+                environment_audit_frame_[cbIdx]=inputs.frame_index;
             }
             UpdateDesc(device_, composite_ds_[cbIdx], params, paramCount);
             cmd->BindGraphicsPipeline(composite_pipeline_);
@@ -1355,7 +1437,9 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
     if (roiPrefix && roiPrefix[0] && device_->GetPlatform()==RHIPlatform::Vulkan) {
         if (roi_audit_queued_ && !roi_audit_dumped_ &&
             inputs.frame_index>=roi_audit_frame_+3u && cbIdx==roi_audit_slot_) {
-            bool complete=true;
+            // The legacy 13-source replay does not capture the new environment
+            // texture/parameters. Preserve its data but never certify it complete.
+            bool complete=!roi_audit_environment_unsupported_;
             bool beginEndSubmitChecked=false;
             bool completionChecked=false;
             bool explicitHostDependency=false;
@@ -1414,7 +1498,8 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                         static_cast<unsigned long long>(source.bound_resource),source.binding,
                         source.layout?source.layout:"unknown",source.source_identity?source.source_identity:"unknown");
                 }
-                std::fprintf(meta,"]}\n");std::fclose(meta);
+                std::fprintf(meta,"],\"environment_composite_replay_supported\":%s,\"coverage_note\":\"legacy replay excludes EnvironmentSpecular and EnvironmentParams; use pass capture for these inputs\"}\n",
+                    roi_audit_environment_unsupported_ ? "false" : "true");std::fclose(meta);
             } else complete=false;
             roi_audit_dumped_=true;
             PRIMAL_LOG_STREAM(Error,"Render") << "[GI_ROI_AUDIT] frame=" << roi_audit_frame_
@@ -1438,6 +1523,8 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                         if (h.IsValid()) builder.Read(h,ResourceState::CopySource);
                 },
                 [this,inputs,cbIdx,resolve](const RoiAuditData&,rendergraph::RenderGraphContext& context) {
+                    roi_audit_environment_unsupported_ = inputs.environment_specular_rg.IsValid() ||
+                        inputs.environment_specular_tex != handles::INVALID_RESOURCE;
                     struct Source {
                         const char* name;
                         ResourceHandle tex;
@@ -1559,6 +1646,25 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                 });
         }
     }
+    passcapture::Add(graph, indirectRG, "indirect", inputs.frame_index);
+    passcapture::Add(graph, fusionOutRG, "scene", inputs.frame_index);
+    if(device_->GetPlatform()==RHIPlatform::Vulkan && lumencompare::enabled &&
+       lumencompare::Selected("FusionComposite.Inputs")) {
+        struct EnvironmentAuditData {};
+        graph.AddPass<EnvironmentAuditData>("FusionComposite.Inputs",rendergraph::RGPassType::Compute,rendergraph::RGPassCategory::Lighting,
+            [fusionOutRG](EnvironmentAuditData&,rendergraph::RenderGraphBuilder& b){b.SideEffect();b.Read(fusionOutRG,ResourceState::ShaderResource);},
+            [this,cbIdx,frame=inputs.frame_index,black=inputs.black_texture,only=inputs.environment_only](const EnvironmentAuditData&,rendergraph::RenderGraphContext& ctx){
+                if(environment_audit_frame_[cbIdx]!=frame)return;
+                lumencompare::Output(device_,ctx.cmdBuffer,"FusionComposite.Inputs","EnvironmentParams",environment_params_[cbIdx],true,ResourceState::ShaderResource);
+                if(!only) lumencompare::Output(device_,ctx.cmdBuffer,"FusionComposite.Inputs","GiGain",indirect_gain_cb_[cbIdx],true,ResourceState::ShaderResource);
+                const auto directory=std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR"))/("frame-"+std::to_string(lumencompare::ordinal));
+                std::filesystem::create_directories(directory);std::ofstream meta(directory/"environment-composite-inputs.json");
+                meta<<"{\"frame\":"<<frame<<",\"bindings\":[";
+                for(u32 i=0;i<12;++i)meta<<(i?",":"")<<"{\"binding\":"<<i<<",\"resource\":"<<environment_audit_inputs_[cbIdx][i]<<"}";
+                meta<<"],\"black_resource\":"<<black<<",\"identity_volume_resource\":"<<volume_identity_tex_<<"}\n";
+            });
+    }
+
     return outputs;
 }
 

@@ -32,6 +32,11 @@
 //   4 DEPTH_FILL — identical rays/pdf to mode 0; Vulkan depth update fills
 //         never-sampled octahedral texels from the nearest observed texel.
 //
+//   7 OCT_STRATIFIED — equal 8x8 UV strata, frame-dependent 2D hashed
+//         jitter. At 128 rays every cell gets two; pdf = length(q)^3/4.
+//         SH uses the returned spherical PDF. Depth uses Jacobian-weighted
+//         within-cell moments (a finite-sample self-normalized ratio).
+//
 // Also consumed by DDGIUpdateDepth, which bins the same traced directions.
 
 #ifndef PROBE_SAMPLE_LIB_GLSL
@@ -43,6 +48,34 @@
 #define DDGI_RAY_SAMPLE_STRATIFIED 3
 #define DDGI_RAY_SAMPLE_DEPTH_FILL 4
 #define DDGI_RAY_SAMPLE_DEPTH_ONLY 5
+#define DDGI_RAY_SAMPLE_OCT_STRATIFIED 7
+
+// Separate integer streams for the two UV dimensions; no correlated golden
+// ratio coordinates. uint operations intentionally wrap modulo 2^32.
+uint ddgiOctSampleHash(uint x) {
+    x ^= x >> 16u; x *= 0x7feb352du;
+    x ^= x >> 15u; x *= 0x846ca68bu;
+    return x ^ (x >> 16u);
+}
+
+// Equal UV strata, not equal solid angle: dOmega/dUV = 4/length(q)^3.
+// For N divisible by 64 each cell receives N/64 samples (128 => two).
+vec4 ddgiOctStratifiedSample(uint rayIndex, uint rayCount, uint frameIndex) {
+    uint cell = rayIndex / (rayCount / 64u);
+    uint seed = ddgiOctSampleHash(frameIndex ^ 0x9e3779b9u) ^
+                ddgiOctSampleHash(rayIndex ^ 0x85ebca6bu);
+    // 18-bit open midpoints survive float32 cell addition without landing
+    // exactly on the next cell boundary (including UV=1).
+    vec2 jitter = (vec2(ddgiOctSampleHash(seed ^ 0x68bc21ebu) >> 14u,
+                        ddgiOctSampleHash(seed ^ 0x02e5be93u) >> 14u) + 0.5) / 262144.0;
+    vec2 uv = (vec2(cell % 8u, cell / 8u) + jitter) / 8.0;
+    vec2 oct = uv * 2.0 - 1.0;
+    vec3 q = vec3(oct, 1.0 - abs(oct.x) - abs(oct.y));
+    if (q.z < 0.0)
+        q.xy = (1.0 - abs(q.yx)) * mix(vec2(-1.0), vec2(1.0), greaterThanEqual(q.xy, vec2(0.0)));
+    float qLength = length(q);
+    return vec4(q / qLength, qLength * qLength * qLength * 0.25);
+}
 
 // dir.xyz = sampled direction (unit), dir.w = pdf(dir).
 // toLight: unit vector from surfaces toward the directional light
@@ -50,6 +83,13 @@
 // for its analytic NdotL term).
 vec4 ddgiSampleRayDirection(uint rayIndex, uint rayCount, uint frameIndex,
                             uint mode, vec3 toLight) {
+    if (mode == DDGI_RAY_SAMPLE_OCT_STRATIFIED) {
+        if (rayCount >= 64u && rayCount % 64u == 0u)
+            return ddgiOctStratifiedSample(rayIndex, rayCount, frameIndex);
+        // A partial oct grid is not the advertised global PDF. Keep a valid
+        // uniform fallback if a diagnostic caller uses a non-grid ray count.
+        mode = DDGI_RAY_SAMPLE_UNIFORM;
+    }
     const float INV_PHI = 0.6180339887498948482;
     const float TWO_PI  = 6.28318530717958647692;
 

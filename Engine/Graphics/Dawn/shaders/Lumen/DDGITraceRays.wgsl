@@ -354,7 +354,12 @@ fn shDot4(c: array<vec3<f32>, 4>, d: vec3<f32>) -> vec3<f32> {
 // Outside the probe grid: returns vec3(0) — no prev bounce contribution.
 // This naturally handles hits outside the DDGI volume (e.g. far-away sky
 // occluders); canonical DDGI simply has no prior bounce data there.
+const DDGI_HISTORY_LEGACY_RADIANCE: f32 = 0.0;
+const DDGI_HISTORY_DISABLED: f32 = 1.0;
+const DDGI_HISTORY_LAMBERT_DIFFUSE: f32 = 2.0;
 fn samplePrevProbeGrid(pos: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
+    if (volume.SkyColor.w == DDGI_HISTORY_DISABLED) { return vec3<f32>(0.0); }
+    let diffuseHistory = volume.SkyColor.w == DDGI_HISTORY_LAMBERT_DIFFUSE;
     let origin: vec3<f32> = volume.ProbeOrigin.xyz;
     let spacing: f32 = volume.ProbeSpacing;
     let counts: vec3<u32> = ddgiGetProbeCounts(volume);
@@ -386,13 +391,19 @@ fn samplePrevProbeGrid(pos: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
                 irradiance_history[cb_i + 1u],
                 irradiance_history[cb_i + 2u]);
         }
+        // SH4 packed layout is unchanged; normalized Lambert convolution.
+        if (diffuseHistory) {
+            for (var i: u32 = 1u; i < 4u; i++) { sh[i] *= (2.0 / 3.0); }
+        }
         let irradiance: vec3<f32> = shDot4(sh, N);
         result = result + irradiance * tet.bw[p];
         totalWeight = totalWeight + tet.bw[p];
     }
 
     if (totalWeight > 0.0) {
-        return result / totalWeight;
+        let value = result / totalWeight;
+        if (diffuseHistory) { return max(value, vec3<f32>(0.0)); }
+        return value;
     }
     return vec3<f32>(0.0);
 }

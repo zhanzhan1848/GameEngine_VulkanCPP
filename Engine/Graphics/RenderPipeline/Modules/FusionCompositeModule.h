@@ -12,6 +12,14 @@ struct FusionInputs {
     // Scene color (deferred output or raw albedo)
     rendergraph::RGResourceHandle primary_input_rg{};
     rhi::ResourceHandle primary_input_tex{rhi::handles::INVALID_RESOURCE};
+    // Display-only environment reflection, composed after GI and before volume attenuation.
+    rendergraph::RGResourceHandle environment_specular_rg{};
+    rhi::ResourceHandle environment_specular_tex{rhi::handles::INVALID_RESOURCE};
+    rendergraph::RGResourceHandle environment_visibility_rg{};
+    rhi::ResourceHandle environment_visibility_tex{rhi::handles::INVALID_RESOURCE};
+    bool environment_visibility_required = false;
+    // Keep environment visible when GI fusion is disabled, without restoring GI inputs.
+    bool environment_only = false;
 
     // GI textures (may be invalid if feature disabled)
     rendergraph::RGResourceHandle ssgi_rg{};
@@ -101,6 +109,8 @@ public:
     FusionOutputs AddPasses(rendergraph::RenderGraph& graph, const FusionInputs& inputs);
 
 private:
+    rhi::ResourceHandle environment_audit_inputs_[3][12]{};
+    u32 environment_audit_frame_[3]{~u32(0),~u32(0),~u32(0)};
     static constexpr u32 kRoiAuditSourceCount = 13;
     static constexpr u32 kRoiAuditCompositeBindingCount = 9;
 
@@ -120,6 +130,7 @@ private:
         rhi::DataFormat runtime_format{rhi::DataFormat::Unknown};
     };
     RoiAuditSource roi_audit_sources_[kRoiAuditSourceCount]{};
+    bool roi_audit_environment_unsupported_{false};
     // Captured at the point where FusionComposite's descriptor params are
     // assembled.  The later RG readback pass consumes these exact handles;
     // it never reconstructs them from FusionInputs or guessed formats.
@@ -195,6 +206,11 @@ private:
 
     // 1x1 identity texture for volume scatter fallback: RGBA = (0,0,0,1)
     rhi::ResourceHandle volume_identity_tex_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle environment_params_[3]{
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE
+    };
 
     // PRIMAL_IND_ASYNC=1 诊断：无同步污染的 indirect 条带统计读回环。
     // 拷贝挂进本帧命令缓冲，槽位随 cbIdx 三轮转——帧 N 映射槽 N%3 时其内容

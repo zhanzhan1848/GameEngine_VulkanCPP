@@ -15,6 +15,7 @@
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 #include "../RHI/Platforms/Vulkan/VulkanDevice.h"
 #include "../RHI/Platforms/Vulkan/VulkanTexture.h"
+#include "../RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
 #endif
 #include "../../Content/ContentToEngine.h"
 #include "../../Utilities/IOStream.h"
@@ -23,6 +24,8 @@
 #include <algorithm>
 #include <string>
 #include <functional>
+#include <cstdlib>
+#include <cstring>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
@@ -191,7 +194,7 @@ bool MaterialDataBuilder::BuildTextureArrays(
 
     if (!ctx.uniqueAlbedo.empty()) {
         // TODO: Pass actual command buffer
-        if (!CreateTextureArray(device, nullptr, ctx.uniqueAlbedo, "AlbedoTextureArray", outAlbedoArray)) {
+        if (!CreateTextureArray(device, nullptr, ctx.uniqueAlbedo, "AlbedoTextureArray", outAlbedoArray, TextureArrayChannel::Albedo)) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Failed to create albedo texture array" << std::endl;
             success = false;
         }
@@ -640,12 +643,68 @@ void MaterialDataBuilder::BuildTextureMapping(
 }
 
 // 🎨 NEW: Create texture array using BlitTexture
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+namespace {
+bool BuildCheckedVulkanAlbedoArray(rhi::RHIDeviceBase* device,rhi::RHICommandBuffer* provided,
+    const std::vector<rhi::ResourceHandle>& sources,rhi::TextureDesc desc,rhi::ResourceHandle& output) {
+    using namespace rhi;
+    auto& vk=static_cast<VulkanDevice&>(*device);
+    desc.mipLevels=1;for(u32 n=std::max(desc.size.x,desc.size.y);n>1;n>>=1)++desc.mipLevels;
+    desc.usage=TextureUsage::ShaderResource|TextureUsage::CopySource|TextureUsage::CopyDest;
+    // Reject every unsupported source before recording any candidate work.
+    // A skipped layer would be undefined data at every generated mip.
+    for(size_t i=0;i<sources.size();++i) {
+        auto* source=vk.GetTexture(sources[i]);
+        if(!source||!source->OwnsImage()||!source->GetNativeImage())return false;
+        const auto& sd=source->GetTextureDesc();
+        const bool same=sd.size.x==desc.size.x&&sd.size.y==desc.size.y;
+        const bool placeholder=i==0&&sd.size.x==1&&sd.size.y==1;
+        if(sd.type!=TextureType::Texture2D||sd.size.z!=1||sd.format!=desc.format||
+           (!same&&!placeholder)||source->GetMipLayout(0)==VK_IMAGE_LAYOUT_UNDEFINED)return false;
+    }
+    CommandBufferHandle owned=handles::INVALID_COMMAND_BUFFER;
+    auto* cmd=provided;
+    if(!cmd) {
+        owned=device->CreateCommandBuffer(CommandQueueType::Graphics);
+        cmd=GetCommandBuffer(owned);
+        if(!cmd||!cmd->Begin()){if(owned!=handles::INVALID_COMMAND_BUFFER)device->DestroyCommandBuffer(owned);return false;}
+    }
+    auto& native=static_cast<VulkanCommandBuffer&>(*cmd);
+    if(!vulkan::CanGenerateAlbedoMipChain(vk,native,desc)) {
+        if(owned!=handles::INVALID_COMMAND_BUFFER)device->DestroyCommandBuffer(owned);
+        PRIMAL_LOG_STREAM(Error,"Render") << "[MaterialDataBuilder] checked Vulkan albedo mips unsupported format/queue/state";
+        return false;
+    }
+    const auto candidate=device->CreateTexture(desc);
+    if(candidate==handles::INVALID_RESOURCE){if(owned!=handles::INVALID_COMMAND_BUFFER)device->DestroyCommandBuffer(owned);return false;}
+    bool ok=true;
+    for(u32 layer=0;layer<sources.size()&&ok;++layer)
+        ok=vulkan::CopyAlbedoMip0Layer(vk,native,sources[layer],candidate,layer,layer==0);
+    if(ok)ok=vulkan::GenerateAlbedoMipChain(vk,native,candidate);
+    if(owned!=handles::INVALID_COMMAND_BUFFER) {
+        if(ok)ok=cmd->End()&&cmd->Submit(0)&&cmd->WaitForCompletion();
+        device->DestroyCommandBuffer(owned);
+    }
+    if(!ok) {
+        // For a supplied command buffer, false requires its owner to discard
+        // that recording; no partially initialized array may be published.
+        device->DestroyTexture(candidate);return false;
+    }
+    output=candidate;
+    PRIMAL_LOG_STREAM(Info,"Render") << "[MaterialDataBuilder] checked Vulkan albedo array layers=" << desc.arraySize
+        << " mips=" << desc.mipLevels << " format=" << u32(desc.format) << " mip0=exact-copy placeholder=explicit";
+    return true;
+}
+}
+#endif
+
 bool MaterialDataBuilder::CreateTextureArray(
     rhi::RHIDeviceBase* device,
     rhi::RHICommandBuffer* cmdBuffer,
     const std::vector<rhi::ResourceHandle>& sources,
     const char* name,
-    rhi::ResourceHandle& outArray
+    rhi::ResourceHandle& outArray,
+    TextureArrayChannel channel
 ) {
     if (sources.empty()) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] No source textures for " << name << std::endl;
@@ -725,6 +784,14 @@ bool MaterialDataBuilder::CreateTextureArray(
     arrayDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDest;
     arrayDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
 
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+    const char* mipPolicy=std::getenv("PRIMAL_VK_ALBEDO_MIPS");
+    if(device->GetPlatform()==rhi::RHIPlatform::Vulkan&&channel==TextureArrayChannel::Albedo&&
+       mipPolicy&&std::strcmp(mipPolicy,"1")==0)
+        return BuildCheckedVulkanAlbedoArray(device,cmdBuffer,sources,arrayDesc,outArray);
+#else
+    (void)channel;
+#endif
     outArray = device->CreateTexture(arrayDesc);
     if (outArray == rhi::handles::INVALID_RESOURCE) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Failed to create texture array '" << name << "'" << std::endl;

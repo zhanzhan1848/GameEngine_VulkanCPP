@@ -5,9 +5,11 @@
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/Utils/ShaderRegistry.h"
 #include "Graphics/Dawn/ShaderLoader.h"
+#include "Graphics/RenderGraph/LumenCompareCapture.h"
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <cmath>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::PostProcess {
@@ -34,6 +36,22 @@ static SamplerHandle s_LinearSampler = handles::INVALID_SAMPLER;
 static ResourceHandle s_HistoryTex[MAX_FRAMES] = {
     handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
 static bool s_HistoryInit[MAX_FRAMES] = {}; // false until first write to this slot
+struct RasterHistory {
+    u32 frame{~u32(0)};
+    math::v2 jitter{};
+    ResourceHandle depthSource{handles::INVALID_RESOURCE};
+    bool valid{false};
+};
+static RasterHistory s_RasterHistory[MAX_FRAMES];
+static u64 s_ResetGeneration=0;
+
+static math::m4x4 ClipJitter(math::v2 jitter) {
+    math::m4x4 j{};
+    for (int i=0;i<4;++i) j.columns[i][i]=1.0f;
+    j.columns[3].x=jitter.x;
+    j.columns[3].y=jitter.y;
+    return j;
+}
 static u32 s_TexWidth = 0;                  // dimensions the history textures were
 static u32 s_TexHeight = 0;                 // created with — recreate on resize
 
@@ -54,6 +72,7 @@ struct TAAGlobalsCPU {
     math::m4x4 currInvViewProj;  // this frame's inverse view-projection
     math::m4x4 prevViewProj;     // previous frame's view-projection
 };
+static_assert(sizeof(TAAGlobalsCPU)==160,"TAA shader uniform layout must remain unchanged");
 static ResourceHandle s_ParamsBuf[MAX_FRAMES] = {
     handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
 static void* s_ParamsMapped[MAX_FRAMES] = {};
@@ -125,21 +144,27 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
     // frame's dispatch may still be in flight is safe.
     bool needHistory = (s_HistoryTex[0] == handles::INVALID_RESOURCE) ||
                        (s_TexWidth != width) || (s_TexHeight != height);
+    for (u32 i=0;i<MAX_FRAMES;++i)
+        needHistory = needHistory || s_HistoryTex[i] == handles::INVALID_RESOURCE ||
+            s_OutputTex[i] == handles::INVALID_RESOURCE;
     if (needHistory) {
+        ++s_ResetGeneration;
         for (u32 i = 0; i < MAX_FRAMES; ++i) {
             if (s_HistoryTex[i] != handles::INVALID_RESOURCE) {
                 device.DestroyTexture(s_HistoryTex[i]);
                 s_HistoryTex[i] = handles::INVALID_RESOURCE;
             }
             s_HistoryInit[i] = false;
+            s_RasterHistory[i] = {};
         }
         s_TexWidth = width;
         s_TexHeight = height;
     }
 
-    if (s_Pipeline != handles::INVALID_PIPELINE) return true;
+    const bool createPipeline = s_Pipeline == handles::INVALID_PIPELINE;
 
     auto platform = device.GetPlatform();
+    if (createPipeline) {
     bool isBinary = false;
     std::vector<u8> shaderBytes = LoadShaderBytes(platform, &isBinary);
     if (shaderBytes.empty()) { PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Shader load failed" << std::endl; return false; }
@@ -184,6 +209,7 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
     // Linear sampler no longer needed — sampleBilinear uses textureLoad only.
     // Keeping the field for ABI but not creating/binding the sampler.
     s_LinearSampler = handles::INVALID_SAMPLER;
+    }
 
     // Allocate persistent history textures (size-tracked) + params buffers
     // and descriptor sets (size-independent, created once) per frame slot.
@@ -198,7 +224,8 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
     for (u32 i = 0; i < MAX_FRAMES; ++i) {
         if (needHistory) {
             s_HistoryTex[i] = device.CreateTexture(histDesc);
-            device.PrimeTextureLayout(s_HistoryTex[i]);  // P0-B 首帧 priming
+            if (s_HistoryTex[i] != handles::INVALID_RESOURCE)
+                device.PrimeTextureLayout(s_HistoryTex[i]);  // P0-B 首帧 priming
             // 输出纹理与 history 同尺寸同生命周期（见 s_OutputTex 注释）。
             TextureDesc outTexDesc = histDesc;
             outTexDesc.name = "TAA_Output";
@@ -206,7 +233,8 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
             if (s_OutputTex[i] != handles::INVALID_RESOURCE)
                 device.DestroyTexture(s_OutputTex[i]);
             s_OutputTex[i] = device.CreateTexture(outTexDesc);
-            device.PrimeTextureLayout(s_OutputTex[i]);  // P0-B 首帧 priming
+            if (s_OutputTex[i] != handles::INVALID_RESOURCE)
+                device.PrimeTextureLayout(s_OutputTex[i]);  // P0-B 首帧 priming
         }
 
         if (s_ParamsBuf[i] == handles::INVALID_RESOURCE) {
@@ -216,11 +244,13 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
             bufDesc.usage = GPUMemoryUsage::Dynamic;
             bufDesc.memoryUsage = GPUMemoryUsage::Dynamic;
             s_ParamsBuf[i] = device.CreateBuffer(bufDesc);
-            s_ParamsMapped[i] = device.MapBuffer(s_ParamsBuf[i], 0, sizeof(TAAGlobalsCPU));
         }
+        if (s_ParamsBuf[i] != handles::INVALID_RESOURCE && !s_ParamsMapped[i])
+            s_ParamsMapped[i] = device.MapBuffer(s_ParamsBuf[i], 0, sizeof(TAAGlobalsCPU));
 
-        if (s_SetPool[i][0] == handles::INVALID_RESOURCE) {
+        {
             for (u32 j = 0; j < MAX_SETS_PER_FRAME; ++j) {
+                if (s_SetPool[i][j] != handles::INVALID_DESCRIPTOR_SET) continue;
                 DescriptorSetDesc dsDesc;
                 dsDesc.layout = s_DSL;
                 s_SetPool[i][j] = device.CreateDescriptorSet(dsDesc);
@@ -228,7 +258,16 @@ static bool EnsurePipeline(RHIDeviceBase& device, u32 width, u32 height) {
         }
     }
 
-    return s_Pipeline != handles::INVALID_PIPELINE;
+    bool ready = s_Pipeline != handles::INVALID_PIPELINE &&
+        s_Layout != handles::INVALID_PIPELINE_LAYOUT && s_DSL != handles::INVALID_RESOURCE;
+    for (u32 i=0;i<MAX_FRAMES;++i) {
+        ready = ready && s_HistoryTex[i] != handles::INVALID_RESOURCE &&
+            s_OutputTex[i] != handles::INVALID_RESOURCE &&
+            s_ParamsBuf[i] != handles::INVALID_RESOURCE && s_ParamsMapped[i];
+        for (u32 j=0;j<MAX_SETS_PER_FRAME;++j)
+            ready = ready && s_SetPool[i][j] != handles::INVALID_DESCRIPTOR_SET;
+    }
+    return ready;
 }
 
 const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
@@ -238,7 +277,14 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
     u32 fi = frameIndex % MAX_FRAMES;
     s_SetIndex[fi] = 0;
 
-    EnsurePipeline(graph.GetDevice(), width, height);
+    if (!EnsurePipeline(graph.GetDevice(), width, height)) {
+        ResetTAAHistory();
+        return graph.AddPass<TAAPassData>("TAAUnavailable",RGPassType::Compute,RGPassCategory::PostProcess,
+            [inputHDR](TAAPassData& data,RenderGraphBuilder& builder) {
+                builder.Read(inputHDR,ResourceState::ShaderResource);
+                data.output=inputHDR;
+            },[](const TAAPassData&,RenderGraphContext&) {});
+    }
 
     // Depth reprojection is active when the caller supplied a valid previous
     // depth (DepthHistoryManager copy) AND the pipeline has the depth bindings
@@ -270,8 +316,14 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
     // prevDepth (DepthHistoryManager) is pipeline-internal and already sits in
     // ShaderResource after the end-of-frame copy — bound directly.
     RGResourceHandle currDepthRG;
+    RGResourceHandle prevDepthRG;
     if (depthActive) {
-        currDepthRG = graph.ImportResource("TAA_CurrDepth", depth->currDepth);
+        currDepthRG = graph.GetDevice().GetPlatform() == RHIPlatform::Vulkan && depth->current_depth_rg.IsValid()
+            ? depth->current_depth_rg : graph.ImportResource("TAA_CurrDepth", depth->currDepth);
+        if (graph.GetDevice().GetPlatform() == RHIPlatform::Vulkan)
+            prevDepthRG = graph.ImportResource("TAA_PrevDepth",depth->prevDepth);
+    } else if (depth && graph.GetDevice().GetPlatform() == RHIPlatform::Vulkan) {
+        currDepthRG = depth->current_depth_rg;
     }
 
     // First-ever frame: force history invalid for ALL slots to avoid reading garbage
@@ -308,6 +360,7 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             if (currDepthRG.IsValid()) {
                 builder.Read(currDepthRG, ResourceState::ShaderResource);
             }
+            if (prevDepthRG.IsValid()) builder.Read(prevDepthRG,ResourceState::ShaderResource);
 
             // 模块持有的输出以 ImportTexture 进图（绕开 RG 瞬态池的帧内
             // 复用——见 s_OutputTex 注释）。desc 必须携带：ToneMapping 用
@@ -333,7 +386,8 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
                                     ResourceState::Unknown),
                 ResourceState::UnorderedAccess);
         },
-        [inputHDR, velocityTexture, width, height, fi, histReadIdx, histValid, depthActive,
+        [inputHDR, velocityTexture, width, height, fi, histReadIdx, histValid, depthActive, frameIndex,
+         depthInputs = depth ? *depth : TAADepthInputs{},
          currDepthTex = depthActive ? depth->currDepth : handles::INVALID_RESOURCE,
          prevDepthTex = depthActive ? depth->prevDepth : handles::INVALID_RESOURCE,
          useDepthBindings = graph.GetDevice().GetPlatform() != RHIPlatform::Dawn]
@@ -345,6 +399,51 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
 
             auto& device = context.graph->GetDevice();
             auto* cmd = context.cmdBuffer;
+            const bool vulkan = device.GetPlatform() == RHIPlatform::Vulkan;
+            math::v2 actualJitter{};
+            bool actualRasterValid = false;
+            bool executionHistoryValid = histValid;
+            bool executionDepthActive = depthActive;
+            const auto previousRaster = s_RasterHistory[histReadIdx];
+            if (vulkan) {
+                actualRasterValid = depthInputs.require_raster_jitter && depthInputs.raster_jitter_provider &&
+                    depthInputs.raster_jitter_provider(actualJitter) &&
+                    std::isfinite(actualJitter.x) && std::isfinite(actualJitter.y);
+                const auto& previous = s_RasterHistory[histReadIdx];
+                u32 cw=0,ch=0,pw=0,ph=0;
+                const bool depthSizesValid = depthActive &&
+                    device.GetTextureSize(depthInputs.currDepth,cw,ch) &&
+                    device.GetTextureSize(depthInputs.prevDepth,pw,ph) &&
+                    cw==width && ch==height && pw==width && ph==height;
+                executionHistoryValid = histValid && s_HistoryInit[histReadIdx] &&
+                    frameIndex > 0 && previous.frame == frameIndex-1;
+                if (depthInputs.require_raster_jitter) {
+                    executionHistoryValid = executionHistoryValid && actualRasterValid &&
+                        depthSizesValid && previous.valid &&
+                        depthInputs.previous_depth_frame == previous.frame &&
+                        previous.depthSource == depthInputs.currDepth;
+                }
+                executionDepthActive = depthActive && (!depthInputs.require_raster_jitter || executionHistoryValid);
+                if (!s_ParamsMapped[fi]) {
+                    s_HistoryInit[fi] = false;
+                    s_RasterHistory[fi] = {};
+                    return;
+                }
+                auto* p = static_cast<TAAGlobalsCPU*>(s_ParamsMapped[fi]);
+                p->invHistoryValid = executionHistoryValid ? 0.0f : 1.0f;
+                p->depthValid = executionDepthActive ? 1u : 0u;
+                if (executionDepthActive && depthInputs.require_raster_jitter) {
+                    p->currInvViewProj = depthInputs.currInvViewProj *
+                        ClipJitter(math::v2{-actualJitter.x,-actualJitter.y});
+                    p->prevViewProj = ClipJitter(previous.jitter) * depthInputs.prevViewProj;
+                }
+                device.SetBufferDirtySize(s_ParamsBuf[fi],sizeof(TAAGlobalsCPU));
+                cmd->MemoryBarrier(PipelineStage::Host,PipelineStage::ComputeShader,
+                    AccessFlag::HostWrite,AccessFlag::ShaderRead);
+                // Do not leave an old stamp valid if execution aborts below.
+                s_RasterHistory[fi] = {};
+                s_HistoryInit[fi] = false;
+            }
 
             auto* inRes = context.graph->GetResource(inputHDR);
             ResourceHandle inHandle = inRes ? inRes->GetPhysicalHandle() : handles::INVALID_RESOURCE;
@@ -358,7 +457,7 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             // sampled image is a validation error even though the shader never
             // samples it (invHistoryValid branch). Bind the input texture as a
             // stand-in instead; the result is identical (alpha=1 passthrough).
-            ResourceHandle histHandle = histValid ? s_HistoryTex[histReadIdx] : inHandle;
+            ResourceHandle histHandle = executionHistoryValid ? s_HistoryTex[histReadIdx] : inHandle;
             // Write target is the current frame's slot — distinct from histHandle
             // (read slot) to avoid write-after-read on the same texture within
             // one command buffer.
@@ -395,10 +494,10 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             // depth reprojection is inactive) — the layout declares them on
             // Vulkan/Metal and the shader gates actual reads on depthValid.
             DescriptorImageInfo currDepthInfo;
-            currDepthInfo.imageView = depthActive ? currDepthTex : inHandle;
+            currDepthInfo.imageView = executionDepthActive ? currDepthTex : inHandle;
             currDepthInfo.imageLayout = ResourceState::ShaderResource;
             DescriptorImageInfo prevDepthInfo;
-            prevDepthInfo.imageView = depthActive ? prevDepthTex : inHandle;
+            prevDepthInfo.imageView = executionDepthActive ? prevDepthTex : inHandle;
             prevDepthInfo.imageLayout = ResourceState::ShaderResource;
 
             WriteDescriptorSet writes[7] = {};
@@ -423,6 +522,39 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             }
 
             device.UpdateDescriptorSets(writeCount, writes);
+
+            if (vulkan && lumencompare::enabled && lumencompare::Selected("TAAPass.Inputs")) {
+                lumencompare::Output(&device,cmd,"TAAPass.Inputs","Parameters",s_ParamsBuf[fi],true,ResourceState::ShaderResource);
+                lumencompare::Output(&device,cmd,"TAAPass.Inputs","CurrentHDR",inHandle,false,ResourceState::ShaderResource);
+                lumencompare::Output(&device,cmd,"TAAPass.Inputs","HistoryColor",histHandle,false,ResourceState::ShaderResource);
+                lumencompare::Output(&device,cmd,"TAAPass.Inputs","Velocity",velHandle,false,ResourceState::ShaderResource);
+                if (executionDepthActive) {
+                    lumencompare::Output(&device,cmd,"TAAPass.Inputs","CurrentDepth",currDepthTex,false,ResourceState::ShaderResource);
+                    lumencompare::Output(&device,cmd,"TAAPass.Inputs","PreviousDepth",prevDepthTex,false,ResourceState::ShaderResource);
+                }
+                const auto directory=std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR"))/
+                    ("frame-"+std::to_string(lumencompare::ordinal));
+                std::filesystem::create_directories(directory);
+                std::ofstream metadata(directory/"taa-inputs.json");
+                metadata << std::setprecision(9) << "{\"schema\":1,\"engine_frame\":" << frameIndex
+                    << ",\"history_write_slot\":" << fi << ",\"history_read_slot\":" << histReadIdx
+                    << ",\"history_written_frame\":" << previousRaster.frame
+                    << ",\"previous_depth_frame\":" << depthInputs.previous_depth_frame
+                    << ",\"reset_generation\":" << s_ResetGeneration
+                    << ",\"require_raster_jitter\":" << depthInputs.require_raster_jitter
+                    << ",\"current_raster_valid\":" << actualRasterValid
+                    << ",\"history_valid\":" << executionHistoryValid
+                    << ",\"depth_valid\":" << executionDepthActive
+                    << ",\"width\":" << width << ",\"height\":" << height
+                    << ",\"current_jitter_ndc\":[" << actualJitter.x << ',' << actualJitter.y
+                    << "],\"previous_jitter_ndc\":[" << previousRaster.jitter.x << ',' << previousRaster.jitter.y
+                    << "],\"current_hdr_handle\":" << inHandle << ",\"history_color_handle\":" << histHandle
+                    << ",\"velocity_handle\":" << velHandle << ",\"current_depth_source\":" << depthInputs.currDepth
+                    << ",\"previous_history_depth_source\":" << previousRaster.depthSource
+                    << ",\"bound_current_depth\":" << currDepthInfo.imageView
+                    << ",\"bound_previous_depth\":" << prevDepthInfo.imageView
+                    << ",\"matrix_source\":\"execution_actual_raster_and_recorded_color_depth_history\"}\n";
+            }
 
             cmd->BindComputePipeline(s_Pipeline);
             cmd->BindDescriptorSets(PipelineBindPoint::Compute, s_Layout, 0, 1, &ds, 0, nullptr);
@@ -466,15 +598,20 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             cmd->InsertBarrier(&histBarrier, 1);
 
             s_HistoryInit[fi] = true;
+            if (vulkan) {
+                s_RasterHistory[fi] = {frameIndex,actualJitter,depthInputs.currDepth,actualRasterValid};
+            }
         }
     );
 }
 
 void ResetTAAHistory() {
+    ++s_ResetGeneration;
     // Forcing re-init causes next TAA pass to skip blending with the stale
     // history texture and overwrite it with the current frame's HDR.
     for (u32 i = 0u; i < MAX_FRAMES; ++i) {
         s_HistoryInit[i] = false;
+        s_RasterHistory[i] = {};
     }
     s_LastFrameIndex = ~0u;
 }

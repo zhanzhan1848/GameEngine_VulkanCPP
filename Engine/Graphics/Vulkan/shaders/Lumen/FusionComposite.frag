@@ -35,6 +35,12 @@ layout(set = 0, binding = 5) uniform texture2D albedoTex;
 layout(set = 0, binding = 6) uniform texture2D ddgiSpecular;
 layout(set = 0, binding = 7) uniform sampler defaultSampler;
 layout(set = 0, binding = 8) uniform texture2D reflSpecular;
+layout(set = 0, binding = 9) uniform texture2D environmentSpecular;
+layout(set = 0, binding = 10) uniform EnvironmentParams {
+    vec4 environmentParams; // x=valid, y=display scale, z=environment-only, w=measured visibility required
+};
+
+layout(set = 0, binding = 11) uniform texture2D environmentVisibility;
 
 // envBRDFApproxAB moved to ShaderLib/EncodeLib.glsl (axis refactor X1):
 // returns the (scale, bias) pair, specular = F0 * AB.x + AB.y.
@@ -48,6 +54,7 @@ void fusion_composite() {
     vec3 albedo   = texture(sampler2D(albedoTex,     defaultSampler), inUv).rgb;
     vec4 ddgiSpec = texture(sampler2D(ddgiSpecular,  defaultSampler), inUv);
     vec4 reflOff  = texture(sampler2D(reflSpecular,  defaultSampler), inUv);
+    vec4 environment = texture(sampler2D(environmentSpecular, defaultSampler), inUv);
 
     float roughness = clamp(orm.g, 0.04, 1.0);
     float metallic  = orm.b;
@@ -73,9 +80,19 @@ void fusion_composite() {
     //   reflection = ssr.rgb + (1-ssrW)·ddgiGlossy。
     float ssrW = clamp(ssr.a, 0.0, 1.0);
     float offW = clamp(reflOff.a, 0.0, 1.0);
+    // Alpha marks an evaluated surface, not brightness. Scale=0 must not
+    // silently switch the fallback to DDGI glossy during display-only A/B.
+    float environmentWeight = environmentParams.x * clamp(environment.a, 0.0, 1.0);
+    float environmentGeometryVisibility = environmentParams.w > 0.5
+        ? clamp(texture(sampler2D(environmentVisibility,defaultSampler),inUv).r,0.0,1.0) : 1.0;
+    // Alpha retains ownership when occluded or unsupported. A zero result
+    // must not fall back to the unoccluded DDGI glossy/environment source.
+    environment.rgb *= environmentGeometryVisibility;
+
+    vec3 fallbackReflection = mix(ddgiGlossy, environment.rgb * environmentParams.y, environmentWeight);
     vec3 reflection = ssr.rgb
                     + reflOff.rgb * offW * (1.0 - ssrW)
-                    + ddgiGlossy * (1.0 - ssrW) * (1.0 - offW);
+                    + fallbackReflection * (1.0 - ssrW) * (1.0 - offW);
 
     // Beer-Lambert: attenuate scene by transmittance, add scattered light.
     // Output HDR linear — tonemap is handled by FinalBlit (Blit.frag) to avoid
@@ -83,6 +100,10 @@ void fusion_composite() {
     // B10: (1-F)·(1-metallic) on the diffuse indirect — see Metal twin.
     vec3 F = F0 + (vec3(1.0) - F0) * pow(1.0 - NoV, 5.0);
     float kD = 1.0 - metallic;
+    if (environmentParams.z > 0.5) {
+        indirect = vec3(0.0);
+        reflection = environment.rgb * environmentParams.y * environmentWeight;
+    }
     vec3 result = (scene + indirect * kD * (vec3(1.0) - F) + reflection) * vol.a + vol.rgb;
     result = clamp(result, vec3(0.0), vec3(64.0));
 

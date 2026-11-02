@@ -466,14 +466,24 @@ void surface_cache_light_eval()
 
     // Read material data
     vec4 albedo = imageLoad(albedo_atlas, ivec2(atlas_uv));
-    if (albedo.a < 0.01) return;
+    const bool legacySurface = (flp.params.sc_params._pad & 1u) != 0u;
+    float depth = imageLoad(depth_atlas, ivec2(atlas_uv)).r;
+    uint transportBits = uint(round(clamp(albedo.a, 0.0, 1.0) * 255.0));
+    if (legacySurface) {
+        if (albedo.a < 0.01) return;
+    } else if ((transportBits & 128u) == 0u || isnan(depth) || isinf(depth) || depth < 0.0 ||
+               any(isnan(albedo)) || any(isinf(albedo))) {
+        // Invalid surface data must not leave a previous slot's radiance alive.
+        imageStore(lighting_out, ivec2(atlas_uv), vec4(0.0));
+        imageStore(nodirect_out, ivec2(atlas_uv), vec4(0.0));
+        return;
+    }
 
     // RGBA8 alpha is a compact material payload written by CardCapture:
     // bit7 validity, bits3..6 transmission UNorm4, bits0..2 thickness UNorm3.
     // Legacy/fallback opaque writers use exactly 0x80, while alpha=0 remains
     // invalid.  Decode via the quantized byte so Vulkan conversion rounding
     // cannot leak into the bit fields.
-    uint transportBits = uint(round(clamp(albedo.a, 0.0, 1.0) * 255.0));
     float transmission = float((transportBits >> 3u) & 0xFu) / 15.0;
     float thickness = float(transportBits & 0x7u) / 7.0;
     float backTransmittance = transmission * exp(-2.0 * thickness);
@@ -486,9 +496,8 @@ void surface_cache_light_eval()
     emissive = min(emissive, vec3(8.0));
 
     // Reconstruct the texel's surface point from the depth atlas (same recipe
-    // as the shadow pass). depth<=0 means never captured — the card midplane
-    // is the best guess left.
-    float depth = imageLoad(depth_atlas, ivec2(atlas_uv)).r;
+    // as the shadow pass). Nonnegative depth, including a genuinely measured
+    // zero-depth surface, is valid; negative depth is explicitly invalid.
     vec3 world_pos = cardTexelToWorld(atlas_uv, max(depth, 0.0), cards.data[card_idx]);
 
     // Inline per-texel lighting (replaces separate LightCull pass)

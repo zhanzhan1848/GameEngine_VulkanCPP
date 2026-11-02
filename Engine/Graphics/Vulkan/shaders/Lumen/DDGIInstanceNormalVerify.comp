@@ -1,0 +1,25 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "GeometryFirstHitGather.glsl"
+layout(local_size_x=64,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=28,std430) readonly buffer Owners { uint data[]; } owners;
+layout(set=0,binding=29,std430) buffer Normals { vec4 data[]; } normals;
+layout(set=0,binding=30,std430) buffer Verified { uint data[]; } verified;
+void main() {
+    uint id=gl_GlobalInvocationID.x;
+    if(id>=owners.data.length() || id>=normals.data.length() || id>=verified.data.length())return;
+    verified.data[id]=0u;
+    if(id>=geometryTriangles.data.length() || owners.data[id]>=geometryInstances.data.length())return;
+    GeometryTriangle tri=geometryTriangles.data[id];
+    GeometryInstance inst=geometryInstances.data[owners.data[id]];
+    vec3 localN=geometryTriangleNormal(tri.e1.xyz,tri.e2.xyz);
+    vec3 worldN=inst.inverse0.xyz*localN.x + inst.inverse1.xyz*localN.y + inst.inverse2.xyz*localN.z;
+    float worldNLength=length(worldN);
+    // A matching independently compiled helper is a necessary gate, not a
+    // claim about every production Gather compiler optimization. Real Gather
+    // output equivalence is separately exercised by the GPU fixture suite.
+    vec4 expected=vec4(localN,worldNLength);
+    bool finiteValue=!any(isnan(localN))&&!any(isinf(localN))&&!any(isnan(worldN))&&!any(isinf(worldN))&&
+        !isnan(worldNLength)&&!isinf(worldNLength)&&worldNLength>0.;
+    if(finiteValue && all(equal(floatBitsToUint(expected),floatBitsToUint(normals.data[id]))))verified.data[id]=1u;
+}

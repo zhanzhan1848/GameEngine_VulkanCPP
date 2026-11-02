@@ -354,7 +354,12 @@ vec3 shDot4(vec3 c[4], vec3 d) {
 // ----------------------------------------------------------------------------
 // Previous-frame probe grid sample at SDF hit position
 // ----------------------------------------------------------------------------
+const float DDGI_HISTORY_LEGACY_RADIANCE = 0.0;
+const float DDGI_HISTORY_DISABLED = 1.0;
+const float DDGI_HISTORY_LAMBERT_DIFFUSE = 2.0;
 vec3 samplePrevProbeGrid(vec3 pos, vec3 N) {
+    if (volume.SkyColor.w == DDGI_HISTORY_DISABLED) return vec3(0.0);
+    const bool diffuseHistory = volume.SkyColor.w == DDGI_HISTORY_LAMBERT_DIFFUSE;
     vec3 origin  = volume.ProbeOrigin.xyz;
     float spacing = volume.ProbeSpacing;
     uvec3 counts  = ddgiGetProbeCounts();
@@ -384,13 +389,18 @@ vec3 samplePrevProbeGrid(vec3 pos, vec3 N) {
                          irradiance_history[cb_i + 1u],
                          irradiance_history[cb_i + 2u]);
         }
+        // SH4 fallback keeps its existing storage/band limit. Lambert's
+        // normalized cosine kernel preserves L0 and scales L1 by 2/3.
+        if (diffuseHistory)
+            for (uint i = 1u; i < 4u; ++i) sh[i] *= (2.0 / 3.0);
         vec3 irradiance = shDot4(sh, N);
         result += irradiance * tet.bw[p];
         totalWeight += tet.bw[p];
     }
 
     if (totalWeight > 0.0) {
-        return result / totalWeight;
+        vec3 value = result / totalWeight;
+        return diffuseHistory ? max(value, vec3(0.0)) : value;
     }
     return vec3(0.0);
 }

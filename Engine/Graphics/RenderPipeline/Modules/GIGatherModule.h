@@ -1,8 +1,13 @@
 #pragma once
+#include "DDGITraversalAudit.h"
+#include "Graphics/Utilities/ComputeWorkgroupExperiment.h"
+#include "InstanceNormalCache.h"
+#include "InstanceNormalCachePolicy.h"
 
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
 #include "Graphics/Lumen/GICacheView.h"
+#include <functional>
 
 namespace primal::graphics {
 namespace rendergraph { class RenderGraph; }
@@ -46,6 +51,20 @@ struct GIGatherInputs {
     // this at the sentinel keep the legacy (cbIdx + 2) % 3 read slot.
     static constexpr u32 kFrameIndexUnset = 0xFFFFFFFFu;
     u32 frame_index = kFrameIndexUnset;
+    rhi::ResourceHandle geometry[4]{rhi::handles::INVALID_RESOURCE,rhi::handles::INVALID_RESOURCE,rhi::handles::INVALID_RESOURCE,rhi::handles::INVALID_RESOURCE};
+    u64 geometry_sizes[4]{};
+    bool geometry_ready=false;
+    u64 geometry_epoch=0,geometry_source_digest=0;
+    std::shared_ptr<const ray_geometry::InstanceNormalOwnerCertificate> geometry_normal_owners;
+    std::function<bool()> geometry_still_current;
+    std::function<bool()> geometry_compact_still_current;
+    rhi::ResourceHandle equal_box_buffer{rhi::handles::INVALID_RESOURCE};
+    u64 equal_box_size=0,equal_box_flags_hash=0,equal_box_payload_hash=0,equal_box_serial=0;
+    std::function<bool()> equal_box_still_current;
+    rhi::ResourceHandle geometry_upper{rhi::handles::INVALID_RESOURCE};
+    u64 geometry_upper_size=0, geometry_upper_original_hash=0, geometry_upper_candidate_hash=0;
+    std::function<bool()> geometry_upper_still_current;
+    std::function<bool(math::v2&)> raster_jitter_provider;
     rhi::ResourceHandle fallback_texture{rhi::handles::INVALID_RESOURCE};  // when ORM missing
 };
 
@@ -72,9 +91,101 @@ public:
     // gather 实际输出分辨率（Metal 全分辨率，Vulkan 维持半分辨率基线）。
     u32 GetGatherWidth() const { return gather_width_; }
     u32 GetGatherHeight() const { return gather_height_; }
+    bool RequiresGeometryConnections() const { return geometry_connections_enabled_; }
     bool IsInitialized() const { return pipeline_ != rhi::handles::INVALID_PIPELINE; }
+    void SetGeometryCompactTraversalEnabled(bool enabled) { compact_requested_=enabled && compact_pipeline_!=rhi::handles::INVALID_PIPELINE; compact_used_=false; }
+    bool WasCompactGeometryUsed() const { return compact_used_; }
+    void ResetGeometryCompactTraversalUsed() { compact_used_=false; }
+    void SetGeometryUpperBVHEnabled(bool enabled) { upper_requested_=enabled && upper_allowed_; upper_used_=false; }
+    bool WasUpperBVHUsed() const { return upper_used_; }
+    void ResetGeometryUpperBVHUsed() { upper_used_=false; }
+    void SetGeometryQueryKernelEnabled(bool enabled) {
+        query_requested_=enabled && query_pipeline_!=rhi::handles::INVALID_PIPELINE; query_used_=false;
+        if(!query_requested_)SetInstanceNormalCacheEnabled(false);
+    }
+    void SetInstanceNormalCacheEnabled(bool enabled){
+        normal_cache_requested_=enabled&&normal_cache_enabled_&&InstanceNormalCacheQueryReady(
+            query_requested_,query_pipeline_!=rhi::handles::INVALID_PIPELINE);
+        normal_cache_used_=false;
+    }
+    bool IsInstanceNormalCacheRequested()const{return normal_cache_requested_;}
+    bool WasInstanceNormalCacheUsed()const{return normal_cache_used_;}
+    void SetGeometryBoundsFirstEnabled(bool enabled) { bounds_requested_=enabled && bounds_pipeline_!=rhi::handles::INVALID_PIPELINE; bounds_used_=false; }
+    bool IsGeometryBoundsFirstRequested() const { return bounds_requested_; }
+    bool WasGeometryBoundsFirstUsed() const { return bounds_used_; }
+    void ResetGeometryBoundsFirstUsed() { bounds_used_=false; bounds_dispatch_=false; }
+    u64 GeometryBoundsFirstActiveShaderHash() const { return bounds_dispatch_ ? (pair_receipt_.actual ? pair_shader_hash_ : (bounds_used_ ? bounds_shader_hash_ : (payload_receipt_.actual ? payload_shader_hash_ : (equal_box_receipt_.actual ? equal_box_shader_hash_ : (workgroup_receipt_.actual ? workgroup_shader_hash_ : query_shader_hash_))))) : 0; }
+    // True when the dispatched shader includes query-kernel optimization, including bounds-first.
+    bool WasGeometryQueryKernelUsed() const { return query_used_; }
+    void ResetGeometryQueryKernelUsed() { query_used_=false; query_dispatch_=false; }
+    bool IsGeometryQueryKernelRequested() const { return query_requested_; }
+    u64 GeometryQueryKernelActiveShaderHash() const { return query_dispatch_ ? (pair_receipt_.actual ? pair_shader_hash_ : (bounds_used_ ? bounds_shader_hash_ : (payload_receipt_.actual ? payload_shader_hash_ : (equal_box_receipt_.actual ? equal_box_shader_hash_ : (workgroup_receipt_.actual ? workgroup_shader_hash_ : (query_used_ ? query_shader_hash_ : query_main_shader_hash_)))))) : 0; }
+
+    struct PayloadReceipt {bool requested=false,actual=false;u32 slot=0;u64 epoch=0,digest=0,shader_hash=0,sources[4]{};};
+    using PairReceipt=PayloadReceipt;
+    const PairReceipt& GetCrossRayPairReceipt() const {return pair_receipt_;}
+    void ResetCrossRayPairReceipt() {pair_receipt_={};}
+    const PayloadReceipt& GetInstancePayloadReceipt() const {return payload_receipt_;}
+    void ResetInstancePayloadReceipt() {payload_receipt_={};}
+    struct EqualBoxReceipt {bool requested=false,actual=false;u32 slot=0;u64 epoch=0,digest=0,payload_hash=0,flags_hash=0,buffer=0,bytes=0,serial=0,sources[4]{};};
+    const EqualBoxReceipt& GetEqualBoxReceipt() const {return equal_box_receipt_;}
+    void ResetEqualBoxReceipt() {equal_box_receipt_={};}
+    const workgroup_experiment::Receipt& GetWorkgroupReceipt() const { return workgroup_receipt_; }
 
 private:
+    PairReceipt pair_receipt_{};
+    bool pair_requested_=false,pair_env_requested_=false;u64 pair_shader_hash_=0;
+    rhi::ShaderHandle pair_shader_{rhi::handles::INVALID_SHADER};
+    rhi::PipelineHandle pair_pipeline_{rhi::handles::INVALID_PIPELINE};
+    PayloadReceipt payload_receipt_{};
+    bool payload_requested_=false,payload_env_requested_=false;
+    u64 payload_shader_hash_=0;
+    rhi::ShaderHandle payload_shader_{rhi::handles::INVALID_SHADER};
+    rhi::PipelineHandle payload_pipeline_{rhi::handles::INVALID_PIPELINE};
+    EqualBoxReceipt equal_box_receipt_{};
+    bool equal_box_requested_=false,equal_box_env_requested_=false;
+    u64 equal_box_shader_hash_=0;
+    rhi::ShaderHandle equal_box_shader_{rhi::handles::INVALID_SHADER};
+    rhi::PipelineHandle equal_box_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineLayoutHandle equal_box_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::DescriptorSetLayoutHandle equal_box_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    rhi::DescriptorSetHandle equal_box_sets_[3]{rhi::handles::INVALID_DESCRIPTOR_SET,rhi::handles::INVALID_DESCRIPTOR_SET,rhi::handles::INVALID_DESCRIPTOR_SET};
+    workgroup_experiment::Receipt workgroup_receipt_{};
+    u32 workgroup_requested_=0;
+    u64 workgroup_shader_hash_=0;
+    rhi::ShaderHandle workgroup_shader_{rhi::handles::INVALID_SHADER};
+    rhi::PipelineHandle workgroup_pipeline_{rhi::handles::INVALID_PIPELINE};
+    InstanceNormalCache normal_cache_;
+    bool normal_cache_enabled_=false,normal_cache_requested_=false,normal_cache_used_=false;
+    bool PrepareTraversalAudit(u32 nativeFrame,u32 slot);
+    bool traversal_audit_requested_=false, traversal_audit_attempted_=false;
+    u32 traversal_audit_frame_=119;
+    u64 traversal_shader_hash_=0, traversal_main_shader_hash_=0;
+    rhi::ShaderHandle traversal_shader_{rhi::handles::INVALID_SHADER};
+    rhi::PipelineHandle traversal_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::PipelineLayoutHandle traversal_layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
+    rhi::DescriptorSetLayoutHandle traversal_set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    rhi::DescriptorSetHandle traversal_set_{rhi::handles::INVALID_DESCRIPTOR_SET};
+    rhi::ResourceHandle traversal_cb_{rhi::handles::INVALID_RESOURCE},traversal_records_{rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle traversal_diffuse_{rhi::handles::INVALID_RESOURCE},traversal_specular_{rhi::handles::INVALID_RESOURCE};
+    traversal_audit::Selection traversal_selection_{};
+    std::vector<traversal_audit::Pixel> traversal_pixels_;
+    bool geometry_connections_enabled_=false;
+    bool compact_requested_=false, compact_used_=false;
+    bool upper_allowed_=false, upper_requested_=false, upper_used_=false;
+    bool bounds_requested_=false, bounds_used_=false, bounds_dispatch_=false;
+    u64 bounds_shader_hash_=0;
+    rhi::ShaderHandle bounds_shader_{rhi::handles::INVALID_SHADER};
+    rhi::PipelineHandle bounds_pipeline_{rhi::handles::INVALID_PIPELINE};
+    bool query_requested_=false, query_used_=false, query_dispatch_=false;
+    u64 query_shader_hash_=0, query_main_shader_hash_=0;
+    rhi::ShaderHandle query_shader_{rhi::handles::INVALID_SHADER};
+    rhi::PipelineHandle query_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::ShaderHandle compact_shader_{rhi::handles::INVALID_SHADER};
+    rhi::PipelineHandle compact_pipeline_{rhi::handles::INVALID_PIPELINE};
+    rhi::ShaderHandle connection_shader_{rhi::handles::INVALID_SHADER};
+    rhi::ResourceHandle connection_cb_[3]{rhi::handles::INVALID_RESOURCE,rhi::handles::INVALID_RESOURCE,rhi::handles::INVALID_RESOURCE};
+    rhi::ResourceHandle connection_unknown_cb_{rhi::handles::INVALID_RESOURCE};
     struct GatherAuditSource {
         rhi::ResourceHandle staging{rhi::handles::INVALID_RESOURCE};
         rhi::ResourceHandle resource{rhi::handles::INVALID_RESOURCE};

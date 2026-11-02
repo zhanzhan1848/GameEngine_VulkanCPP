@@ -1,4 +1,5 @@
 #include "GPUCullingPipeline.h"
+#include "Graphics/RenderGraph/LumenCompareCapture.h"
 #include "GPUDrivenDrawPipeline.h"
 #include "HZBSystem.h"
 #include "../RHI/Core/RHIDevice.h"
@@ -15,6 +16,8 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
@@ -143,6 +146,9 @@ bool GPUCullingPipeline::Initialize(rhi::RHIDeviceBase* device, const CullingCon
 
     device_ = device;
     config_ = config;
+    const char* cullDiagnostics=std::getenv("PRIMAL_VK_CULL_DIAGNOSTICS");
+    vk_cull_diagnostics_enabled_=device_->GetPlatform()!=rhi::RHIPlatform::Vulkan ||
+        !(cullDiagnostics && std::strcmp(cullDiagnostics,"0")==0);
 
     // T4.6.5 part 35.2: HZB occlusion culling now enabled on all platforms.
     // Prior hotfix (part 35.1) disabled it on Vulkan because Stage4's
@@ -163,6 +169,9 @@ bool GPUCullingPipeline::Initialize(rhi::RHIDeviceBase* device, const CullingCon
     }
     
     initialized_ = true;
+    if(device_->GetPlatform()==rhi::RHIPlatform::Vulkan)
+        PRIMAL_LOG_STREAM(Info,"Render") << "[VK_CULL_DIAGNOSTICS] enabled=" << u32(vk_cull_diagnostics_enabled_)
+            << " policy=initialization-time diagnostic_only=1" << std::endl;
     return true;
 }
 
@@ -446,13 +455,15 @@ bool GPUCullingPipeline::CreateBuffers() {
 
     // T4.6.5 part 35.4: triple-buffered host-visible staging for indirect_args.
     // Size matches indirectDesc (5 u32 + padding = 20 bytes; round to 32).
-    for (u32 i = 0; i < 3; ++i) {
-        rhi::BufferDesc readbackDesc{};
-        readbackDesc.size = 32;
-        readbackDesc.type = rhi::BufferType::Raw;
-        readbackDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
-        readbackDesc.bindFlags = static_cast<u32>(rhi::BufferUsageFlags::TransferDst);
-        indirect_readback_staging_[i] = device_->CreateBuffer(readbackDesc);
+    if(vk_cull_diagnostics_enabled_) {
+        for (u32 i = 0; i < 3; ++i) {
+            rhi::BufferDesc readbackDesc{};
+            readbackDesc.size = 32;
+            readbackDesc.type = rhi::BufferType::Raw;
+            readbackDesc.memoryUsage = rhi::GPUMemoryUsage::Readback;
+            readbackDesc.bindFlags = static_cast<u32>(rhi::BufferUsageFlags::TransferDst);
+            indirect_readback_staging_[i] = device_->CreateBuffer(readbackDesc);
+        }
     }
 
 //    std::cout << "GPU Culling buffers created successfully with triple buffering" << std::endl;
@@ -705,7 +716,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     // T4.6.5 part 35.4 diagnostic: capture cull-time state every 30 frames to
     // narrow down "pillars/cloth missing in mid-frustum" symptom. Logs only on
     // Vulkan to avoid spam on Metal/Dawn where the issue isn't reported.
-    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+    if (vk_cull_diagnostics_enabled_ && device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
         static u32 diagCounter = 0;
         if ((diagCounter++ % 30) == 0) {
             const u32 totalMeshlets = gpuDrawPipeline_ ? gpuDrawPipeline_->GetTotalMeshletCount() : 0u;
@@ -725,7 +736,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     // T4.6.5 part 35.4: drain previous frame's indirect_args readback. We
     // staged a copy last frame; the test loop's WaitForCompletion guarantees
     // the GPU has finished, so the staging slot is safe to map.
-    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+    if (vk_cull_diagnostics_enabled_ && device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
         indirect_readback_filled_ >= 1 &&
         execute_call_count_ >= 2) {
         const u32 readSlot = (indirect_readback_idx_ + (3 - indirect_readback_filled_)) % 3;
@@ -1080,13 +1091,22 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
         PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Stage 4 failed" << std::endl;
         return false;
     }
+    if (lumencompare::enabled && std::getenv("LUMEN_COMPARE_CULL_STAGES")) {
+        lumencompare::Output(device_, cmdBuffer, "Culling.AfterExpansion", "cluster-visibility", current_frame_res.cluster_visibility_buffer, true);
+        lumencompare::Output(device_, cmdBuffer, "Culling.AfterExpansion", "cluster-counter", current_frame_res.cluster_visibility_counter_buffer, true);
+    }
 
     // === STAGE 5: Occlusion Culling (HZB) ===
-    if (config_.enable_occlusion_culling) {
+    const bool occlusionEnabled = config_.enable_occlusion_culling &&
+        hzb_system_ && hzb_system_->HasValidHistory();
+    if (occlusionEnabled) {
         if (!Stage5_OcclusionCulling(cmdBuffer, snapshot, bufferIndex)) {
             PRIMAL_LOG_STREAM(Error, "Render") << "GPUCullingPipeline: Stage 5 failed" << std::endl;
             return false;
         }
+    }
+    if (lumencompare::enabled && std::getenv("LUMEN_COMPARE_CULL_STAGES")) {
+        lumencompare::Output(device_, cmdBuffer, "Culling.AfterOcclusion", "cluster-visibility", current_frame_res.cluster_visibility_buffer, true);
     }
 
     // === STAGE 6: Visible List Compaction ===
@@ -1137,7 +1157,7 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     // visible_count into indirect_commands[1] on the GPU. indirect_args is
     // GPU-only on Vulkan, so we copy to a host-visible staging slot and read
     // the previous frame's slot at the top of the next Execute().
-    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+    if (vk_cull_diagnostics_enabled_ && device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
         current_frame_res.indirect_args_buffer != rhi::handles::INVALID_RESOURCE &&
         indirect_readback_staging_[indirect_readback_idx_] != rhi::handles::INVALID_RESOURCE) {
         cmdBuffer->CopyBuffer(current_frame_res.indirect_args_buffer,
@@ -1157,6 +1177,38 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     // These are maximum possible values - actual counts depend on GPU culling results
     results_.visible_instance_count = safeInstanceCount;
     results_.visible_cluster_count = safeClusterCount;
+
+    if (lumencompare::enabled && lumencompare::Selected("Culling.Result")) {
+        const auto Copy = [&](const char* name, rhi::ResourceHandle buffer) {
+            lumencompare::Output(device_, cmdBuffer, "Culling.Result", name, buffer, true);
+        };
+        Copy("instance-visibility", current_frame_res.instance_visibility_buffer);
+        Copy("cluster-visibility", current_frame_res.cluster_visibility_buffer);
+        Copy("cluster-counter", current_frame_res.cluster_visibility_counter_buffer);
+        Copy("visible-counter", current_frame_res.visible_counter_buffer);
+        Copy("visible-cluster-list", current_frame_res.visible_cluster_list_buffer);
+        Copy("indirect-args", current_frame_res.indirect_args_buffer);
+        Copy("constants", current_frame_res.culling_constants_buffer);
+        Copy("input-instances", snapshot.GetInstanceBuffer());
+        Copy("input-cluster-refs", snapshot.GetClusterRefBuffer());
+        if (gpuDrawPipeline_) {
+            Copy("input-meshlets", gpuDrawPipeline_->GetGlobalMeshletBuffer());
+            Copy("input-cluster-map", gpuDrawPipeline_->GetClusterMapBuffer());
+        }
+        const auto directory = std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR")) /
+            ("frame-" + std::to_string(lumencompare::ordinal));
+        std::filesystem::create_directories(directory);
+        std::ofstream meta(directory / "culling.json");
+        meta << "{\"ordinal\":" << lumencompare::ordinal << ",\"execute_call\":" << execute_call_count_
+             << ",\"slot\":" << current_frame_resource_ << ",\"instances\":" << safeInstanceCount
+             << ",\"cluster_refs\":" << safeClusterCount << ",\"meshlets_before_draw\":"
+             << (gpuDrawPipeline_ ? gpuDrawPipeline_->GetTotalMeshletCount() : 0)
+             << ",\"occlusion_requested\":" << (config_.enable_occlusion_culling ? "true" : "false")
+             << ",\"hzb_history_valid\":" << (hzb_system_ && hzb_system_->HasValidHistory() ? "true" : "false")
+             << ",\"occlusion_enabled\":" << (occlusionEnabled ? "true" : "false")
+             << ",\"force_pass\":" << (force_pass_all_debug_ ? "true" : "false")
+             << ",\"scope\":\"actual culling output before draw; counts must be decoded from completed GPU readback\"}\n";
+    }
 
     // if (frameIndex == 0) {
     //     std::cout << "[GPUCulling] GPU Progressive Filtering Complete: "
@@ -1926,7 +1978,8 @@ bool GPUCullingPipeline::UpdateCullingDescriptorSet(const RenderSceneSnapshot& s
                                     : -1.0f;
     }
     constants.frame_index = frame_index;
-    constants.enable_occlusion_culling = config_.enable_occlusion_culling ? 1 : 0;
+    constants.enable_occlusion_culling = config_.enable_occlusion_culling &&
+        hzb_system_ && hzb_system_->HasValidHistory() ? 1 : 0;
     constants.enable_lod_selection = config_.enable_lod_selection ? 1 : 0;
     constants.enable_small_object_culling = config_.enable_small_object_culling ? 1 : 0;
     constants.small_object_threshold = config_.small_object_threshold;

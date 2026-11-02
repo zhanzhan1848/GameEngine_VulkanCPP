@@ -319,7 +319,53 @@ if(APPLE)
         "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Input/InputMac.mm"
     )
     setup_test_target(TestVulkanSponzaRenderGraph)
+    # Diagnostic-only live-SC 2..256-ray witness. Never overwrites production modules.
+    find_program(SC_BOUND_WITNESS_GLSLANG NAMES glslangValidator REQUIRED)
+    set(SC_BOUND_WITNESS_SPV ${CMAKE_BINARY_DIR}/Tests/SCBoundGeometryWitness.comp.spv)
+    add_custom_command(OUTPUT ${SC_BOUND_WITNESS_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/Tests
+        COMMAND ${SC_BOUND_WITNESS_GLSLANG} -V -I${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen
+            ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp -o ${SC_BOUND_WITNESS_SPV}
+        DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp
+            ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl VERBATIM)
+    set(SC_BOUND_WITNESS_REPLACE_SPV ${CMAKE_BINARY_DIR}/Tests/SCBoundGeometryWitnessReplace.comp.spv)
+    add_custom_command(OUTPUT ${SC_BOUND_WITNESS_REPLACE_SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/Tests
+        COMMAND ${SC_BOUND_WITNESS_GLSLANG} -V -DDDGI_GEOMETRY_REPLACE -I${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen
+            ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp -o ${SC_BOUND_WITNESS_REPLACE_SPV}
+        DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp
+            ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl VERBATIM)
+    add_custom_target(SCBoundGeometryWitnessShader DEPENDS ${SC_BOUND_WITNESS_SPV} ${SC_BOUND_WITNESS_REPLACE_SPV})
+    add_dependencies(TestVulkanSponzaRenderGraph SCBoundGeometryWitnessShader)
+    target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE SC_BOUND_GEOMETRY_WITNESS_SPV="${SC_BOUND_WITNESS_SPV}" SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV="${SC_BOUND_WITNESS_REPLACE_SPV}")
+
     target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE "TEST_VULKAN_SPONZA_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1")
+
+    option(PRIMAL_BUILD_RC_INTEGRATION_TEST "Build isolated Vulkan Sponza RC experiment" OFF)
+    if(PRIMAL_BUILD_RC_INTEGRATION_TEST AND ENABLE_VULKAN)
+        # Keep opt-in Vulkan archive away from the shared Metal output.
+        set_target_properties(Engine PROPERTIES ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/RC/lib"
+            ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/RC/lib")
+        set(RC_SPV ${CMAKE_BINARY_DIR}/Tests/RC/Cascade.comp.spv)
+        add_custom_command(OUTPUT ${RC_SPV}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/Tests/RC
+            COMMAND ${SC_BOUND_WITNESS_GLSLANG} -V -I${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen
+                ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/RC/Cascade.comp -o ${RC_SPV}
+            DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/RC/Cascade.comp
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/SurfaceCacheData.glsl
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl VERBATIM)
+        add_custom_target(SponzaRCShader DEPENDS ${RC_SPV})
+        add_executable(TestVulkanSponzaRC Main.cpp TestVulkanSponzaRenderGraph.cpp MacKeyboard.mm
+            ${CMAKE_SOURCE_DIR}/Engine/Input/InputMac.mm ${COMMON_HEADERS})
+        setup_test_target(TestVulkanSponzaRC)
+        target_include_directories(TestVulkanSponzaRC PRIVATE ${CMAKE_SOURCE_DIR}/third_party/VulkanMemoryAllocator/include)
+        get_target_property(RC_BASE_DEFINES TestVulkanSponzaRenderGraph COMPILE_DEFINITIONS)
+        target_compile_definitions(TestVulkanSponzaRC PRIVATE ${RC_BASE_DEFINES}
+            PRIMAL_RC_INTEGRATION_TEST=1 RC_TEST_SPV="${RC_SPV}")
+        add_dependencies(TestVulkanSponzaRC SponzaRCShader SCBoundGeometryWitnessShader)
+        set_tests_properties(Engine_Integration_Tests_TestVulkanSponzaRC PROPERTIES
+            DISABLED TRUE LABELS "Vulkan;RC;Experimental")
+    endif()
 
     # DLSS 集成门禁测试：复制 Sponza 脚手架 + 内置 FG/NR 自动断言（_Exit 0/1）。
     # 与 TestVulkanSponzaRenderGraph 完全独立——原测试不读 DLSS 门禁 env，

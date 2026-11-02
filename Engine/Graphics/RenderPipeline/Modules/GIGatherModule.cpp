@@ -7,6 +7,10 @@
 // re-add platform includes here; Dawn/Metal builds must stay compilable.
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
+#include "Graphics/RenderGraph/LumenCompareCapture.h"
+#include "Graphics/Utils/ShaderRegistry.h"
+#include <fstream>
+#include <bit>
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +26,10 @@ namespace primal::graphics {
 
 using namespace rhi;
 using namespace rhi::math;
+
+static u64 TraversalAuditByteHash(const std::vector<u8>& bytes) {
+    u64 hash=14695981039346656037ull; for(u8 byte:bytes){hash^=byte;hash*=1099511628211ull;}return hash;
+}
 
 static const char* GatherAuditFormatName(DataFormat format) {
     switch (format) {
@@ -76,6 +84,7 @@ struct GPUStaticProbeData {
 bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
                                  u32 render_width, u32 render_height,
                                  ShaderHandle glossy_source_audit_shader) {
+    if(device_)Shutdown();
     device_ = device;
     render_width_ = render_width;
     render_height_ = render_height;
@@ -102,7 +111,69 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             << std::endl;
         return false;
     }
+    const char* traversalEnv=std::getenv("PRIMAL_DDGI_TRAVERSAL_AUDIT");
+    traversal_audit_requested_=traversalEnv && std::strcmp(traversalEnv,"1")==0;
+    if(traversal_audit_requested_) {
+        const char* vis=std::getenv("PRIMAL_DDGI_GEOMETRY_VISIBILITY");
+        const char* ref=std::getenv("PRIMAL_DDGI_GEOMETRY_VISIBILITY_REFERENCE");
+        const char* compact=std::getenv("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS");
+        if(!isVk || !vis || std::strcmp(vis,"1")!=0 || glossyAuditRequested ||
+           (ref && std::strcmp(ref,"1")==0) || (compact && std::strcmp(compact,"1")==0)) {
+            PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_TRAVERSAL_AUDIT] incompatible mode" << std::endl; return false;
+        }
+        if(const char* frame=std::getenv("PRIMAL_DDGI_TRAVERSAL_AUDIT_FRAME")) {
+            char* end=nullptr; const auto value=std::strtoul(frame,&end,10);
+            if(!*frame || !end || *end || value>0xfffffffful) return false;
+            traversal_audit_frame_=u32(value);
+        }
+    }
     glossy_source_audit_enabled_ = glossyAuditRequested;
+    const char* connectionFlag=std::getenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS");
+    const char* visibilityFlag=std::getenv("PRIMAL_DDGI_GEOMETRY_VISIBILITY");
+    const bool replaceVisibility=isVk && visibilityFlag && std::strcmp(visibilityFlag,"1")==0;
+    const char* referenceFlag=std::getenv("PRIMAL_DDGI_GEOMETRY_VISIBILITY_REFERENCE");
+    const bool referenceVisibility=replaceVisibility && referenceFlag && std::strcmp(referenceFlag,"1")==0;
+    const char* queryEnv=std::getenv("PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL");
+    const bool queryEnabled=queryEnv && std::strcmp(queryEnv,"1")==0;
+    const char* queryCompactEnv=std::getenv("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS");
+    if(queryEnabled && (!replaceVisibility || referenceVisibility || traversal_audit_requested_ || glossyAuditRequested ||
+        (queryCompactEnv && std::strcmp(queryCompactEnv,"1")==0))) {
+        PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_QUERY_KERNEL] incompatible geometry, reference, compact or observer configuration" << std::endl;
+        return false;
+    }
+    geometry_connections_enabled_=replaceVisibility || (isVk && connectionFlag && std::strcmp(connectionFlag,"1")==0);
+    if(geometry_connections_enabled_) {
+        if(glossyAuditRequested) {
+            PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_CONNECTIONS] source audit and connection candidate are separate variants";
+            return false;
+        }
+        const auto path=utils::ShaderRegistry::ResolveShaderPath(replaceVisibility
+            ? (referenceVisibility ? "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_replace.comp.spv"
+                                   : "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_anyhit.comp.spv")
+            : "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry.comp.spv");
+        std::ifstream file(path,std::ios::binary|std::ios::ate);
+        if(!file || file.tellg()<=0) {
+            PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_CONNECTIONS] required shader missing or empty: " << path << std::endl;
+            return false;
+        }
+        const auto count=static_cast<size_t>(file.tellg());file.seekg(0);
+        std::vector<u8> bytes(count);
+        if(!file.read(reinterpret_cast<char*>(bytes.data()),count)) {
+            PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_CONNECTIONS] shader read failed: " << path << std::endl;
+            return false;
+        }
+        if(traversal_audit_requested_)traversal_main_shader_hash_=TraversalAuditByteHash(bytes);
+        const char* queryAudit=std::getenv("DDGI_QUERY_KERNEL_AUDIT");
+        if(queryAudit && std::strcmp(queryAudit,"1")==0)query_main_shader_hash_=TraversalAuditByteHash(bytes);
+        connection_shader_=device->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"ddgi_gi_gather");
+        if(connection_shader_==handles::INVALID_SHADER) {
+            PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_CONNECTIONS] shader creation failed: " << path << std::endl;
+            return false;
+        }
+        shader=connection_shader_;
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_CONNECTIONS] mode="
+            << (replaceVisibility ? (referenceVisibility ? "geometry-replace-reference" : "geometry-anyhit") : "geometry-gate") << " shader=" << path << std::endl;
+    }
     auto failAuditInitialization = [&]() {
         // A diagnostic setup failure must never leave the production pipeline
         // looking usable to a caller that ignores Initialize's bool result.
@@ -113,8 +184,12 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     // T3.6/D1: flat-buffer 路径取代 N-volume descriptor-indexing 数组与
     // near/far 双槽 legacy 路径——不再依赖 descriptor indexing，Metal 与
     // Vulkan 同一条路径（消除 nvolume_supported_ 能力差异）。
+    // Retain layout data until the baseline query pipeline has actually been
+    // created. The cache's shader permanently includes QUERY_KERNEL.
+    std::vector<DescriptorSetLayoutBinding> normalCacheBindings,equalBoxBindings;
+    bool normalCacheCompatible=false;
     if (isVk) {
-        DescriptorSetLayoutBinding vkBindings[21] = {
+        DescriptorSetLayoutBinding vkBindings[25] = {
             {0,  DescriptorType::SampledDepthImage, 1, ShaderStage::Compute, nullptr},  // depth
             {1,  DescriptorType::SampledImage,      1, ShaderStage::Compute, nullptr},  // normal
             {2,  DescriptorType::StorageImage,      1, ShaderStage::Compute, nullptr},  // output
@@ -140,7 +215,23 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             // GI 根治 Phase 3.2: flat openSky 统计（天空可见性分类）
             {20, DescriptorType::StorageBuffer,     1, ShaderStage::Compute, nullptr},  // flat probe openSky
         };
-        set_layout_ = device->CreateDescriptorSetLayout({19, vkBindings});
+        if(geometry_connections_enabled_) {
+            for(u32 i=0;i<4;++i) vkBindings[19+i]={23+i,DescriptorType::StorageBuffer,1,ShaderStage::Compute,nullptr};
+            vkBindings[23]={27,DescriptorType::UniformBuffer,1,ShaderStage::Compute,nullptr};
+        }
+        set_layout_ = device->CreateDescriptorSetLayout({geometry_connections_enabled_?24u:19u, vkBindings});
+        const auto enabled=[](const char* name){const char* e=std::getenv(name);return e&&std::strcmp(e,"1")==0;};
+        if(enabled("PRIMAL_DDGI_GEOMETRY_EQUAL_BOX") && queryEnabled && replaceVisibility && !referenceVisibility &&
+           !traversal_audit_requested_ && !glossyAuditRequested && !enabled("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS") &&
+           !enabled("PRIMAL_DDGI_GEOMETRY_UPPER_BVH") && !enabled("PRIMAL_DDGI_GEOMETRY_BOUNDS_FIRST") && !enabled("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE")) {
+            const char* wg=std::getenv("PRIMAL_DDGI_GATHER_WORKGROUP");
+            if(!wg || std::strcmp(wg,"0")==0) {equalBoxBindings.assign(vkBindings,vkBindings+24);equalBoxBindings.push_back({28,DescriptorType::StorageBuffer,1,ShaderStage::Compute,nullptr});equalBoxBindings.back().readonly=true;}
+        }
+        if(enabled("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE")) {
+            normalCacheCompatible=queryEnabled&&replaceVisibility&&!referenceVisibility&&!traversal_audit_requested_&&!glossyAuditRequested&&
+                !enabled("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS")&&!enabled("PRIMAL_DDGI_GEOMETRY_UPPER_BVH");
+            if(normalCacheCompatible)normalCacheBindings.assign(vkBindings,vkBindings+24);
+        }
         if (glossy_source_audit_enabled_) {
             // Binding 19/20 are already live production resources (relocated
             // origins/openSky).  Keep the regular 19-entry descriptor layout
@@ -203,6 +294,147 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     pd.threadGroupSize = {8, 8, 1};
     pipeline_ = device->CreateComputePipeline(pd);
     if (pipeline_ == handles::INVALID_PIPELINE) return false;
+    if(queryEnabled) {
+        const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_query_kernel.comp.spv");
+        std::ifstream file(path,std::ios::binary|std::ios::ate);
+        if(file && file.tellg()>0) {
+            const auto count=static_cast<size_t>(file.tellg()); file.seekg(0); std::vector<u8> bytes(count);
+            if(file.read(reinterpret_cast<char*>(bytes.data()),count)) {
+                const char* queryAudit=std::getenv("DDGI_QUERY_KERNEL_AUDIT");
+                const char* boundsAudit=std::getenv("DDGI_BOUNDS_FIRST_AUDIT");
+                if((queryAudit && std::strcmp(queryAudit,"1")==0) || (boundsAudit && std::strcmp(boundsAudit,"1")==0))query_shader_hash_=TraversalAuditByteHash(bytes);
+                query_shader_=device->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"ddgi_gi_gather");
+            }
+        }
+        if(query_shader_!=handles::INVALID_SHADER) {
+            ComputePipelineDesc queryPd=pd; queryPd.computeShader=query_shader_;
+            query_pipeline_=device->CreateComputePipeline(queryPd);
+        }
+        query_requested_=query_pipeline_!=handles::INVALID_PIPELINE;
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_QUERY_KERNEL] pipeline_ready=" << query_requested_ << " shader=" << path << std::endl;
+    }
+    if(const char* e=std::getenv("PRIMAL_DDGI_CROSS_RAY_PAIR");e && std::strcmp(e,"1")==0) {
+        pair_env_requested_=true;auto exact=[](const char* n){const char* v=std::getenv(n);return v&&std::strcmp(v,"1")==0;};
+        const char* wg=std::getenv("PRIMAL_DDGI_GATHER_WORKGROUP");
+        const bool compatible=isVk && queryEnabled && query_pipeline_!=handles::INVALID_PIPELINE && replaceVisibility && !referenceVisibility &&
+            !traversal_audit_requested_ && !glossyAuditRequested && !exact("PRIMAL_DDGI_GEOMETRY_EQUAL_BOX") && !exact("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS") &&
+            !exact("PRIMAL_DDGI_GEOMETRY_UPPER_BVH") && !exact("PRIMAL_DDGI_GEOMETRY_BOUNDS_FIRST") && !exact("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE") &&
+            !exact("PRIMAL_DDGI_INSTANCE_PAYLOAD_CACHE") && (!wg||std::strcmp(wg,"0")==0);
+        if(compatible){const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_pair.comp.spv");
+            std::ifstream f(path,std::ios::binary|std::ios::ate);if(f&&f.tellg()>0){auto count=static_cast<size_t>(f.tellg());f.seekg(0);std::vector<u8> bytes(count);
+                if(f.read(reinterpret_cast<char*>(bytes.data()),count)){pair_shader_hash_=TraversalAuditByteHash(bytes);pair_shader_=device->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"ddgi_gi_gather");}}
+            if(pair_shader_!=handles::INVALID_SHADER){ComputePipelineDesc pp=pd;pp.computeShader=pair_shader_;pair_pipeline_=device->CreateComputePipeline(pp);}pair_requested_=pair_pipeline_!=handles::INVALID_PIPELINE;}
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_CROSS_RAY_PAIR] startup=1 compatible=" << compatible << " pipeline_ready=" << pair_requested_ << std::endl;
+    }
+    if(const char* e=std::getenv("PRIMAL_DDGI_INSTANCE_PAYLOAD_CACHE");e && std::strcmp(e,"1")==0) {
+        payload_env_requested_=true;
+        auto exact=[](const char* name){const char* v=std::getenv(name);return v && std::strcmp(v,"1")==0;};
+        const char* wg=std::getenv("PRIMAL_DDGI_GATHER_WORKGROUP");
+        const bool compatible=isVk && queryEnabled && query_pipeline_!=handles::INVALID_PIPELINE && replaceVisibility && !referenceVisibility &&
+            !traversal_audit_requested_ && !glossyAuditRequested && !exact("PRIMAL_DDGI_GEOMETRY_EQUAL_BOX") &&
+            !exact("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS") && !exact("PRIMAL_DDGI_GEOMETRY_UPPER_BVH") &&
+            !exact("PRIMAL_DDGI_GEOMETRY_BOUNDS_FIRST") && !exact("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE") && (!wg || std::strcmp(wg,"0")==0);
+        if(compatible) {
+            const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_instance_payload.comp.spv");
+            std::ifstream file(path,std::ios::binary|std::ios::ate);
+            if(file && file.tellg()>0){const auto count=static_cast<size_t>(file.tellg());file.seekg(0);std::vector<u8> bytes(count);
+                if(file.read(reinterpret_cast<char*>(bytes.data()),count)){payload_shader_hash_=TraversalAuditByteHash(bytes);payload_shader_=device->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"ddgi_gi_gather");}}
+            if(payload_shader_!=handles::INVALID_SHADER){ComputePipelineDesc candidate=pd;candidate.computeShader=payload_shader_;payload_pipeline_=device->CreateComputePipeline(candidate);}
+            payload_requested_=payload_pipeline_!=handles::INVALID_PIPELINE;
+        }
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_INSTANCE_PAYLOAD] startup=1 compatible=" << compatible << " pipeline_ready=" << payload_requested_ << std::endl;
+    }
+    if(const char* e=std::getenv("PRIMAL_DDGI_GEOMETRY_EQUAL_BOX");e && std::strcmp(e,"1")==0) {
+        equal_box_env_requested_=true;
+        if(!equalBoxBindings.empty() && query_pipeline_!=handles::INVALID_PIPELINE) {
+            equal_box_set_layout_=device->CreateDescriptorSetLayout({u32(equalBoxBindings.size()),equalBoxBindings.data()});
+            if(equal_box_set_layout_!=handles::INVALID_DESCRIPTOR_SET_LAYOUT)equal_box_layout_=device->CreatePipelineLayout({1,&equal_box_set_layout_});
+            const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_equal_box.comp.spv");
+            std::ifstream file(path,std::ios::binary|std::ios::ate);
+            if(file && file.tellg()>0) {const auto count=static_cast<size_t>(file.tellg());file.seekg(0);std::vector<u8> bytes(count);
+                if(file.read(reinterpret_cast<char*>(bytes.data()),count)){equal_box_shader_hash_=TraversalAuditByteHash(bytes);equal_box_shader_=device->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"ddgi_gi_gather");}}
+            if(equal_box_shader_!=handles::INVALID_SHADER && equal_box_layout_!=handles::INVALID_PIPELINE_LAYOUT) {ComputePipelineDesc ep=pd;ep.computeShader=equal_box_shader_;ep.layout=equal_box_layout_;equal_box_pipeline_=device->CreateComputePipeline(ep);}
+            if(equal_box_pipeline_!=handles::INVALID_PIPELINE)for(auto& set:equal_box_sets_)set=device->CreateDescriptorSet({equal_box_set_layout_});
+            equal_box_requested_=equal_box_pipeline_!=handles::INVALID_PIPELINE;
+            for(auto set:equal_box_sets_)equal_box_requested_ &= set!=handles::INVALID_DESCRIPTOR_SET;
+        }
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_EQUAL_BOX] startup=1 pipeline_ready=" << equal_box_requested_ << std::endl;
+    }
+    const char* workgroupEnv=std::getenv("PRIMAL_DDGI_GATHER_WORKGROUP");
+    const bool workgroupValid=workgroup_experiment::Parse(workgroupEnv,true,workgroup_requested_);
+    if(workgroupEnv) {
+        auto exact=[](const char* name) { const char* v=std::getenv(name); return v && std::strcmp(v,"1")==0; };
+        const bool compatible=isVk && workgroupValid && workgroup_requested_ && queryEnabled &&
+            query_pipeline_!=handles::INVALID_PIPELINE && !referenceVisibility && !traversal_audit_requested_ &&
+            !glossyAuditRequested && !exact("PRIMAL_DDGI_GEOMETRY_UPPER_BVH") &&
+            !exact("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS") && !exact("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE") &&
+            !exact("PRIMAL_DDGI_GEOMETRY_BOUNDS_FIRST");
+        if(compatible) {
+            const auto path=utils::ShaderRegistry::ResolveShaderPath(workgroup_requested_==32 ?
+                "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_cacheless32.comp.spv" :
+                "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_cacheless64.comp.spv");
+            std::ifstream file(path,std::ios::binary|std::ios::ate);
+            if(file && file.tellg()>0) { const auto count=static_cast<size_t>(file.tellg()); file.seekg(0);std::vector<u8> bytes(count);
+                if(file.read(reinterpret_cast<char*>(bytes.data()),count)) {workgroup_shader_hash_=TraversalAuditByteHash(bytes);workgroup_shader_=device->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"ddgi_gi_gather");} }
+            if(workgroup_shader_!=handles::INVALID_SHADER) {ComputePipelineDesc wp=pd;wp.computeShader=workgroup_shader_;wp.threadGroupSize={8,workgroup_requested_==32?4u:8u,1};workgroup_pipeline_=device->CreateComputePipeline(wp);}
+        }
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_GATHER_WORKGROUP] startup=1 requested=" << workgroup_requested_ << " valid=" << workgroupValid << " compatible=" << compatible << " pipeline_ready=" << (workgroup_pipeline_!=handles::INVALID_PIPELINE) << std::endl;
+    }
+    const char* boundsEnv=std::getenv("PRIMAL_DDGI_GEOMETRY_BOUNDS_FIRST");
+    if(boundsEnv && std::strcmp(boundsEnv,"1")==0) {
+        auto exact=[](const char* name) { const char* value=std::getenv(name);return value && std::strcmp(value,"1")==0; };
+        const bool compatible=queryEnabled && query_pipeline_!=handles::INVALID_PIPELINE && !referenceVisibility &&
+            !traversal_audit_requested_ && !glossyAuditRequested && !exact("PRIMAL_DDGI_GEOMETRY_UPPER_BVH") &&
+            !exact("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS") && !exact("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE");
+        const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_bounds_first.comp.spv");
+        if(compatible) {
+            std::ifstream file(path,std::ios::binary|std::ios::ate);
+            if(file && file.tellg()>0) {
+                const auto count=static_cast<size_t>(file.tellg()); file.seekg(0);std::vector<u8> bytes(count);
+                if(file.read(reinterpret_cast<char*>(bytes.data()),count)) {
+                    if(exact("DDGI_BOUNDS_FIRST_AUDIT") || exact("DDGI_QUERY_KERNEL_AUDIT"))bounds_shader_hash_=TraversalAuditByteHash(bytes);
+                    bounds_shader_=device->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"ddgi_gi_gather");
+                }
+            }
+            if(bounds_shader_!=handles::INVALID_SHADER) {ComputePipelineDesc bp=pd;bp.computeShader=bounds_shader_;bounds_pipeline_=device->CreateComputePipeline(bp);}
+        }
+        bounds_requested_=bounds_pipeline_!=handles::INVALID_PIPELINE;
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_BOUNDS_FIRST] compatible=" << compatible << " pipeline_ready=" << bounds_requested_ << " shader=" << path << std::endl;
+    }
+    if(const char* cacheEnv=std::getenv("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE");cacheEnv&&std::strcmp(cacheEnv,"1")==0) {
+        const bool queryReady=InstanceNormalCacheQueryReady(queryEnabled,query_pipeline_!=handles::INVALID_PIPELINE);
+        normal_cache_enabled_=normalCacheCompatible&&queryReady&&normal_cache_.Initialize(device,normalCacheBindings.data(),u32(normalCacheBindings.size()));
+        SetInstanceNormalCacheEnabled(normal_cache_enabled_);
+        if(!normal_cache_enabled_)normal_cache_.Shutdown();
+        PRIMAL_LOG_STREAM(Info,"Render")<<"[DDGI_INSTANCE_NORMAL_CACHE] compatible="<<normalCacheCompatible
+            <<" query_ready="<<queryReady<<" pipeline_ready="<<normal_cache_enabled_<<std::endl;
+    }
+    const char* upperEnv=std::getenv("PRIMAL_DDGI_GEOMETRY_UPPER_BVH");
+    upper_allowed_=replaceVisibility && !referenceVisibility && upperEnv && std::strcmp(upperEnv,"1")==0;
+    upper_requested_=upper_allowed_; upper_used_=false;
+    const char* compactEnv=std::getenv("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS");
+    const bool compactAllowed=replaceVisibility && !referenceVisibility && !upper_allowed_ && compactEnv && std::strcmp(compactEnv,"1")==0;
+    compact_requested_=false; compact_used_=false;
+    if(compactAllowed) {
+        const char* packedEnv=std::getenv("PRIMAL_DDGI_GEOMETRY_COMPACT_PACKED");
+        const bool packed=packedEnv && std::strcmp(packedEnv,"1")==0;
+        const auto path=utils::ShaderRegistry::ResolveShaderPath(packed
+            ? "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_compact_packed.comp.spv"
+            : "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_compact.comp.spv");
+        std::ifstream file(path,std::ios::binary|std::ios::ate);
+        if(file && file.tellg()>0) {
+            const auto count=static_cast<size_t>(file.tellg()); file.seekg(0); std::vector<u8> bytes(count);
+            if(file.read(reinterpret_cast<char*>(bytes.data()),count))
+                compact_shader_=device->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"ddgi_gi_gather");
+        }
+        if(compact_shader_!=handles::INVALID_SHADER) {
+            ComputePipelineDesc compactPd=pd; compactPd.computeShader=compact_shader_;
+            compact_pipeline_=device->CreateComputePipeline(compactPd);
+        }
+        compact_requested_=compact_pipeline_!=handles::INVALID_PIPELINE;
+        PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_COMPACT_STACKS] pipeline_ready="
+            << (compact_pipeline_!=handles::INVALID_PIPELINE) << " shader=" << path << std::endl;
+    }
 
     if (glossy_source_audit_enabled_) {
         ComputePipelineDesc auditPd{};
@@ -363,6 +595,15 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
         far_cb_[i] = device->CreateBuffer(cbDesc);
         // T6.3 sub-B: N-volume params (144B used in a 256B slot).
         nvolumes_cb_[i] = device->CreateBuffer(cbDesc);
+        if(geometry_connections_enabled_) connection_cb_[i]=device->CreateBuffer(cbDesc);
+    }
+    if(geometry_connections_enabled_) {
+        connection_unknown_cb_=device->CreateBuffer(cbDesc);
+        u32 zero[64]{};
+        auto* mapped=connection_unknown_cb_!=handles::INVALID_RESOURCE?device->MapBuffer(connection_unknown_cb_):nullptr;
+        if(!mapped){Shutdown();pipeline_=handles::INVALID_PIPELINE;return false;}
+        std::memcpy(mapped,zero,sizeof(zero));device->UnmapBuffer(connection_unknown_cb_);
+        for(auto b:connection_cb_)if(b==handles::INVALID_RESOURCE){Shutdown();pipeline_=handles::INVALID_PIPELINE;return false;}
     }
 
     BufferDesc spCbDesc{};
@@ -382,16 +623,86 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     dummyDesc.usage = GPUMemoryUsage::Dynamic;
     dummyDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
     dummy_buffer_ = device->CreateBuffer(dummyDesc);
+    if(geometry_connections_enabled_ && dummy_buffer_==handles::INVALID_RESOURCE) {
+        Shutdown();pipeline_=handles::INVALID_PIPELINE;return false;
+    }
 
     return true;
 }
 
+bool GIGatherModule::PrepareTraversalAudit(u32 nativeFrame,u32 slot) {
+    using namespace traversal_audit;
+    if(traversal_audit_attempted_)return false;
+    traversal_audit_attempted_=true;
+    const Pixel roi[]={{797,600},{798,600},{520,600},{500,600},{790,600},{800,600},{650,500},{640,500}};
+    if(!BuildTraversalAuditSelection(gather_width_,gather_height_,32,18,roi,nativeFrame,slot,traversal_selection_,traversal_pixels_))return false;
+    const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_traversal_audit.comp.spv");
+    std::ifstream file(path,std::ios::binary|std::ios::ate);if(!file || file.tellg()<=0)return false;
+    auto count=static_cast<size_t>(file.tellg());file.seekg(0);std::vector<u8> bytes(count);
+    if(!file.read(reinterpret_cast<char*>(bytes.data()),count))return false;
+    traversal_shader_hash_=TraversalAuditByteHash(bytes);
+    traversal_shader_=device_->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"ddgi_gi_gather");
+    if(traversal_shader_==handles::INVALID_SHADER)return false;
+    DescriptorSetLayoutBinding b[26]{};u32 n=0;
+    const auto append=[&](u32 binding,DescriptorType type){b[n++]={binding,type,1,ShaderStage::Compute,nullptr};};
+    append(0,DescriptorType::SampledDepthImage);append(1,DescriptorType::SampledImage);append(2,DescriptorType::StorageImage);append(3,DescriptorType::SampledImage);
+    for(u32 i=4;i<=6;++i)append(i,DescriptorType::UniformBuffer);
+    append(7,DescriptorType::StorageBuffer);append(8,DescriptorType::StorageBuffer);append(9,DescriptorType::UniformBuffer);
+    for(u32 i=10;i<=12;++i)append(i,DescriptorType::StorageBuffer);
+    append(13,DescriptorType::SampledImage);append(14,DescriptorType::StorageImage);append(17,DescriptorType::StorageBuffer);append(18,DescriptorType::UniformBuffer);
+    append(19,DescriptorType::StorageBuffer);append(20,DescriptorType::StorageBuffer);
+    for(u32 i=23;i<=26;++i)append(i,DescriptorType::StorageBuffer);
+    append(27,DescriptorType::UniformBuffer);append(28,DescriptorType::UniformBuffer);append(29,DescriptorType::StorageBuffer);
+    traversal_set_layout_=device_->CreateDescriptorSetLayout({n,b});
+    if(traversal_set_layout_==handles::INVALID_DESCRIPTOR_SET_LAYOUT)return false;
+    traversal_layout_=device_->CreatePipelineLayout({1,&traversal_set_layout_});
+    if(traversal_layout_==handles::INVALID_PIPELINE_LAYOUT)return false;
+    traversal_set_=device_->CreateDescriptorSet({traversal_set_layout_});
+    if(traversal_set_==handles::INVALID_DESCRIPTOR_SET)return false;
+    ComputePipelineDesc pd{};pd.computeShader=traversal_shader_;pd.layout=traversal_layout_;pd.threadGroupSize={8,8,1};
+    traversal_pipeline_=device_->CreateComputePipeline(pd);if(traversal_pipeline_==handles::INVALID_PIPELINE)return false;
+    BufferDesc cb{};cb.size=sizeof(Selection);cb.type=BufferType::Constant;cb.usage=cb.memoryUsage=GPUMemoryUsage::Dynamic;
+    traversal_cb_=device_->CreateBuffer(cb);cb.size=u64(traversal_pixels_.size())*RecordWords*sizeof(u32);cb.type=BufferType::Structured;
+    traversal_records_=device_->CreateBuffer(cb);
+    if(traversal_cb_==handles::INVALID_RESOURCE || traversal_records_==handles::INVALID_RESOURCE)return false;
+    auto* c=device_->MapBuffer(traversal_cb_);if(!c)return false;std::memcpy(c,&traversal_selection_,sizeof(Selection));device_->UnmapBuffer(traversal_cb_);
+    auto* rec=device_->MapBuffer(traversal_records_);if(!rec)return false;std::memset(rec,0xff,size_t(cb.size));device_->UnmapBuffer(traversal_records_);
+    TextureDesc t{};t.size={gather_width_,gather_height_,1};t.format=DataFormat::RGBA16_Float;t.type=TextureType::Texture2D;
+    t.usage=TextureUsage::ShaderResource|TextureUsage::UnorderedAccess|TextureUsage::CopySource;
+    traversal_diffuse_=device_->CreateTexture(t);traversal_specular_=device_->CreateTexture(t);
+    if(traversal_diffuse_==handles::INVALID_RESOURCE || traversal_specular_==handles::INVALID_RESOURCE)return false;
+    device_->PrimeTextureLayout(traversal_diffuse_);device_->PrimeTextureLayout(traversal_specular_);
+    return true;
+}
+
 void GIGatherModule::Shutdown() {
+    normal_cache_.Shutdown();normal_cache_enabled_=normal_cache_requested_=normal_cache_used_=false;
+    if(device_ && traversal_audit_attempted_) {
+        device_->WaitIdle();
+        if(traversal_pipeline_!=handles::INVALID_PIPELINE)device_->DestroyPipeline(traversal_pipeline_);
+        if(traversal_set_!=handles::INVALID_DESCRIPTOR_SET)device_->DestroyDescriptorSet(traversal_set_);
+        if(traversal_layout_!=handles::INVALID_PIPELINE_LAYOUT)device_->DestroyPipelineLayout(traversal_layout_);
+        if(traversal_set_layout_!=handles::INVALID_DESCRIPTOR_SET_LAYOUT)device_->DestroyDescriptorSetLayout(traversal_set_layout_);
+        if(traversal_shader_!=handles::INVALID_SHADER)device_->DestroyShader(traversal_shader_);
+        for(auto resource:{traversal_cb_,traversal_records_})if(resource!=handles::INVALID_RESOURCE)device_->DestroyBuffer(resource);
+        for(auto resource:{traversal_diffuse_,traversal_specular_})if(resource!=handles::INVALID_RESOURCE)device_->DestroyTexture(resource);
+    }
+    traversal_audit_attempted_=false;traversal_audit_requested_=false;
+    traversal_pipeline_=handles::INVALID_PIPELINE;traversal_set_=handles::INVALID_DESCRIPTOR_SET;
+    traversal_layout_=handles::INVALID_PIPELINE_LAYOUT;traversal_set_layout_=handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    traversal_shader_=handles::INVALID_SHADER;traversal_cb_=traversal_records_=handles::INVALID_RESOURCE;
+    traversal_diffuse_=traversal_specular_=handles::INVALID_RESOURCE;traversal_pixels_.clear();
     if (device_) for (auto& s : gather_audit_sources_) {
         if (s.staging!=handles::INVALID_RESOURCE) device_->DestroyBuffer(s.staging);
         s={};
     }
     if (device_) {
+        for(auto& b:connection_cb_) {if(b!=handles::INVALID_RESOURCE)device_->DestroyBuffer(b);b=handles::INVALID_RESOURCE;}
+        if(connection_unknown_cb_!=handles::INVALID_RESOURCE)device_->DestroyBuffer(connection_unknown_cb_);
+        connection_unknown_cb_=handles::INVALID_RESOURCE;
+        if(connection_shader_!=handles::INVALID_SHADER)device_->DestroyShader(connection_shader_);
+        connection_shader_=handles::INVALID_SHADER;geometry_connections_enabled_=false;
+
         for (u32 i = 0; i < 3; ++i) {
             if (glossy_source_audit_sets_[i] != handles::INVALID_DESCRIPTOR_SET)
                 device_->DestroyDescriptorSet(glossy_source_audit_sets_[i]);
@@ -414,6 +725,60 @@ void GIGatherModule::Shutdown() {
         if (glossy_source_audit_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT)
             device_->DestroyDescriptorSetLayout(glossy_source_audit_set_layout_);
     }
+    if(device_) {
+        if(pair_pipeline_!=handles::INVALID_PIPELINE)device_->DestroyPipeline(pair_pipeline_);
+        if(pair_shader_!=handles::INVALID_SHADER)device_->DestroyShader(pair_shader_);
+        pair_pipeline_=handles::INVALID_PIPELINE;pair_shader_=handles::INVALID_SHADER;pair_requested_=false;pair_env_requested_=false;pair_shader_hash_=0;pair_receipt_={};
+        if(payload_pipeline_!=handles::INVALID_PIPELINE)device_->DestroyPipeline(payload_pipeline_);
+        if(payload_shader_!=handles::INVALID_SHADER)device_->DestroyShader(payload_shader_);
+        payload_pipeline_=handles::INVALID_PIPELINE;payload_shader_=handles::INVALID_SHADER;payload_requested_=false;payload_env_requested_=false;payload_shader_hash_=0;payload_receipt_={};
+        for(auto& set:equal_box_sets_){if(set!=handles::INVALID_DESCRIPTOR_SET)device_->DestroyDescriptorSet(set);set=handles::INVALID_DESCRIPTOR_SET;}
+        if(equal_box_pipeline_!=handles::INVALID_PIPELINE)device_->DestroyPipeline(equal_box_pipeline_);
+        if(equal_box_shader_!=handles::INVALID_SHADER)device_->DestroyShader(equal_box_shader_);
+        if(equal_box_layout_!=handles::INVALID_PIPELINE_LAYOUT)device_->DestroyPipelineLayout(equal_box_layout_);
+        if(equal_box_set_layout_!=handles::INVALID_DESCRIPTOR_SET_LAYOUT)device_->DestroyDescriptorSetLayout(equal_box_set_layout_);
+        equal_box_pipeline_=handles::INVALID_PIPELINE;equal_box_shader_=handles::INVALID_SHADER;equal_box_layout_=handles::INVALID_PIPELINE_LAYOUT;equal_box_set_layout_=handles::INVALID_DESCRIPTOR_SET_LAYOUT;equal_box_requested_=false;equal_box_env_requested_=false;equal_box_shader_hash_=0;equal_box_receipt_={};
+        if(workgroup_pipeline_!=handles::INVALID_PIPELINE)device_->DestroyPipeline(workgroup_pipeline_);
+        if(workgroup_shader_!=handles::INVALID_SHADER)device_->DestroyShader(workgroup_shader_);
+        workgroup_pipeline_=handles::INVALID_PIPELINE;workgroup_shader_=handles::INVALID_SHADER;workgroup_requested_=0;workgroup_shader_hash_=0;workgroup_receipt_={};
+        if(bounds_pipeline_!=handles::INVALID_PIPELINE)device_->DestroyPipeline(bounds_pipeline_);
+        if(bounds_shader_!=handles::INVALID_SHADER)device_->DestroyShader(bounds_shader_);
+        bounds_pipeline_=handles::INVALID_PIPELINE;bounds_shader_=handles::INVALID_SHADER;
+        bounds_requested_=false;bounds_used_=false;bounds_dispatch_=false;bounds_shader_hash_=0;
+        if(query_pipeline_!=handles::INVALID_PIPELINE)device_->DestroyPipeline(query_pipeline_);
+        if(query_shader_!=handles::INVALID_SHADER)device_->DestroyShader(query_shader_);
+        query_pipeline_=handles::INVALID_PIPELINE; query_shader_=handles::INVALID_SHADER;
+        query_requested_=false; query_used_=false; query_dispatch_=false;
+        query_shader_hash_=0; query_main_shader_hash_=0;
+        if(compact_pipeline_!=handles::INVALID_PIPELINE)device_->DestroyPipeline(compact_pipeline_);
+        if(compact_shader_!=handles::INVALID_SHADER)device_->DestroyShader(compact_shader_);
+        compact_pipeline_=handles::INVALID_PIPELINE; compact_shader_=handles::INVALID_SHADER;
+        compact_requested_=false; compact_used_=false;
+        upper_allowed_=false;upper_requested_=false;upper_used_=false;
+        for(u32 i=0;i<3;++i) {
+            if(descriptor_sets_[i]!=handles::INVALID_DESCRIPTOR_SET)device_->DestroyDescriptorSet(descriptor_sets_[i]);
+            descriptor_sets_[i]=handles::INVALID_DESCRIPTOR_SET;
+            for(auto* buffer:{&probe_cb_[i],&far_cb_[i],&nvolumes_cb_[i],&static_probe_cb_[i],&flat_irr_buffer_[i],&flat_opensky_buffer_[i]}) {
+                if(*buffer!=handles::INVALID_RESOURCE)device_->DestroyBuffer(*buffer);
+                *buffer=handles::INVALID_RESOURCE;
+            }
+            flat_irr_capacity_[i]=flat_opensky_capacity_[i]=0;
+        }
+        for(auto* texture:{&gi_halfres_texture_,&gi_halfres_history_,&gi_specular_texture_}) {
+            if(*texture!=handles::INVALID_RESOURCE)device_->DestroyTexture(*texture);
+            *texture=handles::INVALID_RESOURCE;
+        }
+        for(auto* buffer:{&dummy_buffer_,&out_staging_}) {
+            if(*buffer!=handles::INVALID_RESOURCE)device_->DestroyBuffer(*buffer);
+            *buffer=handles::INVALID_RESOURCE;
+        }
+        if(pipeline_!=handles::INVALID_PIPELINE)device_->DestroyPipeline(pipeline_);
+        if(layout_!=handles::INVALID_PIPELINE_LAYOUT)device_->DestroyPipelineLayout(layout_);
+        if(set_layout_!=handles::INVALID_DESCRIPTOR_SET_LAYOUT)device_->DestroyDescriptorSetLayout(set_layout_);
+    }
+    pipeline_=handles::INVALID_PIPELINE;layout_=handles::INVALID_PIPELINE_LAYOUT;set_layout_=handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+    out_staging_size_=0;out_dump_frame_=0xFFFFFFFFu;
+    device_=nullptr;
     glossy_source_audit_output_ = handles::INVALID_RESOURCE;
     glossy_source_audit_specular_ = handles::INVALID_RESOURCE;
     glossy_source_audit_pipeline_ = handles::INVALID_PIPELINE;
@@ -432,6 +797,11 @@ void GIGatherModule::Shutdown() {
 
 GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const GIGatherInputs& inputs) {
     GIGatherOutputs outputs{};
+    pair_receipt_={};pair_receipt_.requested=pair_env_requested_;
+    payload_receipt_={};payload_receipt_.requested=payload_env_requested_;
+    equal_box_receipt_={};equal_box_receipt_.requested=equal_box_env_requested_;
+    workgroup_receipt_={}; workgroup_receipt_.requested=workgroup_requested_;
+    compact_used_=false;upper_used_=false;query_used_=false;query_dispatch_=false;bounds_used_=false;bounds_dispatch_=false;
     if (!inputs.ddgi_pass || pipeline_ == handles::INVALID_PIPELINE) return outputs;
 
     // One-shot, opt-in snapshot of the actual consumer inputs, read only once
@@ -546,6 +916,47 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
         }
     }
 
+    bool traversalDispatch=false;
+    if(traversal_audit_requested_ && !traversal_audit_attempted_ && inputs.frame_index==traversal_audit_frame_ &&
+       lumencompare::enabled && lumencompare::Selected("DDGI.TraversalAudit")) {
+        const u32 auditSlot=inputs.current_buffer_index%3;
+        if(device_->FrameSlotCompletions().CanReuse(auditSlot,0))
+            traversalDispatch=PrepareTraversalAudit(inputs.frame_index,auditSlot);
+        else {traversal_audit_attempted_=true;PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_TRAVERSAL_AUDIT] slot completion unavailable" << std::endl;}
+        if(!traversalDispatch)PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_TRAVERSAL_AUDIT] setup failed; observer unavailable" << std::endl;
+    }
+    rendergraph::RGResourceHandle traversalOutRG{},traversalSpecRG{},traversalRecordsRG{},traversalCBRG{};
+    if(traversalDispatch) {
+        TextureDesc auditDesc{};auditDesc.size={gather_width_,gather_height_,1};
+        auditDesc.format=DataFormat::RGBA16_Float;auditDesc.type=TextureType::Texture2D;
+        auditDesc.usage=TextureUsage::ShaderResource|TextureUsage::UnorderedAccess|TextureUsage::CopySource;
+        traversalOutRG=graph.ImportTexture("DDGITraversalAuditDiffuse",traversal_diffuse_,auditDesc);
+        traversalSpecRG=graph.ImportTexture("DDGITraversalAuditSpecular",traversal_specular_,auditDesc);
+        BufferDesc d{};d.type=BufferType::Structured;d.size=u64(traversal_pixels_.size())*traversal_audit::RecordWords*sizeof(u32);
+        traversalRecordsRG=graph.ImportBuffer("DDGITraversalAuditRecords",traversal_records_,d);
+        d.type=BufferType::Constant;d.size=sizeof(traversal_audit::Selection);
+        traversalCBRG=graph.ImportBuffer("DDGITraversalAuditSelection",traversal_cb_,d);
+    }
+    rendergraph::RGResourceHandle geometryRG[4]{};
+    if(geometry_connections_enabled_)for(u32 i=0;i<4;++i) {
+        if(inputs.geometry[i]==handles::INVALID_RESOURCE)continue;
+        BufferDesc desc{};desc.type=BufferType::Structured;desc.size=inputs.geometry_sizes[i];
+        geometryRG[i]=graph.ImportBuffer("DDGIConnectionGeometry"+std::to_string(i),inputs.geometry[i],desc);
+    }
+    rendergraph::RGResourceHandle equalBoxRG{};
+    if(equal_box_requested_ && inputs.equal_box_buffer!=handles::INVALID_RESOURCE && inputs.equal_box_size) {
+        BufferDesc desc{};desc.type=BufferType::Structured;desc.size=inputs.equal_box_size;
+        equalBoxRG=graph.ImportBuffer("DDGIEqualBoxFlags",inputs.equal_box_buffer,desc);
+    }
+    rendergraph::RGResourceHandle geometryUpperRG{};
+    if(upper_allowed_ && inputs.geometry_upper!=handles::INVALID_RESOURCE && inputs.geometry_upper_size) {
+        BufferDesc desc{};desc.type=BufferType::Structured;desc.size=inputs.geometry_upper_size;
+        geometryUpperRG=graph.ImportBuffer("DDGIConnectionGeometryUpper",inputs.geometry_upper,desc);
+    }
+    normal_cache_used_=false;
+    const auto normalCacheRG=normal_cache_enabled_ && normal_cache_requested_
+        ? normal_cache_.AddPasses(graph,inputs,geometryRG)
+        : std::array<rendergraph::RGResourceHandle,3>{};
     struct PassData {
         rendergraph::RGResourceHandle output;
     };
@@ -564,13 +975,21 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
         rendergraph::RGPassType::Compute,
         rendergraph::RGPassCategory::Lighting,
         [outRG = outputs.gi_output_rg, specRG = outputs.gi_specular_rg,
-         glossyAuditOutputRG, glossyAuditSpecRG,
-         irrHandle, depthHandle,
+         glossyAuditOutputRG, glossyAuditSpecRG, traversalOutRG, traversalSpecRG, traversalRecordsRG, traversalCBRG,
+         irrHandle, depthHandle, geometryRG, geometryUpperRG, normalCacheRG, equalBoxRG,
          depthRG = inputs.gbuffer_depth_rg, normalRG = inputs.gbuffer_normal_rg, ormRG = inputs.gbuffer_orm_rg]
         (PassData& data, rendergraph::RenderGraphBuilder& builder) {
             builder.SideEffect(); // prevent RG culling — outputs go to imported textures
             builder.Read(irrHandle, ResourceState::ShaderResource);
             builder.Read(depthHandle, ResourceState::ShaderResource);
+            for(auto h:geometryRG)if(h.IsValid())builder.Read(h,ResourceState::ShaderResource);
+            if(geometryUpperRG.IsValid())builder.Read(geometryUpperRG,ResourceState::ShaderResource);
+            if(equalBoxRG.IsValid())builder.Read(equalBoxRG,ResourceState::ShaderResource);
+            for(auto h:normalCacheRG)if(h.IsValid())builder.Read(h,ResourceState::ShaderResource);
+            if(traversalCBRG.IsValid())builder.Read(traversalCBRG,ResourceState::ShaderResource);
+            if(traversalRecordsRG.IsValid())builder.Write(traversalRecordsRG,ResourceState::UnorderedAccess);
+            if(traversalOutRG.IsValid())builder.Write(traversalOutRG,ResourceState::UnorderedAccess);
+            if(traversalSpecRG.IsValid())builder.Write(traversalSpecRG,ResourceState::UnorderedAccess);
             if (depthRG.IsValid()) builder.Read(depthRG, ResourceState::ShaderResource);
             if (normalRG.IsValid()) builder.Read(normalRG, ResourceState::ShaderResource);
             if (ormRG.IsValid()) builder.Read(ormRG, ResourceState::ShaderResource);
@@ -581,11 +1000,31 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             if (glossyAuditSpecRG.IsValid())
                 builder.Write(glossyAuditSpecRG, ResourceState::UnorderedAccess);
         },
-        [this, inputs, ddgiReadIdx](const PassData&, rendergraph::RenderGraphContext& context) {
+        [this, inputs, ddgiReadIdx, traversalDispatch, normalCacheRG, equalBoxRG](const PassData&, rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
             auto ddgi = inputs.ddgi_pass;
             const u32 bindingIdx = inputs.current_buffer_index % 3;
+            struct AuditBinding {u64 handle=~u64(0),offset=0,range=0;}; AuditBinding auditBindings[30]{};
+            const auto remember=[&](const WriteDescriptorSet* writes,u32 count) {
+                if(!traversalDispatch)return;
+                for(u32 i=0;i<count;++i){const auto& w=writes[i];if(w.dstBinding>=30)continue;
+                    auto& b=auditBindings[w.dstBinding];if(w.imageInfo)b.handle=w.imageInfo->imageView;
+                    else if(w.bufferInfo){b.handle=w.bufferInfo->buffer;b.offset=w.bufferInfo->offset;b.range=w.bufferInfo->range;}}
+            };
             const DescriptorSetHandle descriptorSet = descriptor_sets_[bindingIdx];
+            // Mirror the original bindings into the independent candidate set.
+            // The original set/pipeline remain usable when any witness fails.
+            const bool normalPrepared=normalCacheRG[0].IsValid();
+            const auto updateDescriptors=[&](u32 count,const WriteDescriptorSet* writes) {
+                device_->UpdateDescriptorSets(count,writes);
+                if(!normalPrepared && !equalBoxRG.IsValid())return;
+                std::vector<WriteDescriptorSet> copy;
+                for(u32 i=0;i<count;++i)if(writes[i].dstSet==descriptorSet){
+                    if(normalPrepared){copy.push_back(writes[i]);copy.back().dstSet=normal_cache_.Set(bindingIdx);}
+                    if(equalBoxRG.IsValid()){copy.push_back(writes[i]);copy.back().dstSet=equal_box_sets_[bindingIdx];}
+                }
+                if(!copy.empty())device_->UpdateDescriptorSets(u32(copy.size()),copy.data());
+            };
             const ResourceHandle probeCB = probe_cb_[bindingIdx];
             const ResourceHandle staticProbeCB = static_probe_cb_[bindingIdx];
             const ResourceHandle nvolumesCB = nvolumes_cb_[bindingIdx];
@@ -719,7 +1158,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                             ? 0u : inputs.frame_index + 1u;
                     cb->probe_counts = math::v4{(float)params.probe_count_x, (float)params.probe_count_y, (float)params.probe_count_z,
                         glossy_source_audit_enabled_ ? static_cast<float>(auditFrameStamp) : 9.0f};
-                    cb->camera_pos = math::v4{invView.columns[3][0], invView.columns[3][1], invView.columns[3][2], 1.0f};
+                    cb->camera_pos = math::v4{invView.columns[3][0], invView.columns[3][1], invView.columns[3][2], ddgi->UsesMeasuredVisibility() ? 7.0f : 1.0f};
                     // T6.3 sub-A: probe_vis 数据面——GIDebug() 热调旋钮进 CB，
                     // shader binding 6 第三 vec4（offset 112）。Off（默认）时
                     // x=0，gather 输出零变化。
@@ -981,7 +1420,12 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 imgInfos[5].sampler = handles::INVALID_SAMPLER;
                 imgInfos[5].imageView = gi_specular_texture_;
                 imgInfos[5].imageLayout = ResourceState::UnorderedAccess;
-                device_->UpdateDescriptorSets(6, texWrites);
+                updateDescriptors(6, texWrites);
+                if(traversalDispatch) {
+                    for(u32 i=0;i<6;++i)texWrites[i].dstSet=traversal_set_;
+                    imgInfos[2].imageView=traversal_diffuse_;imgInfos[5].imageView=traversal_specular_;
+                    remember(texWrites,6);updateDescriptors(6,texWrites);
+                }
                 if (glossyAuditDispatch) {
                     // Reuse the exact input image descriptors, changing only
                     // the two write targets and descriptor set.  This keeps
@@ -990,13 +1434,17 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         texWrites[i].dstSet = glossyAuditSet;
                     imgInfos[2].imageView = glossy_source_audit_output_;
                     imgInfos[5].imageView = glossy_source_audit_specular_;
-                    device_->UpdateDescriptorSets(6, texWrites);
+                    updateDescriptors(6, texWrites);
                 }
             }
 
             // T3.6/D1: Vulkan flat 绑定（17 = flat SSBO offset 256 跳过头部，
             // 18 = FlatVolumeCB）。原 15/16（far 双槽）与 17 array[4] 描述符
             // 写入删除。Metal 的 flat 槽（10/11）走下方 bufWrites 路径。
+            const bool compareGather = lumencompare::enabled &&
+                lumencompare::Selected("GIGather.Inputs");
+            ResourceHandle compareFlatHandles[4]{handles::INVALID_RESOURCE, handles::INVALID_RESOURCE,
+                handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
             if (isVk) {
                 WriteDescriptorSet flatWrites[6] = {};
                 DescriptorBufferInfo flatInfos[6];
@@ -1053,7 +1501,15 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 // ≈0 浮点，分类静默失效。
                 flatInfos[3].offset = 256;
                 flatInfos[3].range = ~0ull;
-                device_->UpdateDescriptorSets(4, flatWrites);
+                updateDescriptors(4, flatWrites);
+                if(traversalDispatch) {for(u32 i=0;i<4;++i)flatWrites[i].dstSet=traversal_set_;remember(flatWrites,4);updateDescriptors(4,flatWrites);}
+                if (compareGather) {
+                    const char* names[4] = {"flat-irradiance", "flat-volume", "near-origins", "flat-opensky"};
+                    for (u32 i = 0; i < 4; ++i) {
+                        compareFlatHandles[i] = flatInfos[i].buffer;
+                        lumencompare::Output(device_, cmd, "GIGather.Inputs", names[i], flatInfos[i].buffer, true);
+                    }
+                }
                 if (glossyAuditDispatch) {
                     for (u32 i = 0; i < 4; ++i)
                         flatWrites[i].dstSet = glossyAuditSet;
@@ -1077,7 +1533,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     flatInfos[5].buffer = glossy_material_audit_buffer_[bindingIdx];
                     flatInfos[5].offset = 0;
                     flatInfos[5].range = glossy_material_audit_bytes_;
-                    device_->UpdateDescriptorSets(6, flatWrites);
+                    updateDescriptors(6, flatWrites);
                 }
             }
 
@@ -1118,11 +1574,12 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 bufInfos[8].buffer = ddgi->GetDepthBufferBySlot(ddgiReadIdx); bufInfos[8].offset = 0; bufInfos[8].range = ~0ull;
                 if (isVk) {
                     // Vulkan: bindings 4..12（flat 槽 17/18 已由上方 flatWrites 写入）。
-                    device_->UpdateDescriptorSets(9, bufWrites);
+                    updateDescriptors(9, bufWrites);
+                    if(traversalDispatch) {for(u32 i=0;i<9;++i)bufWrites[i].dstSet=traversal_set_;remember(bufWrites,9);updateDescriptors(9,bufWrites);}
                     if (glossyAuditDispatch) {
                         for (u32 i = 0; i < 9; ++i)
                             bufWrites[i].dstSet = glossyAuditSet;
-                        device_->UpdateDescriptorSets(9, bufWrites);
+                        updateDescriptors(9, bufWrites);
                     }
                 } else {
                     // T3.6/D1: Metal flat 槽（10 = flat SSBO offset 256，11 = fvCB）。
@@ -1135,7 +1592,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         ? flatBuf : dummy_buffer_;
                     bufInfos[9].offset = 256;
                     bufInfos[9].range = ~0ull;
-                    device_->UpdateDescriptorSets(10, bufWrites);
+                    updateDescriptors(10, bufWrites);
                     // Metal fvCB（binding 11，UBO）。
                     WriteDescriptorSet fvWrite{};
                     DescriptorBufferInfo fvInfo{};
@@ -1148,7 +1605,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     fvWrite.bufferInfo = &fvInfo;
                     fvInfo.buffer = nvolumesCB; fvInfo.offset = 0;
                     fvInfo.range = sizeof(FlatVolumeCB);
-                    device_->UpdateDescriptorSets(1, &fvWrite);
+                    updateDescriptors(1, &fvWrite);
                     // 2026-09-17 P0：Metal buffer(12) = 近场重定位有效起点。
                     WriteDescriptorSet roWrite{};
                     DescriptorBufferInfo roInfo{};
@@ -1167,7 +1624,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     }
                     roInfo.offset = 0;
                     roInfo.range = ~0ull;
-                    device_->UpdateDescriptorSets(1, &roWrite);   // 2026-09-15 补提交：此前填充后从未 Update，buffer(12) 缺绑 → validation abort
+                    updateDescriptors(1, &roWrite);   // 2026-09-15 补提交：此前填充后从未 Update，buffer(12) 缺绑 → validation abort
                     // GI 根治 Phase 3.2: Metal buffer(13) = flat openSky。
                     WriteDescriptorSet osWrite{};
                     DescriptorBufferInfo osInfo{};
@@ -1182,15 +1639,220 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         ? flatOpenSkyBuf : dummy_buffer_;
                     osInfo.offset = 0;
                     osInfo.range = ~0ull;
-                    device_->UpdateDescriptorSets(1, &osWrite);
+                    updateDescriptors(1, &osWrite);
                 }
             }
 
-            // Dispatch
-            cmd->BindComputePipeline(pipeline_);
-            const DescriptorSetHandle sets[] = { descriptorSet };
-            cmd->BindDescriptorSets(PipelineBindPoint::Compute, layout_, 0, 1, sets, 0, nullptr);
-            cmd->Dispatch((gather_width_ + 7) / 8, (gather_height_ + 7) / 8, 1);
+            bool connectionReady=false, useUpper=false;
+            math::v2 rasterJitter{};
+            ResourceHandle connectionCB=connection_unknown_cb_;
+            ResourceHandle connectionBuffers[4]{};
+            if(geometry_connections_enabled_) {
+                connectionReady=inputs.geometry_ready && bool(inputs.geometry_still_current) && inputs.geometry_still_current();
+                for(u32 i=0;i<4;++i)connectionReady=connectionReady && inputs.geometry[i]!=handles::INVALID_RESOURCE && inputs.geometry_sizes[i]>0;
+                connectionReady=connectionReady && bool(inputs.raster_jitter_provider) && inputs.raster_jitter_provider(rasterJitter);
+                connectionReady=connectionReady && std::isfinite(rasterJitter.x) && std::isfinite(rasterJitter.y);
+                struct ConnectionDispatch {u32 policy[4];float jitter[4];};
+                static_assert(sizeof(ConnectionDispatch)==32);
+                const ConnectionDispatch policy{{connectionReady?1u:0u,inputs.frame_index,bindingIdx,0u},{rasterJitter.x,rasterJitter.y,0.f,0.f}};
+                if(auto* mapped=device_->MapBuffer(connection_cb_[bindingIdx])) {
+                    std::memcpy(mapped,&policy,sizeof(policy));device_->UnmapBuffer(connection_cb_[bindingIdx]);
+                    connectionCB=connection_cb_[bindingIdx];
+                } else connectionReady=false;
+                useUpper=connectionReady && !pair_env_requested_ && !payload_env_requested_ && upper_requested_ && upper_allowed_ &&
+                    inputs.geometry_upper!=handles::INVALID_RESOURCE && inputs.geometry_upper_size>0 &&
+                    inputs.geometry_upper_still_current && inputs.geometry_upper_still_current();
+                DescriptorBufferInfo infos[5]{};WriteDescriptorSet writes[5]{};
+                for(u32 i=0;i<5;++i) {
+                    infos[i].buffer=i==4?connectionCB:(connectionReady?(useUpper && i==1?inputs.geometry_upper:inputs.geometry[i]):dummy_buffer_);
+                    infos[i].offset=0;infos[i].range=i==4?32:(connectionReady?(useUpper && i==1?inputs.geometry_upper_size:inputs.geometry_sizes[i]):64);
+                    writes[i].dstSet=descriptorSet;writes[i].dstBinding=23+i;writes[i].descriptorCount=1;
+                    writes[i].descriptorType=i==4?DescriptorType::UniformBuffer:DescriptorType::StorageBuffer;
+                    writes[i].bufferInfo=&infos[i];
+                    if(i<4)connectionBuffers[i]=infos[i].buffer;
+                }
+                updateDescriptors(5,writes);
+                if(traversalDispatch) {
+                    for(auto& write:writes)write.dstSet=traversal_set_;
+                    remember(writes,5);updateDescriptors(5,writes);
+                    DescriptorBufferInfo extraInfos[2]{}; WriteDescriptorSet extra[2]{};
+                    extraInfos[0].buffer=traversal_cb_;extraInfos[0].range=sizeof(traversal_audit::Selection);
+                    extraInfos[1].buffer=traversal_records_;extraInfos[1].range=u64(traversal_pixels_.size())*traversal_audit::RecordWords*sizeof(u32);
+                    for(u32 i=0;i<2;++i){extra[i].dstSet=traversal_set_;extra[i].dstBinding=28+i;extra[i].descriptorCount=1;
+                        extra[i].descriptorType=i==0?DescriptorType::UniformBuffer:DescriptorType::StorageBuffer;extra[i].bufferInfo=&extraInfos[i];}
+                    remember(extra,2);updateDescriptors(2,extra);
+                }
+                cmd->MemoryBarrier(PipelineStage::Host|PipelineStage::ComputeShader,PipelineStage::ComputeShader,
+                    AccessFlag::HostWrite|AccessFlag::ShaderWrite,AccessFlag::ShaderRead);
+            }
+            if (compareGather && isVk) {
+                if(geometry_connections_enabled_)
+                    lumencompare::Output(device_,cmd,"GIGather.Inputs","connection-policy",connectionCB,true,ResourceState::ShaderResource);
+                lumencompare::Output(device_, cmd, "GIGather.Inputs", "probe", bufInfos[0].buffer, true);
+                lumencompare::Output(device_, cmd, "GIGather.Inputs", "near-confidence", bufInfos[6].buffer, true);
+                lumencompare::Output(device_, cmd, "GIGather.Inputs", "near-SH", bufInfos[7].buffer, true);
+                lumencompare::Output(device_, cmd, "GIGather.Inputs", "near-moments", bufInfos[8].buffer, true);
+                const auto directory = std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR")) /
+                    ("frame-" + std::to_string(lumencompare::ordinal));
+                std::filesystem::create_directories(directory);
+                std::ofstream meta(directory / "gigather.json");
+                meta << "{\"frame\":" << lumencompare::ordinal << ",\"native_frame\":" << inputs.frame_index
+                     << ",\"binding_slot\":" << bindingIdx << ",\"read_slot\":" << ddgiReadIdx
+                     << ",\"flat_active\":" << (flatActive ? "true" : "false")
+                     << ",\"opensky_active\":" << (openskyActive ? "true" : "false")
+                     << ",\"geometry_required\":" << (geometry_connections_enabled_?"true":"false")
+                     << ",\"geometry_ready\":" << (connectionReady?"true":"false")
+                     << ",\"geometry_epoch\":" << inputs.geometry_epoch
+                     << ",\"geometry_source_digest\":" << inputs.geometry_source_digest
+                     << ",\"geometry_handles\":[" << connectionBuffers[0] << ',' << connectionBuffers[1] << ',' << connectionBuffers[2] << ',' << connectionBuffers[3] << ']'
+
+                     << ",\"total_probes\":" << fvTotalProbes << ",\"flat_byte_offset\":256,\"volumes\":[";
+                for (u32 vi = 0; vi < nvolCount; ++vi) {
+                    const auto& view = nvolViews[vi];
+                    const u32 count = static_cast<u32>(view.counts.x) * static_cast<u32>(view.counts.y) * static_cast<u32>(view.counts.z);
+                    meta << (vi ? "," : "") << "{\"volume\":" << vi << ",\"probe_offset\":" << fvOffsets[vi]
+                         << ",\"probe_count\":" << count << ",\"source_irradiance_handle\":" << view.irradiance
+                         << ",\"source_opensky_handle\":" << view.opensky << '}';
+                }
+                meta << "],\"flat_irradiance_handle\":" << compareFlatHandles[0]
+                     << ",\"flat_volume_handle\":" << compareFlatHandles[1]
+                     << ",\"near_origins_handle\":" << compareFlatHandles[2]
+                     << ",\"flat_opensky_handle\":" << compareFlatHandles[3]
+                     << ",\"probe_handle\":" << bufInfos[0].buffer
+                     << ",\"confidence_handle\":" << bufInfos[6].buffer
+                     << ",\"near_SH_handle\":" << bufInfos[7].buffer
+                     << ",\"near_moments_handle\":" << bufInfos[8].buffer
+                     << ",\"probe_cb_valid_bytes\":" << sizeof(GIGatherCB)
+                     << ",\"validity\":\"flat irradiance at offset256 uses total_probes*144B; opensky uses total_probes*8B when active; probeCB bindings4/5/6 use byte ranges0:80/64:80/80:128; unused allocation capacity is not evidence\","
+                     << "\"observer_note\":\"diagnostic copies add transfer dependencies and may affect latent production synchronization races\"}\n";
+            }
+
+            // Select only after the source, jitter and upload witness have
+            // been rechecked in this actual dispatch callback.
+            const bool useCompact=connectionReady && !pair_env_requested_ && !payload_env_requested_ && compact_requested_ &&
+                compact_pipeline_!=handles::INVALID_PIPELINE &&
+                inputs.geometry_compact_still_current && inputs.geometry_compact_still_current();
+            const bool useQuery=connectionReady && query_requested_ && query_pipeline_!=handles::INVALID_PIPELINE &&
+                inputs.geometry_still_current && inputs.geometry_still_current() &&
+                (!useUpper || (inputs.geometry_upper_still_current && inputs.geometry_upper_still_current()));
+            const bool useNormals=!pair_env_requested_ && !payload_env_requested_ && normalPrepared && normal_cache_requested_ && useQuery && connectionReady && !useUpper && !useCompact && normal_cache_.Available(inputs);
+            const bool useBounds=!pair_env_requested_ && !payload_env_requested_ && useQuery && !useNormals && !useUpper && !useCompact && bounds_requested_ && bounds_pipeline_!=handles::INVALID_PIPELINE;
+            const bool useWorkgroup=!pair_env_requested_ && !payload_env_requested_ && useQuery && !useNormals && !useBounds && !useUpper && !useCompact && workgroup_pipeline_!=handles::INVALID_PIPELINE;
+            const bool useEqualBox=!pair_env_requested_ && !payload_env_requested_ && useQuery && !useNormals && !useBounds && !useUpper && !useCompact && !useWorkgroup && equal_box_requested_ && equalBoxRG.IsValid() && inputs.equal_box_still_current && inputs.equal_box_still_current();
+            if(useEqualBox) {
+                DescriptorBufferInfo info{inputs.equal_box_buffer,0,inputs.equal_box_size};WriteDescriptorSet write{};write.dstSet=equal_box_sets_[bindingIdx];write.dstBinding=28;write.descriptorCount=1;write.descriptorType=DescriptorType::StorageBuffer;write.bufferInfo=&info;
+                device_->UpdateDescriptorSets(1,&write);
+                cmd->MemoryBarrier(PipelineStage::Host,PipelineStage::ComputeShader,AccessFlag::HostWrite,AccessFlag::ShaderRead);
+            }
+            const bool usePayload=!pair_env_requested_ && useQuery && payload_requested_ && !useNormals && !useBounds && !useUpper && !useCompact && !useWorkgroup && !useEqualBox;
+            const bool usePair=useQuery && pair_requested_ && !useNormals && !useBounds && !useUpper && !useCompact && !useWorkgroup && !useEqualBox && !usePayload;
+            // Diagnostic snapshot of the exact descriptor ranges read by the
+            // selected reference pair dispatch. BufferSlice records failed
+            // ranges as incomplete rather than exporting a dummy as geometry.
+            // The observer is active only for a selected LumenCompare frame;
+            // no extra commands or allocation occur on the normal path.
+            if (compareGather && isVk) {
+                const bool sourceCurrent = usePair && connectionReady &&
+                    inputs.geometry_still_current && inputs.geometry_still_current();
+                const auto directory = std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR")) /
+                    ("frame-" + std::to_string(lumencompare::ordinal));
+                std::filesystem::create_directories(directory);
+                std::ofstream bridge(directory / "bridge-gather-geometry.json");
+                bridge << "{\"schema\":1,\"native_frame\":" << inputs.frame_index
+                       << ",\"ordinal\":" << lumencompare::ordinal
+                       << ",\"binding_slot\":" << bindingIdx
+                       << ",\"command\":" << cmd->GetHandle()
+                       << ",\"scene_epoch\":" << inputs.geometry_epoch
+                       << ",\"source_digest\":" << inputs.geometry_source_digest
+                       << ",\"source_current\":" << (sourceCurrent ? "true" : "false")
+                       << ",\"pair_selected\":" << (usePair ? "true" : "false")
+                       << ",\"completion_serial_before_record\":" << device_->FrameSlotCompletions().Serial(bindingIdx)
+                       << ",\"length_semantics\":\"actual descriptor range; logical length requires separate scene witness\",\"buffers\":[";
+                for (u32 i=0;i<4;++i) {
+                    if (i) bridge << ',';
+                    bridge << "{\"binding\":" << (23+i) << ",\"handle\":" << connectionBuffers[i]
+                           << ",\"offset\":0,\"descriptor_bytes\":" << inputs.geometry_sizes[i] << '}';
+                }
+                bridge << "]}\n";
+                if (sourceCurrent) {
+                    // The geometry may have been host-uploaded this frame.
+                    // Publish it directly to transfer before the observer copy.
+                    cmd->MemoryBarrier(PipelineStage::Host | PipelineStage::ComputeShader,
+                        PipelineStage::Transfer, AccessFlag::HostWrite | AccessFlag::ShaderWrite,
+                        AccessFlag::TransferRead);
+                    const char* names[4] = {"geometry-binding-23", "geometry-binding-24",
+                                            "geometry-binding-25", "geometry-binding-26"};
+                    for (u32 i=0;i<4;++i)
+                        lumencompare::BufferSlice(device_,cmd,"GIGather.Inputs",names[i],
+                            connectionBuffers[i],0,inputs.geometry_sizes[i]);
+                }
+            }
+            cmd->BindComputePipeline(useNormals?normal_cache_.Pipeline():(useBounds?bounds_pipeline_:(useWorkgroup?workgroup_pipeline_:(useEqualBox?equal_box_pipeline_:(usePayload?payload_pipeline_:(usePair?pair_pipeline_:(useQuery ? query_pipeline_ : (useCompact ? compact_pipeline_ : pipeline_))))))));
+            const DescriptorSetHandle sets[] = { useNormals?normal_cache_.Set(bindingIdx):(useEqualBox?equal_box_sets_[bindingIdx]:descriptorSet) };
+            cmd->BindDescriptorSets(PipelineBindPoint::Compute, useNormals?normal_cache_.Layout():(useEqualBox?equal_box_layout_:layout_), 0, 1, sets, 0, nullptr);
+            const u32 localY=useWorkgroup && workgroup_requested_==32?4u:8u;
+            const u32 groupsX=workgroup_experiment::Groups(gather_width_,8),groupsY=workgroup_experiment::Groups(gather_height_,localY);
+            cmd->Dispatch(groupsX,groupsY,1);
+            // Only claim qualification when the existing live query check passed;
+            // other modes may be valid but do not provide this receipt proof.
+            const bool receiptQualified=useQuery;
+            workgroup_receipt_={workgroup_requested_,useWorkgroup?workgroup_requested_:0u,8,localY,groupsX,groupsY,gather_width_,gather_height_,bindingIdx,receiptQualified?inputs.geometry_epoch:0,receiptQualified?inputs.geometry_source_digest:0,true};
+            for(u32 i=0;i<4;++i)workgroup_receipt_.buffers[i]=connectionBuffers[i];
+            workgroup_receipt_.source_qualified=receiptQualified;
+            pair_receipt_.actual=usePair;pair_receipt_.slot=bindingIdx;
+            if(usePair){pair_receipt_.epoch=inputs.geometry_epoch;pair_receipt_.digest=inputs.geometry_source_digest;pair_receipt_.shader_hash=pair_shader_hash_;for(u32 i=0;i<4;++i)pair_receipt_.sources[i]=connectionBuffers[i];workgroup_receipt_.shader_fnv1a64=pair_shader_hash_;}
+            payload_receipt_.actual=usePayload;payload_receipt_.slot=bindingIdx;
+            if(usePayload){payload_receipt_.epoch=inputs.geometry_epoch;payload_receipt_.digest=inputs.geometry_source_digest;payload_receipt_.shader_hash=payload_shader_hash_;for(u32 i=0;i<4;++i)payload_receipt_.sources[i]=connectionBuffers[i];workgroup_receipt_.shader_fnv1a64=payload_shader_hash_;}
+            equal_box_receipt_.actual=useEqualBox;equal_box_receipt_.slot=bindingIdx;
+            if(useEqualBox){equal_box_receipt_.epoch=inputs.geometry_epoch;equal_box_receipt_.digest=inputs.geometry_source_digest;equal_box_receipt_.payload_hash=inputs.equal_box_payload_hash;equal_box_receipt_.flags_hash=inputs.equal_box_flags_hash;equal_box_receipt_.buffer=inputs.equal_box_buffer;equal_box_receipt_.bytes=inputs.equal_box_size;equal_box_receipt_.serial=inputs.equal_box_serial;for(u32 i=0;i<4;++i)equal_box_receipt_.sources[i]=connectionBuffers[i];}
+            compact_used_=useCompact; upper_used_=useUpper; query_used_=useQuery && !useNormals; query_dispatch_=!useCompact && !useNormals;
+            normal_cache_used_=useNormals;bounds_used_=useBounds;bounds_dispatch_=useQuery && !useNormals;
+            if(useNormals) {
+                normal_cache_.Receipt(inputs);
+                if(compareGather && isVk) {
+                    lumencompare::Output(device_,cmd,"GIGather.Inputs","instance-normal-owners",normal_cache_.Buffer(bindingIdx,0),true,ResourceState::ShaderResource);
+                    lumencompare::Output(device_,cmd,"GIGather.Inputs","instance-normal-values",normal_cache_.Buffer(bindingIdx,1),true,ResourceState::ShaderResource);
+                    lumencompare::Output(device_,cmd,"GIGather.Inputs","instance-normal-verified",normal_cache_.Buffer(bindingIdx,2),true,ResourceState::ShaderResource);
+                }
+            }
+
+            if(traversalDispatch) {
+                const bool stillCurrent=device_->FrameSlotCompletions().CanReuse(bindingIdx,0) && connectionReady && inputs.geometry_still_current && inputs.geometry_still_current() &&
+                    (!useUpper || (inputs.geometry_upper_still_current && inputs.geometry_upper_still_current()));
+                const auto directory=std::filesystem::path(std::getenv("LUMEN_COMPARE_DIR"))/("frame-"+std::to_string(lumencompare::ordinal));
+                std::filesystem::create_directories(directory);std::ofstream meta(directory/"ddgi-traversal-audit.json");
+                meta << "{\"schema\":1,\"native_frame\":" << inputs.frame_index << ",\"ordinal\":" << lumencompare::ordinal
+                     << ",\"slot\":" << bindingIdx << ",\"completion_serial\":" << device_->FrameSlotCompletions().Serial(bindingIdx) << ",\"ddgi_read_slot\":" << ddgiReadIdx << ",\"valid\":" << (stillCurrent?"true":"false")
+                     << ",\"actual_upper\":" << (useUpper?"true":"false") << ",\"epoch\":" << inputs.geometry_epoch
+                     << ",\"digest\":" << inputs.geometry_source_digest << ",\"width\":" << gather_width_ << ",\"height\":" << gather_height_
+                     << ",\"jitter_bits\":[" << std::bit_cast<u32>(rasterJitter.x) << ',' << std::bit_cast<u32>(rasterJitter.y) << "]"
+                     << ",\"source_payload_hash\":" << inputs.geometry_upper_original_hash << ",\"candidate_payload_hash\":" << inputs.geometry_upper_candidate_hash
+                     << ",\"main_shader_fnv1a64\":" << traversal_main_shader_hash_ << ",\"shadow_shader_fnv1a64\":" << traversal_shader_hash_
+                     << ",\"main_set\":" << descriptorSet << ",\"shadow_set\":" << traversal_set_
+                     << ",\"geometry_handles\":[" << connectionBuffers[0] << ',' << connectionBuffers[1] << ',' << connectionBuffers[2] << ',' << connectionBuffers[3]
+                     << "],\"original_handles\":[" << inputs.geometry[0] << ',' << inputs.geometry[1] << ',' << inputs.geometry[2] << ',' << inputs.geometry[3]
+                     << "],\"original_sizes\":[" << inputs.geometry_sizes[0] << ',' << inputs.geometry_sizes[1] << ',' << inputs.geometry_sizes[2] << ',' << inputs.geometry_sizes[3]
+                     << "],\"sizes\":[" << inputs.geometry_sizes[0] << ',' << (useUpper?inputs.geometry_upper_size:inputs.geometry_sizes[1]) << ',' << inputs.geometry_sizes[2] << ',' << inputs.geometry_sizes[3]
+                     << "],\"shader\":\"DDGIGIGather_geometry_traversal_audit.comp.spv\",\"bindings\":[";
+                bool firstBinding=true;for(u32 i=0;i<30;++i)if(auditBindings[i].handle!=~u64(0)) {
+                    if(!firstBinding)meta << ',';firstBinding=false;meta << "{\"binding\":" << i << ",\"handle\":" << auditBindings[i].handle
+                        << ",\"offset\":" << auditBindings[i].offset << ",\"range\":" << auditBindings[i].range << '}';
+                }
+                meta << "],\"selection\":[";
+                for(size_t i=0;i<traversal_pixels_.size();++i){if(i)meta << ',';meta << '[' << traversal_pixels_[i].x << ',' << traversal_pixels_[i].y << ']';}meta << "]}\n";meta.close();
+                if(stillCurrent) {
+                    lumencompare::Output(device_,cmd,"DDGI.TraversalAudit","production-diffuse",gi_halfres_texture_,false,ResourceState::UnorderedAccess);
+                    lumencompare::Output(device_,cmd,"DDGI.TraversalAudit","production-specular",gi_specular_texture_,false,ResourceState::UnorderedAccess);
+                    cmd->MemoryBarrier(PipelineStage::Host|PipelineStage::ComputeShader,PipelineStage::ComputeShader,
+                        AccessFlag::HostWrite|AccessFlag::ShaderWrite,AccessFlag::ShaderRead|AccessFlag::ShaderWrite);
+                    cmd->BindComputePipeline(traversal_pipeline_);const DescriptorSetHandle sets[]={traversal_set_};
+                    cmd->BindDescriptorSets(PipelineBindPoint::Compute,traversal_layout_,0,1,sets,0,nullptr);
+                    cmd->Dispatch((gather_width_+7)/8,(gather_height_+7)/8,1);
+                    lumencompare::Output(device_,cmd,"DDGI.TraversalAudit","shadow-diffuse",traversal_diffuse_,false,ResourceState::UnorderedAccess);
+                    lumencompare::Output(device_,cmd,"DDGI.TraversalAudit","shadow-specular",traversal_specular_,false,ResourceState::UnorderedAccess);
+                    lumencompare::Output(device_,cmd,"DDGI.TraversalAudit","records",traversal_records_,true,ResourceState::UnorderedAccess);
+                } else PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_TRAVERSAL_AUDIT] stale input, observer not dispatched" << std::endl;
+            }
 
             // Optional receiver-source pass.  It consumes the same descriptor
             // inputs and frame constants as the production dispatch, but its

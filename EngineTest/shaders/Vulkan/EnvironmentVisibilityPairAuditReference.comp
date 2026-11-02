@@ -1,0 +1,348 @@
+#version 450 core
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_samplerless_texture_functions : enable
+// Vulkan geometry visibility for the reflection lobe. This is a scalar,
+// uniform-environment separability approximation when multiplied by a
+// prefiltered cubemap; it is not an exact environment-radiance integral.
+#if defined(ENV_TRACE_WG32) && !defined(ENV_VIS_RESOLVE)
+layout(local_size_x=8,local_size_y=4,local_size_z=1) in;
+#else
+layout(local_size_x=8,local_size_y=8,local_size_z=1) in;
+#endif
+layout(set=0,binding=0) uniform texture2D depthTexture;
+layout(set=0,binding=1) uniform texture2D normalTexture;
+layout(set=0,binding=2) uniform texture2D ormTexture;
+layout(set=0,binding=3,rgba16f) uniform writeonly image2D outputVisibility;
+layout(set=0,binding=5) uniform texture2D halfVisibility;
+layout(set=0,binding=4,std140) uniform VisibilityCB {
+    mat4 inverseViewProjection;
+    vec4 camera; // xyz position, w actual original clip/NDC jitter.x
+    uvec4 dimensions; // full.xy, half.zw
+    uvec4 policy; // scene ready, legacy bit0 / jitter invalid bit31, jitter.y bits, frame
+    vec4 parameters; // geometry bias, plane qualification, Ng cosine, rough diff
+} cb;
+#include "GeometryFirstHit.glsl"
+
+// Private shadow instrumentation; 576 grid samples plus eight fixed ROI points.
+layout(set=0,binding=28,std430) buffer EnvironmentAuditRecords { uint auditRecords[]; };
+uint auditIndex=0xffffffffu,auditRootLoads=0u,auditTop=0u,auditBottom=0u,auditInstances=0u,auditTriangles=0u,auditDigest=2166136261u;
+uvec4 auditCounts[4];uint auditOrders[4],auditOutcomes[4],auditWeights[4];vec3 auditDirections[4],auditPreDirection[4];bool auditUsed[4],auditPreUsed[4],auditPreMismatch[4];
+uint auditLane=0u;
+uint auditNodeLoads=0u,auditInstanceLoads=0u,auditTriangleLoads=0u,auditPaired=0u,auditOverflow=0u;
+void auditStoreActual(uint lane,vec3 d,uint source){if(auditIndex==0xffffffffu)return;uint at=584u*80u+auditIndex*16u+lane*4u;auditRecords[at]=floatBitsToUint(d.x);auditRecords[at+1u]=floatBitsToUint(d.y);auditRecords[at+2u]=floatBitsToUint(d.z);auditRecords[at+3u]=0xe5700000u|source;}
+uint auditDigestStep(uint h,uint kind,uint id,uint inst){h=(h^kind)*16777619u;h=(h^id)*16777619u;return (h^inst)*16777619u;}
+void auditStoreQuery(uint lane,vec3 o,vec3 d,float farT,uint kind){if(auditIndex==0xffffffffu)return;uint q=584u*96u+auditIndex*32u+lane*8u;auditRecords[q]=floatBitsToUint(o.x);auditRecords[q+1u]=floatBitsToUint(o.y);auditRecords[q+2u]=floatBitsToUint(o.z);auditRecords[q+3u]=floatBitsToUint(d.x);auditRecords[q+4u]=floatBitsToUint(d.y);auditRecords[q+5u]=floatBitsToUint(d.z);auditRecords[q+6u]=floatBitsToUint(farT);auditRecords[q+7u]=0xe5710000u|kind;}
+void auditResetScalar(){auditTop=0u;auditBottom=0u;auditInstances=0u;auditTriangles=0u;auditDigest=2166136261u;}
+void auditSaveScalar(uint lane){auditCounts[lane]=uvec4(auditTop,auditBottom,auditInstances,auditTriangles);auditOrders[lane]=auditDigest;auditNodeLoads+=auditTop+auditBottom;auditInstanceLoads+=auditInstances;auditTriangleLoads+=auditTriangles;}
+uint auditSelect(ivec2 pixel){if(pixel.x%40==20 && pixel.y%40==20)return uint(pixel.y/40)*32u+uint(pixel.x/40);const ivec2 roi[8]=ivec2[8](ivec2(200,500),ivec2(240,500),ivec2(280,500),ivec2(320,500),ivec2(600,300),ivec2(640,300),ivec2(680,300),ivec2(720,300));for(uint i=0u;i<8u;++i)if(all(equal(pixel,roi[i])))return 576u+i;return 0xffffffffu;}
+
+bool finite3(vec3 v){return !any(isnan(v))&&!any(isinf(v));}
+bool finite1(float v){return !isnan(v)&&!isinf(v);}
+uint hash32(uint x){x^=x>>16u;x*=0x7feb352du;x^=x>>15u;x*=0x846ca68bu;return x^(x>>16u);}
+vec2 random2(uint seed){return (vec2(hash32(seed^0x68bc21ebu)>>8u,hash32(seed^0x02e5be93u)>>8u)+.5)/16777216.;}
+bool pointAt(ivec2 pixel,out vec3 p) {
+    ivec2 size=ivec2(cb.dimensions.xy);
+    if(any(lessThan(pixel,ivec2(0)))||any(greaterThanEqual(pixel,size)))return false;
+    float z=texelFetch(depthTexture,pixel,0).r;
+    if(!finite1(z)||z<0.||z>=.999999)return false;
+    vec2 uv=(vec2(pixel)+.5)/vec2(size);
+    // The raster adds jitter before Naga flips gl_Position.y. This screen
+    // convention already reverses that flip, so subtract BOTH original axes.
+    vec2 ndc=vec2(uv.x*2.-1.,1.-uv.y*2.)-vec2(cb.camera.w,uintBitsToFloat(cb.policy.z));
+    if(any(isnan(ndc))||any(isinf(ndc)))return false;
+    vec4 h=cb.inverseViewProjection*vec4(ndc,z,1.);
+    if(!finite1(h.w)||abs(h.w)<1e-8)return false;
+    p=h.xyz/h.w;return finite3(p);
+}
+struct Receiver {vec3 p;vec3 ng;vec3 ns;vec3 v;float roughness;};
+#ifdef ENV_VIS_RESOLVE
+// An 8x8 full-resolution group references at most a 6x6 half-source grid.
+// Cache the SAME receiver operator once per source; keep target computation,
+// candidate iteration order and every qualification/ray predicate unchanged.
+shared Receiver sourceReceiverCache[36];
+shared uint sourceReceiverValid[36];
+#endif
+bool receiver(ivec2 pixel,out Receiver r) {
+    if((cb.policy.y&0x80000000u)!=0u)return false;
+    if(any(notEqual(textureSize(depthTexture,0),ivec2(cb.dimensions.xy)))||
+       any(notEqual(textureSize(normalTexture,0),ivec2(cb.dimensions.xy)))||
+       any(notEqual(textureSize(ormTexture,0),ivec2(cb.dimensions.xy))))return false;
+    if(!pointAt(pixel,r.p))return false;
+    vec3 view=cb.camera.xyz-r.p;
+    if(!finite3(view)||dot(view,view)<1e-10)return false;r.v=normalize(view);
+    // Choose the closer valid derivative in each axis. Large depth jumps
+    // cannot establish a surface tangent and must not supply a bias normal.
+    vec3 px0,px1,py0,py1;bool x0=pointAt(pixel-ivec2(1,0),px0),x1=pointAt(pixel+ivec2(1,0),px1);
+    bool y0=pointAt(pixel-ivec2(0,1),py0),y1=pointAt(pixel+ivec2(0,1),py1);
+    if((!x0&&!x1)||(!y0&&!y1))return false;
+    vec3 dx=(x0&&(!x1||distance(px0,r.p)<distance(px1,r.p)))?r.p-px0:px1-r.p;
+    vec3 dy=(y0&&(!y1||distance(py0,r.p)<distance(py1,r.p)))?r.p-py0:py1-r.p;
+    float limit=max(.02,length(view)*.02);
+    if(length(dx)>limit||length(dy)>limit)return false;
+    vec3 n=cross(dx,dy);float s=max(abs(n.x),max(abs(n.y),abs(n.z)));
+    if(!finite3(n)||s<1e-16)return false;r.ng=normalize(n/s);
+    if(dot(r.ng,r.v)<0.)r.ng=-r.ng;
+    vec3 ns=texelFetch(normalTexture,pixel,0).xyz*2.-1.;
+    if(!finite3(ns)||dot(ns,ns)<.25)return false;r.ns=normalize(ns);
+    if(dot(r.ns,r.v)<=1e-5||dot(r.ns,r.ng)<=0.)return false;
+    float rough=texelFetch(ormTexture,pixel,0).g;
+    if(!finite1(rough)||rough<0.||rough>1.)return false;r.roughness=max(rough,.04);
+    return true;
+}
+// Visibility needs an existential opaque witness, not the nearest triangle.
+// The complete/current opaque scene certificate is still required by caller.
+// A valid interior witness suffices even if a different branch is irrelevant;
+// without such a witness every intersected branch must complete before miss.
+bool environmentNodeValid(GeometryNode node) {
+    return finite3(node.lo.xyz)&&finite3(node.hi.xyz)&&
+        all(lessThanEqual(node.lo.xyz,node.hi.xyz));
+}
+int environmentAnyHit(vec3 origin,vec3 direction,float nearT,float farT) {
+    if(!finite3(origin)||!finite3(direction)||!finite1(nearT)||!finite1(farT)||
+       nearT<0.||farT<=nearT||dot(direction,direction)<=0.)return -1;
+    bool endpoint=false;
+    uint topStack[64];uint topSize=1u,topVisited=0u;topStack[0]=0u;
+    while(topSize!=0u) {
+        if(topVisited++>=geometryTop.data.length())return -1;
+        uint at=topStack[--topSize];++auditTop;auditDigest=auditDigestStep(auditDigest,1u,at,0u);if(at>=geometryTop.data.length())return -1;
+        GeometryNode node=geometryTop.data[at];if(!environmentNodeValid(node))return -1;
+        if(!geometryBox(node,origin,direction,nearT,farT))continue;
+        if(node.links.w==0u) {
+            if(topSize+2u>64u||node.links.x>=geometryTop.data.length()||node.links.y>=geometryTop.data.length())return -1;
+            topStack[topSize++]=node.links.x;topStack[topSize++]=node.links.y;continue;
+        }
+        if(node.links.w!=1u||node.links.z>=geometryInstances.data.length())return -1;
+        ++auditInstances;auditDigest=auditDigestStep(auditDigest,2u,node.links.z,0u);GeometryInstance instance=geometryInstances.data[node.links.z];
+        if(any(isnan(instance.inverse0))||any(isinf(instance.inverse0))||
+           any(isnan(instance.inverse1))||any(isinf(instance.inverse1))||
+           any(isnan(instance.inverse2))||any(isinf(instance.inverse2)))return -1;
+        float inverseDet=dot(instance.inverse0.xyz,cross(instance.inverse1.xyz,instance.inverse2.xyz));
+        if(!finite1(inverseDet)||inverseDet==0.)return -1;
+        vec3 localOrigin=vec3(dot(instance.inverse0,vec4(origin,1)),
+            dot(instance.inverse1,vec4(origin,1)),dot(instance.inverse2,vec4(origin,1)));
+        // Preserve WORLD t; inverse-scaled local direction is not normalized.
+        vec3 localDirection=vec3(dot(instance.inverse0.xyz,direction),
+            dot(instance.inverse1.xyz,direction),dot(instance.inverse2.xyz,direction));
+        float directionSquared=dot(localDirection,localDirection);
+        if(!finite3(localOrigin)||!finite3(localDirection)||!finite1(directionSquared)||directionSquared<=0.)return -1;
+        uint bottomStack[64];uint bottomSize=1u,bottomVisited=0u;bottomStack[0]=instance.identity.x;
+        while(bottomSize!=0u) {
+            if(bottomVisited++>=geometryBottom.data.length())return -1;
+            at=bottomStack[--bottomSize];++auditBottom;auditDigest=auditDigestStep(auditDigest,3u,at,node.links.z);if(at>=geometryBottom.data.length())return -1;
+            GeometryNode bottom=geometryBottom.data[at];if(!environmentNodeValid(bottom))return -1;
+            if(!geometryBox(bottom,localOrigin,localDirection,nearT,farT))continue;
+            if(bottom.links.w==0u) {
+                if(bottomSize+2u>64u||bottom.links.x>=geometryBottom.data.length()||bottom.links.y>=geometryBottom.data.length())return -1;
+                bottomStack[bottomSize++]=bottom.links.x;bottomStack[bottomSize++]=bottom.links.y;continue;
+            }
+            if(bottom.links.z>geometryTriangles.data.length()||bottom.links.w>geometryTriangles.data.length()-bottom.links.z)return -1;
+            for(uint i=0u;i<bottom.links.w;++i) {
+                ++auditTriangles;auditDigest=auditDigestStep(auditDigest,4u,bottom.links.z+i,node.links.z);GeometryTriangle triangle=geometryTriangles.data[bottom.links.z+i];
+                if(!finite3(triangle.a.xyz)||!finite3(triangle.e1.xyz)||!finite3(triangle.e2.xyz))return -1;
+                vec3 p=cross(localDirection,triangle.e2.xyz);float det=dot(triangle.e1.xyz,p);
+                if(!finite1(det))return -1;if(det==0.)continue;
+                vec3 delta=localOrigin-triangle.a.xyz;float u=dot(delta,p)/det;
+                if(!finite1(u))return -1;if(u<0.||u>1.)continue;
+                vec3 q=cross(delta,triangle.e1.xyz);float v=dot(localDirection,q)/det;
+                if(!finite1(v))return -1;if(v<0.||u+v>1.)continue;
+                // Same compensated plane solve as the mature closest helper;
+                // only run it after containment, then stop at the first proof.
+                vec3 normal=geometryTriangleNormal(triangle.e1.xyz,triangle.e2.xyz);
+                float planeDet=dot(localDirection,normal);
+                if(!finite3(normal)||!finite1(planeDet)||planeDet==0.)return -1;
+                float t=dot(triangle.a.xyz-localOrigin,normal)/planeDet;
+                if(!finite1(t))return -1;if(t<nearT||t>farT)continue;
+                if(t<=nearT+2e-5||t>=farT-2e-5){endpoint=true;continue;}
+                return 1;
+            }
+        }
+    }
+    return endpoint?-1:0;
+}
+#if defined(ENV_VIS_PAIR) && !defined(ENV_VIS_RESOLVE)
+#define ENV_PAIR_DIAGNOSTICS 1
+#include "EnvironmentVisibilityPair.glsl"
+#endif
+// 0=unknown, 1=known occluded, 2=known complete-scene environment escape.
+int environmentRay(Receiver r,vec3 direction) {
+    if(!finite3(direction))return 0;
+    // A shading-normal lobe below the geometric hemisphere sees no exterior.
+    if(dot(direction,r.ng)<=0.)return 1;
+    if(cb.policy.x!=1u||geometryTop.data.length()==0||geometryBottom.data.length()==0||
+       geometryTriangles.data.length()==0||geometryInstances.data.length()==0)return 0;
+    ++auditRootLoads;GeometryNode root=geometryTop.data[0];
+    if(!finite3(root.lo.xyz)||!finite3(root.hi.xyz)||any(greaterThan(root.lo.xyz,root.hi.xyz)))return 0;
+    vec3 origin=r.p+r.ng*cb.parameters.x;
+    float entry=0.,exit=3.402823466e38;
+    for(uint k=0u;k<3u;++k) {
+        if(direction[k]==0.) {if(origin[k]<root.lo[k]||origin[k]>root.hi[k])return 2;}
+        else {
+            float a=(root.lo[k]-origin[k])/direction[k],b=(root.hi[k]-origin[k])/direction[k];
+            entry=max(entry,min(a,b));exit=min(exit,max(a,b));if(entry>exit)return 2;
+        }
+    }
+    if(!finite1(exit))return 0;if(exit<0.)return 2;
+    // Trace THROUGH the complete root, never call a finite-range clear sky.
+    float tmax=exit+max(.001,abs(exit)*1e-5);
+    auditStoreQuery(auditLane,origin,direction,tmax,3u);
+    int hit=environmentAnyHit(origin,direction,0.,tmax);
+    return hit<0?0:(hit>0?1:2);
+}
+#if defined(ENV_VIS_PAIR) && !defined(ENV_VIS_RESOLVE)
+// Return -1 only when the original ray would enter environmentAnyHit.
+// Other values are the exact original early outcome and are not traced.
+int environmentPairPrepare(Receiver r,vec3 direction,out vec3 origin,out float tmax) {
+    if(!finite3(direction))return 0;
+    if(dot(direction,r.ng)<=0.)return 1;
+    if(cb.policy.x!=1u||geometryTop.data.length()==0||geometryBottom.data.length()==0||geometryTriangles.data.length()==0||geometryInstances.data.length()==0)return 0;
+    ++auditRootLoads;GeometryNode root=geometryTop.data[0];
+    if(!finite3(root.lo.xyz)||!finite3(root.hi.xyz)||any(greaterThan(root.lo.xyz,root.hi.xyz)))return 0;
+    origin=r.p+r.ng*cb.parameters.x;float entry=0.,exit=3.402823466e38;
+    for(uint k=0u;k<3u;++k){if(direction[k]==0.){if(origin[k]<root.lo[k]||origin[k]>root.hi[k])return 2;}
+      else {float a=(root.lo[k]-origin[k])/direction[k],b=(root.hi[k]-origin[k])/direction[k];entry=max(entry,min(a,b));exit=min(exit,max(a,b));if(entry>exit)return 2;}}
+    if(!finite1(exit))return 0;if(exit<0.)return 2;tmax=exit+max(.001,abs(exit)*1e-5);
+    // environmentAnyHit's own original entry validation returns unknown.
+    if(!finite3(origin)||!finite3(direction)||!finite1(tmax)||tmax<=0.||dot(direction,direction)<=0.)return 0;
+    return -1;
+}
+#endif
+int auditScalarRay(Receiver r,vec3 direction,uint lane){auditStoreActual(lane,direction,3u);auditLane=lane;auditResetScalar();int outcome=environmentRay(r,direction);auditSaveScalar(lane);return outcome;}
+vec3 sampleVisibleGGX(vec3 view,float alpha,vec2 xi) {
+    vec3 vh=normalize(vec3(alpha*view.xy,view.z));
+    vec3 t1=vh.z<.99999?normalize(cross(vec3(0,0,1),vh)):vec3(1,0,0);
+    vec3 t2=cross(vh,t1);float radius=sqrt(xi.x),phi=6.28318530718*xi.y;
+    float a=radius*cos(phi),b=radius*sin(phi),s=.5*(1.+vh.z);
+    b=(1.-s)*sqrt(max(0.,1.-a*a))+s*b;
+    vec3 nh=a*t1+b*t2+sqrt(max(0.,1.-a*a-b*b))*vh;
+    return normalize(vec3(alpha*nh.xy,max(0.,nh.z)));
+}
+vec4 traceLobe(Receiver r,ivec2 pixel) {
+    if(cb.policy.y==1u)return vec4(1,0,1,1); // explicit legacy A/B only
+    if(cb.policy.x!=1u)return vec4(0,0,1,1);
+    vec3 t=normalize(cross(abs(r.ns.z)<.999?vec3(0,0,1):vec3(1,0,0),r.ns));
+    vec3 b=cross(r.ns,t);vec3 v=vec3(dot(r.v,t),dot(r.v,b),dot(r.v,r.ns));
+    uint count=r.roughness<=.06?1u:4u;float visible=0.,known=0.,total=0.;
+    bool anyUnknown=false,anyEscape=false,allEscape=true;
+    float alpha=r.roughness*r.roughness;
+    uint seed=uint(pixel.x)*0x9e3779b9u^uint(pixel.y)*0x85ebca6bu;
+    vec2 rotation=random2(seed);
+#if defined(ENV_VIS_PAIR) && !defined(ENV_VIS_RESOLVE)
+    int pairOutcome[4];vec3 pairDirection[4],pairOrigin[4];float pairFar[4];bool pairNeedsTrace[4];
+    if(count==4u){
+        for(uint j=0u;j<4u;++j){pairOutcome[j]=0;pairNeedsTrace[j]=false;
+            vec2 xi=fract(vec2((float(j)+.5)/4.,float((j&1u)*2u+(j>>1u))*.25+.125)+rotation);
+            vec3 h=sampleVisibleGGX(v,alpha,xi);vec3 localL=reflect(-v,h);if(localL.z<=0.)continue;
+            pairDirection[j]=normalize(t*localL.x+b*localL.y+r.ns*localL.z);
+            auditPreDirection[j]=pairDirection[j];auditPreUsed[j]=true;auditStoreActual(j,pairDirection[j],1u);int early=environmentPairPrepare(r,pairDirection[j],pairOrigin[j],pairFar[j]);
+            if(early<0)pairNeedsTrace[j]=true;else pairOutcome[j]=early;
+        }
+        for(uint j=0u;j<4u;j+=2u){
+            if(pairNeedsTrace[j]&&pairNeedsTrace[j+1u]){
+                vec3 origins[2]=vec3[2](pairOrigin[j],pairOrigin[j+1u]);vec3 dirs[2]=vec3[2](pairDirection[j],pairDirection[j+1u]);float fars[2]=float[2](pairFar[j],pairFar[j+1u]);
+                EnvironmentPairResult pr;
+                auditStoreActual(j,dirs[0],2u);auditStoreActual(j+1u,dirs[1],2u);
+                bool ok=environmentAnyHitPair(origins,dirs,fars,pr);
+                auditNodeLoads+=pr.nodeLoads;auditInstanceLoads+=pr.instanceLoads;auditTriangleLoads+=pr.triangleLoads;
+                if(ok){++auditPaired;auditCounts[j]=pr.counts0;auditCounts[j+1u]=pr.counts1;auditOrders[j]=pr.order.x;auditOrders[j+1u]=pr.order.y;
+                    for(uint k=0u;k<2u;++k)pairOutcome[j+k]=pr.status[k]<0?0:(pr.status[k]>0?1:2);}
+                else {++auditOverflow;pairOutcome[j]=auditScalarRay(r,pairDirection[j],j);pairOutcome[j+1u]=auditScalarRay(r,pairDirection[j+1u],j+1u);}
+            } else {if(pairNeedsTrace[j])pairOutcome[j]=auditScalarRay(r,pairDirection[j],j);if(pairNeedsTrace[j+1u])pairOutcome[j+1u]=auditScalarRay(r,pairDirection[j+1u],j+1u);}
+        }
+    }
+#endif
+    for(uint i=0u;i<count;++i) {
+        vec3 localL;float weight=1.;
+        if(count==1u)localL=vec3(-v.xy,v.z);
+        else {
+            // Four stratified VNDF draws; fixed per receiver pixel avoids
+            // stochastic flicker without silently adding temporal history.
+            vec2 xi=fract(vec2((float(i)+.5)/4.,float((i&1u)*2u+(i>>1u))*.25+.125)+rotation);
+            vec3 h=sampleVisibleGGX(v,alpha,xi);localL=reflect(-v,h);
+            if(localL.z<=0.)continue;
+            // VNDF BRDF*NdotL/pdf reduces to Smith G1(L) for F=1.
+            // This is the geometric GGX lobe, not material Fresnel radiance.
+            float c=localL.z;weight=2.*c/(c+sqrt(alpha*alpha+(1.-alpha*alpha)*c*c));
+        }
+        vec3 worldL=normalize(t*localL.x+b*localL.y+r.ns*localL.z);
+#if defined(ENV_VIS_PAIR) && !defined(ENV_VIS_RESOLVE)
+        int outcome=count==4u?pairOutcome[i]:auditScalarRay(r,worldL,i);
+#else
+        int outcome=auditScalarRay(r,worldL,i);
+#endif
+        auditUsed[i]=true;auditOutcomes[i]=uint(outcome);auditWeights[i]=floatBitsToUint(weight);auditDirections[i]=worldL;auditPreMismatch[i]=auditPreUsed[i] && any(notEqual(floatBitsToUint(auditPreDirection[i]),floatBitsToUint(worldL)));
+        total+=weight;
+        anyUnknown=anyUnknown || outcome==0;
+        anyEscape=anyEscape || outcome==2;
+        allEscape=allEscape && outcome==2;
+        if(outcome!=0)known+=weight;if(outcome==2)visible+=weight;
+    }
+    if(total<=0.)return vec4(0,1,0,1);
+    // Preserve categorical endpoints exactly: backend reciprocal/division
+    // approximations must not turn all-escape/all-known into an FP16 step
+    // below one, nor infer validity from comparing accumulated float sums.
+    float visibility=allEscape?1.:(anyEscape?clamp(visible/total,0.,1.):0.);
+    float knownFraction=anyUnknown?clamp(known/total,0.,1.):1.;
+    return vec4(visibility,knownFraction,anyUnknown?1.:0.,1.);
+}
+vec4 mirrorFallback(Receiver r) {
+    if(cb.policy.y==1u)return vec4(1,0,2,1);
+    if(cb.policy.x!=1u)return vec4(0,0,3,1);
+    int result=environmentRay(r,normalize(reflect(-r.v,r.ns)));
+    // B=2 is a KNOWN one-ray fallback, B=3 an UNKNOWN fallback attempt.
+    // G describes only this single measurement, never four VNDF samples.
+    return vec4(result==2?1.:0.,result!=0?1.:0.,result!=0?2.:3.,1.);
+}
+void main() {
+    ivec2 pixel=ivec2(gl_GlobalInvocationID.xy);
+#ifdef ENV_VIS_RESOLVE
+    ivec2 cacheOrigin=ivec2(gl_WorkGroupID.xy)*4-ivec2(1);
+    uint lane=gl_LocalInvocationID.y*8u+gl_LocalInvocationID.x;
+    if(lane<36u) {
+        ivec2 halfPixel=cacheOrigin+ivec2(int(lane%6u),int(lane/6u));
+        bool valid=all(greaterThanEqual(halfPixel,ivec2(0)))&&
+            all(lessThan(halfPixel,ivec2(cb.dimensions.zw)));
+        Receiver cached;
+        if(valid) {
+            ivec2 samplePixel=min(halfPixel*2+ivec2(1),ivec2(cb.dimensions.xy)-1);
+            valid=receiver(samplePixel,cached);
+        }
+        if(valid)sourceReceiverCache[lane]=cached;
+        sourceReceiverValid[lane]=valid?1u:0u;
+    }
+    // Every lane participates, including dispatch-edge lanes which do not
+    // own an output pixel. Early return before this barrier would deadlock.
+    barrier();
+    if(any(greaterThanEqual(pixel,ivec2(cb.dimensions.xy))))return;
+    Receiver target;if(!receiver(pixel,target)){imageStore(outputVisibility,pixel,vec4(0,0,1,0));return;}
+    float best=3.402823466e38;vec4 result=vec4(0);bool found=false;
+    ivec2 base=max((pixel-ivec2(1))/2,ivec2(0));
+    for(int y=0;y<=1;++y)for(int x=0;x<=1;++x) {
+        ivec2 h=base+ivec2(x,y);if(any(lessThan(h,ivec2(0)))||any(greaterThanEqual(h,ivec2(cb.dimensions.zw))))continue;
+        ivec2 cachePixel=h-cacheOrigin;
+        uint cacheIndex=uint(cachePixel.y*6+cachePixel.x);
+        if(sourceReceiverValid[cacheIndex]==0u)continue;
+        Receiver source=sourceReceiverCache[cacheIndex];
+        vec3 delta=source.p-target.p;
+        float nsGate=mix(.9995,.9,target.roughness*target.roughness);
+        if(dot(source.ng,target.ng)<cb.parameters.z||dot(source.ns,target.ns)<nsGate||
+           abs(source.roughness-target.roughness)>cb.parameters.w||
+           abs(dot(delta,target.ng))>cb.parameters.y||abs(dot(delta,source.ng))>cb.parameters.y)continue;
+        float key=dot(delta,delta);
+        if(key>max(.0025,dot(cb.camera.xyz-target.p,cb.camera.xyz-target.p)*.000025))continue;
+        vec4 value=texelFetch(halfVisibility,h,0);
+        if(any(isnan(value))||any(isinf(value))||value.a<.5)continue;
+        if(key<best){best=key;result=value;found=true;}
+    }
+    imageStore(outputVisibility,pixel,found?result:mirrorFallback(target));
+#else
+    if(any(greaterThanEqual(pixel,ivec2(cb.dimensions.zw))))return;
+    ivec2 source=min(pixel*2+ivec2(1),ivec2(cb.dimensions.xy)-1);
+    auditIndex=auditSelect(pixel);auditRootLoads=0u;auditNodeLoads=0u;auditInstanceLoads=0u;auditTriangleLoads=0u;auditPaired=0u;auditOverflow=0u;
+    for(uint j=0u;j<4u;++j){auditCounts[j]=uvec4(0);auditOrders[j]=2166136261u;auditOutcomes[j]=0xffffffffu;auditWeights[j]=0u;auditDirections[j]=vec3(0);auditUsed[j]=false;auditPreUsed[j]=false;auditPreMismatch[j]=false;}
+    Receiver r;bool receiverValid=receiver(source,r);vec4 result=receiverValid?traceLobe(r,source):vec4(0,0,1,0);imageStore(outputVisibility,pixel,result);
+    if(auditIndex!=0xffffffffu){uint b=auditIndex*64u;auditRecords[b]=0x454e5650u;auditRecords[b+1u]=uint(pixel.x);auditRecords[b+2u]=uint(pixel.y);auditRecords[b+3u]=receiverValid?1u:0u;
+        auditRecords[b+4u]=auditRootLoads;auditRecords[b+5u]=auditNodeLoads+auditRootLoads;auditRecords[b+6u]=auditInstanceLoads;auditRecords[b+7u]=auditTriangleLoads;auditRecords[b+8u]=auditPaired;auditRecords[b+9u]=auditOverflow;vec3 origin=receiverValid?r.p+r.ng*cb.parameters.x:vec3(0);auditRecords[b+10u]=floatBitsToUint(origin.x);auditRecords[b+11u]=floatBitsToUint(origin.y);auditRecords[b+12u]=floatBitsToUint(origin.z);auditRecords[b+13u]=cb.policy.x;auditRecords[b+14u]=cb.policy.w;auditRecords[b+15u]=receiverValid?floatBitsToUint(r.roughness):0u;
+        for(uint j=0u;j<4u;++j){uint z=b+16u+j*12u;auditRecords[z]=auditUsed[j]?1u:0u;auditRecords[z+1u]=auditOutcomes[j];auditRecords[z+2u]=auditCounts[j].x;auditRecords[z+3u]=auditCounts[j].y;auditRecords[z+4u]=auditCounts[j].z;auditRecords[z+5u]=auditCounts[j].w;auditRecords[z+6u]=auditOrders[j];auditRecords[z+7u]=floatBitsToUint(auditDirections[j].x);auditRecords[z+8u]=floatBitsToUint(auditDirections[j].y);auditRecords[z+9u]=floatBitsToUint(auditDirections[j].z);auditRecords[z+10u]=auditWeights[j];auditRecords[z+11u]=auditPreMismatch[j]?1u:0u;uint p=584u*64u+auditIndex*16u+j*4u;vec3 pre=auditPreUsed[j]?auditPreDirection[j]:vec3(0);auditRecords[p]=floatBitsToUint(pre.x);auditRecords[p+1u]=floatBitsToUint(pre.y);auditRecords[p+2u]=floatBitsToUint(pre.z);auditRecords[p+3u]=auditPreUsed[j]?1u:0u;}}
+
+#endif
+}

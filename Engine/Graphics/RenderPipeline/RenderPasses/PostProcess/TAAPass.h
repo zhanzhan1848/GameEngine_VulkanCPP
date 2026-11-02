@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
+#include <functional>
 
 namespace primal::graphics::rendergraph {
     class RenderGraph;
@@ -28,6 +29,12 @@ struct TAADepthInputs {
     rhi::ResourceHandle prevDepth{ rhi::handles::INVALID_RESOURCE }; // previous frame R32 depth copy
     math::m4x4 currInvViewProj{};
     math::m4x4 prevViewProj{};
+    // Vulkan only: evaluated after the GBuffer producer executed. Never use
+    // an expected Halton value or a getter evaluated while constructing RG.
+    std::function<bool(math::v2&)> raster_jitter_provider;
+    bool require_raster_jitter{false}; // explicit Vulkan contract, missing provider fails closed
+    u32 previous_depth_frame{~u32(0)};
+    RGResourceHandle current_depth_rg{}; // canonical GBuffer producer identity
 };
 
 /**

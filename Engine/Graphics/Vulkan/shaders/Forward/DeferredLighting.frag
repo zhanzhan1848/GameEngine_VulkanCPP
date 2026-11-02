@@ -180,6 +180,8 @@ layout(set = 0, binding = 17) uniform texture2D translucentTex;  // P4.1 透光�
 
 layout(location = 0) in vec2 inUv;
 layout(location = 0) out vec4 outColor;
+// Separate display reflection from the direct radiance sampled by GI.
+layout(location = 1) out vec4 outEnvironmentSpecular;
 
 // Chebyshev upper bound for VSM — mirrors RHIShaderFunctions.glsl
 // ChebyshevUpperBound (minVariance = VSM_MIN_VARIANCE = 2e-5, light-bleed
@@ -230,7 +232,16 @@ vec3 FresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
          * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
+vec3 SamplePrefilteredEnvironment(vec3 direction, float roughness) {
+    // The prefilter bake distributes roughness over every mip in the bound
+    // view. Query that view rather than assuming a five-level allocation.
+    float maxLod = float(max(textureQueryLevels(samplerCube(prefilterMap, defaultSampler)) - 1, 0));
+    return textureLod(samplerCube(prefilterMap, defaultSampler), direction,
+                      clamp(roughness, 0.0, 1.0) * maxLod).rgb;
+}
+
 void main() {
+    outEnvironmentSpecular = vec4(0.0);
     vec4 albedoV = texture(sampler2D(albedoTex, defaultSampler), inUv);
     vec3 albedo = albedoV.rgb;
     vec3 normalEnc = texture(sampler2D(normalTex, defaultSampler), inUv).rgb;
@@ -399,8 +410,7 @@ void main() {
             // 同分支（stand-in 地板或 PRIMAL_SPEC_OCC 的 GTAO 遮挡）。
             vec3 dFil = FresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
             vec3 dR = reflect(-V, N);
-            vec3 dPre = textureLod(samplerCube(prefilterMap, defaultSampler),
-                                   dR, roughness * 4.0).rgb;
+            vec3 dPre = SamplePrefilteredEnvironment(dR, roughness);
             vec2 dBrdf = texture(sampler2D(brdfLUT, defaultSampler),
                                  vec2(max(dot(N, V), 0.0), roughness)).rg;
             vec3 dSpecIBL = dPre * (dFil * dBrdf.x + dBrdf.y);
@@ -449,10 +459,13 @@ void main() {
         Lo += albedo * lightColor.rgb * trans * DIRECT_INTENSITY;
     }
 
+    outColor = vec4(Lo, 1.0);
+    if (ambientLight.a < 0.5) return;
+
     // T4.6.5 part 37: IBL ambient (image-based lighting).
     // Mirror Metal fragmentLighting_v3 lines 270-287. Cube samples use the
     // shared defaultSampler (linear + repeat — fine for env maps). Prefilter
-    // uses textureLod with roughness × MAX_PREFILTER_LOD to pick the mip.
+    // uses textureLod with roughness across the actual bound mip range.
     vec3 Fil = FresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
     vec3 kSil = Fil;
     vec3 kDil = (vec3(1.0) - kSil) * (1.0 - metallic);
@@ -460,13 +473,19 @@ void main() {
     vec3 irradiance = texture(samplerCube(irradianceMap, defaultSampler), N).rgb;
     vec3 diffuseIBL = irradiance * albedo;
 
-    const float MAX_PREFILTER_LOD = 4.0;
     vec3 R = reflect(-V, N);
-    vec3 prefilteredColor = textureLod(samplerCube(prefilterMap, defaultSampler),
-                                       R, roughness * MAX_PREFILTER_LOD).rgb;
+    vec3 prefilteredColor = SamplePrefilteredEnvironment(R, roughness);
     vec2 brdf = texture(sampler2D(brdfLUT, defaultSampler),
                         vec2(max(dot(N, V), 0.0), roughness)).rg;
     vec3 specularIBL = prefilteredColor * (Fil * brdf.x + brdf.y);
+
+    if (ambientLight.a > 1.5) {
+        // The environment BRDF is separated from geometric visibility. The
+        // latter is measured along the reflection lobe before post composite.
+        // Keep only material micro-occlusion here: no sun-shadow/SSAO proxy.
+        outEnvironmentSpecular = vec4(specularIBL * IBL_SPECULAR_INTENSITY * clamp(orm.r,0.0,1.0), 1.0);
+        return;
+    }
 
     // T4.6.5 part 40.3: scale overall IBL down, and further crush ambient in
     // shadowed pixels so the shadow side reads darker against lit regions.
@@ -499,5 +518,6 @@ void main() {
                  * ao;
 #endif
 
-    outColor = vec4(Lo + ambient, 1.0);
+    outColor = vec4(Lo, 1.0);
+    outEnvironmentSpecular = vec4(ambient, 1.0);
 }
