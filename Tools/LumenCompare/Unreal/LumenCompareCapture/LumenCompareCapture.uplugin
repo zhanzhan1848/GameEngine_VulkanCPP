@@ -1,0 +1,8 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1",
+  "FriendlyName": "Lumen comparison capture",
+  "CanContainContent": false,
+  "Modules": [{"Name": "LumenCompareCapture", "Type": "Runtime", "LoadingPhase": "PostEngineInit"}]
+}

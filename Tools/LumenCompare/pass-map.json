@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "comparison_rule": "Match meaning and receiver domain before comparing numbers. Pass names, probe indices and atlas coordinates are not cross-engine correspondences.",
+  "stages": [
+    {"name": "Geometry and materials", "primal": ["GI.GBuffer", "SurfaceCache.LightEval/albedo", "SurfaceCache.LightEval/normal", "SurfaceCache.LightEval/depth"], "unreal": ["GBuffer", "Lumen.SceneAlbedo", "Lumen.SceneNormal", "Lumen.SceneDepth"], "rule": "Match camera projection and world-space receiver; decode normals/depth and remap metres to centimetres. SC atlases require card-to-world mapping."},
+    {"name": "Surface lighting and visibility", "primal": ["SurfaceCache.Shadow", "SurfaceCache.LightEval"], "unreal": ["LumenSceneDirectLighting", "Batched lights", "Lumen.SceneDirectLighting", "Lumen.SceneFinalLighting"], "rule": "Check irradiance vs outgoing radiance, receiver albedo/pi, light intensity and exposure conventions before subtraction."},
+    {"name": "Surface radiosity", "primal": ["SurfaceCache.IndirectTrace", "SurfaceCache.IndirectResolve", "SurfaceCache.IndirectReconstruct"], "unreal": ["LumenSceneRadiosity", "DistanceFieldTracing", "Integrate"], "rule": "Compare hit positions, visibility, outgoing radiance, update lists and history weights at corresponding surfaces, not atlas texel IDs."},
+    {"name": "World-space cached lighting", "primal": ["DDGI.TraceSDF", "DDGI.Finalize", "DDGI.UpdateIrradiance", "RadianceCascade"], "unreal": ["RadianceCache", "TraceProbes", "RadianceProbeIndirectionTexture"], "rule": "DDGI SH and UE Radiance Cache have different representations. Evaluate at shared world points/directions; do not compare buffer indices directly."},
+    {"name": "Screen probes", "primal": ["ScreenProbe.place", "ScreenProbe.hzb", "ScreenProbe.sdf", "ScreenProbe.finalize", "ScreenProbe.avg", "ScreenProbe.temporal", "ScreenProbe.spatial", "ScreenProbeGI"], "unreal": ["ScreenProbeGather", "ScreenTraces", "TraceVoxels", "SpatialFilter", "TemporalReprojection"], "rule": "Compare current measurements separately from history, validity/confidence, sample count and spatial reconstruction."},
+    {"name": "Composition and display", "primal": ["DDGIGIGather", "FusionIndirect", "FusionComposite", "TAAPass", "ToneMappingPass"], "unreal": ["DiffuseIndirectComposite", "DiffuseIndirect", "RoughSpecularIndirect", "Final viewport screenshot"], "rule": "Match material multiplication and pre-exposure for linear data. Screenshots are display references; tone curves differ and cannot establish GI energy differences."}
+  ]
+}
