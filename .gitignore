@@ -520,3 +520,39 @@ scripts/gi_ownership_baseline.sh
 
 # 引擎知识文档保存在 Gemini Notebook；Docs 为本地工作副本与短期过程文件。
 /Docs/
+
+# 逐轮渲染诊断脚本：本地保留，不作为构建依赖提交。
+/Tools/ExperimentalBVH/compare_runs.py
+/Tools/LumenCompare/analyze_card_fill_origin.py
+/Tools/LumenCompare/analyze_card_writer_snapshot.py
+/Tools/LumenCompare/analyze_frame_timing.py
+/Tools/LumenCompare/analyze_opaque_cloth_ibl.py
+/Tools/LumenCompare/analyze_probe_writers.py
+/Tools/LumenCompare/analyze_ray_sources.py
+/Tools/LumenCompare/analyze_six_region_lighting.py
+/Tools/LumenCompare/compare_surface_guard_regression.py
+/Tools/LumenCompare/dark_patch_capture_controls.py
+/Tools/LumenCompare/dark_patch_fusion_replay.py
+/Tools/LumenCompare/dark_patch_pixel_chain.py
+/Tools/LumenCompare/dark_patch_probe_writer.py
+/Tools/LumenCompare/rank_probe_ray_energy.py
+/Tools/LumenCompare/summarize_history_fix_timeline.py
+/Tools/LumenCompare/trace_history_ancestors.py
+/Tools/LumenCompare/verify_analytic_history_fix.py
+/Tools/LumenCompare/verify_early_drain_independence.py
+/Tools/LumenCompare/verify_fill0_origin_snapshot.py
+/Tools/LumenCompare/verify_ibl_env_only.py
+/Tools/LumenCompare/verify_ibl_isolation.py
+/Tools/LumenCompare/verify_opaque_cloth_material.py
+/Tools/LumenCompare/verify_qualified_capture_geometry.py
+/Tools/LumenCompare/verify_ray_audit_invariance.py
+/Tools/LumenCompare/verify_surface_policy.py
+/Tools/LumenCompare/verify_surface_scene_controls.py
+/scripts/build_environment_leaf_field.py
+/scripts/build_environment_leaf_field_faults.py
+/scripts/generate_environment_cost_shaders.py
+/scripts/generate_environment_leaf_field_shader.py
+/scripts/generate_environment_pair_audit.py
+/scripts/generate_environment_scratch_f.py
+/scripts/private_meshlet_card_cull_audit.py
+/scripts/verify_environment_leaf_field.py
