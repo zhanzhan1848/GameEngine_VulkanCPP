@@ -1,12 +1,16 @@
 #include "Geometry.h"
 #include "meshoptimizer.h"
 #include "common/SDF.h"
+#include "common/TriangleNormal.h"
+#include "common/LegacyTangents.h"
+#include "../Engine/Common/CoreDiag.h"
 #include "../Engine/Utilities/IOStream.h"
 #include "../Engine/Graphics/RHI/Core/RHIMath.h"
 #include <cmath>
 #include <iostream>
 #include <algorithm> // for std::clamp in C++17
 #include <cfloat>
+#include <cstdio>
 
 namespace primal::tools
 {
@@ -40,18 +44,10 @@ namespace primal::tools
 				v3 v1 = m.positions[i1];
 				v3 v2 = m.positions[i2];
 
-				v3 e0 = v1 - v0;
-				v3 e1 = v2 - v0;
-
-				v3 n = Cross(e0, e1);
-				if (LengthSquared(n) > epsilon)
-				{
-					n = Normalize(n);
-				}
-				else
-				{
-					n = { 0.f, 0.f, 0.f };
-				}
+				const float a[3]={v0.x,v0.y,v0.z},b[3]={v1.x,v1.y,v1.z},c[3]={v2.x,v2.y,v2.z};
+				geometry_detail::TriangleNormal result{};
+				geometry_detail::CalculateTriangleNormal(a,b,c,result);
+				v3 n{result.x,result.y,result.z};
 				m.normals[i] = n;
 
 				m.normals[i - 1] = m.normals[i];
@@ -362,16 +358,14 @@ namespace primal::tools
 					{
 						vertex& v{ m.vertices[i] };
 #if defined(_MSC_VER)
-						t_signs[i] |= (u8)((v.tangent.w < 0.f) ? 0x01 : 0x00);
-						t_signs[i] |= (u8)((v.tangent.z > 0.f) ? 0x04 : 0x00);
+						t_signs[i] |= geometry_detail::tangent_sign_bits(v.tangent.z, v.tangent.w);
 						tangents[i] = { (u16)pack_float<16>(clamp(v.tangent.x, -1.f, 1.f), -1.f, 1.f), (u16)pack_float<16>(clamp(v.tangent.y, -1.f, 1.f), -1.f, 1.f) };
 #elif defined(__clang__)
 						if (!std::isfinite(v.tangent.x) || !std::isfinite(v.tangent.y) || !std::isfinite(v.tangent.z))
 						{
 							v.tangent = { 0.f, 1.f, 0.f, 1.f };
 						}
-						t_signs[i] |= (u8)((v.tangent.w < 0.f) ? 0x01 : 0x00);
-						t_signs[i] |= (u8)((v.tangent.z > 0.f) ? 0x04 : 0x00);
+						t_signs[i] |= geometry_detail::tangent_sign_bits(v.tangent.z, v.tangent.w);
 						tangents[i] = { (u16)pack_float<16>(math::clamp(v.tangent.x, -1.f, 1.f), -1.f, 1.f), (u16)pack_float<16>(math::clamp(v.tangent.y, -1.f, 1.f), -1.f, 1.f) };
 #endif	
 					}
@@ -565,11 +559,22 @@ namespace primal::tools
 
 			process_normals(m, settings.smoothing_angle);
 
-			if (!m.uv_sets.empty())
+			if (!m.uv_sets.empty() && m.uv_sets[0].size() == m.raw_indices.size())
 			{
 				process_uvs(m);
 			}
 			
+			geometry_detail::TangentStats tangent_stats{};
+			const bool tangent_ok = geometry_detail::build_legacy_tangents(
+				m.vertices, m.indices, m.tangents, settings.calculate_tangents != 0,
+				!m.uv_sets.empty() && m.uv_sets[0].size() == m.raw_indices.size(), tangent_stats, m.tangents_corner_trusted);
+			if (!tangent_ok || tangent_stats.import_rejected || tangent_stats.fallback_corners || tangent_stats.mikk_failed)
+			{
+				char message[256];
+				std::snprintf(message, sizeof(message), "Legacy tangents: valid=%d imported_rejected=%d rejected_faces=%zu fallback_corners=%zu mikk_failed=%d", tangent_ok, tangent_stats.import_rejected, tangent_stats.rejected_faces, tangent_stats.fallback_corners, tangent_stats.mikk_failed);
+				primal::diag::Emit(primal::diag::kLevelWarn, "ContentTools", message);
+			}
+
 			m.elements_type = determine_elements_type(m);
 
 			process_meshlets(m);
@@ -806,6 +811,7 @@ namespace primal::tools
 		bool split_meshes_by_material(u32 material_idx, const mesh& m, mesh& submesh)
 		{
 			submesh.name = m.name;
+			submesh.tangents_corner_trusted = m.tangents_corner_trusted;
 			submesh.lod_threshold = m.lod_threshold;
 			submesh.lod_id = m.lod_id;
 			submesh.material_idx = material_idx;
@@ -840,7 +846,7 @@ namespace primal::tools
 						submesh.normals.emplace_back(m.normals[j]);
 					}
 
-					if (m.tangents.size())
+					if (m.tangents.size() == m.raw_indices.size())
 					{
 						submesh.tangents.emplace_back(m.tangents[j]);
 					}
@@ -978,10 +984,12 @@ namespace primal::tools
 		combined_mesh.lod_id = first_mesh.lod_id;
 		combined_mesh.material_idx = first_mesh.material_idx;
 		combined_mesh.uv_sets.resize(first_mesh.uv_sets.size());
+		combined_mesh.tangents_corner_trusted = true;
 
 		for (u32 mesh_idx{ 0 }; mesh_idx < lod.meshes.size(); ++mesh_idx)
 		{
 			const mesh& m{ lod.meshes[mesh_idx] };
+			combined_mesh.tangents_corner_trusted &= m.tangents_corner_trusted && m.tangents.size() == m.raw_indices.size();
 
 			if (combined_mesh.elements_type != determine_elements_type(m) ||
 				combined_mesh.uv_sets.size() != m.uv_sets.size() ||

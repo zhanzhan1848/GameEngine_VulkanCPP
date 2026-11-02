@@ -413,3 +413,26 @@ add_test(NAME TestGltfImporter COMMAND TestGltfImporter)
 set_target_properties(TestGltfImporter PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools
 )
+
+# Legacy corner tangent generation, shared with Geometry.cpp.
+add_executable(TestLegacyTangents TestLegacyTangents.cpp)
+target_link_libraries(TestLegacyTangents PRIVATE contenttools_derive)
+add_test(NAME TestLegacyTangents COMMAND TestLegacyTangents)
+set_target_properties(TestLegacyTangents PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools)
+
+add_executable(TestLegacyTangentPipeline TestLegacyTangentPipeline.cpp)
+target_include_directories(TestLegacyTangentPipeline PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/.. ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common ${CMAKE_SOURCE_DIR}/OSAPI/MAC)
+target_link_libraries(TestLegacyTangentPipeline PRIVATE ContentTools)
+add_test(NAME TestLegacyTangentPipeline COMMAND TestLegacyTangentPipeline)
+set_target_properties(TestLegacyTangentPipeline PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/ContentTools)
+if(APPLE AND FBX_LIB_DEBUG)
+    # ContentTools links the SDK with @executable_path; this test executable
+    # lives outside the CLI's directory containing the SDK runtime copy.
+    get_filename_component(LEGACY_TANGENT_FBX_DIR "${FBX_LIB_DEBUG}" DIRECTORY)
+    set_tests_properties(TestLegacyTangentPipeline PROPERTIES
+        ENVIRONMENT "DYLD_LIBRARY_PATH=${LEGACY_TANGENT_FBX_DIR}:$<TARGET_FILE_DIR:ContentTools>")
+endif()
