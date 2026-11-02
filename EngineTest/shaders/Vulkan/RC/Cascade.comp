@@ -1,0 +1,144 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_samplerless_texture_functions : require
+// Test-only world-space radiance intervals. Equal-area (azimuth,z) directions.
+layout(local_size_x=64) in;
+layout(binding=0,std140) uniform Params {
+    mat4 vp; mat4 inverseVP;
+    vec4 originSpacing; vec4 cameraJitter; vec4 sky;
+    uvec4 screen; // output width/height, card count, phase (0..2 trace,3..5 merge,6 gather)
+    uvec4 levels[3]; // xyz grid dimensions, direction side length
+    uvec4 offsets; // level offsets, total samples
+    vec4 jitter; // raster NDC xy, padding
+} cb;
+layout(binding=1,std430) buffer Intervals { vec4 data[]; } intervals;
+layout(binding=2,std430) buffer Merged { vec4 data[]; } merged;
+layout(binding=3,std430) readonly buffer Active { uint data[]; } activity;
+layout(binding=4) uniform texture2D lightingAtlas;
+layout(binding=5) uniform texture2D depthAtlas;
+#include "SurfaceCacheData.glsl"
+layout(binding=6,std430) readonly buffer Cards { SurfaceCacheCard data[]; } cards;
+layout(binding=7) uniform texture2D depthTexture;
+layout(binding=8) uniform texture2D normalTexture;
+layout(binding=9,std430) writeonly buffer Output { vec4 data[]; } outputGI;
+#include "GeometryFirstHit.glsl"
+const float PI=3.141592653589793;
+bool finite1(float x){return !isnan(x)&&!isinf(x);}
+bool finite3(vec3 x){return !any(isnan(x))&&!any(isinf(x));}
+vec4 unknownInterval(){return vec4(0,0,0,-1);}
+uint count(uint l) { return cb.levels[l].x*cb.levels[l].y*cb.levels[l].z; }
+vec3 direction(uint id,uint side) {
+    float z=1.-2.*(float(id/side)+.5)/float(side);
+    float phi=2.*PI*(float(id%side)+.5)/float(side);
+    return vec3(sqrt(max(0.,1.-z*z))*cos(phi),z,sqrt(max(0.,1.-z*z))*sin(phi));
+}
+vec3 position(uint id,uint l) {
+    uvec3 n=cb.levels[l].xyz;
+    return cb.originSpacing.xyz+(vec3(id%n.x,(id/n.x)%n.y,id/(n.x*n.y))+.5)*cb.originSpacing.w*float(1u<<l);
+}
+// Unknown is w=-1; known blocked w=0; known open interval w=1.
+// Never turn a missing Surface Cache source into sky.
+vec4 source(vec3 p,uint owner,vec3 rayDirection) {
+    float best=1e30;vec4 result=vec4(0,0,0,-1);
+    ivec2 atlasSize=textureSize(depthAtlas,0);
+    if(!finite3(p)||!finite3(rayDirection)||any(notEqual(atlasSize,textureSize(lightingAtlas,0))))return result;
+    for(uint c=0;c<min(cb.screen.z,uint(cards.data.length()));++c) {
+        SurfaceCacheCard card=cards.data[c];
+        uint axis=card.axis_direction&255u,faceDirection=(card.axis_direction>>8u)&255u;
+        if(card.mesh_instance_id!=owner||card.resolution==0u||axis>2u||faceDirection>1u||
+           !finite3(card.center.xyz)||!finite3(card.extent.xyz)||any(lessThan(card.extent.xyz,vec3(0))))continue;
+        // Same capture-facing convention as the measured-geometry DDGI path.
+        if(dot(scCardFaceNormal(card),rayDirection)<=0.)continue;
+        if(card.atlas_offset_x>=uint(atlasSize.x)||card.atlas_offset_y>=uint(atlasSize.y)||
+           card.resolution>uint(atlasSize.x)-card.atlas_offset_x||
+           card.resolution>uint(atlasSize.y)-card.atlas_offset_y)continue;
+        vec2 uv;if(!worldToCardUV(p,card,uv)||any(isnan(uv))||any(isinf(uv)))continue;
+        ivec2 base=ivec2(uv);
+        for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x) {
+            ivec2 t=base+ivec2(x,y);
+            if(any(lessThan(t,ivec2(card.atlas_offset_x,card.atlas_offset_y)))||
+               any(greaterThanEqual(t,ivec2(card.atlas_offset_x+card.resolution,card.atlas_offset_y+card.resolution)))||
+               any(greaterThanEqual(t,textureSize(depthAtlas,0))))continue;
+            float depth=texelFetch(depthAtlas,t,0).r;vec4 light=texelFetch(lightingAtlas,t,0);
+            if(depth<0.||isnan(depth)||isinf(depth)||light.a<=.5||any(isnan(light))||any(isinf(light)))continue;
+            vec3 captured=cardTexelToWorld(uvec2(t),depth,card);
+            vec3 delta=captured-p;
+            float error=length(delta);
+            // Owner is necessary but not a primitive identity certificate.
+            // Tight plane agreement additionally rejects nearby parallel layers.
+            if(finite3(captured)&&abs(delta[axis])<=.002&&error<=.05&&error<best){best=error;result=vec4(max(light.rgb,vec3(0)),0);}
+        }
+    } return result;
+}
+vec4 upper(vec3 p,uint l,uint dir) {
+    if(l>=3u||!finite3(p)||!finite1(cb.originSpacing.w)||cb.originSpacing.w<=0.)return unknownInterval();
+    uint side=cb.levels[l].w;
+    if(side==0u||dir>=side*side)return unknownInterval();
+    vec3 grid=(p-cb.originSpacing.xyz)/(cb.originSpacing.w*float(1u<<l))-.5;
+    // Bound before conversion to integers, including values far outside domain.
+    if(!finite3(grid)||any(lessThan(grid,vec3(-1)))||any(greaterThan(grid,vec3(cb.levels[l].xyz))))return unknownInterval();
+    ivec3 base=ivec3(floor(grid));vec3 f=fract(grid);vec4 value=vec4(0);float weight=0.;
+    for(int z=0;z<2;++z)for(int y=0;y<2;++y)for(int x=0;x<2;++x) {
+        ivec3 q=base+ivec3(x,y,z);if(any(lessThan(q,ivec3(0)))||any(greaterThanEqual(q,ivec3(cb.levels[l].xyz))))continue;
+        float w=(x==0?1.-f.x:f.x)*(y==0?1.-f.y:f.y)*(z==0?1.-f.z:f.z);
+        if(w<=0.)continue;
+        uint idx=uint(q.x)+cb.levels[l].x*(uint(q.y)+cb.levels[l].y*uint(q.z));
+        vec4 v=merged.data[cb.offsets[l]+idx*side*side+dir];
+        if(v.w<0.||!finite3(v.rgb)||!finite1(v.w))return unknownInterval();value+=w*v;weight+=w;
+    } return weight>.999?value/weight:vec4(0,0,0,-1);
+}
+void main() {
+    uint id=gl_GlobalInvocationID.x,phase=cb.screen.w;
+    if(phase<6u) {
+        uint l=phase%3u,side=cb.levels[l].w,dirs=side*side;
+        if(id>=count(l)*dirs)return;
+        uint probe=id/dirs,dir=id%dirs,index=cb.offsets[l]+id;
+        if(activity.data[cb.offsets[l]+probe]==0u){
+            // No stale light outside this frame's update region. Persistence
+            // needs scene/light epochs and belongs to a later cache contract.
+            if(phase<3u)intervals.data[index]=unknownInterval();else merged.data[index]=unknownInterval();
+            return;
+        }
+        vec3 p=position(probe,l),d=direction(dir,side);
+        if(phase<3u) {
+            float end=l==2u?1000.:cb.originSpacing.w*pow(4.,float(l+1u));
+            float start=l==0u?.002:cb.originSpacing.w*pow(4.,float(l));
+            float t;uint owner,primitive;int hit=geometryFirstHit(p,d,start,end,t,owner,primitive);
+            if(hit<0)intervals.data[index]=unknownInterval();
+            else if(hit==1)intervals.data[index]=source(p+d*t,owner,d);
+            else if(l<2u)intervals.data[index]=vec4(0,0,0,1);
+            else {
+                // A finite 1000m segment miss alone is not full-scene escape.
+                bool fartherScene=geometryTop.data.length()==0||geometryBox(geometryTop.data[0],p,d,end,1e30);
+                intervals.data[index]=fartherScene||!finite3(cb.sky.rgb)?unknownInterval():vec4(max(cb.sky.rgb,vec3(0)),0);
+            }
+        } else {
+            vec4 local=intervals.data[index];
+            if(local.w<=0.||l==2u){merged.data[index]=local;return;}
+            vec4 farValue=vec4(0);uint parentSide=side*2u;
+            for(uint y=0;y<2u;++y)for(uint x=0;x<2u;++x) {
+                vec4 v=upper(p,l+1u,(dir/side*2u+y)*parentSide+dir%side*2u+x);
+                if(v.w<0.){merged.data[index]=vec4(0,0,0,-1);return;}farValue+=v*.25;
+            }
+            merged.data[index]=vec4(local.rgb+local.w*farValue.rgb,local.w*farValue.w);
+        } return;
+    }
+    if(id>=cb.screen.x*cb.screen.y)return;
+    ivec2 pixel=ivec2(id%cb.screen.x,id/cb.screen.x),size=textureSize(depthTexture,0);
+    ivec2 full=min(ivec2((vec2(pixel)+.5)*vec2(size)/vec2(cb.screen.xy)),size-1);
+    float depth=texelFetch(depthTexture,full,0).r;
+    if(!finite1(depth)||depth<0.||depth>=.999999){outputGI.data[id]=vec4(0);return;}
+    vec2 uv=(vec2(full)+.5)/vec2(size);
+    vec4 h=cb.inverseVP*vec4(vec2(uv.x*2.-1.,1.-uv.y*2.)-cb.jitter.xy,depth,1);
+    vec3 ns=texelFetch(normalTexture,full,0).xyz*2.-1.;
+    if(!finite1(h.w)||abs(h.w)<1e-8||!finite3(h.xyz)||!finite3(ns)||dot(ns,ns)<.25){outputGI.data[id]=vec4(0);return;}
+    vec3 p=h.xyz/h.w,n=normalize(ns);
+    vec3 light=vec3(0);float known=0.,total=0.;uint side=cb.levels[0].w;
+    for(uint i=0;i<side*side;++i) {
+        float w=max(dot(n,direction(i,side)),0.);if(w<=0.)continue;total+=w;
+        vec4 v=upper(p,0u,i);if(v.w<0.)continue;
+        light+=w*v.rgb;known+=w;
+    }
+    // Irradiance, same quantity as DDGI Gather, no albedo or extra Lambert factor.
+    outputGI.data[id]=vec4(light*(4.*PI/float(side*side)),total>0.?known/total:0.);
+}
