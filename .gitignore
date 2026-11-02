@@ -447,6 +447,7 @@ build-wt/
 .superpowers/
 test-output/
 .zcode/
+.codex/
 autoresearch/
 build-wasm/
 projects_test/
@@ -514,3 +515,6 @@ scripts/gi_ownership_baseline.sh
 
 # Vulkan shader compiler timing marker; local scratch, not source.
 /Engine/Graphics/Vulkan/[Ss]haders/*.markertest
+
+# 引擎知识文档保存在 Gemini Notebook；Docs 为本地工作副本与短期过程文件。
+/Docs/

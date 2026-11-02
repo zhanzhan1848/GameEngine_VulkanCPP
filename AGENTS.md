@@ -81,8 +81,15 @@ Darwin/DebugVulkan/TestVulkanSponzaRenderGraph 2>&1 | tee /tmp/regress_vulkan.lo
 - **渲染/RHI 必读**：动 `Engine/Graphics/`（RHI、渲染图、任一后端）前先查
   `Docs/RHI/GraphicsAPI_Parity_Matrix.md`（Vulkan/Metal/D3D12/Dawn 四 API 对等矩阵，
   注意 Dawn 端的降级边界）和 `Docs/rhi-barrier-semantics.md`（三端同步语义）。
-- **文档索引**：全仓文档状态/位置以 `Docs/ARCHIVE.md` 为单一事实源；完工文档移入
-  `Docs/completed/` 并同步登记。
+- **文档与知识库**：`Docs/` 整体不进入 Git；本地正式文档索引仍为 `Docs/ARCHIVE.md`。
+  引擎说明、架构、功能、规划、技术路线及正式结论保存到 [Gemini Notebook 引擎知识库](https://notebook.google.com/notebook/b30f044b-6a42-4f6b-bd0e-47ff3bda9864)。
+  更新正式文档后同步知识库，保留原路径、日期与实现/候选/失败边界；同步后核验来源可读。
+  会话交接、临时实验、逐轮诊断、原始证据、CI/审查流水报告不进入知识库；过程文件仅保留最近 72 小时。
+  `Docs/reports/` 定义为中间过程目录。阶段收束先将设计、实现契约和长期结论提炼到 `Docs/` 根目录专题文档，
+  维护源文件→主题的覆盖清单，再上传正式专题并读回核验；不直接上传 reports 原文。
+  入口见 `Docs/Rendering_Knowledge_Index.md`。未完成知识提炼的 Markdown 不得仅按目录、文件名或年龄删除。
+  清理按最后修改/状态变更时间中较晚者计算，保留近期或正在使用的输入及构建对象；删除前记录范围、SHA 与实际释放空间。
+  正式文档不按三天期限删除。迁移清单和同步收据保留于本地 `Docs/.knowledge-base/`。
 - **PFX/粒子排障速查**：PFX 相关"改了没作用/行为突变/穿地/无法保存"类问题，
   先查 `Docs/2026-09-16-pfx-troubleshooting-root-causes.md`（根因+现行规则）。
   高频结论：预览推送只进私有预览发射器，场景发射器只经 Save→Resync 更新；
