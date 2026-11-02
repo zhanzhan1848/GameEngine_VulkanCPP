@@ -2,6 +2,8 @@
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include <iostream>
+#include <cstdlib>
+#include <cstring>
 
 using namespace primal::graphics::rendergraph;
 using namespace primal::graphics::rhi;
@@ -9,6 +11,7 @@ using namespace primal::graphics::rhi;
 // Mock RHI Device
 class MockRHICommandBuffer : public RHICommandBuffer {
 public:
+    u32 timestampWrites=0,timestampResets=0,dispatches=0;
     MockRHICommandBuffer(RHIDeviceBase& device) : RHICommandBuffer(device, CommandQueueType::Graphics) {}
 
     virtual void BeginRenderPass(const RenderPassDesc& desc) override {}
@@ -28,7 +31,7 @@ public:
     virtual void DrawIndirect(ResourceHandle buffer, uint64_t offset = 0, uint32_t drawCount = 1) override {}
     
     virtual void BindComputePipeline(PipelineHandle pipeline) override {}
-    virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override {}
+    virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) override {++dispatches;}
     virtual void DispatchIndirect(ResourceHandle buffer, uint64_t offset = 0) override {}
     
     virtual void CopyBuffer(ResourceHandle src, ResourceHandle dst, uint64_t srcOffset = 0, uint64_t dstOffset = 0, uint64_t size = 0) override {}
@@ -39,7 +42,8 @@ public:
     
     virtual void InsertBarrier(const ResourceBarrier* barriers, uint32_t barrierCount) override {}
 
-    virtual void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {}
+    virtual void WriteTimestamp(QueryPoolHandle queryPool, uint32_t queryIndex) override {++timestampWrites;}
+    virtual void ResetQueryPool(QueryPoolHandle,uint32_t,uint32_t) override {++timestampResets;}
 
     // stale-test port: pure virtuals added to RHICommandBuffer after the Dawn era
     virtual void PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags,
@@ -60,6 +64,7 @@ protected:
 
 class MockRHIDevice : public RHIDeviceBase {
 public:
+    bool timestampsAvailable=false;u32 queryCreates=0,queryDestroys=0,queryReads=0;
     // 最小化实现，仅用于测试 RenderGraph
     virtual bool IsValid() const override { return true; }
     virtual const DeviceInfo& GetDeviceInfo() const override { static DeviceInfo info; return info; }
@@ -71,8 +76,8 @@ public:
     virtual SyncHandle CreateSync() override { return handles::INVALID_SYNC; }
     virtual bool WaitForSync(SyncHandle handle, u32 timeoutMs) override { return true; }
     virtual void DestroySync(SyncHandle handle) override {}
-    virtual QueryPoolHandle CreateQueryPool(const QueryPoolDesc& desc) override { return handles::INVALID_QUERY_POOL; }
-    virtual void DestroyQueryPool(QueryPoolHandle handle) override {}
+    virtual QueryPoolHandle CreateQueryPool(const QueryPoolDesc& desc) override { ++queryCreates;return timestampsAvailable?QueryPoolHandle(42+queryCreates):handles::INVALID_QUERY_POOL; }
+    virtual void DestroyQueryPool(QueryPoolHandle handle) override {++queryDestroys;}
     virtual SamplerHandle CreateSampler(const SamplerDesc& desc) override { return handles::INVALID_SAMPLER; }
     virtual void DestroySampler(SamplerHandle handle) override {}
     virtual DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) override { return handles::INVALID_DESCRIPTOR_SET_LAYOUT; }
@@ -107,7 +112,7 @@ public:
     virtual void DestroyPipeline(PipelineHandle) override {}
     virtual void* MapBuffer(ResourceHandle, u64 = 0, u64 = 0) override { return nullptr; }
     virtual void UnmapBuffer(ResourceHandle) override {}
-    virtual bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) override { return false; }
+    virtual bool GetQueryPoolResults(QueryPoolHandle handle, uint32_t firstQuery, uint32_t queryCount, void* data, size_t stride) override {++queryReads;return false;}
     virtual RHIGarbageCollector& GetGarbageCollector() override { static RHIGarbageCollector gc; return gc; }
 
     // stale-test port: pure virtuals added to RHIDeviceBase after the Dawn era
@@ -352,12 +357,42 @@ Engine::Test::TestResult TestMemoryAliasing() {
     return Engine::Test::TestResult::Passed;
 }
 
+Engine::Test::TestResult TestTimestampPolicy() {
+    const char* old=std::getenv("PRIMAL_RG_TIMESTAMPS");const bool hadOld=old!=nullptr;const std::string oldValue=old?old:"";
+    bool passed=true;
+    for(const char* value:{static_cast<const char*>(nullptr),"1","0","00","false",""}) {
+        if(value)setenv("PRIMAL_RG_TIMESTAMPS",value,1);else unsetenv("PRIMAL_RG_TIMESTAMPS");
+        const bool expected=!(value&&std::strcmp(value,"0")==0);
+        MockRHIDevice device;device.timestampsAvailable=true;MockRHICommandBuffer cmd(device);
+        {
+            RenderGraph graph(device);passed=passed&&(graph.AreTimestampsEnabled()==expected);
+            for(u32 frame=0;frame<4;++frame) {
+                graph.Clear();struct Data{};
+                graph.AddPass<Data>("ProductionDispatch",RGPassType::Compute,RGPassCategory::Main,
+                    [](Data&,RenderGraphBuilder& b){b.SideEffect();},
+                    [](const Data&,RenderGraphContext& c){c.cmdBuffer->Dispatch(1,1,1);});
+                graph.Compile();graph.Execute(&cmd);
+            }
+            graph.Clear();graph.Clear();
+            passed=passed&&cmd.dispatches==4;
+            if(expected)passed=passed&&device.queryCreates>0&&device.queryReads>0&&cmd.timestampResets==4&&cmd.timestampWrites==8;
+            else passed=passed&&device.queryCreates==0&&device.queryReads==0&&cmd.timestampResets==0&&cmd.timestampWrites==0&&
+                graph.GetTimestampRecordingSequence()==0&&graph.GetTimestampResolvedSequence()==0&&!graph.HasFreshTimestampResults()&&
+                !graph.WasTimestampQueryReadSuccessful()&&graph.GetTimestampQueryReadCpuMs()==-1.0&&graph.GetPassExecutionTimes().empty();
+        }
+        passed=passed&&(device.queryCreates==device.queryDestroys);
+    }
+    if(hadOld)setenv("PRIMAL_RG_TIMESTAMPS",oldValue.c_str(),1);else unsetenv("PRIMAL_RG_TIMESTAMPS");
+    return passed?Engine::Test::TestResult::Passed:Engine::Test::TestResult::Failed;
+}
+
 int main() {
     std::vector<Engine::Test::TestCase> tests = {
         {"BasicGraphBuild", TestBasicGraphBuild, "Tests basic render graph construction and execution"},
         {"ResourceDependency", TestResourceDependency, "Tests resource dependency between passes"},
         {"PassCulling", TestPassCulling, "Tests pass culling logic"},
-        {"MemoryAliasing", TestMemoryAliasing, "Tests resource memory aliasing"}
+        {"MemoryAliasing", TestMemoryAliasing, "Tests resource memory aliasing"},
+        {"TimestampPolicy", TestTimestampPolicy, "Exact-0 disables every query operation and preserves dispatches"}
     };
 
     Engine::Test::TestStats stats;

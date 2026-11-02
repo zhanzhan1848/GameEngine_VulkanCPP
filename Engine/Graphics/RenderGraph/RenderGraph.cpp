@@ -1,6 +1,15 @@
 #include "RenderGraph.h"
+#include "Graphics/Utilities/CPUStallAudit.h"
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+#include "Graphics/RHI/Platforms/Vulkan/VulkanPassTimestampAudit.h"
+#endif
+#include "LumenCompareCapture.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <sstream>
 #include <stack>
@@ -10,6 +19,14 @@
 namespace primal::graphics::rendergraph {
 
 RenderGraph::RenderGraph(rhi::RHIDeviceBase& device) : device_(device) {
+    const char* timestamps=std::getenv("PRIMAL_RG_TIMESTAMPS");
+    timestampsEnabled_=!(timestamps && std::strcmp(timestamps,"0")==0);
+    // Log each actual policy once per process, not once per rebuilt graph.
+    static std::atomic<bool> logged[2]{};
+    if(!logged[timestampsEnabled_?1:0].exchange(true,std::memory_order_relaxed)) {
+        PRIMAL_LOG_STREAM(Info,"Render")<<"[RG_TIMESTAMPS] enabled="<<timestampsEnabled_
+            <<" policy=construction-time diagnostic_only=1"<<std::endl;
+    }
 }
 
 RenderGraph::~RenderGraph() {
@@ -36,8 +53,12 @@ RenderGraph::~RenderGraph() {
 
 
 void RenderGraph::Clear() {
-    ResolveTimestamps();
-    currentQueryFrameIndex_ = 1 - currentQueryFrameIndex_;
+    cpu_stall_audit::BeginGraph();
+    cpu_stall_audit::Scope cpuClear("graph.clear");
+    if(timestampsEnabled_) {
+        ResolveTimestamps();
+        currentQueryFrameIndex_ = 1 - currentQueryFrameIndex_;
+    }
 
     passes_.clear();
     resources_.clear();
@@ -51,6 +72,7 @@ void RenderGraph::Clear() {
 
     currentFrame_++;
     CleanupPool();
+    cpu_stall_audit::BuildStart();
 }
 
 void RenderGraph::CleanupPool() {
@@ -229,6 +251,8 @@ void RenderGraph::MarkAsOutput(RGResourceHandle handle) {
 }
 
 void RenderGraph::Compile() {
+    cpu_stall_audit::BuildEnd();
+    cpu_stall_audit::Scope cpuCompile("graph.compile");
     // 1. 剔除未使用的 Pass
     CullPasses();
 
@@ -241,8 +265,12 @@ void RenderGraph::Compile() {
     // 4. 插入 Barriers
     InsertBarriers();
 
+    // All render graph culling, allocation and synchronization above are
+    // production work. Only the following diagnostic query work is optional.
+    if(!timestampsEnabled_)return;
     // 5. 准备 Timestamp Query Pool
     auto& currentFrameData = queryFrames_[currentQueryFrameIndex_];
+    currentFrameData.recordingSequence = ++timestampRecordingSequence_;
     u32 requiredQueries = static_cast<u32>(activePasses_.size() * 2);
 
     // 记录 Pass Names
@@ -586,13 +614,18 @@ void RenderGraph::InsertBarriers() {
 }
 
 void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
+    cpu_stall_audit::Scope cpuExecute("graph.execute");
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+    auto* timestampAuditCmd=device_.GetPlatform()==rhi::RHIPlatform::Vulkan?static_cast<rhi::VulkanCommandBuffer*>(cmdBuffer):nullptr;
+    rhi::pass_timestamp::instance.Graph(timestampAuditCmd);
+#endif
     RenderGraphContext context;
     context.cmdBuffer = cmdBuffer;
     context.graph = this;
 
     auto& currentFrameData = queryFrames_[currentQueryFrameIndex_];
     rhi::QueryPoolHandle queryPool = currentFrameData.queryPool;
-    bool enableTimestamp = (queryPool != rhi::handles::INVALID_QUERY_POOL);
+    bool enableTimestamp = timestampsEnabled_ && (queryPool != rhi::handles::INVALID_QUERY_POOL);
 
     // T4.6.5 part 24.2 (B6 fix): Vulkan spec requires queries to be reset
     // between uses. Pool is reused across frames (rebuilt only on capacity
@@ -610,6 +643,9 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
         // std::cout << "RenderGraph: Preparing Pass " << pass->GetName() << std::endl;
 
         bool hasRenderPass = pass->GetRenderPassDesc().has_value();
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+        const int timestampAuditIndex=rhi::pass_timestamp::instance.BeginPass(timestampAuditCmd,pass->GetName().c_str(),hasRenderPass);
+#endif
 
         // 1. Write Begin Timestamp
         // Only write manually if NOT using RenderPass (RenderPass handles it via desc to support Apple Silicon)
@@ -684,11 +720,16 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
         }
 
         // std::cout << "RenderGraph: Executing Pass " << pass->GetName() << std::endl;
-        pass->Execute(context);
+        { cpu_stall_audit::Scope cpuPass(pass->GetName().c_str()); pass->Execute(context); }
 
         if (hasRenderPass) {
             cmdBuffer->EndRenderPass();
         }
+
+        lumencompare::AfterPass(device_, cmdBuffer, *pass);
+#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+        rhi::pass_timestamp::instance.EndPass(timestampAuditCmd,timestampAuditIndex);
+#endif
 
         // 2. Write End Timestamp (only if NOT in RenderPass, because RenderPass handles it automatically via desc)
         // BUT wait, WriteTimestamp in MetalCommandBuffer.cpp is disabled for RenderPassEncoder on Apple Silicon.
@@ -765,6 +806,12 @@ std::string RenderGraph::DumpGraphViz() const {
 }
 
 void RenderGraph::ResolveTimestamps() {
+    if(!timestampsEnabled_)return;
+    timestampResultsFresh_ = false;
+    timestampQueryReadOk_ = false;
+    timestampQueryReadCpuMs_ = -1.0;
+    timestampReadMin_ = timestampReadMax_ = 0;
+    timestampPreviousBound_ = timestampLastTickBound_;
     u32 prevFrameIndex = 1 - currentQueryFrameIndex_;
     auto& frameData = queryFrames_[prevFrameIndex];
 
@@ -778,7 +825,23 @@ void RenderGraph::ResolveTimestamps() {
     utl::vector<u64> results(passCount * 2);
     // 使用 0 作为 offset (假设 RHI 实现正确处理)
     // 注意：GetQueryPoolResults 是我们刚添加到 RHIDevice 的接口
+    static const bool timingEnabled = [] { const char* e=std::getenv("PRIMAL_FRAME_TIMING");return e && std::strcmp(e,"1")==0; }();
+    const auto queryStart = timingEnabled ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     bool readOk = device_.GetQueryPoolResults(frameData.queryPool, 0, passCount * 2, results.data(), sizeof(u64));
+    if (timingEnabled) timestampQueryReadCpuMs_ =
+        std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-queryStart).count();
+    timestampQueryReadOk_ = readOk;
+    // In the opt-in Vulkan nonblocking path, false means at least one query
+    // may still be pending. The driver is permitted to have written a subset:
+    // do not publish those pairs or clear the last accepted timing map. This
+    // records a non-fresh, unsuccessful read, not a zero-cost frame. The
+    // existing two-slot ring does not retain/retry this sample after reuse.
+    const char* nonblocking = std::getenv("PRIMAL_VK_QUERY_NONBLOCKING");
+    if (!readOk && device_.GetPlatform()==rhi::RHIPlatform::Vulkan &&
+        nonblocking && std::strcmp(nonblocking,"1")==0) {
+        frameData.ready = false;
+        return;
+    }
     static u32 dbgCount = 0;
     if ((dbgCount++ % 120) == 0) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[RG-TSdbg] readOk=" << readOk << " passes=" << passCount
@@ -788,7 +851,6 @@ void RenderGraph::ResolveTimestamps() {
     // VK_NOT_READY even when WAIT_BIT was set, while the results buffer
     // already holds valid staged timestamps. Trust the per-pair validity
     // filter below instead of the boolean.
-    (void)readOk;
     {
         passExecutionTimes_.clear();
         
@@ -802,9 +864,21 @@ void RenderGraph::ResolveTimestamps() {
             
             // 简单的溢出检查和有效性检查
             if (end > start && start != 0) {
+                if (!timestampReadMin_ || start < timestampReadMin_) timestampReadMin_ = start;
+                if (end > timestampReadMax_) timestampReadMax_ = end;
                 double durationMs = static_cast<double>(end - start) * timestampPeriod / 1000000.0;
                 passExecutionTimes_[frameData.passNames[i]] = durationMs;
             }
+        }
+        // MoltenVK may return false despite valid staged pairs. Authenticate
+        // the complete valid-pair tick range against the last accepted range;
+        // stale or overlapping values are rejected even when readOk is true.
+        if (timestampReadMin_ && timestampReadMax_ > timestampReadMin_ &&
+            timestampReadMin_ > timestampLastTickBound_ &&
+            frameData.recordingSequence > timestampResolvedSequence_) {
+            timestampResolvedSequence_ = frameData.recordingSequence;
+            timestampLastTickBound_ = timestampReadMax_;
+            timestampResultsFresh_ = true;
         }
     }
     
