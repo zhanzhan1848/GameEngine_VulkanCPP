@@ -33,7 +33,8 @@ D3D12Shader::D3D12Shader(D3D12Shader&& other) noexcept
 
 D3D12Shader& D3D12Shader::operator=(D3D12Shader&& other) noexcept {
     if (this != &other) {
-        device_ = other.device_;
+        // [R6/Windows] device_ 是 D3D12Device& 引用成员（不可重绑；C2582：
+        // 经引用赋值=调用 Device 不可用赋值）。引用保持构造期绑定，不赋值。
         handle_ = other.handle_;
         stage_ = other.stage_;
         dxil_ = std::move(other.dxil_);

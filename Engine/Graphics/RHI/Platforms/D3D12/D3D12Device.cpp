@@ -112,49 +112,42 @@ bool D3D12Device::initializeImpl() {
 
     // M5 F5-3：descriptor indexing 能力真实查询（初始化期一次，缓存结果；
     // CheckFeatureSupport 失败=能力未知 → 按 tier0/不支持处理，不静默）。
+    // [R6/Windows] ①D3D12_FEATURE_DATA_D3D12_OPTIONS 无 MaxDescriptorHeapSize
+    // 字段（真头核对：vendored dxsdk d3d12.h L2095-2112 与官方 DirectX-Headers
+    // 均 0 命中）——bindless 规模上限改记 ResourceBindingTier（Tier>=2 即无界
+    // 数组；shader-visible 堆上限是 tier 决定的常量，非 feature 查询项），
+    // 删除该查询。②TypedUAVLoadAdditionalFormats 在 OPTIONS（v1）不在
+    // OPTIONS3（真头：OPTIONS v1 L2914 命中；OPTIONS3 五字段无此名）——
+    // 查询迁入本块合并，避免重复 CheckFeatureSupport。
     {
         D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
         if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS,
                                                    &options, sizeof(options)))) {
             resourceBindingTier_ = options.ResourceBindingTier;
-            maxDescriptorHeapSize_ = options.MaxDescriptorHeapSize;
             // 判定语义对齐 VulkanDevice（"引擎消费路径可用"而非 tier 透传）：
             // Tier>=2 = 无界描述符数组 + shader 内动态/非一致索引可用。
             // Tier 1 仅静态索引数组（等价 Vulkan 未开 descriptorIndexing）。
             descriptorIndexingSupported_ =
                 options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_2;
+            // M6 F6-2/F6-3：类型化 UAV 附加格式（RGBA16F/RG16F 等 typed UAV
+            // load/store 的先决能力；D3D12 仅保证 R32_FLOAT/UINT/SINT 三格式）。
+            // 消费点：D3D12Texture 对需附加格式的 UAV 纹理显式失败（fail 语义）。
+            typedUavAdditionalFormats_ = options.TypedUAVLoadAdditionalFormats != 0;
             PRIMAL_LOG_STREAM(Info, "RHI")
                 << "[D3D12Device] descriptor indexing (ResourceBindingTier="
                 << u32(options.ResourceBindingTier)
-                << ", MaxDescriptorHeapSize=" << options.MaxDescriptorHeapSize
+                << ", TypedUAVLoadAdditionalFormats="
+                << (typedUavAdditionalFormats_ ? "yes" : "no")
                 << ") — " << (descriptorIndexingSupported_ ? "enabled" : "NOT supported (tier<2)")
                 << std::endl;
         } else {
             resourceBindingTier_ = 0;
             descriptorIndexingSupported_ = false;
-            PRIMAL_LOG_STREAM(Warn, "RHI")
-                << "[D3D12Device] OPTIONS CheckFeatureSupport failed — "
-                   "descriptor indexing reported NOT supported" << std::endl;
-        }
-    }
-
-    // M6 F6-2/F6-3：类型化 UAV 附加格式能力真实查询（OPTIONS3。
-    // TypedUAVLoadAdditionalFormats——RGBA16F/RG16F 等 typed UAV load/store
-    // 的先决能力；D3D12 仅保证 R32_FLOAT/UINT/SINT 三格式）。查询失败=能力
-    // 未知 → 按不支持处理，不静默（M5 F5-3 同款纪律）。消费点：D3D12Texture
-    // 对需附加格式的 UAV 纹理显式失败（fail 语义，不降级）。
-    {
-        D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3{};
-        if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3,
-                                                   &options3, sizeof(options3)))) {
-            typedUavAdditionalFormats_ =
-                options3.TypedUAVLoadAdditionalFormats != 0;
-        } else {
             typedUavAdditionalFormats_ = false;
             PRIMAL_LOG_STREAM(Warn, "RHI")
-                << "[D3D12Device] OPTIONS3 CheckFeatureSupport failed — "
-                   "TypedUAVLoadAdditionalFormats reported NOT supported"
-                << std::endl;
+                << "[D3D12Device] OPTIONS CheckFeatureSupport failed — "
+                   "descriptor indexing + typed UAV additional formats "
+                   "reported NOT supported" << std::endl;
         }
         PRIMAL_LOG_STREAM(Info, "RHI")
             << "[D3D12Device] typed UAV additional formats — "
@@ -295,7 +288,10 @@ bool D3D12Device::createDeviceAndQueue() {
 bool D3D12Device::createAllocator() {
     // F0-4（M0 批次 B 接线）: D3D12MemAlloc v3.0.1。
     D3D12MA::ALLOCATOR_DESC allocDesc{};
-    allocDesc.Flags = D3D12MA_RECOMMENDED_ALLOCATOR_FLAGS;
+    // [R6/Windows] MSVC C2440：宏展开为 enum|enum（提升 int），int→enum
+    // 无隐式转换（D3D12MA v3.0.1 的 ALLOCATOR_FLAGS 是普通未限定作用域 enum，
+    // 头文件 L1060）。显式函数式转换收窄回枚举类型。
+    allocDesc.Flags = D3D12MA::ALLOCATOR_FLAGS(D3D12MA_RECOMMENDED_ALLOCATOR_FLAGS);
     allocDesc.pDevice = device_.Get();
     allocDesc.pAdapter = adapter_.Get();  // AddRef 由 allocator 内部管理
     allocDesc.PreferredBlockSize = 0;     // 0 = 默认 64 MiB 块
@@ -467,11 +463,15 @@ void D3D12Device::queryDeviceInfo(DeviceInfo& info) {
         D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT va{};
         D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5{};
         // 能力位按 Master Plan 功能面逐步填充；M0 仅记录 raytracing/mesh。
+        // [R6/Windows] 真名核对（官方 DirectX-Headers d3d12.h）：OPTIONS7 字段
+        // 是 MeshShaderTier（L3182），枚举是 D3D12_MESH_SHADER_TIER（L3166，
+        // D3D12_MESH_SHADER_TIER_NOT_SUPPORTED=0 / _TIER_1=10）——
+        // MeshShaderPipelineTier / D3D12_MESH_SHADER_PIPELINE_TIER_* 均不存在。
         D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7{};
         if (SUCCEEDED(device_->CheckFeatureSupport(
                 D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7)))) {
-            info.supportsMeshShaders = options7.MeshShaderPipelineTier
-                != D3D12_MESH_SHADER_PIPELINE_TIER_NOT_SUPPORTED;
+            info.supportsMeshShaders = options7.MeshShaderTier
+                != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED;
         }
         (void)va; (void)options5;
     }
@@ -522,6 +522,28 @@ ID3D12CommandSignature* D3D12Device::GetDrawIndexedIndirectSignature() {
         return nullptr;
     }
     return drawIndexedIndirectSignature_.Get();
+}
+
+// [R6/Windows] M5 只交付了 DRAW/DRAW_INDEXED 两个签名；DispatchIndirect 误写为
+// 不存在的 ID3D12GraphicsCommandList::DispatchIndirect（MSVC C2039）。compute
+// indirect 的正规形态 = DISPATCH 类型 CommandSignature + ExecuteIndirect。
+// 布局=VkDispatchIndirectCommand 3×u32(x,y,z)=12B ≡ D3D12_DISPATCH_ARGUMENTS
+// 字段序（ThreadGroupCountX/Y/Z）——字节级一致，零翻译。
+ID3D12CommandSignature* D3D12Device::GetDispatchIndirectSignature() {
+    if (dispatchIndirectSignature_) return dispatchIndirectSignature_.Get();
+    D3D12_INDIRECT_ARGUMENT_DESC arg{};
+    arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12_COMMAND_SIGNATURE_DESC desc{};
+    desc.ByteStride = kIndirectDispatchArgStride;  // 12
+    desc.NumArgumentDescs = 1;
+    desc.pArgumentDescs = &arg;
+    if (FAILED(device_->CreateCommandSignature(&desc, nullptr,
+                                               IID_PPV_ARGS(&dispatchIndirectSignature_)))) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] CreateCommandSignature(DISPATCH) failed" << std::endl;
+        return nullptr;
+    }
+    return dispatchIndirectSignature_.Get();
 }
 double D3D12Device::getTimestampPeriodImpl() const { return timestampPeriodNs_; }
 

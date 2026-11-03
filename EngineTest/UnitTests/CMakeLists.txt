@@ -108,6 +108,21 @@ set_target_properties(TestLightmapBaking PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 
+# R6（Windows 五测）：TestLightmapBaking.cpp(170) MSVC C1001 ICE（用户日志）。
+# 已做 Meshlet.cpp R4 同构微重构（CHECK 宏实参内联 path 聚合临时 → 命名
+# 局部）；本条 per-source /Od 为双保险兜底，对齐 LumenDDGIPass（R2-5）/
+# Meshlet（R4）先例：per-source 选项追加在 target 选项之后（非 Debug 的
+# /Ox 被压住；Debug 本就 /Od）；属性读回 + STATUS 凭证（Windows configure
+# 输出必须含下述行，空=未生效）。测试 TU 非热路径，/Od 零代价。
+if(MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/TestLightmapBaking.cpp"
+        PROPERTIES COMPILE_OPTIONS "/Od")
+    get_source_file_property(PRIMAL_LMAP_ICE_OD_FLAGS
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/TestLightmapBaking.cpp" COMPILE_OPTIONS)
+    message(STATUS "C1001 mitigation (lightmap): TestLightmapBaking.cpp='${PRIMAL_LMAP_ICE_OD_FLAGS}'")
+endif()
+
 # M1-a MLX 后端对拍门禁：shim 缺失 SKIP，库存在而对拍失败 FAIL。
 # 依赖 Tools/NeuralMLXShim 的构建产物（dylib + mlx.metallib），见
 # scripts/build_neural_mlx_metallib.sh 与 Docs/2026-09-15-neural-mlx-backend-plan.md。

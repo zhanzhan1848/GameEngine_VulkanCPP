@@ -297,6 +297,12 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
     if (!native || !resource_) return false;
 
     const u32 dxgiFull = ToDxgiFormat(texDesc_.format);
+    // [R6/Windows] isDepthFamily 原是 Initialize()（L201）的局部量，本函数
+    // 不可见（C2065）。在此重算同一表达式（planeCount_ 是成员，成员初始化
+    // 于 Initialize 先行，此处读到的即最终值）。
+    const bool isDepthFamily = planeCount_ == 2
+        || texDesc_.format == DataFormat::D32_Float
+        || texDesc_.format == DataFormat::D16_UNorm;
 
     // ---- RTV（RenderTarget usage；wrap backbuffer 走同一路径） ----
     const bool wantRtv = viewMode_
@@ -392,7 +398,9 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
                 srvDesc.Texture2DArray.FirstArraySlice = viewMode_ ? viewDesc_.firstArraySlice : 0;
                 srvDesc.Texture2DArray.ArraySize = viewMode_ ? viewDesc_.arraySize : texDesc_.arraySize;
                 srvDesc.Texture2DArray.PlaneSlice = 0;
-                srvDesc.Texture2DArray.ResourceMinLOD = 0.0f;
+                // [R6/Windows] 真名 ResourceMinLODClamp（官方头 D3D12_TEX2D_ARRAY_SRV；
+                // ResourceMinLOD 不存在）。
+                srvDesc.Texture2DArray.ResourceMinLODClamp = 0.0f;
                 break;
             case TextureType::Texture2D:
             case TextureType::Unknown:
@@ -401,7 +409,8 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
                 srvDesc.Texture2D.MostDetailedMip = viewMode_ ? viewDesc_.mostDetailedMip : 0;
                 srvDesc.Texture2D.MipLevels = viewMode_ ? viewDesc_.mipCount : texDesc_.mipLevels;
                 srvDesc.Texture2D.PlaneSlice = 0;
-                srvDesc.Texture2D.ResourceMinLOD = 0.0f;
+                // [R6/Windows] 真名 ResourceMinLODClamp（官方头 D3D12_TEX2D_SRV）。
+                srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
                 break;
         }
         native->CreateShaderResourceView(resource_.Get(), &srvDesc,

@@ -662,13 +662,26 @@ void D3D12CommandBufferImpl::Dispatch(u32 groupCountX, u32 groupCountY, u32 grou
     commandList_->Dispatch(groupCountX, groupCountY, groupCountZ);
 }
 
+// [R6/Windows] 原实现误调不存在的 ID3D12GraphicsCommandList::DispatchIndirect
+// （MSVC C2039）。改为与 DrawIndirect 同款的 DISPATCH CommandSignature +
+// ExecuteIndirect 路径（签名惰性创建见 D3D12Device）。RHI 接口无 count 参数 →
+// MaxCommandCount=1、CountBuffer=nullptr（单命令，Vulkan 非count变体等价）。
+// arg buffer 状态流转与 DrawIndirect 注释相同：INDIRECT_ARGUMENT 提升幂等。
 void D3D12CommandBufferImpl::DispatchIndirect(ResourceHandle buffer, u64 offset) {
     if (!commandList_) return;
     D3D12Device& dev = static_cast<D3D12Device&>(device_);
     D3D12Buffer* buf = dev.GetBuffer(buffer);
     if (!buf) return;
+    ID3D12CommandSignature* sig = dev.GetDispatchIndirectSignature();
+    if (!sig) return;
+    D3D12SubresourceKey key{};
+    key.resource = buffer;
+    key.subresource = 0;
+    key.isTexture = false;
+    EmitTrackerOps(dev.GetStateTracker().Transition(key, ResourceState::IndirectArgument),
+                   buf->GetNativeResource());
     UpdateStats(CommandType::DispatchIndirect);
-    commandList_->DispatchIndirect(buf->GetNativeResource(), offset);
+    commandList_->ExecuteIndirect(sig, 1, buf->GetNativeResource(), offset, nullptr, 0);
 }
 
 // ============================================================================

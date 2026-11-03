@@ -207,10 +207,14 @@ void TestContainerRejects() {
     std::remove(path.c_str());
 
     // 尺寸不符拒绝写。
+    // [R6/Windows] MSVC C1001 ICE 规避（Meshlet.cpp R4 同构修法）：宏实参里
+    // 的内联 path 聚合临时（temp_directory_path() / "..."）.string() 改命名
+    // 局部，降低前端实例化压力。
+    const std::string neverPath =
+        (std::filesystem::temp_directory_path() / "lmap_never.lmap").string();
     LightmapContainer mismatch = bad;
     mismatch.pages[0].texels_rgba16f.resize(10);  // 与 4×4×4 不符
-    CHECK(!SaveLightmapContainer(
-              (std::filesystem::temp_directory_path() / "lmap_never.lmap").string(), mismatch),
+    CHECK(!SaveLightmapContainer(neverPath, mismatch),
           "mismatched texels rejected on save");
 }
 

@@ -42,10 +42,16 @@
 namespace primal::graphics::rhi {
 
 class D3D12Device;
-class D3D12Pipeline;
-class D3D12PipelineLayout;
 
 namespace d3d12 {
+
+// [R6/Windows] 真类在 rhi::d3d12（D3D12Pipeline.h）。此前这两个前置声明
+// 误放在外层 rhi 命名空间，制造了与真类无关的影子不完整类型
+// rhi::D3D12Pipeline / rhi::D3D12PipelineLayout，导致 CommandBuffer 成员
+// boundPipeline_/boundLayout_ 与 Device::GetPipeline 返回的
+// rhi::d3d12::D3D12Pipeline* 之间 C2440/C2027 双向断裂。
+class D3D12Pipeline;
+class D3D12PipelineLayout;
 
 class D3D12Texture;
 

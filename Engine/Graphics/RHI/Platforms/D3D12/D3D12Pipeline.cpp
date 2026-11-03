@@ -427,7 +427,10 @@ D3D12Pipeline::D3D12Pipeline(D3D12Pipeline&& other) noexcept
 
 D3D12Pipeline& D3D12Pipeline::operator=(D3D12Pipeline&& other) noexcept {
     if (this != &other) {
-        device_ = other.device_;
+        // [R6/Windows] device_ 是 D3D12Device& 引用成员（不可重绑；C2280：
+        // 经引用赋值=调用 Device 的已删除拷贝赋值）。move 赋值语义=引用
+        // 保持指向构造期绑定的设备，与 move 构造器 device_(other.device_)
+        // 的引用复制一致——不赋值即正确。
         handle_ = other.handle_;
         isCompute_ = other.isCompute_;
         layout_ = other.layout_;
@@ -488,7 +491,10 @@ bool D3D12Pipeline::InitializeGraphics(const GraphicsPipelineDesc& desc) {
         element.Format = static_cast<DXGI_FORMAT>(ToDxgiFormat(attr.format));
         element.InputSlot = attr.binding;
         element.AlignedByteOffset = attr.offset;
-        const auto* binding = nullptr;
+        // [R6/Windows] C3535：const auto* 无法从 nullptr 推导（MSVC 推不出
+        // 依据）。显式类型=desc.vertexBindings（utl::vector<VertexInputBinding>，
+        // RHIDevice.h L90）的元素指针。
+        const VertexInputBinding* binding = nullptr;
         for (const auto& b : desc.vertexBindings) {
             if (b.binding == attr.binding) { binding = &b; break; }
         }
@@ -598,7 +604,9 @@ bool D3D12Pipeline::InitializeGraphics(const GraphicsPipelineDesc& desc) {
     pso.SampleDesc.Count = 1;
     pso.SampleDesc.Quality = 0;
     pso.NodeMask = 0;
-    pso.CachedPSO = nullptr;
+    // [R6/Windows] CachedPSO 是 D3D12_CACHED_PIPELINE_STATE 结构体值（非
+    // 指针；官方头 L2600/2609）——nullptr 赋值 C2679。置零空缓存=语义相同。
+    pso.CachedPSO = {};
     pso.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
 
     HRESULT hr = native->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pipeline_));
@@ -641,7 +649,9 @@ bool D3D12Pipeline::InitializeCompute(const ComputePipelineDesc& desc) {
     pso.pRootSignature = GetRootSignature();
     pso.CS = cs->ByteCode();
     pso.NodeMask = 0;
-    pso.CachedPSO = nullptr;
+    // [R6/Windows] CachedPSO 是 D3D12_CACHED_PIPELINE_STATE 结构体值（非
+    // 指针；官方头 L2600/2609）——nullptr 赋值 C2679。置零空缓存=语义相同。
+    pso.CachedPSO = {};
     pso.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
     HRESULT hr = native->CreateComputePipelineState(&pso, IID_PPV_ARGS(&pipeline_));
     if (FAILED(hr)) {

@@ -116,24 +116,28 @@ public:
     // 字段序字节级一致，CommandSignature 按该字节布局构造，零中间翻译。
     ID3D12CommandSignature* GetDrawIndirectSignature();        // DRAW        16B
     ID3D12CommandSignature* GetDrawIndexedIndirectSignature(); // DRAW_INDEXED 20B
+    ID3D12CommandSignature* GetDispatchIndirectSignature();    // DISPATCH    12B（R6 补）
     // 查询签名字节步长（CommandBuffer ExecuteIndirect 直译用；供单测断言）。
     static constexpr u32 kIndirectDrawArgStride = 16;
     static constexpr u32 kIndirectDrawIndexedArgStride = 20;
+    // D3D12_DISPATCH_ARGUMENTS = VkDispatchIndirectCommand = 3×u32(x,y,z) = 12B。
+    static constexpr u32 kIndirectDispatchArgStride = 12;
 
     // M5 F5-3：descriptor indexing 能力运行时真实查询（覆盖 RHIDeviceBase
     // 默认 false）。语义=VulkanDevice 同款（SupportsDescriptorIndexing 为
     // 引擎消费路径的"可用"判定，非原始 tier 透传）：ResourceBindingTier>=2
     // （无界描述符数组+shader 动态索引可用）。不按 shader model 假设。
     bool SupportsDescriptorIndexing() const override { return descriptorIndexingSupported_; }
-    // F5-3 记录用：原始 tier + DescriptorHeap 特性（MaxDescriptorHeapSize/
-    // MaxSamplerDescriptorHeapSize，Tier1 的 SRV 堆 100 万上限是 bindless
-    // 规模上限的决定项）。initializeImpl 时查询缓存。
+    // F5-3 记录用：原始 ResourceBindingTier（bindless 规模上限的决定项；
+    // [R6/Windows] D3D12 无 MaxDescriptorHeapSize feature 字段——真头核对
+    // OPTIONS v1 全字段无此名，tier 即规模语义，故只记 tier）。查询见
+    // initializeImpl。
     u32 GetResourceBindingTier() const { return resourceBindingTier_; }
-    u64 GetMaxDescriptorHeapSize() const { return maxDescriptorHeapSize_; }
-    // M6 F6-2/F6-3：类型化 UAV 附加格式（OPTIONS3.TypedUAVLoadAdditionalFormats）
-    // ——RGBA16F/RG16F 等 typed UAV load/store 的先决能力（D3D12 仅保证
-    // R32_FLOAT/UINT/SINT）。initializeImpl 期真实查询缓存；false 时
-    // D3D12Texture 对需附加格式的 UAV 纹理显式失败（fail 语义）。
+    // M6 F6-2/F6-3：类型化 UAV 附加格式（[R6] 字段在 OPTIONS v1，非 OPTIONS3
+    // ——真头核对；查询已并入 OPTIONS 块）——RGBA16F/RG16F 等 typed UAV
+    // load/store 的先决能力（D3D12 仅保证 R32_FLOAT/UINT/SINT）。initializeImpl
+    // 期真实查询缓存；false 时 D3D12Texture 对需附加格式的 UAV 纹理显式失败
+    // （fail 语义）。
     bool GetTypedUavAdditionalFormats() const { return typedUavAdditionalFormats_; }
 
     // ODR-bypass 上传虚接口（语义与 VulkanDevice 同名 override 对齐）
@@ -274,10 +278,11 @@ private:
     // --- M5 F5-2/F5-3 ---
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndirectSignature_;
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndexedIndirectSignature_;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> dispatchIndirectSignature_;  // R6
     bool descriptorIndexingSupported_ = false;  // F5-3：tier>=2 判定结果
     u32 resourceBindingTier_ = 0;               // D3D12_RESOURCE_BINDING_TIER_*
-    u64 maxDescriptorHeapSize_ = 0;             // OPTIONS.MaxDescriptorHeapSize
-    bool typedUavAdditionalFormats_ = false;    // M6：OPTIONS3.TypedUAVLoadAdditionalFormats
+    // [R6/Windows] maxDescriptorHeapSize_ 已删除：OPTIONS 无该字段（真头核对）。
+    bool typedUavAdditionalFormats_ = false;    // M6：OPTIONS(v1).TypedUAVLoadAdditionalFormats
 };
 
 } // namespace primal::graphics::rhi

@@ -53,6 +53,8 @@
 
 #define STBI_NO_THREAD_LOCALS
 #include "stb_image.h"
+// [R6] 自包含：PRIMAL_LOG_STREAM 不再依赖传递包含（形态与 TestModularPipeline.cpp 一致）。
+#include "Engine/Common/CoreLogStream.h"
 
 #define NS_PRIVATE_IMPLEMENTATION
 #include <AppKit/AppKit.hpp>
