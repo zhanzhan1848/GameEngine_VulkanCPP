@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "name": "m4_sponza_deferred",
+  "scene": {
+    "asset": "EngineTest/assets/Sponza.model",
+    "asset_sha256": "b0c1f2d5e583508aab922c6e4c2c38cf2a564f952709f45827ac10d4c4757390",
+    "config": {
+      "env": {
+        "RHI_TEST_PLATFORM": "vulkan",
+        "RHI_TEST_DEFERRED": "1",
+        "RHI_TEST_SHADOWS": "1",
+        "RHI_TEST_POST": "1",
+        "RHI_TEST_FRAMES": "240",
+        "RHI_CAPTURE_FRAMES": "0,20,59,90,119,150,180,210,239",
+        "RHI_RESIZE_FRAME": "120",
+        "RHI_RESTORE_FRAME": "130",
+        "RHI_RESIZE_TO": "1600,900",
+        "RHI_GBUFFER_DUMP": "1"
+      }
+    }
+  },
+  "camera": {
+    "start": {
+      "position": [0.0, 5.0, 0.0],
+      "pitch_deg": 0.0,
+      "yaw_deg": 0.0,
+      "roll_deg": 0.0
+    },
+    "keyframes": [
+      {"time": 0.0,  "position": [2.6, 1.6, 2.0],  "lookAt": [3.8, 3.2, 4.0],  "fov_deg": 42.0},
+      {"time": 0.5,  "position": [1.5, 1.8, 3.5],  "lookAt": [3.6, 2.8, 6.0],  "fov_deg": 45.0},
+      {"time": 1.0,  "position": [0.0, 2.0, 6.0],  "lookAt": [3.2, 2.2, 8.5],  "fov_deg": 48.0},
+      {"time": 1.4,  "position": [0.0, 2.2, 8.0],  "lookAt": [0.0, 2.0, 14.0], "fov_deg": 55.0},
+      {"time": 2.6,  "position": [0.0, 2.2, 8.0],  "lookAt": [0.0, 2.0, 14.0], "fov_deg": 55.0},
+      {"time": 3.0,  "position": [-2.5, 3.0, 6.0], "lookAt": [-1.0, 2.0, 14.0], "fov_deg": 60.0},
+      {"time": 3.6,  "position": [0.0, 3.5, 6.0],  "lookAt": [0.0, 2.0, 12.0],  "fov_deg": 60.0},
+      {"time": 4.0,  "position": [0.0, 5.0, 0.0],  "lookAt": [0.0, 2.0, 8.0],   "fov_deg": 60.0}
+    ],
+    "interpolation": "linear",
+    "coordinate_system": "right-handed Y-up, +Z forward into Sponza main axis (test-local)",
+    "coverage_notes": "F4-7 三段覆盖：0.0-1.4s 材质变化段——Sponza 石柱近景特写（+X 侧柱列低机位 fov 42-48，帧 0-29 内 0.0-0.5s 同柱位近似静止供确定性比对）→ 沿柱列推移→跨向布幔/banner 挂区（GBuffer albedo/normal 通道跨材质差异的主要覆盖）；1.4-2.6s 光照变化段——画廊纵深轴对称构图静止（帧 84-155），光强两档步进切换（keyframes 1.5s→0.85 / 2.2s→2.2，轨迹 config 驱动按帧切换非时变，方向恒定——M2 阴影级联 VP 不重导边界登记），直射面/阴影面/ambient 三类像素对强度阶跃的响应可分档统计；2.6-4.0s 阴影+post 组合保持段——m3 同源侧移+回归锚点构图（柱影扫过画面+ACES 肩部高亮），全程 RHI_TEST_SHADOWS=1+RHI_TEST_POST=1+RHI_TEST_DEFERRED=1 三开关组合。"
+  },
+  "timing": {
+    "timestep": 0.0166667,
+    "total_frames": 240,
+    "warmup_frames": 30
+  },
+  "render": {
+    "resolution": [1280, 720],
+    "exposure": 1.0,
+    "postprocess": {"bloom": "off", "tone_mapping": "aces_fixed_ev"},
+    "post": {"exposure": 2.0, "curve": "ACESFit(2.51,0.03,2.43,0.59,0.14)", "encoding": "linear_to_bgra8_unorm_single_point"},
+    "random_seed": 0,
+    "light": {
+      "kind": "directional",
+      "dir_to_light": [-0.9, 1.5, -0.8],
+      "intensity": 2.2,
+      "color": [1.0, 0.98, 0.92],
+      "keyframes": [
+        {"time": 0.0, "intensity": 2.2},
+        {"time": 1.5, "intensity": 0.85},
+        {"time": 2.2, "intensity": 2.2}
+      ],
+      "keyframe_semantics": "step (latest keyframe with time<=t; fields optional and inherited; shadow cascade VP NOT re-derived on dir changes — documented boundary)"
+    },
+    "shadow": {
+      "cascades": 1,
+      "map_size": 2048,
+      "filter": "pcf3x3_comparison_sampler",
+      "comparison_func": "LessEqual",
+      "ortho_half_extent": 40.0,
+      "near": 20.0,
+      "far": 150.0
+    },
+    "gbuffer": {
+      "targets": 3,
+      "formats": ["RGBA8_UNorm", "RG16_Float", "RGBA8_UNorm"],
+      "normal_encoding": "world_xy_direct_rg16f_z_sign_in_material_alpha",
+      "depth": "D32_Float",
+      "light_pass": "fullscreen_triangle_invvp_reconstruct_blinnphong_pcf3x3_same_source_as_forward"
+    }
+  },
+  "manifest_requirements": {
+    "build_git_sha": "regenerate-at-capture-time",
+    "shader_spirv_sha256": "regenerate-at-capture-time",
+    "engine_binary_path": "Darwin/Debug/TestRHISponzaShared (DebugVulkan build tree)"
+  }
+}

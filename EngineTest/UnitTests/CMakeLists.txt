@@ -201,8 +201,54 @@ if(ENABLE_VULKAN)
     # Vulkan 后端测试需要 ENABLE_VULKAN 编译定义,以匹配 Engine 内对 VulkanDevice 的启用逻辑。
     target_compile_definitions(TestRHIDeviceFactory PRIVATE ENABLE_VULKAN=1)
 endif()
+# F0-9（D3D12 M0）：Windows + ENABLE_D3D12 时工厂测试翻转 D3D12 断言
+# （非 nullptr），与 Engine 内 ENABLE_D3D12=1 门控对齐（对齐上方 Vulkan 先例）。
+if(WIN32 AND ENABLE_D3D12)
+    target_compile_definitions(TestRHIDeviceFactory PRIVATE ENABLE_D3D12=1)
+endif()
 add_test(NAME TestRHIDeviceFactory COMMAND TestRHIDeviceFactory)
 set_target_properties(TestRHIDeviceFactory PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+# ======================
+# D3D12 平台中立核单测（F0-6/F0-7/F0-5 预算器）——无 Windows 头，
+# 所有平台（含 macOS）编译运行；Engine 静态库内 D3D12 中立核由
+# Engine/CMakeLists.txt 白名单编入。
+# ======================
+add_executable(UnitD3D12Format RHI/D3D12/TestD3D12Format.cpp)
+target_include_directories(UnitD3D12Format PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(UnitD3D12Format PRIVATE Engine)
+add_test(NAME UnitD3D12Format COMMAND UnitD3D12Format)
+set_target_properties(UnitD3D12Format PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+add_executable(UnitD3D12StateTracker RHI/D3D12/TestD3D12StateTracker.cpp)
+target_include_directories(UnitD3D12StateTracker PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(UnitD3D12StateTracker PRIVATE Engine)
+add_test(NAME UnitD3D12StateTracker COMMAND UnitD3D12StateTracker)
+set_target_properties(UnitD3D12StateTracker PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+add_executable(UnitD3D12RootSigBudget RHI/D3D12/TestD3D12RootSigBudget.cpp)
+target_include_directories(UnitD3D12RootSigBudget PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(UnitD3D12RootSigBudget PRIVATE Engine)
+add_test(NAME UnitD3D12RootSigBudget COMMAND UnitD3D12RootSigBudget)
+set_target_properties(UnitD3D12RootSigBudget PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 

@@ -22,7 +22,9 @@
 #include "Engine/Graphics/RHI/Core/RHITypes.h"
 #include "Engine/Graphics/RHI/Core/RHIMath.h"
 #include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
-#include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanPassTimestampAudit.h"
+// F0-11 (D3D12 M0): pass timestamp 审计走平台中立入口（Vulkan 特化经
+// VulkanPassTimestampEntry.cpp 静态注册；本文件不再 include Audit 头）。
+#include "Engine/Graphics/RHI/Core/RHIPassTimestampAudit.h"
 #include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
 #include "Engine/Graphics/RHI/Platforms/Vulkan/VulkanSampler.h"
 #if defined(__APPLE__) && __has_include(<MoltenVK/mvk_private_api.h>)
@@ -2179,9 +2181,25 @@ void TestVulkanSponzaRenderGraph::Run() {
         lastFrameTime_ = std::chrono::steady_clock::now();
     }
     // Measure real dt like Metal TestSponzaRenderGraph (not hardcoded 1/60).
+    // F0-14（D3D12 M0 轨迹模式，PhaseDoc §3.5）: PRIMAL_FIXED_DT=<seconds>（>0）
+    // 时 dt 取该恒定值，优先于真实时钟——轨迹/基线运行必须设固定值，否则
+    // run-to-run 的真实墙钟抖动使逐帧比较无意义。未设/非法/非正值=非轨迹
+    // 模式，行为与注入前完全一致（默认路径不变）。lastFrameTime_ 照常推进，
+    // 保持时钟语义；仅 env 门控下每帧输出一行 stderr 供 capture manifest
+    // 与方差标定核对（grep "[FIXED_DT]"）。
+    static const float fixedDt = [] {
+        const char* e = std::getenv("PRIMAL_FIXED_DT");
+        if (!e) return -1.0f;
+        const float v = std::strtof(e, nullptr);
+        return v > 0.0f ? v : -1.0f;  // 非法/非正=未设置（行为不变）
+    }();
     auto currentTime = std::chrono::steady_clock::now();
     float dt = std::chrono::duration<float>(currentTime - lastFrameTime_).count();
     lastFrameTime_ = currentTime;
+    if (fixedDt > 0.0f) {
+        dt = fixedDt;
+        std::cerr << "[FIXED_DT] frame " << frameCount_ << " dt=" << dt << std::endl;
+    }
 
     // Arrow key camera orientation (test-local, not in core RHICamera).
     // Left/Right = yaw, Up/Down = pitch. Global input must not rotate a locked
@@ -2640,7 +2658,11 @@ void TestVulkanSponzaRenderGraph::Run() {
 
     if (!cmd->Reset()) return;
     if (!cmd->Begin()) return;
-    const u64 passTimestampTicket=pass_timestamp::instance.Begin(static_cast<VulkanDevice*>(device_),static_cast<VulkanCommandBuffer*>(cmd),cmdHandle,frameIdx,renderSystem_.GetFrameFence(frameIdx),frameCount_);
+    // F0-11: 中立入口，传 RHIDeviceBase*（特化内部做后端分派与转型）。
+    u64 passTimestampTicket=0;
+    if (auto* const passTimestampEntry=pass_timestamp::GetEntry()) {
+        passTimestampTicket=passTimestampEntry->Begin(device_,cmd,cmdHandle,frameIdx,renderSystem_.GetFrameFence(frameIdx),frameCount_);
+    }
 
     TextureDesc targetDesc = renderSystem_.GetBackBufferDesc();
     const char* requestedFrame = std::getenv("SPONZA_CAPTURE_FRAME");
@@ -3124,9 +3146,10 @@ void TestVulkanSponzaRenderGraph::Run() {
     submitInfo.signalFence = renderSystem_.GetFrameFence(frameIdx);
     const auto submitStart = timingEnabled ? FrameClock::now() : FrameClock::time_point{};
     bool submitted=false;
-    { primal::graphics::cpu_stall_audit::Scope phase("frame.submit");submitted=device_->Submit(submitInfo); }
+        { primal::graphics::cpu_stall_audit::Scope phase("frame.submit");submitted=device_->Submit(submitInfo); }
     cpuAudit.SubmitResult(submitted);
-    pass_timestamp::instance.Commit(frameIdx,cmdHandle,submitInfo.signalFence,frameCount_,passTimestampTicket,varianceCommandEnded,submitted);
+    if (auto* const passTimestampEntry=pass_timestamp::GetEntry())
+        passTimestampEntry->Commit(frameIdx,cmdHandle,submitInfo.signalFence,frameCount_,passTimestampTicket,varianceCommandEnded,submitted);
     pipeline_->CommitVarianceFenceFrame(frameIdx,cmdHandle,submitInfo.signalFence,frameCount_,varianceSubmissionTicket,submitted && varianceCommandEnded);
     const double submitMs = timingEnabled ? std::chrono::duration<double,std::milli>(FrameClock::now()-submitStart).count() : 0.0;
     const auto presentStart = timingEnabled ? FrameClock::now() : FrameClock::time_point{};
@@ -7418,7 +7441,10 @@ void TestVulkanSponzaRenderGraph::Shutdown() {
         device_->WaitIdle();
         if(device_->GetPlatform()==RHIPlatform::Vulkan) {
             auto* vk=static_cast<VulkanDevice*>(device_);
-            if(vk->GetLastWaitIdleResult()==VK_SUCCESS)pass_timestamp::instance.ReleaseAfterIdle(vk);
+            if(vk->GetLastWaitIdleResult()==VK_SUCCESS) {
+                if (auto* const passTimestampEntry=pass_timestamp::GetEntry())
+                    passTimestampEntry->ReleaseAfterIdle(device_);
+            }
         }
         std::cerr << "[Part35.7] WaitIdle done" << std::endl;
     }

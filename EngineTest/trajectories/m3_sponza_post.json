@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "name": "m3_sponza_post",
+  "scene": {
+    "asset": "EngineTest/assets/Sponza.model",
+    "asset_sha256": "b0c1f2d5e583508aab922c6e4c2c38cf2a564f952709f45827ac10d4c4757390",
+    "config": {
+      "env": {
+        "RHI_TEST_PLATFORM": "vulkan",
+        "RHI_TEST_SHADOWS": "1",
+        "RHI_TEST_POST": "1",
+        "RHI_TEST_FRAMES": "240",
+        "RHI_CAPTURE_FRAMES": "0,20,59,90,119,150,180,210,239",
+        "RHI_RESIZE_FRAME": "120",
+        "RHI_RESTORE_FRAME": "130",
+        "RHI_RESIZE_TO": "1600,900"
+      }
+    }
+  },
+  "camera": {
+    "start": {
+      "position": [0.0, 5.0, 0.0],
+      "pitch_deg": 0.0,
+      "yaw_deg": 0.0,
+      "roll_deg": 0.0
+    },
+    "keyframes": [
+      {"time": 0.0,  "position": [0.0, 2.2, 3.0],  "lookAt": [3.5, 1.0, 0.5],  "fov_deg": 60.0},
+      {"time": 0.5,  "position": [0.0, 2.2, 3.0],  "lookAt": [3.5, 1.0, 0.5],  "fov_deg": 60.0},
+      {"time": 1.2,  "position": [0.0, 2.6, 5.0],  "lookAt": [3.0, 1.5, 2.0],  "fov_deg": 60.0},
+      {"time": 2.0,  "position": [-2.5, 3.0, 6.0], "lookAt": [-1.0, 2.0, 14.0], "fov_deg": 60.0},
+      {"time": 2.6,  "position": [0.0, 2.2, 10.0], "lookAt": [-3.0, 2.5, 14.0], "fov_deg": 55.0},
+      {"time": 3.2,  "position": [-1.0, 1.8, 8.0], "lookAt": [-3.5, 2.0, 13.0], "fov_deg": 55.0},
+      {"time": 3.6,  "position": [0.0, 3.5, 6.0],  "lookAt": [0.0, 2.0, 12.0],  "fov_deg": 60.0},
+      {"time": 4.0,  "position": [0.0, 5.0, 0.0],  "lookAt": [0.0, 2.0, 8.0],  "fov_deg": 60.0}
+    ],
+    "interpolation": "linear",
+    "coordinate_system": "right-handed Y-up, +Z forward into Sponza main axis (test-local)",
+    "coverage_notes": "段语义按实测亮区标定（初版几何推断与实测亮区不符，已修正；实测：画廊纵深地面视角 luma>200 占比 34-65%，入口侧拱近景 ~0%）。0.0-1.2s 暗部段：入口侧拱/立柱近景背光面（帧 0-29 静止供确定性比对，帧 0/20/59 覆盖）；1.2-2.0s 由暗入亮过渡；2.0-3.6s 高亮段：画廊纵深受光地面/拱廊直视（base exposure 2.0 下 HDR≈1.5-2.0 深入 ACES 肩部，帧 119/150/180/210 覆盖——其中 2.0-3.2s 同时是连续侧移运动段：位置连续横越、光斑与阴影边缘扫过画面=画面运动覆盖；lookAt 保持画廊几何内 z≤14 避免越过远端开口）；3.6-4.0s 回归段收束至 m1/m2 同锚点构图。全程 RHI_TEST_SHADOWS=1（M2 阴影段组合验证）。"
+  },
+  "timing": {
+    "timestep": 0.0166667,
+    "total_frames": 240,
+    "warmup_frames": 30
+  },
+  "render": {
+    "resolution": [1280, 720],
+    "exposure": 1.0,
+    "postprocess": {"bloom": "off", "tone_mapping": "aces_fixed_ev"},
+    "post": {"exposure": 2.0, "curve": "ACESFit(2.51,0.03,2.43,0.59,0.14)", "encoding": "linear_to_bgra8_unorm_single_point"},
+    "random_seed": 0,
+    "light": {
+      "kind": "directional",
+      "dir_to_light": [-0.9, 1.5, -0.8],
+      "intensity": 2.2,
+      "color": [1.0, 0.98, 0.92]
+    },
+    "shadow": {
+      "cascades": 1,
+      "map_size": 2048,
+      "filter": "pcf3x3_comparison_sampler",
+      "comparison_func": "LessEqual",
+      "ortho_half_extent": 40.0,
+      "near": 20.0,
+      "far": 150.0
+    }
+  },
+  "manifest_requirements": {
+    "build_git_sha": "regenerate-at-capture-time",
+    "shader_spirv_sha256": "regenerate-at-capture-time",
+    "engine_binary_path": "Darwin/Debug/TestRHISponzaShared (DebugVulkan build tree)"
+  }
+}

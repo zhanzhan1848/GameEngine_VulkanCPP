@@ -47,6 +47,28 @@ declare -a SHADERS=(
     # variant ported from Dawn WGSL. This graphics variant matches the module's
     # 9-binding descriptor set layout (Forward/DeferredLighting.vert+frag).
     "DeferredLighting     vert frag"
+    # D3D12 M1 F1-7: minimal forward set for the shared test host
+    # (TestRHISponzaShared). Single-source GLSL also feeding the D3D12 chain
+    # (scripts/build_d3d12_shaders.py).
+    "M1Forward            vert frag"
+    # D3D12 M2 F2-5: shadow depth VS (single cascade) + lit FS reusing
+    # M1Forward.vert. Single-source GLSL also feeding the D3D12 chain.
+    "M2ShadowDepth        vert"
+    "M2ForwardLit         frag"
+    # D3D12 M3 F3-2: post full-screen triangle VS + exposure/ACES FS.
+    # Single-source GLSL also feeding the D3D12 chain.
+    "M3Post               vert frag"
+    # D3D12 M4 F4-2: deferred GBuffer MRT writer (vert = M1Forward variant,
+    # frag writes 3 RTs). Single-source GLSL also feeding the D3D12 chain.
+    "M4GBuffer            vert frag"
+    # D3D12 M4 F4-3: deferred full-screen light FS (vertex stage reuses
+    # M3Post.vert bytes — no separate M4 vert file).
+    "M4DeferredLight      frag"
+    # D3D12 M6 F6-2: probe-grid GI characterization compute pair (entry
+    # main; writeonly image3D bake / EMA accum with typed UAV load + 3D SRV
+    # history). Single-source GLSL also feeding the D3D12 chain.
+    "M6ProbeBake          comp"
+    "M6ProbeAccum         comp"
 )
 
 for entry in "${SHADERS[@]}"; do

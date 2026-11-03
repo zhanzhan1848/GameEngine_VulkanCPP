@@ -91,8 +91,21 @@ int main() {
     CHECK(InitializeEngine(kRHIPlatform_Unknown, 0) == 0, "Unknown platform should fail");
     CHECK(IsEngineInitialized() == 0, "state should remain uninitialized after failure");
 
-    // 5) D3D12 平台也应该失败（RHI 还没实现 D3D12 后端）
+    // 5) D3D12 平台（F0-9 条件化，D3D12 M0）：
+    //    - 未启用（macOS / ENABLE_D3D12=OFF）：InitializeEngine 必须失败
+    //      且状态保持未初始化——既有断言，macOS 上真实执行。
+    //    - Windows + ENABLE_D3D12：工厂接通 D3D12Device 最小闭环，
+    //      InitializeEngine 应成功并完整走一次生命周期
+    //      （本分支在 macOS 不编译；本测试移植 Windows (LoadLibrary) 后生效）。
+#if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
+    CHECK(InitializeEngine(kRHIPlatform_D3D12, 0) == 1, "D3D12 platform should initialize (ENABLE_D3D12 on Windows)");
+    CHECK(IsEngineInitialized() == 1, "state should be initialized after D3D12 init");
+    ShutdownEngine();
+    CHECK(IsEngineInitialized() == 0, "state should be uninitialized after D3D12 shutdown");
+#else
     CHECK(InitializeEngine(kRHIPlatform_D3D12, 0) == 0, "D3D12 platform should fail (not implemented)");
+    CHECK(IsEngineInitialized() == 0, "state should remain uninitialized after D3D12 failure");
+#endif
 
     // 6) Metal 平台初始化
     //    注意：完整 InitializeEngine 需要 engine shader blob (shaders.metallib)，

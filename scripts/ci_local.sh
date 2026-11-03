@@ -123,4 +123,10 @@ fi
 # T1.7 (E1 前半)：shader 同语言拷贝漂移门禁（基线快照机制）
 "$ROOT/scripts/check_shader_copies.sh" || fail "shader 拷贝漂移门禁"
 
+# D3D12 M0 F0-12：RHI 后端依赖静态门禁——共享代码禁止 include 后端头 /
+# static_cast 后端类型（新违规必须登记 scripts/rhi_backend_deps_whitelist.txt
+# 并给出分类与理由，或走 RHI 公共接口改造）。
+"$ROOT/scripts/check_rhi_backend_deps.sh" || fail "RHI 后端依赖门禁"
+echo "RHI backend deps gate OK"
+
 printf '\nCI LOCAL PASSED（%s）\n' "${CONFIG}" >&2

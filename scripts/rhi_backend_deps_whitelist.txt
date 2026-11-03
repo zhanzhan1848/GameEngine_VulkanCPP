@@ -1,0 +1,158 @@
+Engine/Content/ContentToEngine.cpp|待逐步消化|多后端直查分支（include 后端头/cast 后端类型），待经 RHI 公共接口改造后移出（M1+ 逐项消化）|2026-11-03
+Engine/Graphics/Lumen/DDGI/DDGIShProducerAudit.inl|后端专属实验|Vulkan 专属 GI/诊断实验路径（Lumen DDGI/SC/EV witness，Master Plan §1 登记项，不计入共同功能）|2026-11-03
+Engine/Graphics/Lumen/DDGI/LumenDDGIPass.cpp|后端专属实验|Vulkan 专属 GI/诊断实验路径（Lumen DDGI/SC/EV witness，Master Plan §1 登记项，不计入共同功能）|2026-11-03
+Engine/Graphics/Lumen/SurfaceCache/SurfaceCachePass.cpp|后端专属实验|Vulkan 专属 GI/诊断实验路径（Lumen DDGI/SC/EV witness，Master Plan §1 登记项，不计入共同功能）|2026-11-03
+Engine/Graphics/Nanite/GlobalSDF.cpp|待逐步消化|多后端直查分支（include 后端头/cast 后端类型），待经 RHI 公共接口改造后移出（M1+ 逐项消化）|2026-11-03
+Engine/Graphics/Nanite/MaterialDataBuilder.cpp|待逐步消化|多后端直查分支（include 后端头/cast 后端类型），待经 RHI 公共接口改造后移出（M1+ 逐项消化）|2026-11-03
+Engine/Graphics/Nanite/OfflineSDFMerger.cpp|待逐步消化|多后端直查分支（include 后端头/cast 后端类型），待经 RHI 公共接口改造后移出（M1+ 逐项消化）|2026-11-03
+Engine/Graphics/PCG/GPU/GPUMesher.cpp|待逐步消化|多后端直查分支（include 后端头/cast 后端类型），待经 RHI 公共接口改造后移出（M1+ 逐项消化）|2026-11-03
+Engine/Graphics/PCG/GPU/PCGScatterCompute.h|待逐步消化|多后端直查分支（include 后端头/cast 后端类型），待经 RHI 公共接口改造后移出（M1+ 逐项消化）|2026-11-03
+Engine/Graphics/Passes/ParticlePass.cpp|待逐步消化|多后端直查分支（include 后端头/cast 后端类型），待经 RHI 公共接口改造后移出（M1+ 逐项消化）|2026-11-03
+Engine/Graphics/RHI/Core/RHIDeviceFactory.cpp|平台宿主|工厂后端分发点：DeviceDesc.platform 运行时分发的唯一后端实例化处（Master Plan §1 合法例外）|2026-11-03
+Engine/Graphics/RenderPipeline/Modules/ForwardSceneRenderer.cpp|待逐步消化|多后端直查分支（include 后端头/cast 后端类型），待经 RHI 公共接口改造后移出（M1+ 逐项消化）|2026-11-03
+Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/ToneMappingPass.cpp|待逐步消化|多后端直查分支（include 后端头/cast 后端类型），待经 RHI 公共接口改造后移出（M1+ 逐项消化）|2026-11-03
+Engine/Graphics/Renderer.cpp|待逐步消化|多后端直查分支（include 后端头/cast 后端类型），待经 RHI 公共接口改造后移出（M1+ 逐项消化）|2026-11-03
+Engine/Particles/GPUParticlePass.cpp|待逐步消化|多后端直查分支（include 后端头/cast 后端类型），待经 RHI 公共接口改造后移出（M1+ 逐项消化）|2026-11-03
+Engine/Platform/StubsEmscripten.cpp|平台宿主|WASM 平台宿主 Dawn stub（Emscripten 目标专属编译单元）|2026-11-03
+EngineTest/IntegrationTests/DDGIAnalyticFirstRhoCandidate.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/DDGIDefaultFirstOracle.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/DDGIFirstCoherentReplay.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/DDGIFirstFactorReplay.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/DDGIFirstNativeNormalCandidate.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/DDGIFirstNormalProof.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/DDGIFirstPrimaryRasterProof.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/DDGIFirstRecordProof.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/DDGIFirstShadowMapDump.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/DDGIZeroNormalFactor.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/Graphics/WFC/TestKenneyTilePreview.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/Graphics/WFC/TestWFCRendering.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/Graphics/WFC/TestWFCRuinsRendering.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/Graphics/WFC/TestWFCStreaming.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/HZBStandaloneTest.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/RC/SponzaRC.h|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/SCBoundaryIndexTest.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/SCGeometryFirstHitTest.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/SCGeometrySupportProof.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/SCMaterialSampleProof.inl|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestCSMIntegration.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestCSMIntegrationRenderGraph.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestDawnForwardRenderer.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestDawnForwardRenderer.h|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestDawnRenderGraph.h|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestDawnRenderer.h|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestDawnRendering.h|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestDawnSponza.h|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestForwardRenderer.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestGeometryDebugSponza.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestMaterialPreview.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestMaterialPreviewEditor.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestMetalRenderer.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestMetalShadows.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestModularPipeline.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestMultiView.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestNaniteStreamingPipeline.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestPCGScatter.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestParticleSponza.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestPhysicsMultiBody.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestPhysicsSmoke.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestRendererRHIDevice.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestSponzaRenderGraph.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestStandardPipeline.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestVulkanDLSSRenderGraph.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestVulkanFroxelRenderGraph.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/IntegrationTests/TestVulkanSponzaRenderGraph.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalBlendState.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalCommandBuffer.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalCommandEncoding.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalDepthPrePass.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalDescriptorSet.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalDevice.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalEncoderBarrierSpike.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalForwardRendererIntegration.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalHotReload.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalMath.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalP4cReferences.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalPRT.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalPipeline.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalResource.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalResourceBinding.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalShaderPipeline.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalShadowPass.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalSimplePBR.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalSwapChain.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalSyncQuery.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalTexture.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalToneMap.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalVTPrimitives.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/Metal/TestMetalVTPrototype.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/RenderGraph/TestRenderGraphTimestamp.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/Graphics/TestVulkanPassTimestampTicket.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestRHIDeviceFactory.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestRHITimestamp.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVTSVTRuntime.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanAlbedoMipmaps.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanBloom.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanBlurPass.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanBuffer.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanCommandBuffer.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanComputeBytesLarge.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGICrossRayPairReplay.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGIEqualBoxReplay.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGIGatherConnections.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGIInstancePayloadReplay.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGIIrradianceHistory.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGIMeasuredSampling.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanDepthAspect.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanDepthPrePass.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanDescriptorSet.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanDevice.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentArchivedReplay.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentCostAudit.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentCostTiming.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentCostTimingE.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentCostTimingF.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentLeafField.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentLeafFieldTiming.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentPairAudit.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentPairBoundary.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentRealQueryCapture.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentVisibility.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanFormatParity.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanForwardPBR_Lite.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanForwardRendererIntegration.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanGeometryBoxContainment.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanIBLPrecomputer.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanIBL_BRDFLUT.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanIBL_Equirect.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanIBL_IrradiancePrefilter.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanLayeredRendering.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanLumenSSAO.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanNaniteSmoke.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanPassTimestampAudit.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanPushConstants.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanSSRComposite.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanSSRPass.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanSSRTrace.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanScreenProbePlaceCenter.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanSecondaryCommandBuffer.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanShadowPass.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanSimplePBR.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanStagingUpload.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanStandardPipelineSmoke.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanStress.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanSwapChain.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanSync.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanTAA.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanTAAJitterContract.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanTangentFrame.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanTextureUpdate.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanTimestampNonblocking.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanToneMap.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanToon.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanTriangle.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanVTPrimitives.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/Core/TestVulkanVTPrototype.cpp|后端专属测试|后端专属测试二进制/诊断 include（仅对应后端配置编译，测试目标自身即后端消费者）|2026-11-03
+EngineTest/UnitTests/RHI/D3D12/TestD3D12Format.cpp|后端专属测试|D3D12 平台中立核单测：显式 include 中立核头（无 Windows 头，macOS 合法编译单元，F0-6/F0-7 交付物）|2026-11-03
+EngineTest/UnitTests/RHI/D3D12/TestD3D12RootSigBudget.cpp|后端专属测试|D3D12 平台中立核单测：显式 include 中立核头（无 Windows 头，macOS 合法编译单元，F0-6/F0-7 交付物）|2026-11-03
+EngineTest/UnitTests/RHI/D3D12/TestD3D12StateTracker.cpp|后端专属测试|D3D12 平台中立核单测：显式 include 中立核头（无 Windows 头，macOS 合法编译单元，F0-6/F0-7 交付物）|2026-11-03

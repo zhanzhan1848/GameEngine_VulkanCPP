@@ -1,0 +1,49 @@
+#version 450 core
+
+// M6 Probe Accum (D3D12 M6 F6-2/F6-5) — 探针网格 temporal 累积（EMA）compute。
+// GIHistoryValidity 表征：EMA 混合前一帧网格（history ping-pong 3D 纹理，
+// sampler3D SRV 读取）与新烘焙帧（readonly image3D = 类型化 UAV load——
+// D3D12 侧需 TypedUAVLoadAdditionalFormats 能力，宿主创建期查询，能力不足
+// 显式失败，见 D3D12Device M6 扩展）。
+//
+// 语义（与生产 DDGI temporal 权重同族；LumenTypes ddgi_irradiance_
+// temporal_weight=0.02 为新样本权重——本处取 0.1）：
+//   out = history * 0.9 + new * 0.1          （正常帧）
+//   out = new * 0.1                          （reset 帧：history 视为清零
+//                                              ——SC tile 清零/GIHistoryValidity
+//                                              先例，见 parity matrix #8）
+// reset 帧 → 网格均值先跳落再单调爬升 = 重置跳变 + 收敛阶梯双证据。
+//
+// 绑定布局（set0 单 set；反射契约冻结）：
+//   set 0 binding 0 = newGrid（rgba16f readonly image3D = typed UAV load）
+//   set 0 binding 1 = histTexture（texture3D 分离采样对 image）
+//   set 0 binding 2 = histSampler（sampler；texelFetch→HLSL Load，DXC 可
+//                     淘汰 → 反射契约 DXIL_OPTIONAL，先例 M5Mipmap srcSamp）
+//   set 0 binding 3 = outGrid（rgba16f writeonly image3D）
+//   set 0 binding 4 = AccumParams UBO（16B：flags.x bit0 = reset）
+// dispatch：local 4x4x4 → 2x2x2（与 bake 同拓扑——结构等价目标）。
+//
+// 确定性：EMA 是固定权重浮点混合（无 dt 项——dt 恒定由宿主 [FIXED_DT]
+// 契约保证，权重不随 dt 变化）；texelFetch 1:1 直取无过滤；双跑逐位成立。
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(set = 0, binding = 0, rgba16f) readonly uniform image3D newGrid;
+
+layout(set = 0, binding = 1) uniform texture3D histTexture;
+layout(set = 0, binding = 2) uniform sampler histSampler;
+
+layout(set = 0, binding = 3, rgba16f) writeonly uniform image3D outGrid;
+
+layout(set = 0, binding = 4) uniform AccumParams {
+    vec4 flags;             // x: bit0 = reset（history 清零语义）
+} params;
+
+void main() {
+    ivec3 c = ivec3(gl_GlobalInvocationID);
+    vec4 newV = imageLoad(newGrid, c);
+    vec4 histV = (params.flags.x > 0.5)
+        ? vec4(0.0)                                   // reset：history 清零
+        : texelFetch(sampler3D(histTexture, histSampler), c, 0);
+    imageStore(outGrid, c, histV * 0.9 + newV * 0.1);
+}

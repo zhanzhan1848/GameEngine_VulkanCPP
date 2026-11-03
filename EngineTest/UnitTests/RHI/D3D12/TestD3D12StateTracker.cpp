@@ -1,0 +1,472 @@
+/**
+ * @file TestD3D12StateTracker.cpp
+ * @brief D3D12 状态跟踪器 + 状态映射规则表单测（>=30 断言）
+ * @details D3D12 M0（F0-6/F0-7 验收）。规则维度：
+ *          ① 状态映射（布局态全值 + 生命周期态拒绝 + Present=COMMON）
+ *          ② COMMON 读类自动提升（buffer 全类 / 纹理读类 / 写类必显式）
+ *          ③ 相同状态无 op（UAV 特例除外）
+ *          ④ UAV->UAV WAW 必发 UAV barrier
+ *          ⑤ buffer 与纹理 per-mip 独立跟踪
+ *          ⑥ 提交边界 decay（buffer 全衰 / 纹理仅提升态 / 显式转换保持 / 开关）
+ *          ⑦ op 序有序性（折叠 ALL / 混合 per-sub 升序）
+ *          ⑧ 未注册/越界/生命周期态显式拒绝
+ *          ⑨ M2 F2-3：比较采样器映射（ComparisonFunc 全值 / 比较谓词与
+ *            VulkanSampler compareEnable 对齐 / 滤波档 COMPARISON 平移）
+ *          ⑩ M2 F2-2：阴影深度 pass 转换（DEPTH_WRITE <-> SRV/DEPTH_READ）
+ */
+
+#include "../../TestFramework.h"
+#include "Graphics/RHI/Platforms/D3D12/D3D12StateTracker.h"
+
+using namespace primal::graphics::rhi;
+using namespace primal::graphics::rhi::d3d12;
+using namespace Engine::Test;
+
+// ===== ① 状态映射 =====
+TestResult TestStateMappingTable() {
+    u32 bits = 0;
+    TEST_ASSERT(ToD3D12ResourceStates(ResourceState::General, bits) && bits == kD3D12ResourceState_Common, "General -> COMMON");
+    TEST_ASSERT(ToD3D12ResourceStates(ResourceState::ShaderResource, bits) && bits == kD3D12ResourceState_AllShaderResource, "ShaderResource -> 0xC0");
+    TEST_ASSERT(ToD3D12ResourceStates(ResourceState::RenderTarget, bits) && bits == kD3D12ResourceState_RenderTarget, "RenderTarget -> 0x4");
+    TEST_ASSERT(ToD3D12ResourceStates(ResourceState::DepthStencil, bits) && bits == kD3D12ResourceState_DepthWrite, "DepthStencil -> DEPTH_WRITE");
+    TEST_ASSERT(ToD3D12ResourceStates(ResourceState::DepthStencilReadOnly, bits) && bits == kD3D12ResourceState_DepthRead, "DepthReadOnly -> DEPTH_READ");
+    TEST_ASSERT(ToD3D12ResourceStates(ResourceState::UnorderedAccess, bits) && bits == kD3D12ResourceState_UnorderedAccess, "UAV -> 0x8");
+    TEST_ASSERT(ToD3D12ResourceStates(ResourceState::CopySource, bits) && bits == kD3D12ResourceState_CopySource, "CopySource -> 0x800");
+    TEST_ASSERT(ToD3D12ResourceStates(ResourceState::CopyDest, bits) && bits == kD3D12ResourceState_CopyDest, "CopyDest -> 0x400");
+    TEST_ASSERT(ToD3D12ResourceStates(ResourceState::Present, bits) && bits == kD3D12ResourceState_Present && bits == 0, "Present -> 0 (== COMMON)");
+    TEST_ASSERT(ToD3D12ResourceStates(ResourceState::ResolveSource, bits) && bits == kD3D12ResourceState_ResolveSource, "ResolveSource -> 0x2000");
+    TEST_ASSERT(ToD3D12ResourceStates(ResourceState::ResolveDest, bits) && bits == kD3D12ResourceState_ResolveDest, "ResolveDest -> 0x1000");
+    TEST_ASSERT(ToD3D12ResourceStates(ResourceState::IndirectArgument, bits) && bits == kD3D12ResourceState_IndirectArgument, "Indirect -> 0x200");
+    // 生命周期态显式拒绝
+    TEST_ASSERT(!ToD3D12ResourceStates(ResourceState::Unknown, bits), "Unknown rejected");
+    TEST_ASSERT(!ToD3D12ResourceStates(ResourceState::Created, bits), "Created rejected");
+    TEST_ASSERT(!ToD3D12ResourceStates(ResourceState::PendingUpload, bits), "PendingUpload rejected");
+    TEST_ASSERT(!ToD3D12ResourceStates(ResourceState::Destroyed, bits), "Destroyed rejected");
+    // PipelineStage / AccessFlag 翻译
+    TEST_ASSERT(PipelineStageToResourceStatesBits(PipelineStage::ComputeShader) == kD3D12ResourceState_NonPixelShaderResource, "Compute stage -> NPSR");
+    TEST_ASSERT(PipelineStageToResourceStatesBits(PipelineStage::FragmentShader) == kD3D12ResourceState_PixelShaderResource, "Fragment stage -> PSR");
+    TEST_ASSERT(AccessFlagsToResourceStatesBits(AccessFlag::ShaderWrite) == kD3D12ResourceState_UnorderedAccess, "ShaderWrite -> UAV");
+    TEST_ASSERT(AccessFlagsToResourceStatesBits(AccessFlag::ShaderRead) == kD3D12ResourceState_AllShaderResource, "ShaderRead -> SRV");
+    TEST_ASSERT(AccessFlagsToResourceStatesBits(AccessFlag::TransferWrite) == kD3D12ResourceState_CopyDest, "TransferWrite -> COPY_DEST");
+    // 提升集合精确性：DepthRead/ResolveSource 只读但不可提升
+    TEST_ASSERT(IsReadClassState(ResourceState::ShaderResource), "SRV promotable");
+    TEST_ASSERT(IsReadClassState(ResourceState::CopySource), "CopySrc promotable");
+    TEST_ASSERT(IsReadClassState(ResourceState::IndirectArgument), "Indirect promotable");
+    TEST_ASSERT(!IsReadClassState(ResourceState::DepthStencilReadOnly), "DepthRead NOT promotable");
+    TEST_ASSERT(!IsReadClassState(ResourceState::ResolveSource), "ResolveSrc NOT promotable");
+    return TestResult::Passed;
+}
+
+// ===== ②③ 显式 transition / 相同状态 no-op / COMMON 提升 =====
+TestResult TestTransitionBasics() {
+    D3D12StateTracker tracker;
+    // 纹理 3 mip；显式初始 CopyDest（写类：注册即显式状态，非提升）
+    TEST_ASSERT(tracker.RegisterResource(1, true, 3, 1, 1, ResourceState::CopyDest), "register texture 3 mips");
+
+    D3D12SubresourceKey k1{1, 1, true};  // mip 1
+    auto ops = tracker.Transition(k1, ResourceState::ShaderResource);
+    TEST_ASSERT(ops.size() == 1, "explicit transition emits 1 op");
+    TEST_ASSERT(ops[0].kind == D3D12ResourceBarrierOp::Kind::Transition, "kind=Transition");
+    TEST_ASSERT(ops[0].stateBefore == kD3D12ResourceState_CopyDest, "before=COPY_DEST");
+    TEST_ASSERT(ops[0].stateAfter == kD3D12ResourceState_AllShaderResource, "after=SRV");
+    TEST_ASSERT(ops[0].subresource == 1, "subresource index preserved");
+
+    // 相同状态再转：无 op
+    ops = tracker.Transition(k1, ResourceState::ShaderResource);
+    TEST_ASSERT(ops.empty(), "same-state transition emits nothing");
+
+    // 显式转换回 COMMON 后，读类目标走提升（零 barrier）
+    ops = tracker.Transition(k1, ResourceState::General);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateAfter == kD3D12ResourceState_Common, "to COMMON explicit");
+    ops = tracker.Transition(k1, ResourceState::CopySource);
+    TEST_ASSERT(ops.empty(), "COMMON -> read-class texture promotes silently");
+    ResourceState cur = ResourceState::Unknown;
+    TEST_ASSERT(tracker.QueryState(k1, cur) && cur == ResourceState::CopySource, "tracked after promotion");
+
+    // 提升后状态已前进到 CopySource：再转写类是 CopySource -> RT 显式转换
+    ops = tracker.Transition(k1, ResourceState::RenderTarget);
+    TEST_ASSERT(ops.size() == 1, "promoted-state -> write-class emits explicit transition");
+    TEST_ASSERT(ops[0].stateBefore == kD3D12ResourceState_CopySource, "before=COPY_SOURCE (promoted state)");
+    TEST_ASSERT(ops[0].stateAfter == kD3D12ResourceState_RenderTarget, "after=RT");
+
+    // 仍在注册初始态（CopyDest）的 mip2：先显式转回 COMMON，再验证
+    // COMMON 起点 -> 写类的显式转换
+    D3D12SubresourceKey k2{1, 2, true};
+    ops = tracker.Transition(k2, ResourceState::General);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_CopyDest,
+                "mip2 CopyDest -> COMMON explicit");
+    ops = tracker.Transition(k2, ResourceState::RenderTarget);
+    TEST_ASSERT(ops.size() == 1, "COMMON -> write-class emits explicit transition");
+    TEST_ASSERT(ops[0].stateBefore == kD3D12ResourceState_Common, "before=COMMON");
+    TEST_ASSERT(ops[0].stateAfter == kD3D12ResourceState_RenderTarget, "after=RT (COMMON start)");
+
+    // COMMON -> DepthRead：只读但不可提升（D3D12 规则）→ 显式 transition
+    ops = tracker.Transition(k2, ResourceState::General);
+    TEST_ASSERT(ops.size() == 1, "mip2 RT -> COMMON explicit");
+    ops = tracker.Transition(k2, ResourceState::DepthStencilReadOnly);
+    TEST_ASSERT(ops.size() == 1, "COMMON -> DepthRead explicit (not promotable)");
+    TEST_ASSERT(ops[0].stateBefore == kD3D12ResourceState_Common, "DepthRead before=COMMON");
+    return TestResult::Passed;
+}
+
+TestResult TestBufferPromotion() {
+    D3D12StateTracker tracker;
+    TEST_ASSERT(tracker.RegisterResource(7, false, 1, 1, 1, ResourceState::General), "register buffer COMMON");
+    D3D12SubresourceKey k{7, 0, false};
+
+    // buffer：COMMON -> 任意状态（含写类）全提升
+    auto ops = tracker.Transition(k, ResourceState::UnorderedAccess);
+    TEST_ASSERT(ops.empty(), "buffer COMMON -> UAV promotes (no barrier)");
+    ops = tracker.Transition(k, ResourceState::RenderTarget);
+    TEST_ASSERT(ops.size() == 1, "buffer COMMON -> RT after leaving UAV: explicit");
+
+    // promotion 关闭：全显式
+    D3D12StateTracker::Config noPromo;
+    noPromo.promotionEnabled = false;
+    D3D12StateTracker tracker2{noPromo};
+    TEST_ASSERT(tracker2.RegisterResource(8, false, 1, 1, 1, ResourceState::General), "register buffer 2");
+    D3D12SubresourceKey k8{8, 0, false};
+    ops = tracker2.Transition(k8, ResourceState::ShaderResource);
+    TEST_ASSERT(ops.size() == 1, "promotion disabled -> explicit transition");
+    return TestResult::Passed;
+}
+
+// ===== ④ UAV WAW =====
+TestResult TestUavWawAlwaysBarriers() {
+    D3D12StateTracker tracker;
+    TEST_ASSERT(tracker.RegisterResource(2, true, 1, 1, 1, ResourceState::UnorderedAccess), "register UAV texture");
+    D3D12SubresourceKey k{2, 0, true};
+
+    auto ops = tracker.Transition(k, ResourceState::UnorderedAccess);
+    TEST_ASSERT(ops.size() == 1, "UAV -> UAV same state emits barrier");
+    TEST_ASSERT(ops[0].kind == D3D12ResourceBarrierOp::Kind::UAV, "kind=UAV");
+    TEST_ASSERT(ops[0].stateBefore == 0 && ops[0].stateAfter == 0, "UAV op carries no state change");
+
+    // 连续 compute->compute WAW：每次都发
+    ops = tracker.Transition(k, ResourceState::UnorderedAccess);
+    TEST_ASSERT(ops.size() == 1 && ops[0].kind == D3D12ResourceBarrierOp::Kind::UAV, "second WAW also emits");
+
+    // buffer 的 UAV WAW 同样必发
+    D3D12StateTracker trackerB;
+    TEST_ASSERT(trackerB.RegisterResource(9, false, 1, 1, 1, ResourceState::UnorderedAccess), "register UAV buffer");
+    D3D12SubresourceKey kb{9, 0, false};
+    ops = trackerB.Transition(kb, ResourceState::UnorderedAccess);
+    TEST_ASSERT(ops.size() == 1 && ops[0].kind == D3D12ResourceBarrierOp::Kind::UAV, "buffer WAW emits");
+    return TestResult::Passed;
+}
+
+// ===== ⑤ per-mip 独立 + ⑦ op 序 =====
+TestResult TestPerMipIndependenceAndOrdering() {
+    D3D12StateTracker tracker;
+    TEST_ASSERT(tracker.RegisterResource(3, true, 3, 1, 1, ResourceState::General), "register 3-mip COMMON");
+
+    // 各 mip 走不同路径：mip0 提升、mip1 显式、mip2 不动
+    TEST_ASSERT(tracker.Transition({3, 0, true}, ResourceState::ShaderResource).empty(), "mip0 promotes");
+    auto ops = tracker.Transition({3, 1, true}, ResourceState::RenderTarget);
+    TEST_ASSERT(ops.size() == 1 && ops[0].subresource == 1, "mip1 explicit RT");
+    TEST_ASSERT(tracker.Transition({3, 2, true}, ResourceState::General).empty(), "mip2 stays COMMON (no op)");
+
+    ResourceState s0 = ResourceState::Unknown, s1 = ResourceState::Unknown, s2 = ResourceState::Unknown;
+    TEST_ASSERT(tracker.QueryState({3, 0, true}, s0) && s0 == ResourceState::ShaderResource, "mip0 SRV");
+    TEST_ASSERT(tracker.QueryState({3, 1, true}, s1) && s1 == ResourceState::RenderTarget, "mip1 RT");
+    TEST_ASSERT(tracker.QueryState({3, 2, true}, s2) && s2 == ResourceState::General, "mip2 COMMON");
+
+    // 混合起点整资源转 CopySource：mip0 SRV→CopySrc 显式、mip1 RT→CopySrc
+    // 显式、mip2 COMMON 提升（无 op）→ 两条 per-sub op，升序，各自携带真实 before
+    ops = tracker.Transition({3, kD3D12ResourceBarrierAllSubresources, true}, ResourceState::CopySource);
+    TEST_ASSERT(ops.size() == 2, "mixed-state whole-resource: explicit subs emit per-sub ops");
+    TEST_ASSERT(ops[0].subresource == 0 && ops[0].stateBefore == kD3D12ResourceState_AllShaderResource,
+                "op[0] mip0 before=SRV (ascending order)");
+    TEST_ASSERT(ops[1].subresource == 1 && ops[1].stateBefore == kD3D12ResourceState_RenderTarget,
+                "op[1] mip1 before=RT");
+    TEST_ASSERT(ops[0].kind == D3D12ResourceBarrierOp::Kind::Transition
+        && ops[1].kind == D3D12ResourceBarrierOp::Kind::Transition, "both are Transition ops");
+
+    // 均匀起点整资源转换：折叠为单条 ALL op
+    D3D12StateTracker tracker2;
+    TEST_ASSERT(tracker2.RegisterResource(4, true, 4, 1, 1, ResourceState::RenderTarget), "register 4-mip RT");
+    ops = tracker2.Transition({4, kD3D12ResourceBarrierAllSubresources, true}, ResourceState::ShaderResource);
+    TEST_ASSERT(ops.size() == 1, "uniform whole-resource collapses to 1 op");
+    TEST_ASSERT(ops[0].subresource == kD3D12ResourceBarrierAllSubresources, "collapsed op carries ALL marker");
+    TEST_ASSERT(ops[0].stateBefore == kD3D12ResourceState_RenderTarget, "collapsed before=RT");
+    return TestResult::Passed;
+}
+
+// ===== ⑥ decay =====
+TestResult TestSubmitBoundaryDecay() {
+    D3D12StateTracker tracker;
+    TEST_ASSERT(tracker.RegisterResource(5, false, 1, 1, 1, ResourceState::General), "buffer");
+    TEST_ASSERT(tracker.RegisterResource(6, true, 2, 1, 1, ResourceState::General), "texture 2 mip");
+
+    // buffer 先提升到 SRV（COMMON->读类，零 op），再 SRV->UAV 显式转换
+    TEST_ASSERT(tracker.Transition({5, 0, false}, ResourceState::ShaderResource).empty(), "buffer COMMON->SRV promotes");
+    TEST_ASSERT(tracker.Transition({5, 0, false}, ResourceState::UnorderedAccess).size() == 1, "buffer SRV->UAV explicit");
+    // 纹理 mip0 显式转 RT；mip1 COMMON 提升到 SRV
+    TEST_ASSERT(tracker.Transition({6, 0, true}, ResourceState::RenderTarget).size() == 1, "mip0 explicit RT");
+    TEST_ASSERT(tracker.Transition({6, 1, true}, ResourceState::ShaderResource).empty(), "mip1 promotes to SRV");
+
+    auto decayed = tracker.OnSubmitBoundary();
+    // 预期：buffer(5,0) 衰减 + 纹理提升态 mip(6,1) 衰减；纹理显式 RT mip(6,0) 保持
+    TEST_ASSERT(decayed.size() == 2, "buffer + promoted mip decay; explicit texture state persists");
+    TEST_ASSERT(decayed[0].resource == 5 && decayed[0].subresource == 0, "buffer decay record");
+    TEST_ASSERT(decayed[1].resource == 6 && decayed[1].subresource == 1, "promoted mip decay record");
+
+    ResourceState s = ResourceState::Unknown;
+    TEST_ASSERT(tracker.QueryState({5, 0, false}, s) && s == ResourceState::General, "buffer back to COMMON");
+    TEST_ASSERT(tracker.QueryState({6, 0, true}, s) && s == ResourceState::RenderTarget, "explicit RT persists");
+    TEST_ASSERT(tracker.QueryState({6, 1, true}, s) && s == ResourceState::General, "promoted mip back to COMMON");
+
+    // 再次提交边界：无新衰减（RT 不衰减；其余已 COMMON）
+    decayed = tracker.OnSubmitBoundary();
+    TEST_ASSERT(decayed.empty(), "second boundary: no further decay");
+
+    // decay 开关关闭：不做任何衰减
+    D3D12StateTracker::Config noDecay;
+    noDecay.decayOnSubmit = false;
+    D3D12StateTracker tracker2{noDecay};
+    TEST_ASSERT(tracker2.RegisterResource(10, false, 1, 1, 1, ResourceState::UnorderedAccess), "buffer UAV");
+    TEST_ASSERT(tracker2.OnSubmitBoundary().empty(), "decay disabled: nothing decays");
+    ResourceState s2 = ResourceState::Unknown;
+    TEST_ASSERT(tracker2.QueryState({10, 0, false}, s2) && s2 == ResourceState::UnorderedAccess, "state kept with decay off");
+    return TestResult::Passed;
+}
+
+// ===== ⑦ Track 显式注入 + ⑧ 拒绝语义 =====
+TestResult TestTrackAndRejections() {
+    D3D12StateTracker tracker;
+    TEST_ASSERT(tracker.RegisterResource(11, true, 2, 1, 1, ResourceState::RenderTarget), "register");
+    TEST_ASSERT(!tracker.RegisterResource(11, true, 2, 1, 1, ResourceState::General), "double register rejected");
+
+    // Track 显式改状态（当作显式转换：不参与提升衰减）
+    TEST_ASSERT(tracker.Track({11, 1, true}, ResourceState::CopyDest), "track explicit state");
+    ResourceState s = ResourceState::Unknown;
+    TEST_ASSERT(tracker.QueryState({11, 1, true}, s) && s == ResourceState::CopyDest, "tracked state visible");
+    TEST_ASSERT(!tracker.Track({11, 0, true}, ResourceState::PendingUpload), "lifecycle state rejected by Track");
+    TEST_ASSERT(!tracker.Track({99, 0, true}, ResourceState::General), "unregistered resource rejected");
+
+    // 越界子资源 / 生命周期目标 / 未注册：显式空结果
+    TEST_ASSERT(tracker.Transition({11, 5, true}, ResourceState::General).empty(), "out-of-range subresource rejected");
+    TEST_ASSERT(tracker.Transition({11, 0, true}, ResourceState::Ready).empty(), "lifecycle target rejected");
+    TEST_ASSERT(tracker.Transition({42, 0, true}, ResourceState::General).empty(), "unregistered transition rejected");
+
+    // 注销
+    TEST_ASSERT(tracker.UnregisterResource(11), "unregister");
+    TEST_ASSERT(!tracker.UnregisterResource(11), "double unregister rejected");
+    TEST_ASSERT(tracker.RegisteredResourceCount() == 0, "empty after unregister");
+    return TestResult::Passed;
+}
+
+// ===== ⑨ F2-3（M2）比较采样器映射：ComparisonFunc / 比较谓词 / 滤波档 =====
+TestResult TestComparisonSamplerMapping() {
+    // ComparisonFunc 全值映射（D3D12_COMPARISON_FUNC 枚举值 1..8）
+    TEST_ASSERT(ToD3D12ComparisonFunc(ComparisonFunc::Never) == kD3D12ComparisonFunc_Never, "cmp Never");
+    TEST_ASSERT(ToD3D12ComparisonFunc(ComparisonFunc::Less) == kD3D12ComparisonFunc_Less, "cmp Less");
+    TEST_ASSERT(ToD3D12ComparisonFunc(ComparisonFunc::Equal) == kD3D12ComparisonFunc_Equal, "cmp Equal");
+    TEST_ASSERT(ToD3D12ComparisonFunc(ComparisonFunc::LessEqual) == kD3D12ComparisonFunc_LessEqual, "cmp LessEqual");
+    TEST_ASSERT(ToD3D12ComparisonFunc(ComparisonFunc::Greater) == kD3D12ComparisonFunc_Greater, "cmp Greater");
+    TEST_ASSERT(ToD3D12ComparisonFunc(ComparisonFunc::NotEqual) == kD3D12ComparisonFunc_NotEqual, "cmp NotEqual");
+    TEST_ASSERT(ToD3D12ComparisonFunc(ComparisonFunc::GreaterEqual) == kD3D12ComparisonFunc_GreaterEqual, "cmp GreaterEqual");
+    TEST_ASSERT(ToD3D12ComparisonFunc(ComparisonFunc::Always) == kD3D12ComparisonFunc_Always, "cmp Always");
+    TEST_ASSERT(ToD3D12ComparisonFunc(ComparisonFunc::Unknown) == kD3D12ComparisonFunc_Never, "cmp Unknown->Never conservative");
+
+    // 比较谓词与 VulkanSampler compareEnable 逐字对齐（!= Never）。
+    // 关键事实：SamplerDesc 默认构造（comparisonFunc==Always）→ 比较采样器
+    // ——RHI 默认值坑在两端一致呈现，调用方必须显式传值（M2 §F2-3 契约）。
+    SamplerDesc def{};
+    TEST_ASSERT(def.comparisonFunc == ComparisonFunc::Always, "default comparisonFunc is Always (trap fact)");
+    TEST_ASSERT(SamplerDescWantsComparison(def), "default desc IS comparison sampler (parity with Vulkan)");
+    SamplerDesc never{}; never.comparisonFunc = ComparisonFunc::Never;
+    TEST_ASSERT(!SamplerDescWantsComparison(never), "Never -> plain sampler (Vulkan parity)");
+    SamplerDesc leq{}; leq.comparisonFunc = ComparisonFunc::LessEqual;
+    TEST_ASSERT(SamplerDescWantsComparison(leq), "LessEqual -> comparison sampler");
+
+    // 滤波档：普通档位 + COMPARISON 平移 + 各向异性保留比较档
+    TEST_ASSERT(SelectD3D12SamplerFilter(def) == kD3D12Filter_ComparisonMinMagMipLinear, "default Linear3 -> Comparison Linear3");
+    TEST_ASSERT(SelectD3D12SamplerFilter(never) == kD3D12Filter_MinMagMipLinear, "Never Linear3 -> plain Linear3");
+    SamplerDesc pnt = never; pnt.minFilter = pnt.magFilter = pnt.mipFilter = FilterMode::Point;
+    TEST_ASSERT(SelectD3D12SamplerFilter(pnt) == kD3D12Filter_MinMagMipPoint, "Never Point3 -> plain Point3");
+    SamplerDesc cmpp = leq; cmpp.minFilter = cmpp.magFilter = cmpp.mipFilter = FilterMode::Point;
+    TEST_ASSERT(SelectD3D12SamplerFilter(cmpp) == kD3D12Filter_ComparisonMinMagMipPoint, "LessEqual Point3 -> Comparison Point3");
+    SamplerDesc mixed = leq; mixed.minFilter = FilterMode::Point;
+    TEST_ASSERT(SelectD3D12SamplerFilter(mixed) == kD3D12Filter_ComparisonMinPointMagLinearMipLinear, "LessEqual P/L/L -> Comparison MinPointMagLinearMipLinear");
+    SamplerDesc aniso = never; aniso.maxAnisotropy = 8;
+    TEST_ASSERT(SelectD3D12SamplerFilter(aniso) == kD3D12Filter_Anisotropic, "Never aniso -> plain aniso");
+    SamplerDesc caniso = leq; caniso.maxAnisotropy = 8;
+    TEST_ASSERT(SelectD3D12SamplerFilter(caniso) == kD3D12Filter_ComparisonAnisotropic, "LessEqual aniso -> COMPARISON aniso (no silent tier drop)");
+    return TestResult::Passed;
+}
+
+// ===== ⑩ F2-2（M2）阴影深度 pass 转换：DEPTH_WRITE <-> SRV/DEPTH_READ =====
+TestResult TestShadowDepthPassTransitions() {
+    D3D12StateTracker tracker;
+    // shadow map：D32 单 mip，注册即 DepthStencil（BeginRenderPass 深度附件态）
+    TEST_ASSERT(tracker.RegisterResource(21, true, 1, 1, 1, ResourceState::DepthStencil),
+                "register shadow map at DepthStencil");
+    D3D12SubresourceKey sm{21, 0, true};
+
+    // 深度 pass 结束 → 采样（InsertBarrier DepthWrite→ShaderResource）
+    auto ops = tracker.Transition(sm, ResourceState::ShaderResource);
+    TEST_ASSERT(ops.size() == 1, "DEPTH_WRITE -> SRV emits 1 op");
+    TEST_ASSERT(ops[0].stateBefore == kD3D12ResourceState_DepthWrite, "before=DEPTH_WRITE");
+    TEST_ASSERT(ops[0].stateAfter == kD3D12ResourceState_AllShaderResource, "after=SRV");
+
+    // 采样后下一帧再作深度附件（ShaderResource→DepthStencil：清屏写深度）
+    ops = tracker.Transition(sm, ResourceState::DepthStencil);
+    TEST_ASSERT(ops.size() == 1, "SRV -> DEPTH_WRITE emits 1 op");
+    TEST_ASSERT(ops[0].stateBefore == kD3D12ResourceState_AllShaderResource, "before=SRV");
+    TEST_ASSERT(ops[0].stateAfter == kD3D12ResourceState_DepthWrite, "after=DEPTH_WRITE");
+
+    // 只读深度附件路径（lit pass 复用主深度但不写）：DepthWrite→DepthRead
+    ops = tracker.Transition(sm, ResourceState::DepthStencilReadOnly);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateAfter == kD3D12ResourceState_DepthRead,
+                "DEPTH_WRITE -> DEPTH_READ emits 1 op (ReadOnly mapping)");
+    // DepthRead 不在 COMMON 提升集合：回 SRV 须显式 transition（非零 op）
+    ops = tracker.Transition(sm, ResourceState::ShaderResource);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_DepthRead,
+                "DEPTH_READ -> SRV explicit (not promotion)");
+    return TestResult::Passed;
+}
+
+// ===== ⑪ F5-4（M5）多阶段 compute UAV 链：GPU 剔除链场景 =====
+// 场景=M5 共同 GPU-driven 切片的真实链形：reset(compute 写 counter) →
+// cull(compute 写 counter+arg buffer，同 buffer WAW/WAR) →[经
+// InsertBarrier(UAV→INDIRECT_ARGUMENT) 事实注入]→ DrawIndexedIndirect 读。
+// 断言覆盖（M0 规范措辞）：
+//   - 连续 compute 写同一 buffer：每对 UAV→UAV 必发一条 UAV barrier（规则④）；
+//   - compute 写→draw 读：无 transition 提升路径（COMMON→INDIRECT_ARGUMENT
+//     读类提升零 op）与显式转换路径（UAV→INDIRECT_ARGUMENT 一条 Transition）
+//     的边界语义都有记录；
+//   - 提交边界 decay 后链可逐帧重放。
+TestResult TestM5ComputeChainUavDiscipline() {
+    D3D12StateTracker tracker;
+    // arg/counter 复合 buffer（真实剔除链同 buffer 多阶段读写），COMMON 注册
+    //（createBufferImpl 现行初始态）。
+    TEST_ASSERT(tracker.RegisterResource(101, false, 1, 1, 1, ResourceState::General),
+                "register cull buffer at COMMON");
+    D3D12SubresourceKey cb{101, 0, false};
+
+    // --- 帧 N：stage0 reset 写 counter（dispatch 的隐式 UAV 提升——
+    // 由 InsertBarrier 的 beforeState 事实注入表达）---
+    TEST_ASSERT(tracker.Track(cb, ResourceState::UnorderedAccess),
+                "stage0 compute write: fact-inject UAV");
+
+    // --- stage1 cull 写同 buffer（WAW）：每对必发 UAV barrier ---
+    auto ops = tracker.Transition(cb, ResourceState::UnorderedAccess);
+    TEST_ASSERT(ops.size() == 1 && ops[0].kind == D3D12ResourceBarrierOp::Kind::UAV,
+                "stage0->stage1 same-buffer WAW emits exactly 1 UAV barrier");
+    // stage2（假想多趟剔除，如 HZB 两阶段）：再来一对，仍必发
+    ops = tracker.Transition(cb, ResourceState::UnorderedAccess);
+    TEST_ASSERT(ops.size() == 1 && ops[0].kind == D3D12ResourceBarrierOp::Kind::UAV,
+                "stage1->stage2 same-buffer WAW emits UAV barrier again");
+    // stage3：三连写第三对仍必发（≥3 对验证"每对必发"，非仅首对）
+    ops = tracker.Transition(cb, ResourceState::UnorderedAccess);
+    TEST_ASSERT(ops.size() == 1 && ops[0].kind == D3D12ResourceBarrierOp::Kind::UAV
+                && ops[0].subresource == kD3D12ResourceBarrierAllSubresources,
+                "stage2->stage3 WAW barrier (resource-level, ALL subresources)");
+
+    // --- compute 写 → draw 读（DrawIndexedIndirect 消费 arg buffer）---
+    // 显式路径：UAV→INDIRECT_ARGUMENT 一条 Transition op（官方样例模式）
+    ops = tracker.Transition(cb, ResourceState::IndirectArgument);
+    TEST_ASSERT(ops.size() == 1 && ops[0].kind == D3D12ResourceBarrierOp::Kind::Transition
+                && ops[0].stateBefore == kD3D12ResourceState_UnorderedAccess
+                && ops[0].stateAfter == kD3D12ResourceState_IndirectArgument,
+                "compute-write -> indirect-read: UAV->INDIRECT_ARGUMENT 1 transition");
+    // 幂等：ExecuteIndirect 入口重复请求同状态零 op
+    ops = tracker.Transition(cb, ResourceState::IndirectArgument);
+    TEST_ASSERT(ops.empty(), "already INDIRECT_ARGUMENT: idempotent no-op");
+
+    // --- 提交边界 decay：buffer 全衰减回 COMMON（规则③）---
+    auto decayed = tracker.OnSubmitBoundary();
+    TEST_ASSERT(decayed.size() == 1 && decayed[0].resource == 101,
+                "submit boundary decays cull buffer to COMMON");
+    // decay 后下一帧：COMMON→读类目标走提升（零 op，无 transition）——
+    // "compute 写→draw 读经 promotion 无 transition"的边界语义记录：
+    // 仅当 buffer 处于 COMMON（新帧）且目标为读类（IndirectArgument 可提升）
+    // 时才零 barrier；帧内 UAV 写后必须走上面的显式转换。
+    ops = tracker.Transition(cb, ResourceState::IndirectArgument);
+    TEST_ASSERT(ops.empty(), "COMMON -> INDIRECT_ARGUMENT read promotion: 0 ops");
+    TEST_ASSERT(IsReadClassState(ResourceState::IndirectArgument),
+                "IndirectArgument is promotion-class read state (semantic record)");
+    // 提升态（IndirectArgument）再次衰减后，COMMON→UAV 走 buffer 全类提升
+    //（规则② buffer 任意状态可提升）——随后同 buffer WAW 恢复规则④。
+    (void)tracker.OnSubmitBoundary();
+    ops = tracker.Transition(cb, ResourceState::UnorderedAccess);
+    TEST_ASSERT(ops.empty(), "COMMON -> UAV buffer promotion: 0 ops (rule 2)");
+    ops = tracker.Transition(cb, ResourceState::UnorderedAccess);
+    TEST_ASSERT(ops.size() == 1 && ops[0].kind == D3D12ResourceBarrierOp::Kind::UAV,
+                "next-frame WAW pair still emits UAV barrier");
+    return TestResult::Passed;
+}
+
+// ===== ⑪ M6 F6-3：TEXTURE3D 子资源模型 =====
+// D3D12 3D 纹理无数组维（DepthOrArraySize=depth；子资源 = mip×1×plane，
+// 即子资源索引 = mip）。验证：注册几何（mip×1）、整资源单态转换（GI 切片
+// 8x8x8 单 mip = 单子资源）、多 mip 3D 的 per-mip 独立索引（mip N → 索引 N
+// ——与 2D 的 mip + mipLevels*arrayLayer 公式在 arraySize=1 时一致）、
+// D3D12Device 侧 arraySize 钳制语义由源审查覆盖（tracker 层按已钳制几何
+// 注册的契约在此锁定）。
+TestResult TestM6Texture3DSubresourceModel() {
+    D3D12StateTracker tracker;
+    // 8x8x8 RGBA16F 单 mip 3D（M6 探针网格）：子资源数=1，整资源单态。
+    TEST_ASSERT(tracker.RegisterResource(21, true, 1, 1, 1, ResourceState::General),
+                "register 3D probe grid (mip=1 array=1 plane=1)");
+    D3D12SubresourceKey whole{21, kD3D12ResourceBarrierAllSubresources, true};
+    auto ops = tracker.Transition(whole, ResourceState::UnorderedAccess);
+    // COMMON→UAV 是写类显式转换（纹理规则：写类不可从 COMMON 提升）；
+    // 单子资源整资源折叠为一条 ALL-subresource op（均匀起点折叠规则）。
+    TEST_ASSERT(ops.size() == 1, "3D whole-resource COMMON->UAV explicit (1 op)");
+    TEST_ASSERT(ops[0].subresource == kD3D12ResourceBarrierAllSubresources,
+                "collapsed single-subresource whole-resource op = ALL marker");
+    // UAV→UAV WAW 规则④同 2D（compute bake→accum 链）
+    ops = tracker.Transition(whole, ResourceState::UnorderedAccess);
+    TEST_ASSERT(ops.size() == 1 && ops[0].kind == D3D12ResourceBarrierOp::Kind::UAV,
+                "3D UAV->UAV WAW emits UAV barrier (rule 4)");
+    // UAV→SRV（延迟光照采样）：显式转换
+    ops = tracker.Transition(whole, ResourceState::ShaderResource);
+    TEST_ASSERT(ops.size() == 1
+                && ops[0].stateBefore == kD3D12ResourceState_UnorderedAccess
+                && ops[0].stateAfter == kD3D12ResourceState_AllShaderResource,
+                "3D UAV->SRV explicit transition");
+    ResourceState cur = ResourceState::Unknown;
+    TEST_ASSERT(tracker.QueryState(whole, cur) && cur == ResourceState::ShaderResource,
+                "3D state tracked after transition");
+
+    // 多 mip 3D（4 mip）：子资源索引=mip（数组维恒 1——D3D12 3D 几何）。
+    TEST_ASSERT(tracker.RegisterResource(22, true, 4, 1, 1, ResourceState::General),
+                "register 4-mip 3D");
+    D3D12SubresourceKey m2{22, 2, true};
+    ops = tracker.Transition(m2, ResourceState::UnorderedAccess);
+    TEST_ASSERT(ops.size() == 1 && ops[0].subresource == 2,
+                "3D per-mip index = mip (array dim collapsed)");
+    // 越界 mip（=子资源数）拒绝
+    D3D12SubresourceKey mBad{22, 4, true};
+    ops = tracker.Transition(mBad, ResourceState::ShaderResource);
+    TEST_ASSERT(ops.empty(), "out-of-range mip rejected (no ops)");
+    return TestResult::Passed;
+}
+
+void RegisterD3D12StateTrackerTests() {
+    auto suite = std::make_shared<TestSuite>("D3D12StateTrackerTests");
+    suite->AddTestCase(TestCase("StateMappingTable", TestStateMappingTable));
+    suite->AddTestCase(TestCase("TransitionBasics", TestTransitionBasics));
+    suite->AddTestCase(TestCase("BufferPromotion", TestBufferPromotion));
+    suite->AddTestCase(TestCase("UavWawAlwaysBarriers", TestUavWawAlwaysBarriers));
+    suite->AddTestCase(TestCase("PerMipIndependenceAndOrdering", TestPerMipIndependenceAndOrdering));
+    suite->AddTestCase(TestCase("SubmitBoundaryDecay", TestSubmitBoundaryDecay));
+    suite->AddTestCase(TestCase("TrackAndRejections", TestTrackAndRejections));
+    suite->AddTestCase(TestCase("ComparisonSamplerMapping", TestComparisonSamplerMapping));
+    suite->AddTestCase(TestCase("ShadowDepthPassTransitions", TestShadowDepthPassTransitions));
+    suite->AddTestCase(TestCase("M5ComputeChainUavDiscipline", TestM5ComputeChainUavDiscipline));
+    suite->AddTestCase(TestCase("M6Texture3DSubresourceModel", TestM6Texture3DSubresourceModel));
+    TestRunner::RegisterTestSuite(suite);
+}
+
+#ifndef UNIT_TEST_LIB
+int main() {
+    RegisterD3D12StateTrackerTests();
+    // M5 移交修复：失败码传播（对齐 TestNaniteResourceManager main 风格——
+    // RunAllSuites 返回 TestStats，failedTests>0 → exit 1；不再恒 0）。
+    Engine::Test::TestStats stats = TestRunner::RunAllSuites();
+    return stats.failedTests == 0 ? 0 : 1;
+}
+#endif

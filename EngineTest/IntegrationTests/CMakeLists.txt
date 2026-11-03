@@ -311,6 +311,14 @@ if(APPLE)
     # First visible-window Vulkan Sponza render via RenderSystem abstraction.
     # Mirrors TestNaniteStreamingPipeline scaffolding (RenderTestRunner + RenderSystem)
     # but drives StandardRenderPipeline::RenderWithCommandBuffer on a Vulkan device.
+    #
+    # M0 批次 B（D3D12 F0 门控先在缺陷修复）：以下 Vulkan 集成测试目标只在
+    # ENABLE_VULKAN=ON 的构建树（Darwin/DebugVulkan）构建。它们局部定义
+    # ENABLE_VULKAN=1 编译 Vulkan 调用代码，但链接的 libEngine.a 只有在
+    # ENABLE_VULKAN=ON 时才含 Vulkan 后端符号——Metal-only Debug 树下必然
+    # 链接失败。门控模式对齐 UnitTests/CMakeLists.txt 的 TestRHIDeviceFactory
+    # 先例（if(ENABLE_VULKAN) → target_compile_definitions ENABLE_VULKAN=1）。
+    if(ENABLE_VULKAN)
     add_executable(TestVulkanSponzaRenderGraph
         "Main.cpp"
         "TestVulkanSponzaRenderGraph.cpp"
@@ -340,6 +348,27 @@ if(APPLE)
     target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE SC_BOUND_GEOMETRY_WITNESS_SPV="${SC_BOUND_WITNESS_SPV}" SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV="${SC_BOUND_WITNESS_REPLACE_SPV}")
 
     target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE "TEST_VULKAN_SPONZA_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1")
+    endif() # ENABLE_VULKAN gate for TestVulkanSponzaRenderGraph
+
+    # 10d. TestRHISponzaShared (D3D12 M1 F1-8 共享测试宿主)
+    # 参数化 platform（env RHI_TEST_PLATFORM=vulkan|d3d12）：同一份中立 RHI
+    # 调用代码驱动 Sponza forward 轨迹（M1Forward 管线、离屏 readback PPM、
+    # resize 段、资源账本）。本文件零后端 include/cast（F0-12 门禁）——
+    # d3d12 在无 D3D12 后端的构建上由工厂返回 nullptr → SKIP exit 42。
+    # ENABLE_VULKAN 门控（对齐 10b 先例）：macOS 只进 DebugVulkan 树；
+    # Windows 集成会话（ENABLE_D3D12=ON）复用同一二进制跑 d3d12 侧。
+    if(ENABLE_VULKAN)
+    add_executable(TestRHISponzaShared
+        "TestRHISponzaShared.cpp"
+    )
+    setup_test_target(TestRHISponzaShared)
+    target_compile_definitions(TestRHISponzaShared PRIVATE "ENABLE_VULKAN=1")
+    # ctest 入口 = 冒烟帧数版（3 帧，独立 capture 目录，不污染正式证据目录）；
+    # 完整 240 帧轨迹由 D3D12 M1 交付流程显式 env 驱动（见 PhaseDoc §5）。
+    set_tests_properties(Engine_Integration_Tests_TestRHISponzaShared PROPERTIES
+        TIMEOUT 300 LABELS "Vulkan;RHI;D3D12M1"
+        ENVIRONMENT "RHI_TEST_FRAMES=3;RHI_CAPTURE_DIR=/tmp/d3d12_m1_evidence/ctest_smoke_frames")
+    endif() # ENABLE_VULKAN gate for TestRHISponzaShared
 
     option(PRIMAL_BUILD_RC_INTEGRATION_TEST "Build isolated Vulkan Sponza RC experiment" OFF)
     if(PRIMAL_BUILD_RC_INTEGRATION_TEST AND ENABLE_VULKAN)
@@ -371,6 +400,8 @@ if(APPLE)
     # 与 TestVulkanSponzaRenderGraph 完全独立——原测试不读 DLSS 门禁 env，
     # 本测试自带 env（Initialize 内 setenv）。运行：
     #   Darwin/Debug/TestVulkanDLSSRenderGraph; echo $?
+    # ENABLE_VULKAN 门控（M0 批次 B）：同 10b，只进 Vulkan 构建树。
+    if(ENABLE_VULKAN)
     add_executable(TestVulkanDLSSRenderGraph
         "Main.cpp"
         "TestVulkanDLSSRenderGraph.cpp"
@@ -400,6 +431,7 @@ if(APPLE)
         ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
         $<TARGET_FILE_DIR:TestVulkanFroxelRenderGraph>/Engine/Graphics/Vulkan/shaders
     )
+    endif() # ENABLE_VULKAN gate for TestVulkanDLSSRenderGraph / TestVulkanFroxelRenderGraph
 
     # Refuse to link/run the Vulkan Sponza target with a source-backed shader
     # older than its GLSL/WGSL input (including recursively included GLSL).
@@ -412,6 +444,7 @@ if(APPLE)
         COMMENT "Checking Vulkan shader source/SPIR-V freshness"
         VERBATIM
     )
+    if(ENABLE_VULKAN)
     add_dependencies(TestVulkanSponzaRenderGraph VulkanShaderFreshnessGate)
 
     # T4.6.5 part 35.3: bundle Vulkan SPIR-V shaders next to the test binary.
@@ -431,6 +464,7 @@ if(APPLE)
         ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
         $<TARGET_FILE_DIR:TestVulkanDLSSRenderGraph>/Engine/Graphics/Vulkan/shaders
     )
+    endif() # ENABLE_VULKAN gate for Vulkan target deps/shader bundles
 
     # 11. TestHZBStandalone
     add_executable(TestHZBStandalone

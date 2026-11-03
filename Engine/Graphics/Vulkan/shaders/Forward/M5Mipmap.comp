@@ -1,0 +1,53 @@
+#version 450
+// M5Mipmap.comp — D3D12 现代化 M5 F5-5 compute mipmap 工具 shader
+// （M7 F7-3 提前交付项；D3D12 设备级 GenerateMipmaps 仍 NOT-IMPLEMENTED，
+//   接通留 M7——本件是工具 shader 本体 + freshness/反射契约门禁产物）。
+//
+// 单级 box downsample：RGBA8_UINT 源级（utexture2D 精确整数 texelFetch，
+// 无滤波/无归一化往返）→ 2×2 盒均值（整数四舍五入 (sum + 2) / 4，边界
+// clamp 复制）→ rgba8ui 存储图像写目标级。每级一次 dispatch，宿主逐级换
+// 绑定；级间显式 MemoryBarrier(ComputeShader→ComputeShader,
+// ShaderWrite→ShaderRead)（rhi-barrier-semantics §1 约定①）。
+// limit = min(mipCount, 4) 由宿主侧保证 bounded（shader 不数级数）。
+//
+// 共同切片形态（偏差登记）：逐级独立 1-mip 纹理对（src/dst 整资源 barrier，
+// M1 标准流）——单纹理 per-mip 存储视图路径受 RHI SampledImage 描述符
+// SRO 硬编码 + CopyTextureToBuffer 全局布局跟踪组合限制，M7 设备级
+// GenerateMipmaps 接通时统一收（见交付报告欠账表）。
+//
+// 确定性纪律：全程 uint 运算（load/store/add/div），同输入逐字节可复算。
+//
+// 绑定（set0，全部 compute 阶段；分离 texture+sampler=M1 契约惯例）：
+//   b0 SampledImage（utexture2D：源级纹理；texelFetch 不滤波）
+//   b1 Sampler（占位——texelFetch 无滤波语义，形态与 M1 对齐）
+//   b2 StorageImage（rgba8ui，目标级纹理）
+//   b3 Uniform：uvec4 srcSize（x=源宽 y=源高）
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform utexture2D srcTex;
+layout(set = 0, binding = 1) uniform sampler srcSamp;
+layout(set = 0, binding = 2, rgba8ui) writeonly uniform uimage2D dstMip;
+layout(set = 0, binding = 3) uniform MipParams {
+    uvec4 srcSize;
+} p;
+
+void main() {
+    const uvec2 dst = gl_GlobalInvocationID.xy;
+    const uint w = max(p.srcSize.x, 1u);
+    const uint h = max(p.srcSize.y, 1u);
+    // dst 尺寸 = (src+1)/2（box 上取整）；越界线程（dispatch 8×8 对齐补齐
+    // 部分）直接返回——imageStore 越界行为不依赖规范灰色区。
+    if (dst.x >= (w + 1u) / 2u || dst.y >= (h + 1u) / 2u) return;
+    const uvec2 srcBase = dst * 2u;
+    // 边界 clamp（奇数维度复制边 texel；本切片 8→4→2→1 全偶，不触发）
+    const uint x1 = min(srcBase.x + 1u, w - 1u);
+    const uint y1 = min(srcBase.y + 1u, h - 1u);
+    const uvec4 a = texelFetch(usampler2D(srcTex, srcSamp), ivec2(int(srcBase.x), int(srcBase.y)), 0);
+    const uvec4 b = texelFetch(usampler2D(srcTex, srcSamp), ivec2(int(x1), int(srcBase.y)), 0);
+    const uvec4 c = texelFetch(usampler2D(srcTex, srcSamp), ivec2(int(srcBase.x), int(y1)), 0);
+    const uvec4 d = texelFetch(usampler2D(srcTex, srcSamp), ivec2(int(x1), int(y1)), 0);
+    const uvec4 sum = a + b + c + d;
+    const uvec4 avg = (sum + uvec4(2u)) / uvec4(4u);  // 整数 round-half-up
+    imageStore(dstMip, ivec2(int(dst.x), int(dst.y)), avg);
+}

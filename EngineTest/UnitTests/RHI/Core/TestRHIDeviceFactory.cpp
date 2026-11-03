@@ -51,7 +51,16 @@ TestResult TestUnimplementedBackendsReturnNull() {
 #endif
 
     desc.platform = RHIPlatform::D3D12;
+#if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
+    // F0-9（D3D12 M0）：Windows + ENABLE_D3D12 时工厂应实例化 D3D12Device
+    // 最小闭环（此分支在 macOS 不编译；本文件由 UnitTests CMake 在
+    // WIN32+ENABLE_D3D12 时传 ENABLE_D3D12=1 宏）。
+    RHIDeviceBase* d3d = CreateRHIDevice(desc);
+    TEST_ASSERT(d3d != nullptr, "D3D12 backend should return non-null when ENABLE_D3D12 is defined on Windows");
+    DestroyRHIDevice(d3d);
+#else
     TEST_ASSERT(CreateRHIDevice(desc) == nullptr, "D3D12 backend should return nullptr (not implemented)");
+#endif
 
     desc.platform = RHIPlatform::Dawn;
     TEST_ASSERT(CreateRHIDevice(desc) == nullptr, "Dawn backend should return nullptr (not implemented)");

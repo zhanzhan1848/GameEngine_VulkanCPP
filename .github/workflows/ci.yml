@@ -338,6 +338,76 @@ jobs:
           retention-days: 14
 
   # ============================================================
+  # Windows 双后端（Vulkan + D3D12）—— D3D12 RHI 现代化 M0 F0-10。
+  # 与上方 Vulkan-only job 并存（保留原 job 不动）；独立 build-d3d12 目录
+  # 避免与 build/ 增量缓存交叉。只跑无头 ctest 子集（D3D12 平台中立核单测
+  # + 反向条件化的工厂测试）——窗口式/Vulkan 集成测试由原 job 覆盖。
+  # 前置：自托管机需预装 Agility SDK NuGet 包（Microsoft.Direct3D.D3D12
+  # 1.611.x，CONFIG 包路径在 NuGet 包目录或 vcpkg）。
+  # 运行验证 DEFERRED-WIN（macOS 宿主只写配置，M7 集成会话首跑）。
+  # ============================================================
+  windows-d3d12:
+    name: Windows (MSVC / Vulkan+D3D12 dual backend)
+    needs: preflight
+    if: github.event_name == 'push' || inputs.platform == 'all' || inputs.platform == 'windows'
+    runs-on: [self-hosted, Windows, x64]
+    timeout-minutes: 120
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        fetch-depth: 1
+
+      - name: 配置 CMake (Release + Vulkan + D3D12 双后端)
+        shell: powershell
+        run: |
+          # ENABLE_D3D12=ON：Agility SDK REQUIRED 化（Engine/CMakeLists 的
+          # find_package(Microsoft.Direct3D.D3D12 ${PRIMAL_D3D12_AGILITY_VERSION}
+          # CONFIG REQUIRED)），缺失即 configure 失败——不静默降级。
+          # BUILD_CONTENT_TOOLS=OFF 同原 job（FBX SDK 缺失）。
+          cmake -S . -B build-d3d12 -DENABLE_VULKAN=ON -DENABLE_D3D12=ON -DBUILD_CONTENT_TOOLS=OFF
+          Write-Host '--- D3D12 gate markers ---'
+          Select-String -Path build-d3d12/CMakeCache.txt -Pattern 'ENABLE_D3D12|PRIMAL_D3D12_AGILITY' | ForEach-Object { Write-Host $_.Line.Trim() }
+
+      - name: 编译 (Release, 双后端)
+        shell: powershell
+        run: |
+          cmd /c "cmake --build build-d3d12 --config Release --parallel > msbuild-d3d12-full.log 2>&1"
+          $code = $LASTEXITCODE
+          Get-Content msbuild-d3d12-full.log | Select-Object -Last 80
+          exit $code
+
+      - name: 无头 ctest（D3D12 核单测 + 条件化工厂测试）
+        shell: powershell
+        run: |
+          # 仅无头子集：D3D12 平台中立核（Format/StateTracker/RootSigBudget）
+          # + ENABLE_D3D12 条件化后的 TestRHIDeviceFactory（D3D12 断言翻转）。
+          # 全量窗口式测试仍由 Vulkan-only job 覆盖。
+          ctest --test-dir build-d3d12 -C Release -R "UnitD3D12|TestRHIDeviceFactory" --output-on-failure --timeout 300 --no-tests=error
+
+      - name: 提取编译错误摘要（失败时）
+        if: failure()
+        shell: powershell
+        run: |
+          if (-not (Test-Path msbuild-d3d12-full.log)) { Write-Host 'no build log found'; exit 0 }
+          $err = Get-Content msbuild-d3d12-full.log | Where-Object { $_ -match '(fatal error C\d+|error C\d+|error LNK\d+|error MSB\d+)' }
+          if ($err) { $err | Select-Object -First 80 | ForEach-Object { Write-Host $_ }; $err | Set-Content msbuild-d3d12-errors.log; exit 0 }
+          Write-Host 'no compile errors found in log'
+
+      - name: 上传编译错误制品（失败时）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-errors-windows-d3d12
+          path: |
+            msbuild-d3d12-errors.log
+            msbuild-d3d12-full.log
+            build-d3d12/Testing/**/*.log
+            build-d3d12/Testing/**/*.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ============================================================
   # Linux（gcc/clang 编译验证，不跑测试）
   # ============================================================
   linux:

@@ -1,0 +1,88 @@
+#version 450
+// M5Cull.comp — D3D12 现代化 M5 F5-1 共同最小 GPU-driven 剔除切片。
+// （GLSL 源与 Vulkan .spv 同一文件；D3D12 走 build_d3d12_shaders.py 链 B
+//   GLSL→SPIR-V→spirv-cross→HLSL→dxc→DXIL .cso。）
+//
+// 冻结子集（PhaseDoc §1/§2 F5-1）：逐实例 frustum + 距离剔除（纯几何谓词，
+// 无 LOD/遮挡/流送——生产欠账另行登记）。单 dispatch 内完成：
+//   ① 谓词判定（视锥 6 平面球测试 + 距离平方测试，全程无 sqrt/无三角函数）
+//   ② 写 DrawIndexedIndirect arg（VkDrawIndexedIndirectCommand 5×u32 布局，
+//     instanceCount ∈ {0,1} 携带剔除判定——0 = 该 mesh 本帧不绘制）
+//   ③ 存活计数 atomicAdd（CPU 交叉断言用）
+//
+// 确定性纪律：
+//   - 谓词浮点运算与宿主 CPU 复算逐操作同序（dot(plane.xyz,c)+plane.w 对比
+//     -r；距离用平方范数对比 (maxDist+r)^2），不依赖超越函数；
+//   - resetMode=1 时仅线程 0 清零计数器（stage0 语义），其余线程立即返回。
+//
+// 绑定（set0，全部 compute 阶段）：
+//   b0 StorageBuffer(readonly)  inst[]   —— 32B/项 std430
+//   b1 Uniform                  params   —— 128B std140（剔除参数，逐帧一次）
+//   b2 StorageBuffer(writeonly) args[]   —— mesh m @ m*5
+//   b3 StorageBuffer(coherent)  counter  —— u32
+//   b4 Uniform                  flags    —— uvec4（x=resetMode；独立 UBO 避免
+//     同帧 reset/cull 两次 dispatch 之间的宿主双写竞态）
+
+layout(local_size_x = 64) in;
+
+struct M5Instance {
+    vec4 sphere;   // xyz = 包围球心（model=identity → 世界系即局部系），w = 半径
+    uvec4 meta;    // x=indexCount y=firstIndex z=vertexOffset w=firstInstance
+};
+
+layout(set = 0, binding = 0, std430) readonly buffer InstBuf {
+    M5Instance inst[];
+} instBuf;
+
+layout(set = 0, binding = 1, std140) uniform CullParams {
+    vec4 planes[6];      // 归一化视锥平面（宿主 Gribb-Hartmann 提取后上传，
+                         // 两端同源 → 约定差异零风险）
+    vec4 camMaxDist;     // xyz = 相机位置，w = 最大绘制距离
+    vec4 counts;         // x = meshCount
+} params;
+
+layout(set = 0, binding = 2, std430) writeonly buffer ArgsBuf {
+    uint args[];         // mesh m @ m*5：indexCount/instanceCount/firstIndex/
+                         // vertexOffset/firstInstance（Vk 布局单一事实源）
+} argsBuf;
+
+layout(set = 0, binding = 3, std430) coherent buffer CounterBuf {
+    uint visibleCount;
+} counter;
+
+layout(set = 0, binding = 4) uniform CullFlags {
+    uvec4 f;             // x = resetMode（1 = stage0：仅线程 0 清零计数器）
+} flags;
+
+void main() {
+    const uint m = gl_GlobalInvocationID.x;
+    if (flags.f.x == 1u) {               // resetMode：stage0 单线程清零
+        if (m == 0u) counter.visibleCount = 0u;
+        return;
+    }
+    if (m >= uint(params.counts.x)) return;
+
+    const vec4 s = instBuf.inst[m].sphere;
+    bool pass = true;
+    for (int p = 0; p < 6; ++p) {
+        // 与宿主 CPU 复算逐操作同序：dot(plane.xyz, c) + plane.w < -r → 剔除
+        const float d = dot(params.planes[p].xyz, s.xyz) + params.planes[p].w;
+        if (d < -s.w) { pass = false; break; }
+    }
+    if (pass) {
+        // 距离剔除：平方范数对比，两端同式（无 sqrt）
+        const vec3 dv = s.xyz - params.camMaxDist.xyz;
+        const float dist2 = dot(dv, dv);
+        const float rmax = params.camMaxDist.w + s.w;
+        if (dist2 > rmax * rmax) pass = false;
+    }
+
+    const uvec4 meta = instBuf.inst[m].meta;
+    const uint base = m * 5u;
+    argsBuf.args[base + 0u] = meta.x;          // indexCount
+    argsBuf.args[base + 1u] = pass ? 1u : 0u;  // instanceCount = 剔除判定
+    argsBuf.args[base + 2u] = meta.y;          // firstIndex
+    argsBuf.args[base + 3u] = meta.z;          // vertexOffset
+    argsBuf.args[base + 4u] = meta.w;          // firstInstance
+    if (pass) atomicAdd(counter.visibleCount, 1u);
+}

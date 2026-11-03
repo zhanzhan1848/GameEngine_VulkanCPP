@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "name": "m2_sponza_shadow",
+  "scene": {
+    "asset": "EngineTest/assets/Sponza.model",
+    "asset_sha256": "b0c1f2d5e583508aab922c6e4c2c38cf2a564f952709f45827ac10d4c4757390",
+    "config": {
+      "env": {
+        "RHI_TEST_PLATFORM": "vulkan",
+        "RHI_TEST_SHADOWS": "1",
+        "RHI_TEST_FRAMES": "240",
+        "RHI_CAPTURE_FRAMES": "0,15,40,80,119,160,200,239",
+        "RHI_RESIZE_FRAME": "120",
+        "RHI_RESTORE_FRAME": "130",
+        "RHI_RESIZE_TO": "1600,900"
+      }
+    }
+  },
+  "camera": {
+    "start": {
+      "position": [0.0, 5.0, 0.0],
+      "pitch_deg": 0.0,
+      "yaw_deg": 0.0,
+      "roll_deg": 0.0
+    },
+    "keyframes": [
+      {"time": 0.0,  "position": [0.0, 5.0, 0.0],  "lookAt": [0.0, 2.0, 8.0],  "fov_deg": 60.0},
+      {"time": 0.5,  "position": [0.0, 5.0, 0.0],  "lookAt": [0.0, 2.0, 8.0],  "fov_deg": 60.0},
+      {"time": 1.0,  "position": [2.0, 3.0, 4.0],  "lookAt": [0.0, 2.0, 10.0], "fov_deg": 60.0},
+      {"time": 1.5,  "position": [0.0, 2.2, 9.0],  "lookAt": [-3.0, 3.0, 14.0], "fov_deg": 55.0},
+      {"time": 2.0,  "position": [-2.0, 4.0, 5.0], "lookAt": [2.0, 2.0, 2.0],  "fov_deg": 60.0},
+      {"time": 2.5,  "position": [0.0, 2.0, 2.0],  "lookAt": [0.0, 0.5, 12.0], "fov_deg": 55.0},
+      {"time": 3.0,  "position": [1.5, 2.5, 6.0],  "lookAt": [-1.5, 1.0, 13.0], "fov_deg": 60.0},
+      {"time": 4.0,  "position": [0.0, 5.0, 0.0],  "lookAt": [0.0, 2.0, 8.0],  "fov_deg": 60.0}
+    ],
+    "interpolation": "linear",
+    "coordinate_system": "right-handed Y-up, +Z forward into Sponza main axis (test-local)",
+    "coverage_notes": "0.0-0.5s 同机位静止段（跨帧差异/阴影稳定性检查，帧 0-29 相邻帧应逐位一致）；1.0-2.0s 侧向移动过走廊柱（遮挡物边缘阴影）；2.0-3.0s 低机位沿主轴看画廊地面（拱券光斑/拱影）；其余段相机运动中观察阴影无漂移。"
+  },
+  "timing": {
+    "timestep": 0.0166667,
+    "total_frames": 240,
+    "warmup_frames": 30
+  },
+  "render": {
+    "resolution": [1280, 720],
+    "exposure": 1.0,
+    "postprocess": {"bloom": "off", "tone_mapping": "off"},
+    "random_seed": 0,
+    "light": {
+      "kind": "directional",
+      "dir_to_light": [-0.9, 1.5, -0.8],
+      "intensity": 2.2,
+      "color": [1.0, 0.98, 0.92]
+    },
+    "shadow": {
+      "cascades": 1,
+      "map_size": 2048,
+      "filter": "pcf3x3_comparison_sampler",
+      "comparison_func": "LessEqual",
+      "ortho_half_extent": 40.0,
+      "near": 20.0,
+      "far": 150.0
+    }
+  },
+  "manifest_requirements": {
+    "build_git_sha": "regenerate-at-capture-time",
+    "shader_spirv_sha256": "regenerate-at-capture-time",
+    "engine_binary_path": "Darwin/DebugVulkan/TestRHISponzaShared"
+  }
+}

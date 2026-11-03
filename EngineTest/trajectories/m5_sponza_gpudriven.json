@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "name": "m5_sponza_gpudriven",
+  "scene": {
+    "asset": "EngineTest/assets/Sponza.model",
+    "asset_sha256": "b0c1f2d5e583508aab922c6e4c2c38cf2a564f952709f45827ac10d4c4757390",
+    "config": {
+      "env": {
+        "RHI_TEST_PLATFORM": "vulkan",
+        "RHI_TEST_GPUDRIVEN": "1",
+        "RHI_TEST_SHADOWS": "1",
+        "RHI_TEST_POST": "1",
+        "RHI_TEST_DEFERRED": "1",
+        "RHI_TEST_FRAMES": "240",
+        "RHI_CAPTURE_FRAMES": "0,20,59,90,119,150,180,210,239",
+        "RHI_RESIZE_FRAME": "120",
+        "RHI_RESTORE_FRAME": "130",
+        "RHI_RESIZE_TO": "1600,900"
+      }
+    }
+  },
+  "camera": {
+    "start": {
+      "position": [0.0, 5.0, 0.0],
+      "pitch_deg": 0.0,
+      "yaw_deg": 0.0,
+      "roll_deg": 0.0
+    },
+    "keyframes": [
+      {"time": 0.0,  "position": [2.6, 1.6, 2.0],  "lookAt": [3.8, 3.2, 4.0],  "fov_deg": 42.0},
+      {"time": 0.5,  "position": [1.5, 1.8, 3.5],  "lookAt": [3.6, 2.8, 6.0],  "fov_deg": 45.0},
+      {"time": 1.0,  "position": [0.0, 2.0, 6.0],  "lookAt": [3.2, 2.2, 8.5],  "fov_deg": 48.0},
+      {"time": 1.2,  "position": [0.0, 2.2, 8.0],  "lookAt": [0.0, 2.0, 14.0], "fov_deg": 55.0},
+      {"time": 1.5,  "position": [0.0, 3.5, 2.0],  "lookAt": [0.0, 2.2, 14.0], "fov_deg": 60.0},
+      {"time": 1.8,  "position": [0.0, 4.5, 0.0],  "lookAt": [0.0, 2.4, 14.0], "fov_deg": 60.0},
+      {"time": 2.0,  "position": [-2.0, 1.8, 7.0], "lookAt": [0.0, 2.0, 10.0], "fov_deg": 50.0},
+      {"time": 2.4,  "position": [-2.0, 1.8, 7.0], "lookAt": [0.0, 2.0, 10.0], "fov_deg": 50.0},
+      {"time": 2.7,  "position": [2.8, 1.8, 7.0],  "lookAt": [0.0, 2.0, 10.0], "fov_deg": 55.0},
+      {"time": 3.0,  "position": [2.8, 1.8, 7.0],  "lookAt": [0.0, 2.0, 10.0], "fov_deg": 55.0},
+      {"time": 3.3,  "position": [0.0, 2.2, 8.0],  "lookAt": [0.0, 2.0, 14.0], "fov_deg": 60.0},
+      {"time": 4.0,  "position": [0.0, 5.0, 0.0],  "lookAt": [0.0, 2.0, 8.0],   "fov_deg": 60.0}
+    ],
+    "interpolation": "linear",
+    "coordinate_system": "right-handed Y-up, +Z forward into Sponza main axis (test-local)",
+    "coverage_notes": "M5 F5-7 五段覆盖：0.0-1.0s 近景材质段——柱列低机位 fov 42-48（帧 0-59 同 m4 材质段形态，供 GPUDRIVEN=1 vs =0 逐位对比的全通过锚点帧）；1.0-1.8s 远近切换段——沿主轴后退 8→2→0 单位、lookAt 恒锚 (0,2,14) 系（fov 55-60：视野拉宽下视锥侧面剔除开始生效——存活数阶跃变化段；首版穿越式拉远在帧 77-80 出现直绘亦黑的中段空视——两路径等价地同为黑、轨迹改为同轴后退消除）；1.8-2.4s 遮挡显露段——近柱侧后平移到位后静止 0.4s（帧 108-143：柱后几何被遮挡→显露的视角切换 + 静止锚点供确定性双跑）；2.4-3.0s 快速运动段——2.7s 内横跨 -2→+2.8 单位（约 4.8 单位/0.3s，帧 144-179：剔除集合快速变化 + 帧尾静止锚点）；3.0-4.0s 流送稳定/组合保持段——回归画廊纵深轴对称构图并静止（帧 180-239，m4 组合段同源锚点：GPUDRIVEN+SHADOWS+POST+DEFERRED 四开关全开）。全程 RHI_TEST_GPUDRIVEN=1（GPU 剔除链 + DrawIndexedIndirect + 每帧 CPU 交叉断言）。"
+  },
+  "timing": {
+    "timestep": 0.0166667,
+    "total_frames": 240,
+    "warmup_frames": 30
+  },
+  "render": {
+    "resolution": [1280, 720],
+    "exposure": 1.0,
+    "postprocess": {"bloom": "off", "tone_mapping": "aces_fixed_ev"},
+    "post": {"exposure": 2.0, "curve": "ACESFit(2.51,0.03,2.43,0.59,0.14)", "encoding": "linear_to_bgra8_unorm_single_point"},
+    "random_seed": 0,
+    "light": {
+      "kind": "directional",
+      "dir_to_light": [-0.9, 1.5, -0.8],
+      "intensity": 2.2,
+      "color": [1.0, 0.98, 0.92],
+      "keyframes": [
+        {"time": 0.0, "intensity": 2.2},
+        {"time": 1.5, "intensity": 0.85},
+        {"time": 2.2, "intensity": 2.2}
+      ],
+      "keyframe_semantics": "step (latest keyframe with time<=t; fields optional and inherited; shadow cascade VP NOT re-derived on dir changes — documented boundary)"
+    },
+    "shadow": {
+      "cascades": 1,
+      "map_size": 2048,
+      "filter": "pcf3x3_comparison_sampler",
+      "comparison_func": "LessEqual",
+      "ortho_half_extent": 40.0,
+      "near": 20.0,
+      "far": 150.0
+    },
+    "gpudriven": {
+      "cull_stages": "reset + frustum6plane_sphere + squared_distance (single cull dispatch)",
+      "indirect_layout": "VkDrawIndexedIndirectCommand 5xu32 per mesh (20B)",
+      "not_selected": ["HZB occlusion", "LOD selection", "streaming feedback", "cluster binning/expansion/compaction"],
+      "notes": "per-mesh material-set rebinding retained (bindless merged-buffer submit not in common slice — see debt register)"
+    }
+  },
+  "manifest_requirements": {
+    "build_git_sha": "regenerate-at-capture-time",
+    "shader_spirv_sha256": "regenerate-at-capture-time",
+    "engine_binary_path": "Darwin/DebugVulkan/TestRHISponzaShared (DebugVulkan build tree)"
+  }
+}
