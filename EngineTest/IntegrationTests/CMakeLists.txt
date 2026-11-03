@@ -350,25 +350,11 @@ if(APPLE)
     target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE "TEST_VULKAN_SPONZA_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1")
     endif() # ENABLE_VULKAN gate for TestVulkanSponzaRenderGraph
 
-    # 10d. TestRHISponzaShared (D3D12 M1 F1-8 共享测试宿主)
-    # 参数化 platform（env RHI_TEST_PLATFORM=vulkan|d3d12）：同一份中立 RHI
-    # 调用代码驱动 Sponza forward 轨迹（M1Forward 管线、离屏 readback PPM、
-    # resize 段、资源账本）。本文件零后端 include/cast（F0-12 门禁）——
-    # d3d12 在无 D3D12 后端的构建上由工厂返回 nullptr → SKIP exit 42。
-    # ENABLE_VULKAN 门控（对齐 10b 先例）：macOS 只进 DebugVulkan 树；
-    # Windows 集成会话（ENABLE_D3D12=ON）复用同一二进制跑 d3d12 侧。
-    if(ENABLE_VULKAN)
-    add_executable(TestRHISponzaShared
-        "TestRHISponzaShared.cpp"
-    )
-    setup_test_target(TestRHISponzaShared)
-    target_compile_definitions(TestRHISponzaShared PRIVATE "ENABLE_VULKAN=1")
-    # ctest 入口 = 冒烟帧数版（3 帧，独立 capture 目录，不污染正式证据目录）；
-    # 完整 240 帧轨迹由 D3D12 M1 交付流程显式 env 驱动（见 PhaseDoc §5）。
-    set_tests_properties(Engine_Integration_Tests_TestRHISponzaShared PROPERTIES
-        TIMEOUT 300 LABELS "Vulkan;RHI;D3D12M1"
-        ENVIRONMENT "RHI_TEST_FRAMES=3;RHI_CAPTURE_DIR=/tmp/d3d12_m1_evidence/ctest_smoke_frames")
-    endif() # ENABLE_VULKAN gate for TestRHISponzaShared
+    # 10d. TestRHISponzaShared 于 2026-11-03 移出 APPLE 门（原位置）：
+    # 见本文件平台 if 链 endif 之后的正式注册块（Windows/ENABLE_D3D12
+    # 构建不再因 APPLE 包裹而缺失该测试目标）。
+
+
 
     option(PRIMAL_BUILD_RC_INTEGRATION_TEST "Build isolated Vulkan Sponza RC experiment" OFF)
     if(PRIMAL_BUILD_RC_INTEGRATION_TEST AND ENABLE_VULKAN)
@@ -1030,6 +1016,29 @@ elseif(LINUX)
 
     add_custom_target(IntegrationTests DEPENDS TestRenderer)
 endif()
+
+# 10d. TestRHISponzaShared (D3D12 M1 F1-8 共享测试宿主) —— 2026-11-03 移出
+# APPLE 门：注册条件 = ENABLE_VULKAN（任意平台）。参数化 platform（env
+# RHI_TEST_PLATFORM=vulkan|d3d12）：同一份中立 RHI 调用代码驱动 Sponza
+# forward 轨迹（M1Forward 管线、离屏 readback PPM、resize 段、资源账本）。
+# 本文件零后端 include/cast（F0-12 门禁）——d3d12 在无 D3D12 后端的构建上
+# 由工厂返回 nullptr → SKIP exit 42。宿主离屏无窗口依赖：macOS 只进
+# DebugVulkan 树（Metal 树 ENABLE_VULKAN=OFF 不生成）；Windows 双后端构建
+# （ENABLE_VULKAN+ENABLE_D3D12）生成同一二进制，d3d12 侧运行时切换。
+# 仍在 TARGET ContentTools 门内：setup_test_target 链接 Engine+ContentTools。
+if(ENABLE_VULKAN)
+    add_executable(TestRHISponzaShared
+        "TestRHISponzaShared.cpp"
+    )
+    setup_test_target(TestRHISponzaShared)
+    target_compile_definitions(TestRHISponzaShared PRIVATE "ENABLE_VULKAN=1")
+    # ctest 入口 = 冒烟帧数版（3 帧，独立 capture 目录，不污染正式证据目录）；
+    # 完整 240 帧轨迹由 D3D12 M1 交付流程显式 env 驱动（见 PhaseDoc §5）。
+    set_tests_properties(Engine_Integration_Tests_TestRHISponzaShared PROPERTIES
+        TIMEOUT 300 LABELS "Vulkan;RHI;D3D12M1"
+        ENVIRONMENT "RHI_TEST_FRAMES=3;RHI_CAPTURE_DIR=/tmp/d3d12_m1_evidence/ctest_smoke_frames")
+endif() # ENABLE_VULKAN gate for TestRHISponzaShared (platform-agnostic)
+
 else()
     message(STATUS "Integration tests skipped: ContentTools disabled (BUILD_CONTENT_TOOLS=OFF)")
     add_custom_target(IntegrationTests)

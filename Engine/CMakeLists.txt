@@ -173,7 +173,9 @@ option(ENABLE_VULKAN "Enable Vulkan RHI backend (Win32 + Linux + macOS via Molte
 option(ENABLE_D3D12 "Enable D3D12 RHI backend (Windows only)" OFF)
 # Agility SDK 锁版（M0 冻结，R6 工具版本漂移风险）。历史 premake5.lua 用的
 # 1.608.2 与 props 1.606.3 混用已废弃；统一锁 1.611.x 单一版本。
-set(PRIMAL_D3D12_AGILITY_VERSION "1.611.3" CACHE STRING
+# 2026-11-03 修正：1.611.3 在 nuget.org 不存在（flatcontainer 404，实测），
+# 1.611.x 实际可用止于 1.611.2 —— 锁 1.611.2。
+set(PRIMAL_D3D12_AGILITY_VERSION "1.611.2" CACHE STRING
     "Microsoft.Direct3D.D3D12 (Agility SDK) version used when ENABLE_D3D12=ON")
 
 # 检查是否禁用粒子系统
@@ -680,17 +682,96 @@ if(ENABLE_VULKAN)
     message(STATUS "Vulkan SDK found: ${Vulkan_INCLUDE_DIR}")
 endif()
 
-# D3D12 RHI 后端依赖：Agility SDK（NuGet Microsoft.Direct3D.D3D12，CONFIG 包）。
-# F0-2/F0-3：ENABLE_D3D12 时 REQUIRED 化 + 锁单一版本
-# （PRIMAL_D3D12_AGILITY_VERSION，默认 1.611.x；premake 时代 1.608.2/1.606.3
-# props 混用已废弃）。上方 MSVC 分支内保留的软 find_package 只服务 legacy
-# Direct3D12（ENABLE_D3D12=OFF 时 legacy 仍可能编入）。
+# D3D12 RHI 后端依赖：Agility SDK（NuGet Microsoft.Direct3D.D3D12）。
+# 2026-11-03 接入方式修正（Windows 首编 R1）：官方 Agility NuGet 包不提供
+# CMake CONFIG（find_package CONFIG REQUIRED 必然失败），改为**零机器特定
+# 配置**的动态获取链，优先级降级：
+#   1) 用户缓存变量 PRIMAL_D3D12_AGILITY_SDK_DIR（指向含 build/native/include
+#      的解压目录，或直接含 d3d12.h 的 include 目录）→ 直接采用；
+#   2) 否则 configure 期从 nuget.org flatcontainer 自动下载 pinned nupkg
+#      （就是 zip）到 ${CMAKE_BINARY_DIR}/agility-sdk/，file(ARCHIVE_EXTRACT)
+#      解压，include 用 build/native/include/，bin 用 build/native/bin/x64/；
+#      SHA256 校验（PRIMAL_D3D12_AGILITY_SHA，默认=1.611.2 实测值，来自
+#      api.nuget.org 2026-11-03 下载测量；置空=跳过校验并 WARNING）；
+#   3) 下载失败（离线）→ 回退 Windows SDK 自带 d3d12.h + WARNING（运行时
+#      特性面受 OS/SDK 版本限制），宏 PRIMAL_D3D12_AGILITY_RUNTIME=0；
+#   4) Agility 在场 → 宏 PRIMAL_D3D12_AGILITY_RUNTIME=1，并把
+#      D3D12Core.dll / d3d12SDKLayers.dll copy_if_different 到共享运行输出
+#      根（Windows/<Config>/D3D12/，对齐官方 NuGet targets 的 .\D3D12\
+#      约定——D3D12 运行时按 exe 相对路径解析该子目录）。
+# 上方 MSVC 分支内保留的软 find_package 只服务 legacy Direct3D12
+# （ENABLE_D3D12=OFF 时 legacy 仍可能编入；同样不会找到 CONFIG，无害）。
 if(ENABLE_D3D12)
     if(NOT WIN32)
         message(WARNING "ENABLE_D3D12=ON is ignored on non-Windows platforms (D3D12 needs Agility SDK/d3d12.h)")
     else()
-        find_package(Microsoft.Direct3D.D3D12 ${PRIMAL_D3D12_AGILITY_VERSION} CONFIG REQUIRED)
-        target_link_libraries(${PROJECT_NAME} PRIVATE Microsoft::Direct3D-D3D12)
+        set(PRIMAL_D3D12_AGILITY_SDK_DIR "" CACHE PATH
+            "Agility SDK root (contains build/native/include) or a directory directly containing d3d12.h; empty = auto-download from nuget.org")
+        set(PRIMAL_D3D12_AGILITY_SHA "414858c5cf25e43022938ab992d78a9639b1a9a48efe5b4a05fca2df9294388c" CACHE STRING
+            "SHA256 of the pinned Agility nupkg (measured from api.nuget.org 2026-11-03, 1.611.2); empty = skip verification with WARNING")
+
+        set(PRIMAL_D3D12_AGILITY_INCLUDE_DIR "")
+        set(PRIMAL_D3D12_AGILITY_BIN_DIR "")
+
+        if(PRIMAL_D3D12_AGILITY_SDK_DIR)
+            # 优先级 1：用户提供的 SDK 目录（解压的 nupkg 根或裸 include 目录）。
+            if(EXISTS "${PRIMAL_D3D12_AGILITY_SDK_DIR}/d3d12.h")
+                set(PRIMAL_D3D12_AGILITY_INCLUDE_DIR "${PRIMAL_D3D12_AGILITY_SDK_DIR}")
+            elseif(EXISTS "${PRIMAL_D3D12_AGILITY_SDK_DIR}/build/native/include/d3d12.h")
+                set(PRIMAL_D3D12_AGILITY_INCLUDE_DIR
+                    "${PRIMAL_D3D12_AGILITY_SDK_DIR}/build/native/include")
+                if(EXISTS "${PRIMAL_D3D12_AGILITY_SDK_DIR}/build/native/bin/x64")
+                    set(PRIMAL_D3D12_AGILITY_BIN_DIR
+                        "${PRIMAL_D3D12_AGILITY_SDK_DIR}/build/native/bin/x64")
+                endif()
+            else()
+                message(FATAL_ERROR "PRIMAL_D3D12_AGILITY_SDK_DIR='${PRIMAL_D3D12_AGILITY_SDK_DIR}' contains neither d3d12.h nor build/native/include/d3d12.h")
+            endif()
+        else()
+            # 优先级 2：configure 期自动下载 pinned nupkg（stamp 幂等；换版本重下）。
+            set(PRIMAL_D3D12_AGILITY_ROOT "${CMAKE_BINARY_DIR}/agility-sdk")
+            set(PRIMAL_D3D12_AGILITY_STAMP
+                "${PRIMAL_D3D12_AGILITY_ROOT}/extracted/.primal-agility-${PRIMAL_D3D12_AGILITY_VERSION}")
+            if(NOT EXISTS "${PRIMAL_D3D12_AGILITY_STAMP}")
+                set(PRIMAL_D3D12_AGILITY_NUPKG
+                    "${PRIMAL_D3D12_AGILITY_ROOT}/microsoft.direct3d.d3d12.${PRIMAL_D3D12_AGILITY_VERSION}.nupkg")
+                file(MAKE_DIRECTORY "${PRIMAL_D3D12_AGILITY_ROOT}")
+                message(STATUS "Downloading Agility SDK (Microsoft.Direct3D.D3D12) ${PRIMAL_D3D12_AGILITY_VERSION} from nuget.org ...")
+                file(DOWNLOAD
+                    "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/${PRIMAL_D3D12_AGILITY_VERSION}/microsoft.direct3d.d3d12.${PRIMAL_D3D12_AGILITY_VERSION}.nupkg"
+                    "${PRIMAL_D3D12_AGILITY_NUPKG}"
+                    TIMEOUT 300
+                    STATUS PRIMAL_D3D12_AGILITY_DL_STATUS)
+                list(GET PRIMAL_D3D12_AGILITY_DL_STATUS 0 PRIMAL_D3D12_AGILITY_DL_CODE)
+                if(PRIMAL_D3D12_AGILITY_DL_CODE EQUAL 0)
+                    if(PRIMAL_D3D12_AGILITY_SHA)
+                        file(SHA256 "${PRIMAL_D3D12_AGILITY_NUPKG}" PRIMAL_D3D12_AGILITY_DL_SHA)
+                        if(NOT PRIMAL_D3D12_AGILITY_DL_SHA STREQUAL "${PRIMAL_D3D12_AGILITY_SHA}")
+                            message(FATAL_ERROR "Agility nupkg SHA256 mismatch: got '${PRIMAL_D3D12_AGILITY_DL_SHA}', expected '${PRIMAL_D3D12_AGILITY_SHA}' (pin or investigate)")
+                        endif()
+                    else()
+                        message(WARNING "PRIMAL_D3D12_AGILITY_SHA is empty — skipping nupkg integrity check for ${PRIMAL_D3D12_AGILITY_VERSION}")
+                    endif()
+                    file(REMOVE_RECURSE "${PRIMAL_D3D12_AGILITY_ROOT}/extracted")
+                    file(ARCHIVE_EXTRACT INPUT "${PRIMAL_D3D12_AGILITY_NUPKG}"
+                         DESTINATION "${PRIMAL_D3D12_AGILITY_ROOT}/extracted")
+                    file(WRITE "${PRIMAL_D3D12_AGILITY_STAMP}"
+                         "${PRIMAL_D3D12_AGILITY_VERSION} ${PRIMAL_D3D12_AGILITY_SHA}\n")
+                else()
+                    list(GET PRIMAL_D3D12_AGILITY_DL_STATUS 1 PRIMAL_D3D12_AGILITY_DL_MSG)
+                    message(WARNING "Agility SDK ${PRIMAL_D3D12_AGILITY_VERSION} download failed (${PRIMAL_D3D12_AGILITY_DL_MSG}); falling back to Windows SDK d3d12.h (runtime feature level limited by OS/SDK)")
+                endif()
+            endif()
+            if(EXISTS "${PRIMAL_D3D12_AGILITY_ROOT}/extracted/build/native/include/d3d12.h")
+                set(PRIMAL_D3D12_AGILITY_INCLUDE_DIR
+                    "${PRIMAL_D3D12_AGILITY_ROOT}/extracted/build/native/include")
+                if(EXISTS "${PRIMAL_D3D12_AGILITY_ROOT}/extracted/build/native/bin/x64")
+                    set(PRIMAL_D3D12_AGILITY_BIN_DIR
+                        "${PRIMAL_D3D12_AGILITY_ROOT}/extracted/build/native/bin/x64")
+                endif()
+            endif()
+        endif()
+
         target_compile_definitions(${PROJECT_NAME} PRIVATE
             ENABLE_D3D12=1
             PRIMAL_D3D12_AGILITY_VERSION="${PRIMAL_D3D12_AGILITY_VERSION}"
@@ -700,7 +781,41 @@ if(ENABLE_D3D12)
         # third_party/D3D12MemAlloc/VENDOR.md）。
         target_include_directories(${PROJECT_NAME} PRIVATE
             "${CMAKE_SOURCE_DIR}/third_party/D3D12MemAlloc/include")
-        message(STATUS "Agility SDK (Microsoft.Direct3D.D3D12) ${PRIMAL_D3D12_AGILITY_VERSION} found and REQUIRED")
+
+        if(PRIMAL_D3D12_AGILITY_INCLUDE_DIR)
+            # Agility 头必须排在 Windows SDK 默认 include 之前（BEFORE），
+            # 否则 VS 默认 INCLUDE 路径里的老 d3d12.h 仍会被优先解析。
+            target_include_directories(${PROJECT_NAME} BEFORE PRIVATE
+                "${PRIMAL_D3D12_AGILITY_INCLUDE_DIR}")
+            target_compile_definitions(${PROJECT_NAME} PRIVATE
+                PRIMAL_D3D12_AGILITY_RUNTIME=1
+            )
+            # 运行时 DLL 暂存到共享运行输出根的 D3D12/ 子目录（EngineDLL、
+            # 全部集成测试 exe 与编辑器加载路径共用该根；官方 NuGet targets
+            # 同样复制到 .\D3D12\ 而非 exe 平级）。
+            if(PRIMAL_D3D12_AGILITY_BIN_DIR)
+                foreach(PRIMAL_D3D12_AGILITY_DLL D3D12Core.dll d3d12SDKLayers.dll)
+                    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E make_directory
+                            "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/D3D12"
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                            "${PRIMAL_D3D12_AGILITY_BIN_DIR}/${PRIMAL_D3D12_AGILITY_DLL}"
+                            "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/D3D12/${PRIMAL_D3D12_AGILITY_DLL}"
+                        VERBATIM)
+                endforeach()
+            endif()
+            message(STATUS "Agility SDK (Microsoft.Direct3D.D3D12) ${PRIMAL_D3D12_AGILITY_VERSION} active: include='${PRIMAL_D3D12_AGILITY_INCLUDE_DIR}' runtime DLLs='${PRIMAL_D3D12_AGILITY_BIN_DIR}'")
+        else()
+            # 优先级 3：离线回退——Windows SDK 自带 d3d12.h（要求 SDK >=
+            # 10.0.16299：D3D12_FEATURE_D3D12_OPTIONS3=21 与本代码面所用
+            # EnumAdapterByGpuPreference 均在该版本就位；VS2022 自带 SDK
+            # 远高于此下限）。能力查询全部运行时 CheckFeatureSupport，
+            # 不存在编译期能力绑定。
+            target_compile_definitions(${PROJECT_NAME} PRIVATE
+                PRIMAL_D3D12_AGILITY_RUNTIME=0
+            )
+            message(WARNING "D3D12 backend builds against Windows SDK d3d12.h (PRIMAL_D3D12_AGILITY_RUNTIME=0): newest Agility-only API surface and the D3D12/ runtime DLL side-load are unavailable in this configuration")
+        endif()
     endif()
 endif()
 

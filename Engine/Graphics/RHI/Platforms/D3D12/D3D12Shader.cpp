@@ -7,11 +7,7 @@
 
 #include <cstring>
 
-#include "Engine/Common/CoreDiag.h"
-
-#ifndef PRIMAL_LOG_STREAM
-#define PRIMAL_LOG_STREAM(level, channel) primal::diag::StreamProxy(level, channel)
-#endif
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi::d3d12 {
 

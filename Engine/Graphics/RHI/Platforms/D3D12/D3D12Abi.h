@@ -7,17 +7,20 @@
  *          平台中立核（Format/StateMapping/StateTracker/RootSignatureBudget）
  *          能在 macOS 上编译并单测（Master Plan §2 分层隔离约束）。
  *
- *          值来源（2026-11-03 逐项核对）：
- *            - DXGI_FORMAT: learn.microsoft.com/windows/win32/api/dxgiformat/
- *              ne-dxgiformat-dxgi_format（dxgiformat.h，值自 Windows 8 起冻结）
- *            - D3D12_RESOURCE_STATES / D3D12_RESOURCE_DIMENSION / D3D12_FILTER /
- *              D3D12_TEXTURE_ADDRESS_MODE / D3D12_COMPARISON_FUNC / D3D12_BLEND /
- *              D3D12_BLEND_OP / D3D12_DESCRIPTOR_HEAP_TYPE / D3D12_HEAP_TYPE /
- *              D3D12_COMMAND_LIST_TYPE: learn.microsoft.com d3d12.h 枚举页
- *
- *          Windows 集成时（M7）启用 PRIMAL_D3D12_ABI_CHECKS：用一族
- *          static_assert 把这里的每个常量锁到真实 d3d12.h / dxgiformat.h，
- *          见本文件底部的核对模板。
+ *          值来源（2026-11-03 全表重校，双源交叉核对）：
+ *            a) Microsoft Learn 公开枚举页：
+ *               - DXGI_FORMAT: .../dxgiformat/ne-dxgiformat-dxgi_format
+ *               - D3D12_FILTER / D3D12_RESOURCE_STATES / D3D12_RESOURCE_DIMENSION /
+ *                 D3D12_TEXTURE_ADDRESS_MODE / D3D12_COMPARISON_FUNC / D3D12_BLEND /
+ *                 D3D12_BLEND_OP / D3D12_DESCRIPTOR_HEAP_TYPE / D3D12_HEAP_TYPE /
+ *                 D3D12_COMMAND_LIST_TYPE / D3D12_RESOURCE_BARRIER_TYPE:
+ *                 .../d3d12/ne-d3d12-*（d3d12.h）
+ *            b) 本机 vendored 真实 SDK 头逐值比对（bgfx 3rdparty/dxsdk 的
+ *               d3d12.h / dxgiformat.h，与最新 SDK ABI 值冻结一致）。
+ *          重校结论：DXGI_FORMAT / RESOURCE_STATES / DIMENSION / ADDRESS /
+ *          COMPARISON / BLEND / BLEND_OP / HEAP_TYPE / DESCRIPTOR_HEAP_TYPE /
+ *          COMMAND_LIST_TYPE 各段原值全部正确；D3D12_FILTER 与
+ *          D3D12_RESOURCE_BARRIER_TYPE 两段为直觉顺序误记，已按位编码真值重写。
  *
  *          注意：Enhanced Barriers（D3D12_BARRIER_SYNC/ACCESS）的位值在公开
  *          文档页未列数值，M0 不手定义——翻译表（D3D12StateMapping）落在
@@ -207,29 +210,42 @@ enum : u32 {
 };
 
 // ============================================================================
-// D3D12_FILTER（基础 8 档 0-7、Comparison 0x10-0x17/0x6d、各向异性 0x55；
-// M2 F2-3 落地 Comparison 全档。Minimum/Maximum 变体（0x20+/0x30+）本仓
-// RHI 无对应 FilterMode，暂不定义）
+// D3D12_FILTER —— 位编码，非顺序编号（2026-11-03 全表重校）：
+//   bits[5:4]=min 过滤（0=point,1=linear）  bits[3:2]=mag  bits[1:0]=mip
+//   bit[6]=各向异性标志（0x40，须 min/mag/mip 全 linear）
+//   bits[8:7]=reduction（0=标准,1=comparison(+0x80),2=minimum(+0x100),
+//                          3=maximum(+0x180)）
+// 因此：基础 8 档 = 0x0/0x1/0x4/0x5/0x10/0x11/0x14/0x15（trilinear =
+// MIN_MAG_MIP_LINEAR = 0x15，不是直觉顺序的 7，也不是 0x41）；ANISOTROPIC =
+// 0x55；COMPARISON 族 = 基础档 + 0x80（0x80..0x95、0xd5）。
+// 注意 SDK 成员命名（d3d12.h / Microsoft Learn D3D12_FILTER 页）：
+//   0x5  = D3D12_FILTER_MIN_POINT_MAG_MIP_LINEAR（无 "MIN_POINT_MAG_LINEAR_
+//          MIP_LINEAR" 这一成员名）
+//   0x85 = D3D12_FILTER_COMPARISON_MIN_POINT_MAG_MIP_LINEAR
+//   0x15 = D3D12_FILTER_MIN_MAG_MIP_LINEAR；0x14 = MIN_MAG_LINEAR_MIP_POINT
+// 本表沿用仓库自有的全拼命名（MinPointMagLinearMipLinear 等），语义与上述
+// SDK 档一一对应；AbiChecks.cpp 按真实 SDK 成员名锁值。
+// Minimum/Maximum 变体（+0x100/+0x180）本仓 RHI 无对应 FilterMode，不定义。
 // ============================================================================
 enum : u32 {
     kD3D12Filter_MinMagMipPoint                        = 0,
-    kD3D12Filter_MinMagPointMipLinear                  = 1,
-    kD3D12Filter_MinPointMagLinearMipPoint             = 2,
-    kD3D12Filter_MinPointMagLinearMipLinear            = 3,
-    kD3D12Filter_MinLinearMagMipPoint                  = 4,
-    kD3D12Filter_MinLinearMagPointMipLinear            = 5,
-    kD3D12Filter_MinMagLinearMipPoint                  = 6,
-    kD3D12Filter_MinMagMipLinear                       = 7,
+    kD3D12Filter_MinMagPointMipLinear                  = 0x1,
+    kD3D12Filter_MinPointMagLinearMipPoint             = 0x4,
+    kD3D12Filter_MinPointMagLinearMipLinear            = 0x5,   // SDK: MIN_POINT_MAG_MIP_LINEAR
+    kD3D12Filter_MinLinearMagMipPoint                  = 0x10,
+    kD3D12Filter_MinLinearMagPointMipLinear            = 0x11,
+    kD3D12Filter_MinMagLinearMipPoint                  = 0x14,
+    kD3D12Filter_MinMagMipLinear                       = 0x15,  // trilinear
     kD3D12Filter_Anisotropic                           = 0x55,
-    kD3D12Filter_ComparisonMinMagMipPoint              = 0x10,
-    kD3D12Filter_ComparisonMinMagPointMipLinear        = 0x11,
-    kD3D12Filter_ComparisonMinPointMagLinearMipPoint   = 0x12,
-    kD3D12Filter_ComparisonMinPointMagLinearMipLinear  = 0x13,
-    kD3D12Filter_ComparisonMinLinearMagMipPoint        = 0x14,
-    kD3D12Filter_ComparisonMinLinearMagPointMipLinear  = 0x15,
-    kD3D12Filter_ComparisonMinMagLinearMipPoint        = 0x16,
-    kD3D12Filter_ComparisonMinMagMipLinear             = 0x17,
-    kD3D12Filter_ComparisonAnisotropic                 = 0x6d,
+    kD3D12Filter_ComparisonMinMagMipPoint              = 0x80,
+    kD3D12Filter_ComparisonMinMagPointMipLinear        = 0x81,
+    kD3D12Filter_ComparisonMinPointMagLinearMipPoint   = 0x84,
+    kD3D12Filter_ComparisonMinPointMagLinearMipLinear  = 0x85,  // SDK: COMPARISON_MIN_POINT_MAG_MIP_LINEAR
+    kD3D12Filter_ComparisonMinLinearMagMipPoint        = 0x90,
+    kD3D12Filter_ComparisonMinLinearMagPointMipLinear  = 0x91,
+    kD3D12Filter_ComparisonMinMagLinearMipPoint        = 0x94,
+    kD3D12Filter_ComparisonMinMagMipLinear             = 0x95,
+    kD3D12Filter_ComparisonAnisotropic                 = 0xd5,
 };
 
 // ============================================================================
@@ -325,13 +341,16 @@ enum : u32 {
 
 // ============================================================================
 // 经典 Resource Barrier 类型（D3D12_RESOURCE_BARRIER_TYPE；供
-// D3D12StateTracker 的 op 序列语义对齐，Windows 层映射到真实结构）
+// D3D12StateTracker 的 op 序列语义对齐，Windows 层映射到真实结构）。
+// 2026-11-03 重校：d3d12.h 仅有三个成员 TRANSITION=0 / ALIASING=1 / UAV=2
+// （Microsoft Learn D3D12_RESOURCE_BARRIER_TYPE 页 + 本机 vendored dxsdk
+// 头双源一致）。旧表的 RTV=1 / Aliasing=3 是误记：D3D12 无 RTV barrier
+// 类型（render-target 依赖走 TRANSITION），Aliasing 真值=1。
 // ============================================================================
 enum : u32 {
     kD3D12ResourceBarrierType_Transition = 0,
-    kD3D12ResourceBarrierType_RTV = 1,
+    kD3D12ResourceBarrierType_Aliasing = 1,
     kD3D12ResourceBarrierType_UAV = 2,
-    kD3D12ResourceBarrierType_Aliasing = 3,
 };
 
 /// D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES（Subresource 字段的全子资源哨兵）

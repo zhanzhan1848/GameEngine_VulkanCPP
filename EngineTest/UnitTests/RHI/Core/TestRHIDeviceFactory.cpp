@@ -16,8 +16,12 @@
 using namespace primal::graphics::rhi;
 using namespace Engine::Test;
 
-// 验证 Metal 平台能创建非空 device，且原生 MTL::Device* 可访问
+// 验证 Metal 平台能创建非空 device，且原生 MTL::Device* 可访问。
+// 2026-11-03 修正非 APPLE 语义：Metal 后端只在 __APPLE__ 编译，Windows/
+// Linux 上 CreateRHIDevice(Metal) 必然返回 nullptr——旧版在此直接断言非空
+// → 非 Apple 平台必 FAIL。平台门内运行，非平台 = SKIP 计数（不是失败）。
 TestResult TestCreateMetalDevice() {
+#if defined(__APPLE__)
     DeviceDesc desc;
     desc.platform = RHIPlatform::Metal;
     desc.enableDebug = false;
@@ -25,15 +29,16 @@ TestResult TestCreateMetalDevice() {
     RHIDeviceBase* device = CreateRHIDevice(desc);
     TEST_ASSERT(device != nullptr, "CreateRHIDevice(Metal) should return non-null");
 
-#if defined(__APPLE__)
     // 验证是真正的 MetalDevice 实例
     auto* metalDevice = dynamic_cast<MetalDevice*>(device);
     TEST_ASSERT(metalDevice != nullptr, "Device should be a MetalDevice");
     TEST_ASSERT(metalDevice->GetNativeDevice() != nullptr, "Native MTL::Device should be initialized");
-#endif
 
     DestroyRHIDevice(device);
     return TestResult::Passed;
+#else
+    return TestResult::Skipped;  // Metal 后端仅 __APPLE__ 编译（工厂 nullptr 路径由下例覆盖）
+#endif
 }
 
 // 验证未实现的后端返回 nullptr
@@ -96,7 +101,9 @@ void RegisterRHIDeviceFactoryTests() {
 #ifndef UNIT_TEST_LIB
 int main() {
     RegisterRHIDeviceFactoryTests();
-    TestRunner::RunAllSuites();
-    return 0;
+    // 2026-11-03 修正：失败码传播（对齐 TestD3D12StateTracker M6 修法——
+    // RunAllSuites 返回 TestStats，failedTests>0 → exit 1；不再恒 0）。
+    Engine::Test::TestStats stats = TestRunner::RunAllSuites();
+    return stats.failedTests == 0 ? 0 : 1;
 }
 #endif

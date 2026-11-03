@@ -11,10 +11,19 @@
 
 #include "D3D12Format.h"
 
-#include "Engine/Common/CoreDiag.h"
+#include "Engine/Common/CoreLogStream.h"
 
-#ifndef PRIMAL_LOG_STREAM
-#define PRIMAL_LOG_STREAM(level, channel) primal::diag::StreamProxy(level, channel)
+#if defined(PRIMAL_D3D12_AGILITY_RUNTIME) && PRIMAL_D3D12_AGILITY_RUNTIME
+// Agility SDK 运行时导出（Engine/CMakeLists.txt 动态接入链在场时定义）：
+// D3D12 系统运行时按二进制的 D3D12SDKVersion 导出值选择 side-load 的
+// <exe 目录>\D3D12\D3D12Core.dll（官方 Agility 集成约定；该 DLL 由 Engine
+// POST_BUILD copy_if_different 暂存到共享运行输出根）。本 TU 经
+// RHIDeviceFactory（CreateRHIDevice → new D3D12Device）必然被静态库链接
+// 拉入，导出稳定可见。离线回退路径（PRIMAL_D3D12_AGILITY_RUNTIME=0）不
+// 导出——无 side-load DLL 时导出反而令 d3d12.dll 找 .\D3D12\ 失败。
+extern "C" {
+__declspec(dllexport) extern const UINT D3D12SDKVersion = D3D12_SDK_VERSION;
+}
 #endif
 
 namespace primal::graphics::rhi {
