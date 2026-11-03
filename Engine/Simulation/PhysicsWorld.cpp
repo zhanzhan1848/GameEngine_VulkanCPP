@@ -738,8 +738,9 @@ u64 joint_create(const joint_desc& d)
         settings.mNormalAxis1 = settings.mNormalAxis2 = normal;
         if (d.limit_min_deg < d.limit_max_deg)
         {
-            settings.mLimitsMin = d.limit_min_deg * (f32)M_PI / 180.f;
-            settings.mLimitsMax = d.limit_max_deg * (f32)M_PI / 180.f;
+            // primal::math::pi 替代 M_PI（MSVC <cmath> 无 POSIX M_PI；常量经 CommonHeaders 传递）
+            settings.mLimitsMin = d.limit_min_deg * primal::math::pi / 180.f;
+            settings.mLimitsMax = d.limit_max_deg * primal::math::pi / 180.f;
         }
         settings.mMotorSettings.SetTorqueLimit(d.motor_torque);
         c = settings.Create(body_a, body_b);
@@ -747,7 +748,7 @@ u64 joint_create(const joint_desc& d)
         {
             auto* hinge = static_cast<JPH::HingeConstraint*>(c);
             hinge->SetMotorState(JPH::EMotorState::Velocity);
-            hinge->SetTargetAngularVelocity(d.motor_speed_deg_sec * (f32)M_PI / 180.f);
+            hinge->SetTargetAngularVelocity(d.motor_speed_deg_sec * primal::math::pi / 180.f);
             // 驱动关节保持动态端点清醒（否则 Jolt 休眠判据会把恒扭矩小运动体
             // 睡掉；静态体断言拒绝 SetAllowSleeping——先判 IsStatic）
             if (!body_a.IsStatic()) body_a.SetAllowSleeping(false);
@@ -793,7 +794,7 @@ bool joint_get_state(u64 joint_id, f32& out_angle_deg, f32& out_anchor_separatio
 
     auto* hinge = static_cast<JPH::HingeConstraint*>(it->second.cid);
     if (hinge == nullptr) return false;
-    out_angle_deg = hinge->GetCurrentAngle() * 180.f / (f32)M_PI;
+    out_angle_deg = hinge->GetCurrentAngle() * 180.f / primal::math::pi;
 
     // 约束误差：锚点经两 body 当前变换回到世界后的距离（局部锚点在创建时算）
     const JPH::RVec3 wa1 = lock_a.GetBody().GetCenterOfMassTransform() * it->second.local_a;

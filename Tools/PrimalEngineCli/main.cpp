@@ -213,7 +213,11 @@ void DestroyRenderTarget(u64 targetHandle);
 u32  PipelineRenderFrame(u64 targetHandle, u32 cameraId, u32 surfaceId);
 int  SaveRenderTargetAsPng(u64 targetHandle, const char* path);
 
-// 资产（libContentTools）
+// 资产（libContentTools）——2026-11-03 R2：BUILD_CONTENT_TOOLS=OFF 构建里
+// libContentTools/contenttools_pipeline 不编入，声明与使用一并门控（编译+链接
+// 双面）；关闭时相关 verb 走 NOT_SUPPORTED 分支（对齐 VerbEngineInfo 的
+// _WIN32 先例）。schema 输出与配置无关（快照门稳定）。
+#if defined(PRIMAL_CLI_CONTENT_TOOLS)
 u32 CookMesh(const char* inputPath, const char* outputPath);
 u32 CookMeshWithPipeline(const char* inputPath, const char* outputPath,
                          ai_asset_pipeline_params* params);
@@ -257,6 +261,7 @@ u32 CookTexture(
     u8* slices_buffer, u32 slices_capacity, u32* out_slices_size,
     u8* icon_buffer, u32 icon_capacity, u32* out_icon_size,
     ContentToolsCookResult* out_info);
+#endif // PRIMAL_CLI_CONTENT_TOOLS
 } // extern "C"
 
 // RHIPlatform 数值与 PrimalEditor_Avalonia/NativeEngineBridge.cs 保持一致
@@ -668,6 +673,7 @@ int VerbPhysicsSim(int argc, char** argv)
 // 统计 mesh 总数与带 UVLM（Lightmap UV sidecar）/ CDBK（T4.2 card bake）段的
 // mesh 数。这是 "cook → 磁盘 → 引擎读回" 闭环的校验端；读取失败不否定
 // cook 本身，但会体现在返回的统计里（mesh_count=0 即异常）。
+#if defined(PRIMAL_CLI_CONTENT_TOOLS)
 static bool CountMeshStats(const char* path, u32* out_mesh_count,
                            u32* out_lightmap_uv_meshes, u32* out_card_baked_meshes,
                            u32* out_total_cards = nullptr, u32* out_max_cards = nullptr,
@@ -711,11 +717,13 @@ static bool CountMeshStats(const char* path, u32* out_mesh_count,
         *out_mean_cards = (f32)*out_total_cards / (f32)*out_mesh_count;
     return true;
 }
+#endif // PRIMAL_CLI_CONTENT_TOOLS
 
 // A9 PR2: 资产管线 cook（ProcessAIAsset）。uvatlas 开启时按 ContentToolsCLI
 // --pipeline 的默认组合装配 POD；lightmap 再把 uvatlas 切到 Lightmap 预设
 // （purpose=Lightmap、gutter=4、strict unique pack），生成的第二套 UV 落入
 // blob 的 UVLM sidecar 段而非被丢弃。
+#if defined(PRIMAL_CLI_CONTENT_TOOLS)
 static bool CookMeshPipeline(const char* inPath, const char* outPath,
                              bool uvatlas, bool uvatlasLightmap,
                              bool enable_sdf,
@@ -762,6 +770,7 @@ static bool CookMeshPipeline(const char* inPath, const char* outPath,
     CountMeshStats(outPath, out_mesh_count, out_lightmap_uv_meshes, out_card_baked_meshes);
     return true;
 }
+#endif // PRIMAL_CLI_CONTENT_TOOLS
 
 // ============================================================================
 // bake-sdf（2026-09-16）: 给已有 .model 的空 "SDF " 段填充 per-mesh SDF，
@@ -775,6 +784,7 @@ static bool CookMeshPipeline(const char* inPath, const char* outPath,
 // ============================================================================
 static int VerbBakeSdf(int argc, char** argv)
 {
+#if defined(PRIMAL_CLI_CONTENT_TOOLS)
     const char* inPath = nullptr;
     const char* outPath = nullptr;
     u32 resolution = 48;
@@ -1051,6 +1061,13 @@ static int VerbBakeSdf(int argc, char** argv)
                   (u32)subs.size(), baked, resolution, inSize64, (unsigned long long)outBuf.size());
     PrintOk(msg);
     return kExitOk;
+#else
+    (void)argc; (void)argv;
+    PrintError("NOT_SUPPORTED",
+               "bake-sdf 依赖 ContentTools 资产管线（BUILD_CONTENT_TOOLS=OFF 构建未编入）",
+               "安装 FBX SDK/DirectXTex 后以 -DBUILD_CONTENT_TOOLS=ON 重新配置并重建");
+    return kExitEngine;
+#endif
 }
 
 // ============================================================================
@@ -1064,6 +1081,7 @@ static int VerbBakeSdf(int argc, char** argv)
 // ============================================================================
 int VerbBakeCards(int argc, char** argv)
 {
+#if defined(PRIMAL_CLI_CONTENT_TOOLS)
     const char* inPath = nullptr;
     const char* outPath = nullptr;
     u32 resolution = 32;
@@ -1476,6 +1494,13 @@ int VerbBakeCards(int argc, char** argv)
                   inSize64, (unsigned long long)outBuf.size());
     PrintOk(msg);
     return kExitOk;
+#else
+    (void)argc; (void)argv;
+    PrintError("NOT_SUPPORTED",
+               "bake-cards 依赖 ContentTools 资产管线（BUILD_CONTENT_TOOLS=OFF 构建未编入）",
+               "安装 FBX SDK/DirectXTex 后以 -DBUILD_CONTENT_TOOLS=ON 重新配置并重建");
+    return kExitEngine;
+#endif
 }
 
 // ============================================================================
@@ -1488,6 +1513,7 @@ int VerbBakeCards(int argc, char** argv)
 // ============================================================================
 static int VerbScBakeSurface(int argc, char** argv)
 {
+#if defined(PRIMAL_CLI_CONTENT_TOOLS)
     namespace cs = primal::tools::card_surface;
     const char* inPath = nullptr;
     const char* outPath = nullptr;
@@ -2017,10 +2043,18 @@ static int VerbScBakeSurface(int argc, char** argv)
                   (unsigned long long)boundarySamples);
     PrintOk(msg);
     return kExitOk;
+#else
+    (void)argc; (void)argv;
+    PrintError("NOT_SUPPORTED",
+               "sc-bake-surface 依赖 ContentTools 资产管线（BUILD_CONTENT_TOOLS=OFF 构建未编入）",
+               "安装 FBX SDK/DirectXTex 后以 -DBUILD_CONTENT_TOOLS=ON 重新配置并重建");
+    return kExitEngine;
+#endif
 }
 
 int VerbCookMesh(int argc, char** argv)
 {
+#if defined(PRIMAL_CLI_CONTENT_TOOLS)
     const char* inPath = nullptr;
     const char* outPath = nullptr;
     bool uvatlas = false;
@@ -2103,6 +2137,13 @@ int VerbCookMesh(int argc, char** argv)
                   total_cards, max_cards, (double)mean_cards);
     PrintOk(data);
     return kExitOk;
+#else
+    (void)argc; (void)argv;
+    PrintError("NOT_SUPPORTED",
+               "cook-mesh 依赖 ContentTools 资产管线（BUILD_CONTENT_TOOLS=OFF 构建未编入）",
+               "安装 FBX SDK/DirectXTex 后以 -DBUILD_CONTENT_TOOLS=ON 重新配置并重建");
+    return kExitEngine;
+#endif
 }
 
 int VerbSchema()
@@ -2270,6 +2311,7 @@ int VerbBakeVt(int argc, char** argv)
 
 int VerbImportTexture(int argc, char** argv)
 {
+#if defined(PRIMAL_CLI_CONTENT_TOOLS)
     // ContentTools 受管 TextureFormat 枚举（map_managed_output_format 同序）
     struct FormatName { const char* name; u32 value; };
     static constexpr FormatName kFormats[] = {
@@ -2403,6 +2445,13 @@ int VerbImportTexture(int argc, char** argv)
                   static_cast<unsigned long long>(out.size()));
     PrintOk(data);
     return kExitOk;
+#else
+    (void)argc; (void)argv;
+    PrintError("NOT_SUPPORTED",
+               "import-texture 依赖 ContentTools 资产管线（BUILD_CONTENT_TOOLS=OFF 构建未编入）",
+               "安装 FBX SDK/DirectXTex 后以 -DBUILD_CONTENT_TOOLS=ON 重新配置并重建");
+    return kExitEngine;
+#endif
 }
 
 int VerbBuildShaders(int argc, char** argv)
@@ -2497,6 +2546,7 @@ static void LightmapBakeProgressLog(void*, u32 phase, u32 done, u32 total)
 
 int VerbBakeLightmaps(int argc, char** argv)
 {
+#if defined(PRIMAL_CLI_CONTENT_TOOLS)
     const char* inPath = nullptr;
     const char* outDir = nullptr;
     u32 atlas = 2048, spp = 64, bounces = 3;
@@ -2741,6 +2791,15 @@ int VerbBakeLightmaps(int argc, char** argv)
                   (double)settings.texel_density, spp);
     PrintOk(okJson);
     return kExitOk;
+#else
+    // 场景 blob 解析（ReadSceneHeader/WalkSceneBlob）在 contenttools_pipeline
+    // ——与上各 verb 同因门控。
+    (void)argc; (void)argv;
+    PrintError("NOT_SUPPORTED",
+               "bake-lightmaps 依赖 ContentTools 资产管线（BUILD_CONTENT_TOOLS=OFF 构建未编入）",
+               "安装 FBX SDK/DirectXTex 后以 -DBUILD_CONTENT_TOOLS=ON 重新配置并重建");
+    return kExitEngine;
+#endif
 }
 
 int VerbBakeGi()

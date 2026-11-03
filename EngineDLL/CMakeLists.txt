@@ -182,10 +182,17 @@ else()
 endif()
 
 # 链接依赖项
-target_link_libraries(${PROJECT_NAME} PRIVATE
-    Engine
-    ContentTools
-)
+# 2026-11-03 R2（Windows 首编）：ContentTools 链接按目标存在性门控——
+# BUILD_CONTENT_TOOLS=OFF 时该目标不存在，无条件链接导致 libEngineDLL
+# 链接失败（NoCT 实测：ld: library 'ContentTools' not found）。EngineDLL
+# 源级零 ContentTools 符号使用（CaptureAPI.cpp 的 Geometry 匹配是
+# CoreGraphics/CGGeometry.h 框架头；GeometryAPI.cpp include 的是引擎自身
+# Geometry/Geometry.h）——此前的无条件链接是残留依赖，OFF 路径去掉后若
+# 有隐藏符号需求会在链接期显式暴露（fail-closed）。
+target_link_libraries(${PROJECT_NAME} PRIVATE Engine)
+if(TARGET ContentTools)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ContentTools)
+endif()
 
 # EngineDLL.dll 部署到测试输出目录：TestMaterialGraphAPI / TestParticleMaterialAPI /
 # TestMaterialAPIExtended 直接链接本 DLL。此前 DLL 只输出到源码树 Windows/，exe

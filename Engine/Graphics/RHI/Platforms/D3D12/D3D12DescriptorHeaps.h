@@ -33,9 +33,23 @@
 #include "../../Core/RHIDescriptorSetLayout.h"
 #include "../../Core/RHIDescriptorSet.h"
 
-namespace primal::graphics::rhi::d3d12 {
+// 2026-11-03 R2（Windows 首编修复）：本头此前直接开 rhi::d3d12 命名空间且未
+// 前置声明 rhi::D3D12Device / D3D12DescriptorHeapManager——
+//   1) 类内 `friend class primal::graphics::rhi::D3D12Device;` 引用未声明类
+//      （ill-formed：clang 实测报 no class named ...；MSVC 报不完整类型系）；
+//   2) D3D12Sampler::Initialize/Destroy 的参数 D3D12DescriptorHeapManager&
+//      在声明点（本头 157 行）之前不可见。
+// 修法=对齐 D3D12Buffer.h 等兄弟头：先在 rhi 命名空间前置声明 D3D12Device，
+//  再入 d3d12 子命名空间并前置声明 D3D12DescriptorHeapManager（引用形参
+//  只需不完整类型即可）。
+namespace primal::graphics::rhi {
+
+class D3D12Device;
+
+namespace d3d12 {
 
 class D3D12FencePool;
+class D3D12DescriptorHeapManager;
 
 // ============================================================================
 // D3D12DescriptorSetLayout — 绑定模型的 set 布局描述（M1 F1-4/F1-5）
@@ -292,5 +306,6 @@ private:
 };
 
 } // namespace primal::graphics::rhi::d3d12
+} // namespace primal::graphics::rhi
 
 #endif // defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12

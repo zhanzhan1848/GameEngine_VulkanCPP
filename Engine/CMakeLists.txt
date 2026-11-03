@@ -534,6 +534,17 @@ if(MSVC)
         $<$<NOT:$<CONFIG:Debug>>:/Ox;/Oi;/GF;/Oy;/Gy>
     )
 
+    # 2026-11-03 R2（Windows 首编）：LumenDDGIPass.cpp 在 MSVC 下触发 C1001
+    # （内部编译器错误；用户附件未传到——无精确错误行号与配置名）。静态扫描
+    # 无明确高危构造（无结构化绑定/std::visit/巨型本地数组；requires 均为
+    # 日志字符串），按 MSVC 官方建议对该文件降优化兜底：per-source /Od 追加
+    # 在 target 选项之后（MSVC 同组优化选项后者生效，非 Debug 的 /Ox 被压住；
+    # Debug 本就 /Od）。待拿到完整 C1001 输出（文件:行号+编译器版本+配置）后
+    # 根治并移除本条。仅 MSVC 生效；clang/gcc（macOS/Linux 树）不受影响。
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/DDGI/LumenDDGIPass.cpp"
+        PROPERTIES COMPILE_OPTIONS "/Od")
+
     target_link_options(${PROJECT_NAME} PRIVATE /SUBSYSTEM:WINDOWS)
     target_link_options(${PROJECT_NAME} PRIVATE
         $<$<NOT:$<CONFIG:Debug>>:/OPT:REF;/OPT:ICF>

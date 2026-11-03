@@ -28,7 +28,9 @@ f32 stereo_pan(const listener& l, const f32 source[3])
     const f32 horizontal2 = dx * dx + dz * dz;
     if (horizontal2 < 1e-12f) return 0.f;
     // 前向（yaw）：0°=+Z；右向 = 前向绕 +Y 旋转 -90°（从上往下看顺时针）
-    const f32 yaw = l.yaw_deg * (f32)M_PI / 180.f;
+    // （primal::math::pi 替代 M_PI：MSVC 的 <cmath> 不定义 POSIX 扩展 M_PI，
+    //  常量经 CommonHeaders.h → Utilities/MathTypes.h 传递，双平台一致）
+    const f32 yaw = l.yaw_deg * primal::math::pi / 180.f;
     const f32 fx = -sinf(yaw), fz = cosf(yaw);          // 前向单位向量
     const f32 rx = cosf(yaw), rz = sinf(yaw);           // 右向单位向量
     const f32 inv = 1.f / sqrtf(horizontal2);
