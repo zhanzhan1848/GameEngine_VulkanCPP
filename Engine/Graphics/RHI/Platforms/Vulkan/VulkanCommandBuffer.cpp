@@ -1481,6 +1481,21 @@ void VulkanCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 dr
     vkCmdDrawIndirect(cmdBuffer_, b->GetNativeBuffer(), offset, drawCount, sizeof(VkDrawIndirectCommand));
 }
 
+// M5 F5-2：索引间接绘制。非 count 变体（RHI 无 countBuffer 参数——直译；
+// D3D12 端 count 布局差异与适配策略见 D3D12CommandBuffer::DrawIndexedIndirect
+// 注释）。stride = sizeof(VkDrawIndexedIndirectCommand) = 20B（arg buffer 布局
+// 单一事实源）。调用方须已按 rhi-barrier-semantics §1 显式
+// MemoryBarrier(ComputeShader→DrawIndirect, ShaderWrite→IndirectCommandRead)。
+void VulkanCommandBuffer::DrawIndexedIndirect(ResourceHandle buffer, u64 offset, u32 drawCount) {
+    if (scope_ != Scope::RenderPass) return;
+    VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
+    VulkanBuffer* b = vk.GetBuffer(buffer);
+    if (!b) return;
+    vkCmdDrawIndexedIndirect(cmdBuffer_, b->GetNativeBuffer(), offset, drawCount,
+                             sizeof(VkDrawIndexedIndirectCommand));
+    UpdateStats(CommandType::DrawIndirect);
+}
+
 void VulkanCommandBuffer::BindComputePipeline(PipelineHandle pipeline) {
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
     VulkanPipeline* p = vk.GetPipeline(pipeline);

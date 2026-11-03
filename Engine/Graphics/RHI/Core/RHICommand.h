@@ -560,7 +560,31 @@ public:
      * @param drawCount 绘制次数
      */
     virtual void DrawIndirect(ResourceHandle buffer, u64 offset = 0, u32 drawCount = 1) = 0;
-    
+
+    /// 索引绘制间接（D3D12 M5 F5-2）。arg buffer 布局 = Vulkan
+    /// VkDrawIndexedIndirectCommand 单一事实源（5×u32 = 20B：
+    /// indexCount/instanceCount/firstIndex/vertexOffset/firstInstance，
+    /// D3D12_DRAW_INDEXED_ARGUMENTS 同字节序同字段序，零适配）。
+    /// RHI 接口无 count buffer 参数 → 直译（D3D12 ExecuteIndirect 的
+    /// MaxCommandCount=drawCount、CountBuffer=nullptr；Vulkan
+    /// vkCmdDrawIndexedIndirect 非 count 变体）。GPU 驱动剔除链的
+    /// compute 写 arg → 本入口读，依赖调用方按 rhi-barrier-semantics §1
+    /// 显式 MemoryBarrier(ComputeShader→DrawIndirect, ShaderWrite→
+    /// IndirectCommandRead)（D3D12 侧另有 UAV→INDIRECT_ARGUMENT 状态
+    /// 流转，见 D3D12CommandBuffer 实现注释）。
+    /// 默认实现=显式不支持（非纯虚：Metal/Dawn 后端 M5 未接，log 一次，
+    /// 行为不变）；Vulkan/D3D12 已实现。
+    virtual void DrawIndexedIndirect(ResourceHandle buffer, u64 offset = 0, u32 drawCount = 1) {
+        (void)buffer; (void)offset; (void)drawCount;
+        static bool s_warned = false;  // 与 M1 SetComputeBytes 同款"显式不支持"惯例
+        if (!s_warned) {
+            s_warned = true;
+            std::fprintf(stderr,
+                "[RHICommandBuffer] DrawIndexedIndirect NOT-IMPLEMENTED on this "
+                "backend (M5 F5-2: implemented on Vulkan/D3D12)\n");
+        }
+    }
+
     // === 计算命令 ===
     
     /**

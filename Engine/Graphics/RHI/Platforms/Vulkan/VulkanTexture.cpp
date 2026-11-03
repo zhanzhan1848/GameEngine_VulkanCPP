@@ -757,9 +757,18 @@ bool VulkanTexture::updateRegion(const void* data, u64 size, const TextureRegion
     }
     if (vkImage_ == VK_NULL_HANDLE || state_ != ResourceState::Ready) return false;
 
-    if (texDesc_.type != TextureType::Texture2D || texDesc_.size.z > 1 ||
+    // M6 F6-3：支持 2D 单 slice 与 TEXTURE3D（非 array）——3D 是 GI 体积
+    // 数据（探针网格/SPGI 级联/SDF）主载体；array/cube 家族仍走命令层
+    // CopyBufferToTexture。
+    const bool is3D = texDesc_.type == TextureType::Texture3D;
+    if ((!is3D && (texDesc_.type != TextureType::Texture2D || texDesc_.size.z > 1)) ||
         texDesc_.arraySize > 1) {
-        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: only 2D single-slice supported (M0 scope)" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: only 2D single-slice or "
+                     "non-array Texture3D supported (M6 scope)" << std::endl;
+        return false;
+    }
+    if (is3D && region.baseArrayLayer != 0) {
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: 3D requires baseArrayLayer=0" << std::endl;
         return false;
     }
     if (vulkan::IsBlockCompressedFormat(texDesc_.format)) {
@@ -779,25 +788,39 @@ bool VulkanTexture::updateRegion(const void* data, u64 size, const TextureRegion
         return false;
     }
     if (region.offsetZ != 0 || region.depth != 1) {
-        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: 2D requires offsetZ=0/depth=1" << std::endl;
+        // 3D 允许 z 子区域；2D 保持平面约束。
+        if (!is3D) {
+            PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: 2D requires offsetZ=0/depth=1" << std::endl;
+            return false;
+        }
+    }
+    if (region.depth == 0) {
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: depth==0" << std::endl;
         return false;
     }
 
     const u32 mipW = std::max<u32>(1u, texDesc_.size.x >> region.mipLevel);
     const u32 mipH = std::max<u32>(1u, texDesc_.size.y >> region.mipLevel);
+    const u32 mipD = std::max<u32>(1u, texDesc_.size.z >> region.mipLevel);
     if (region.width == 0 || region.height == 0 ||
-        region.offsetX + region.width > mipW || region.offsetY + region.height > mipH) {
+        region.offsetX + region.width > mipW || region.offsetY + region.height > mipH ||
+        (is3D && region.offsetZ + region.depth > mipD)) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: region [" << region.offsetX << ","
-                  << region.offsetY << " " << region.width << "x" << region.height
+                  << region.offsetY << "," << region.offsetZ << " " << region.width << "x"
+                  << region.height << "x" << region.depth
                   << ") exceeds mip " << region.mipLevel << " dims "
-                  << mipW << "x" << mipH << std::endl;
+                  << mipW << "x" << mipH << "x" << mipD << std::endl;
         return false;
     }
     const u64 bytesPerRow = u64(region.width) * bpt;
-    if (size != bytesPerRow * region.height) {
+    // 3D：紧密行主序 × depth 层（slice 间距 = bytesPerRow*height，与
+    // bufferImageHeight=0 紧密约定一致）；2D 保持平面核算。
+    const u64 expectedSize = bytesPerRow * region.height
+                           * (is3D ? region.depth : 1u);
+    if (size != expectedSize) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] updateRegion: size " << size << " != tightly-packed "
-                  << bytesPerRow * region.height << " (bytesPerRow=" << bytesPerRow
-                  << " x rows=" << region.height << ")" << std::endl;
+                  << expectedSize << " (bytesPerRow=" << bytesPerRow
+                  << " x rows=" << region.height << "x depth=" << region.depth << ")" << std::endl;
         return false;
     }
 

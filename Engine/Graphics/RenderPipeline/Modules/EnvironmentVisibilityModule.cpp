@@ -344,12 +344,15 @@ EnvironmentVisibilityOutputs EnvironmentVisibilityModule::AddPasses(RenderGraph&
                         parameterBuffer==cb_[phase][slot] && inputs.geometry_ready &&
                         (!inputs.geometry_still_current || inputs.geometry_still_current());
                     u64 physical[4]{},visible[4]{};
-                    auto* vk=static_cast<VulkanDevice*>(device_);
+                    // F0-11: GetBufferByteSize 已提升为 RHIDeviceBase 虚接口——
+                    // 此处不再 static_cast<VulkanDevice*>（旧代码依赖
+                    // LumenCompareCapture.h 传递 include 的 VulkanDevice.h，属
+                    // 隐藏传递依赖；Vulkan override 行为不变）。
                     for (u32 i=0;i<4;++i) {
                         current=current && buffers[i+1].buffer==inputs.geometry[i] &&
                             buffers[i+1].buffer!=handles::INVALID_RESOURCE &&
                             buffers[i+1].range==~u64(0);
-                        const bool sized=vk->GetBufferByteSize(buffers[i+1].buffer,physical[i]);
+                        const bool sized=device_->GetBufferByteSize(buffers[i+1].buffer,physical[i]);
                         current=current && sized && buffers[i+1].offset<physical[i];
                         if (sized && buffers[i+1].offset<physical[i])
                             visible[i]=physical[i]-buffers[i+1].offset;

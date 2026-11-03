@@ -1,8 +1,9 @@
 #include "RenderGraph.h"
 #include "Graphics/Utilities/CPUStallAudit.h"
-#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
-#include "Graphics/RHI/Platforms/Vulkan/VulkanPassTimestampAudit.h"
-#endif
+// F0-11 (D3D12 M0): pass timestamp 审计经平台中立入口分派（Vulkan 特化在
+// Platforms/Vulkan/VulkanPassTimestampEntry.cpp 静态注册；未注册后端 no-op，
+// 与旧 ENABLE_VULKAN 平台门行为一致）。共享代码不再 include 后端头。
+#include "Graphics/RHI/Core/RHIPassTimestampAudit.h"
 #include "LumenCompareCapture.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include <algorithm>
@@ -615,10 +616,9 @@ void RenderGraph::InsertBarriers() {
 
 void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
     cpu_stall_audit::Scope cpuExecute("graph.execute");
-#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
-    auto* timestampAuditCmd=device_.GetPlatform()==rhi::RHIPlatform::Vulkan?static_cast<rhi::VulkanCommandBuffer*>(cmdBuffer):nullptr;
-    rhi::pass_timestamp::instance.Graph(timestampAuditCmd);
-#endif
+    // F0-11: 中立入口（未注册后端 = nullptr = no-op，同旧平台门）。
+    rhi::pass_timestamp::Entry* const timestampAudit = rhi::pass_timestamp::GetEntry();
+    if (timestampAudit) timestampAudit->Graph(cmdBuffer);
     RenderGraphContext context;
     context.cmdBuffer = cmdBuffer;
     context.graph = this;
@@ -643,9 +643,9 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
         // std::cout << "RenderGraph: Preparing Pass " << pass->GetName() << std::endl;
 
         bool hasRenderPass = pass->GetRenderPassDesc().has_value();
-#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
-        const int timestampAuditIndex=rhi::pass_timestamp::instance.BeginPass(timestampAuditCmd,pass->GetName().c_str(),hasRenderPass);
-#endif
+        const int timestampAuditIndex=timestampAudit
+            ?timestampAudit->BeginPass(cmdBuffer,pass->GetName().c_str(),hasRenderPass)
+            :-1;
 
         // 1. Write Begin Timestamp
         // Only write manually if NOT using RenderPass (RenderPass handles it via desc to support Apple Silicon)
@@ -727,9 +727,7 @@ void RenderGraph::Execute(rhi::RHICommandBuffer* cmdBuffer) {
         }
 
         lumencompare::AfterPass(device_, cmdBuffer, *pass);
-#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
-        rhi::pass_timestamp::instance.EndPass(timestampAuditCmd,timestampAuditIndex);
-#endif
+        if (timestampAudit) timestampAudit->EndPass(cmdBuffer,timestampAuditIndex);
 
         // 2. Write End Timestamp (only if NOT in RenderPass, because RenderPass handles it automatically via desc)
         // BUT wait, WriteTimestamp in MetalCommandBuffer.cpp is disabled for RenderPassEncoder on Apple Silicon.

@@ -1,8 +1,11 @@
 #pragma once
 // Read-only, opt-in snapshots of the exact RG producer versions. No shader changes.
+// F0-11 (D3D12 M0): 后端门从 `GetPlatform()!=Vulkan` 换成 capture 桥能力查询
+// （语义不变：仅 Vulkan 注册特化；Metal/Dawn/未实现 D3D12 一律跳过）。
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
+#include "Graphics/RenderGraph/RHICaptureBridge.h"
 #include "Graphics/RenderPipeline/RenderPasses/PostProcess/ToneMappingPass.h"
 #include <vector>
 #include <string>
@@ -24,7 +27,7 @@ struct Snapshot { std::string name; ResourceHandle buffer, texture; u32 width, h
 inline std::vector<Snapshot> pending;
 inline bool failed = false;
 inline void Add(RenderGraph& graph, RGResourceHandle source, const char* label, u32 frame) {
-    if (!Requested(frame) || !std::getenv("SPONZA_PASS_CAPTURE_DIR") || graph.GetDevice().GetPlatform()!=RHIPlatform::Vulkan) return;
+    if (!Requested(frame) || !std::getenv("SPONZA_PASS_CAPTURE_DIR") || !rhicapture::BackendCaptureSupported(graph.GetDevice())) return;
     if (!source.IsValid()) { failed=true; return; }
     struct Data {};
     graph.AddPass<Data>(std::string("PassCapture_")+label, RGPassType::Compute, RGPassCategory::PostProcess,

@@ -20,6 +20,14 @@
 #include "../Platforms/Vulkan/VulkanDevice.h"
 #endif
 
+// D3D12 后端（M0 F0-1/F0-8）：Windows 专属 COM 层只在 _WIN32 + ENABLE_D3D12
+// 编译；其余平台（含 macOS）该分支保持 return nullptr——平台中立核
+// （D3D12Abi/Format/StateMapping/StateTracker/RootSignatureBudget）不经过
+// 工厂，由测试直接链接。
+#if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
+#include "../Platforms/D3D12/D3D12Device.h"
+#endif
+
 namespace primal::graphics::rhi {
 
 RHIDeviceBase* CreateRHIDevice(const DeviceDesc& desc) {
@@ -48,10 +56,23 @@ RHIDeviceBase* CreateRHIDevice(const DeviceDesc& desc) {
             break;
         }
         case RHIPlatform::D3D12:
-            // 未实现：RHI/Platforms/D3D12/ 为空目录
+#if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
+        {
+            auto* d3d12Device = new D3D12Device(desc);
+            if (d3d12Device && d3d12Device->Initialize()) {
+                device = d3d12Device;
+            } else {
+                delete d3d12Device;
+            }
+        }
+            break;
+#else
+            // 未启用 D3D12 后端（非 Windows 构建，或 Windows 上 ENABLE_D3D12=OFF）。
+            // 平台中立核存在于 RHI/Platforms/D3D12/，但无设备实现。
             return nullptr;
+#endif
         case RHIPlatform::Dawn:
-            // 未实现：RHI/Platforms/Dawn/ 为空目录
+            // 未实现：RHI/Platforms/Dawn/ 无设备实现
             return nullptr;
         case RHIPlatform::Unknown:
         default:

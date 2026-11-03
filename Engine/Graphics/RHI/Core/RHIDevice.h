@@ -198,6 +198,14 @@ public:
     // T4.6.5 part 24.2 (B6 fix): non-pure virtual — backends without query pool
     // support (Metal, Dawn) inherit empty default.
     virtual void ResetQueryPool(QueryPoolHandle handle, u32 firstQuery, u32 queryCount) {}
+    // F0-11 (D3D12 M0)：诊断查询——buffer 的实际字节尺寸。默认 false =
+    // 后端不支持该查询（调用方按"尺寸不可用"显式处理，不静默当 0 用）。
+    // VulkanDevice 把原有私有实现提升为 override；D3D12 M1 资源层接通。
+    // 签名沿用 VulkanDevice 既有约定（bool + out 参数），全部现存调用点
+    // （LumenCompareCapture / EnvironmentVisibilityModule 等）零改动。
+    virtual bool GetBufferByteSize(ResourceHandle buffer, u64& outBytes) {
+        (void)buffer; outBytes = 0; return false;
+    }
     virtual SamplerHandle CreateSampler(const SamplerDesc& desc) = 0;
     virtual void DestroySampler(SamplerHandle handle) = 0;
     virtual DescriptorSetLayoutHandle CreateDescriptorSetLayout(const DescriptorSetLayoutDesc& desc) = 0;

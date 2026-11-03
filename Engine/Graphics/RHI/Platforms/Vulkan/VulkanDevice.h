@@ -138,7 +138,8 @@ public:
     bool GetTextureSize(ResourceHandle texture, u32& width, u32& height) override;
     DataFormat GetTextureFormat(ResourceHandle texture) override;
     /// Vulkan-only read-only diagnostic metadata; does not expose/map storage.
-    bool GetBufferByteSize(ResourceHandle buffer, u64& bytes);
+    /// F0-11: 提升为 RHIDeviceBase 虚接口 override（签名不变，调用方零改动）。
+    bool GetBufferByteSize(ResourceHandle buffer, u64& bytes) override;
     VulkanCommandBuffer* GetCommandBuffer(CommandBufferHandle handle);
 
     /// Phase 4: Per-type lookup

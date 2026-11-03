@@ -14,6 +14,7 @@
 #include "Engine/Graphics/Utilities/CPUStallAudit.h"
 
 #include "Graphics/RHI/Core/RHICommand.h"
+#include "VulkanBackendLinks.h"
 #include "VulkanTexture.h"
 #include "VulkanCommandBuffer.h"
 // Phase 4
@@ -73,6 +74,12 @@ bool VulkanDevice::initializeImpl() {
     lifecycleGeneration_=0;
     lastWaitIdleResult_.store(VK_NOT_READY,std::memory_order_release);
     validationEnabled_ = desc_.enableValidation || desc_.enableDebug;
+
+    // F0-11 链接锚点：强制拉入 capture 桥 / pass timestamp 入口的注册 TU
+    //（静态库无符号引用成员会被链接器裁剪，注册曾静默丢失——见
+    // VulkanBackendLinks.h）。幂等；不改变设备初始化语义。
+    EnsureVulkanCaptureBridgeLinked();
+    pass_timestamp::EnsureVulkanPassTimestampEntryLinked();
 
     if (!createInstance()) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createInstance failed" << std::endl;

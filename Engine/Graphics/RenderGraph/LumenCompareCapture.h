@@ -1,8 +1,12 @@
 #pragma once
 // Diagnostic-only observer. Copies immediately after the real producer, before
 // a later pass can overwrite the same physical allocation. No additional rays.
+// F0-11 (D3D12 M0): 后端专属查询经 RHICaptureBridge 分派（本头不再 include
+// 任何 Platforms/* 头，不再 static_cast 后端设备——Vulkan 行为零变化，
+// 特化在 Platforms/Vulkan/VulkanCaptureBridge.cpp，D3D12 待 M1 同模式提供）。
 #include "RenderGraphPass.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
+#include "Graphics/RenderGraph/RHICaptureBridge.h"
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -10,10 +14,6 @@
 #include <sstream>
 #include <vector>
 #include <chrono>
-#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
-#include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
-#include "Graphics/RHI/Platforms/Vulkan/VulkanTexture.h"
-#endif
 
 namespace primal::graphics::lumencompare {
 using namespace rhi;
@@ -74,9 +74,10 @@ inline u32 PixelBytes(DataFormat f) {
 inline void AfterPass(RHIDeviceBase& base, RHICommandBuffer* cmd, const RenderGraphPass& pass) {
     if (!enabled) return;
     ++passIndex;
-#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
-    if (base.GetPlatform() != RHIPlatform::Vulkan || !Selected(pass.GetName())) return;
-    auto& device = static_cast<VulkanDevice&>(base);
+    // F0-11: 旧门 = ENABLE_VULKAN 编译 + GetPlatform()==Vulkan；新门 = 该后端
+    // 是否注册了 capture 特化。Vulkan 注册见 VulkanCaptureBridge.cpp；
+    // 未注册后端（Metal/Dawn/D3D12-未实现）与旧行为一致：整帧零捕获。
+    if (!rhicapture::BackendCaptureSupported(base) || !Selected(pass.GetName())) return;
     for (const auto& output : pass.GetOutputs()) {
         auto* resource = output.resource;
         if (!resource) continue;
@@ -103,11 +104,14 @@ inline void AfterPass(RHIDeviceBase& base, RHICommandBuffer* cmd, const RenderGr
             item.status = "untyped_import"; items.push_back(item); continue;
         }
         const bool isBuffer = resource->GetType() == RGResourceType::Buffer || ddgiBuffer;
-        auto* texture = isBuffer ? nullptr : device.GetTexture(item.physical);
-        if (texture && texture->GetNativeImage()) {
-            const auto& desc = texture->GetTextureDesc();
+        // F0-11: 纹理解析经后端桥（Vulkan 特化 = 旧直查路径，零行为变化）。
+        rhicapture::TextureResolve resolve;
+        const auto* texture = isBuffer ? nullptr
+            : (rhicapture::ResolveTexture(base, item.physical, resolve) && resolve.hasNativeImage ? &resolve : nullptr);
+        if (texture) {
+            const auto& desc = texture->desc;
             item.format = u32(desc.format); item.bpp = PixelBytes(desc.format);
-            device.GetTextureSize(item.physical, item.width, item.height);
+            item.width = texture->width; item.height = texture->height;
             item.depth = std::max(1u, desc.size.z);
             // Initial format contract: complete single-subresource color textures.
             // Unsupported depth/arrays/mips are listed explicitly, never called complete.
@@ -116,7 +120,7 @@ inline void AfterPass(RHIDeviceBase& base, RHICommandBuffer* cmd, const RenderGr
                 item.status = "unsupported_texture_layout_or_format"; items.push_back(item); continue;
             }
             item.bytes = u64(item.width) * item.height * item.depth * item.bpp;
-        } else if (!device.GetBufferByteSize(item.physical, item.bytes)) {
+        } else if (!base.GetBufferByteSize(item.physical, item.bytes)) {
             item.status = "resource_unresolved"; items.push_back(item); continue;
         }
         u64 pendingBytes = 0;
@@ -126,12 +130,12 @@ inline void AfterPass(RHIDeviceBase& base, RHICommandBuffer* cmd, const RenderGr
         }
         BufferDesc staging{}; staging.size = item.bytes;
         staging.bindFlags = u32(BufferUsageFlags::TransferDst); staging.memoryUsage = GPUMemoryUsage::Readback;
-        item.staging = device.CreateBuffer(staging);
+        item.staging = base.CreateBuffer(staging);
         if (item.staging == handles::INVALID_RESOURCE) {
             item.status = "allocation_failed"; items.push_back(item); continue;
         }
         cmd->MemoryBarrier(PipelineStage::AllCommands, PipelineStage::Transfer, AccessFlag::MemoryWrite, AccessFlag::TransferRead);
-        if (texture && texture->GetNativeImage()) {
+        if (texture) {
             ResourceBarrier barrier{}; barrier.resource = item.physical;
             barrier.beforeState = output.state; barrier.afterState = ResourceState::CopySource;
             cmd->InsertBarrier(&barrier, 1);
@@ -147,7 +151,6 @@ inline void AfterPass(RHIDeviceBase& base, RHICommandBuffer* cmd, const RenderGr
             AccessFlag::TransferRead | AccessFlag::TransferWrite, AccessFlag::MemoryRead | AccessFlag::MemoryWrite | AccessFlag::HostRead);
         items.push_back(item);
     }
-#endif
 }
 // For dispatches hidden inside a larger RG pass: the caller supplies the exact
 // native output and its real state at this producer boundary.
@@ -169,15 +172,13 @@ inline void Output(RHIDeviceBase* device, RHICommandBuffer* cmd, const std::stri
 inline void BufferSlice(RHIDeviceBase* base, RHICommandBuffer* cmd, const std::string& stage,
                         const std::string& name, ResourceHandle source, u64 offset, u64 bytes) {
     if (!enabled || !base || !cmd || !Selected(stage)) return;
-#if defined(ENABLE_VULKAN) && ENABLE_VULKAN
-    if (base->GetPlatform() != RHIPlatform::Vulkan) return;
-    auto& device = static_cast<VulkanDevice&>(*base);
+    if (!rhicapture::BackendCaptureSupported(*base)) return;  // F0-11: 后端能力门（同旧 Vulkan 门语义）
     Item item; item.pass=stage; item.name=name; item.physical=source;
     item.sourceOffset=offset; item.bytes=bytes;
     item.file="slice-"+std::to_string(++passIndex)+".raw";
     u64 size=0, pending=0;
     for (const auto& i:items) if(i.staging!=handles::INVALID_RESOURCE) pending+=i.bytes;
-    if (!bytes || !device.GetBufferByteSize(source,size) || offset>size || bytes>size-offset) {
+    if (!bytes || !base->GetBufferByteSize(source,size) || offset>size || bytes>size-offset) {
         item.status="invalid_buffer_slice";items.push_back(item);return;
     }
     if (pending>stagingBudgetBytes || bytes>stagingBudgetBytes-pending) {
@@ -185,7 +186,7 @@ inline void BufferSlice(RHIDeviceBase* base, RHICommandBuffer* cmd, const std::s
     }
     BufferDesc desc{};desc.size=bytes;desc.bindFlags=u32(BufferUsageFlags::TransferDst);
     desc.memoryUsage=GPUMemoryUsage::Readback;
-    item.staging=device.CreateBuffer(desc);
+    item.staging=base->CreateBuffer(desc);
     if(item.staging==handles::INVALID_RESOURCE) {
         item.status="allocation_failed";items.push_back(item);return;
     }
@@ -196,7 +197,6 @@ inline void BufferSlice(RHIDeviceBase* base, RHICommandBuffer* cmd, const std::s
         AccessFlag::TransferRead|AccessFlag::TransferWrite,
         AccessFlag::MemoryRead|AccessFlag::MemoryWrite|AccessFlag::HostRead);
     items.push_back(item);
-#endif
 }
 inline bool Drain(RHIDeviceBase* device, u64 engineFrame, u32 giAgeAfterRender) {
     if (!enabled) return true;

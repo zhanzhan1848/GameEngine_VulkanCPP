@@ -167,15 +167,25 @@ option(ENABLE_WEBGPU "Enable WebGPU support via Dawn library" OFF)
 # 检查是否启用 Vulkan RHI 后端 (Win32 + Linux + macOS via MoltenVK)
 option(ENABLE_VULKAN "Enable Vulkan RHI backend (Win32 + Linux + macOS via MoltenVK)" OFF)
 
+# D3D12 RHI 后端（仅 Windows；可与 ENABLE_VULKAN 同 ON —— 双后端单一测试二进制，
+# 运行时按 DeviceDesc.platform 分发）。macOS/Linux 上此 option 被忽略：
+# 只编平台中立核白名单（见下方 D3D12 分层注释）。
+option(ENABLE_D3D12 "Enable D3D12 RHI backend (Windows only)" OFF)
+# Agility SDK 锁版（M0 冻结，R6 工具版本漂移风险）。历史 premake5.lua 用的
+# 1.608.2 与 props 1.606.3 混用已废弃；统一锁 1.611.x 单一版本。
+set(PRIMAL_D3D12_AGILITY_VERSION "1.611.3" CACHE STRING
+    "Microsoft.Direct3D.D3D12 (Agility SDK) version used when ENABLE_D3D12=ON")
+
 # 检查是否禁用粒子系统
 option(DISABLE_PARTICLE_SYSTEM "Disable particle system compilation" OFF)
 
 if(WIN32)
-    if(ENABLE_VULKAN)
-        # ENABLE_VULKAN=ON 时只编下方自包含的新 Vulkan RHI 后端（RHI/Platforms/Vulkan）。
-        # legacy Direct3D12 / Graphics/Vulkan 基于旧 XMFLOAT 数学层（XMLoad/XMStore 直取
-        # math 类型地址），与新的带运算符数学类型不兼容；macOS 的 ENABLE_VULKAN 构建
-        # 同样不包含这两个目录。
+    if(ENABLE_VULKAN OR ENABLE_D3D12)
+        # ENABLE_VULKAN 或 ENABLE_D3D12=ON 时只编自包含的新 RHI 后端
+        # （RHI/Platforms/{Vulkan,D3D12}）。legacy Direct3D12 / Graphics/Vulkan
+        # 基于旧 XMFLOAT 数学层（XMLoad/XMStore 直取 math 类型地址），与新的
+        # 带运算符数学类型不兼容；macOS 的 ENABLE_VULKAN 构建同样不包含这两
+        # 个目录。ENABLE_D3D12 同样排除 legacy Direct3D12（F0-3）。
         set(GRAPHICS_SOURCES "")
     else()
         file(GLOB_RECURSE GRAPHICS_SOURCES
@@ -212,6 +222,46 @@ if(ENABLE_VULKAN)
     )
     list(APPEND GRAPHICS_SOURCES ${VULKAN_RHI_SOURCES})
     message(STATUS "Vulkan RHI backend enabled (Engine/Graphics/RHI/Platforms/Vulkan)")
+endif()
+
+# D3D12 RHI 后端 (Engine/Graphics/RHI/Platforms/D3D12/*) — M0 分层隔离：
+#   1) 平台中立核（无任何 Windows 头，macOS 可编译+单测）：
+#      Abi / Format / StateMapping / StateTracker / RootSignatureBudget。
+#      这五个文件在【所有平台】编入（显式白名单，不 glob——防止未来误把
+#      Windows 专属文件带进 macOS 树）。
+#   2) Windows 专属 COM 层（D3D12Device/Fence/Buffer/Texture/SwapChain/
+#      Pipeline/CommandBuffer/DescriptorHeaps，include d3d12.h 家族）：
+#      仅 WIN32 AND ENABLE_D3D12 时 glob 全目录编入 + ENABLE_D3D12=1 宏 +
+#      Agility SDK REQUIRED（F0-2/F0-3）。
+if(WIN32 AND ENABLE_D3D12)
+    file(GLOB_RECURSE D3D12_RHI_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/*.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/*.cpp"
+    )
+    list(APPEND GRAPHICS_SOURCES ${D3D12_RHI_SOURCES})
+    # F0-4: D3D12MemAlloc v3.0.1（third_party，版本+SHA 见
+    # third_party/D3D12MemAlloc/VENDOR.md）。仅 Windows 树编入——
+    # src/D3D12MemAlloc.cpp 直接 include <d3d12.h>/<dxgi.h>，进 macOS
+    # 编译必然失败；非 Windows 分支（下方 else）不引用本目录。
+    list(APPEND GRAPHICS_SOURCES
+        "${CMAKE_SOURCE_DIR}/third_party/D3D12MemAlloc/src/D3D12MemAlloc.cpp")
+    message(STATUS "D3D12 RHI backend enabled (Engine/Graphics/RHI/Platforms/D3D12, Agility SDK ${PRIMAL_D3D12_AGILITY_VERSION}, D3D12MemAlloc v3.0.1)")
+else()
+    file(GLOB D3D12_NEUTRAL_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/D3D12Abi.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/D3D12Format.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/D3D12Format.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/D3D12StateMapping.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/D3D12StateMapping.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/D3D12StateTracker.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/D3D12StateTracker.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/D3D12RootSignatureBudget.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/D3D12RootSignatureBudget.cpp"
+    )
+    list(APPEND GRAPHICS_SOURCES ${D3D12_NEUTRAL_SOURCES})
+    if(NOT WIN32)
+        message(STATUS "D3D12 RHI neutral core only (Windows-only COM layer excluded; ENABLE_D3D12=${ENABLE_D3D12} ignored on this platform)")
+    endif()
 endif()
 
 # 添加WebGPU平台支持（如果启用）
@@ -628,6 +678,30 @@ if(ENABLE_VULKAN)
         )
     endif()
     message(STATUS "Vulkan SDK found: ${Vulkan_INCLUDE_DIR}")
+endif()
+
+# D3D12 RHI 后端依赖：Agility SDK（NuGet Microsoft.Direct3D.D3D12，CONFIG 包）。
+# F0-2/F0-3：ENABLE_D3D12 时 REQUIRED 化 + 锁单一版本
+# （PRIMAL_D3D12_AGILITY_VERSION，默认 1.611.x；premake 时代 1.608.2/1.606.3
+# props 混用已废弃）。上方 MSVC 分支内保留的软 find_package 只服务 legacy
+# Direct3D12（ENABLE_D3D12=OFF 时 legacy 仍可能编入）。
+if(ENABLE_D3D12)
+    if(NOT WIN32)
+        message(WARNING "ENABLE_D3D12=ON is ignored on non-Windows platforms (D3D12 needs Agility SDK/d3d12.h)")
+    else()
+        find_package(Microsoft.Direct3D.D3D12 ${PRIMAL_D3D12_AGILITY_VERSION} CONFIG REQUIRED)
+        target_link_libraries(${PROJECT_NAME} PRIVATE Microsoft::Direct3D-D3D12)
+        target_compile_definitions(${PROJECT_NAME} PRIVATE
+            ENABLE_D3D12=1
+            PRIMAL_D3D12_AGILITY_VERSION="${PRIMAL_D3D12_AGILITY_VERSION}"
+        )
+        # F0-4: D3D12MemAlloc v3.0.1 头文件路径（源文件已加入
+        # GRAPHICS_SOURCES，见上方 D3D12 块；版本+SHA 见
+        # third_party/D3D12MemAlloc/VENDOR.md）。
+        target_include_directories(${PROJECT_NAME} PRIVATE
+            "${CMAKE_SOURCE_DIR}/third_party/D3D12MemAlloc/include")
+        message(STATUS "Agility SDK (Microsoft.Direct3D.D3D12) ${PRIMAL_D3D12_AGILITY_VERSION} found and REQUIRED")
+    endif()
 endif()
 
 # === Jolt Physics（物理内核；Jolt 头文件只允许出现在 Engine/Simulation/ 内部）===

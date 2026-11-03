@@ -75,6 +75,8 @@ public:
     void DrawIndexed(u32 indexCount, u32 startIndex = 0, u32 baseVertex = 0,
                      u32 instanceCount = 1, u32 startInstance = 0) override;
     void DrawIndirect(ResourceHandle buffer, u64 offset = 0, u32 drawCount = 1) override;
+    // M5 F5-2（D3D12 现代化）：索引间接绘制（vkCmdDrawIndexedIndirect 非 count 变体）。
+    void DrawIndexedIndirect(ResourceHandle buffer, u64 offset = 0, u32 drawCount = 1) override;
     void BindComputePipeline(PipelineHandle pipeline) override;
     void PushConstants(PipelineLayoutHandle layout, ShaderStage stageFlags,
                        u32 offset, u32 size, const void* pValues) override;
