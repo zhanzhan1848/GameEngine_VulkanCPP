@@ -10,6 +10,9 @@
 #include "SurfaceStaticPages.h"
 #include "BoundaryStaticSamples.h"
 #include <memory>
+#include <array>    // R3 IWYU: std::array 使用点直接补齐（MSVC 传递链风险）
+#include <vector>
+#include <string>
 #include "Graphics/Utilities/GeometryFirstHit.h"
 #include "Graphics/Utilities/GeometryBVHStore.h"
 #include "Graphics/Utilities/EnvironmentHybridCertificate.h"

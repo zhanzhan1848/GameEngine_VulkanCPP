@@ -1,6 +1,8 @@
 #pragma once
 
 #include "CommonHeaders.h"
+#include <string>   // R3 IWYU: std::string 使用点直接补齐
+#include <vector>
 
 // ============================================================================
 // SurfaceStaticPages —— SC per-mesh 静态表面页 sidecar（"SCS1"）读取器。

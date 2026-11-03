@@ -55,7 +55,11 @@ target_compile_definitions(contenttools_collision PRIVATE
     NO_OPENMP
 )
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(contenttools_collision PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
@@ -92,4 +96,5 @@ target_compile_options(contenttools_collision PRIVATE
     -Wno-unused-macros
     -Wno-used-but-marked-unused
     -Wno-weak-vtables
+    >
 )

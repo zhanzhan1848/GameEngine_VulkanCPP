@@ -5,12 +5,17 @@ project(ContentTools)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-execute_process(
-        COMMAND xcrun --sdk macosx --show-sdk-path
-        OUTPUT_VARIABLE MACOSX_PREFIX
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-set(CMAKE_OSX_SYSROOT "${MACOSX_PREFIX}")
+# R3（Windows 首编）：xcrun 只在 Apple 工具链存在。此前无条件执行导致
+# Windows 上 MACOSX_PREFIX 为空、CMAKE_OSX_SYSROOT 被置空串、include 列表
+# 混入 "/usr/include" 等不存在路径。APPLE 门控后 Windows 分支零 macOS 残留。
+if(APPLE)
+    execute_process(
+            COMMAND xcrun --sdk macosx --show-sdk-path
+            OUTPUT_VARIABLE MACOSX_PREFIX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    set(CMAKE_OSX_SYSROOT "${MACOSX_PREFIX}")
+endif()
 
 # 添加源文件
 set(PROJECTION_SOURCES

@@ -1,8 +1,17 @@
 /**
  * @file NeuralNRBackend.cpp
  * @brief NR shim 封装实现（dlopen + 生命周期；探测序列同 NeuralMLXBackend）
+ *
+ * R3（Windows 首编）：MLX/CoreML shim（libNeuralMLXShim.dylib，Swift 构建）
+ * 是 macOS 专属依赖，<dlfcn.h> 在 MSVC 下不存在。实现整体 APPLE 门控；
+ * 非 Apple 平台编译降级 stub（Initialize 恒 false → 模块走 kernel/裸路径
+ * fallback，与 shim 缺库时的运行时降级同语义）。头文件保持全平台可编
+ * （NeuralNRModule.h 按值持有本类成员）。CMake glob 不变（Neural 目录
+ * 仍全平台收集——门控在 TU 内，单一事实源）。
  */
 #include "NeuralNRBackend.h"
+
+#if defined(__APPLE__)
 
 #include <cstdint>
 #include <cstdio>
@@ -137,5 +146,27 @@ bool NeuralNRBackend::Infer(const f32* planes7, u32 width, u32 height,
     if (err) err->clear();
     return true;
 }
+
+#else  // !defined(__APPLE__)
+
+// 非 Apple 降级 stub：签名与 NeuralNRBackend.h 一一对应；IsAvailable() 恒
+// false（model_ 永不置位），调用方（NeuralNRModule）按 Initialize 失败降级。
+std::string NeuralNRBackend::FindDylib() { return {}; }
+std::string NeuralNRBackend::FindPackage() { return {}; }
+
+bool NeuralNRBackend::Initialize(const std::string&, const std::string&,
+                                 std::string* err) {
+    if (err) *err = "NeuralNRBackend: MLX shim is macOS-only (libNeuralMLXShim.dylib)";
+    return false;
+}
+
+void NeuralNRBackend::Shutdown() {}
+
+bool NeuralNRBackend::Infer(const f32*, u32, u32, u32, f32*, std::string* err) {
+    if (err) *err = "NeuralNRBackend: not available on this platform";
+    return false;
+}
+
+#endif  // defined(__APPLE__)
 
 }  // namespace primal::graphics::neural

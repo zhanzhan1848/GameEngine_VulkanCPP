@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CommonHeaders.h"
+#include <vector>   // R3 IWYU: std::vector 使用点直接补齐（MSVC 传递链风险）
 #include "SurfaceCacheTypes.h"
 #include "Graphics/RHI/Core/RHIMeshAsset.h"  // rhi::RHICardBakeData (T4.2)
 

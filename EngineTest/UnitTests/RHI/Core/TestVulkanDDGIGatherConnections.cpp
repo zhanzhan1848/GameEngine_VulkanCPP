@@ -1,5 +1,6 @@
 // Actual production DDGIGIGather geometry-connection contracts; private fixtures only.
 #include "../../TestFramework.h"
+#include "EngineTest/Utils/TestEnv.h"   // R3: portable setenv/unsetenv (MSVC lacks POSIX ones)
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
@@ -196,8 +197,8 @@ void zero(const Pair& x,bool unsupported){for(const auto* image:{&x.diffuse,&x.s
 void identical(const Result& x){for(auto pair:{std::pair{&x.baseline.diffuse,&x.candidate.diffuse},std::pair{&x.baseline.specular,&x.candidate.specular}})require(pair.first->size()==pair.second->size()&&std::memcmp(pair.first->data(),pair.second->data(),pair.first->size()*sizeof(Pixel))==0,"Clear or legacy actual GPU outputs remain bit-identical");}
 struct ConnectionEnvironment {
     bool present=false;std::string original;
-    ConnectionEnvironment(){if(const char* p=std::getenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS")){present=true;original=p;}setenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS","0",1);}
-    ~ConnectionEnvironment(){if(present)setenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS",original.c_str(),1);else unsetenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS");}
+    ConnectionEnvironment(){if(const char* p=std::getenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS")){present=true;original=p;}primaltest::SetEnv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS","0");}
+    ~ConnectionEnvironment(){if(present)primaltest::SetEnv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS",original.c_str());else primaltest::UnsetEnv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS");}
 };
 struct OwnedGather {GIGatherModule value;~OwnedGather(){value.Shutdown();}};
 void registerLifecycleCases(const std::shared_ptr<TestSuite>& suite){
@@ -208,7 +209,7 @@ void registerLifecycleCases(const std::shared_ptr<TestSuite>& suite){
         OwnedGather owner;auto& m=owner.value;
         require(m.Initialize(g.d,g.shaders[0],16,16),"Baseline module Initialize succeeds");require(m.IsInitialized()&&!m.RequiresGeometryConnections(),"Baseline module live without candidate");
         if(scenario==1){
-            setenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS","1",1);
+            primaltest::SetEnv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS","1");
             require(m.Initialize(g.d,g.shaders[0],16,16),"Reinitialize candidate from production geometry SPV succeeds");
             require(m.IsInitialized()&&m.RequiresGeometryConnections(),"Exact-1 candidate initialized after baseline cleanup");
         }else if(scenario==2){

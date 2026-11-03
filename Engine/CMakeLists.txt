@@ -541,9 +541,22 @@ if(MSVC)
     # 在 target 选项之后（MSVC 同组优化选项后者生效，非 Debug 的 /Ox 被压住；
     # Debug 本就 /Od）。待拿到完整 C1001 输出（文件:行号+编译器版本+配置）后
     # 根治并移除本条。仅 MSVC 生效；clang/gcc（macOS/Linux 树）不受影响。
+    #
+    # 2026-11-03 R3（第三轮，Release 仍 C1001 后的加固）：
+    #   a) 属性读回验证——configure 输出必须出现下述 STATUS 行（含 /Od），
+    #      否则属性未生效（路径不匹配或被后续同属性调用替换——本文件无其它
+    #      set_source_files_properties 触及此源）。
+    #   b) /Od 只压后端（c2）；若 Debug 配置也 ICE = 前端（c1）问题，/Od 无效
+    #      ——转拆分路线：R3 已把 IO 辅助拆出 LumenDDGIPassIO.cpp（4834→4584
+    #      行）；仍复发则继续按块拆 AddPass（~1780 行单函数）。
+    #   c) 诊断需要用户提供：C1001 完整输出（文件:行号+触发函数+cl 版本
+    #      `cl /B1` 号）+ 配置名（Debug/Release）——见 runbook §11.3。
     set_source_files_properties(
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/DDGI/LumenDDGIPass.cpp"
         PROPERTIES COMPILE_OPTIONS "/Od")
+    get_source_file_property(PRIMAL_DDGI_ICE_OD_FLAGS
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/DDGI/LumenDDGIPass.cpp" COMPILE_OPTIONS)
+    message(STATUS "C1001 mitigation: LumenDDGIPass.cpp per-source COMPILE_OPTIONS='${PRIMAL_DDGI_ICE_OD_FLAGS}' (expect '/Od'; empty = property NOT applied)")
 
     target_link_options(${PROJECT_NAME} PRIVATE /SUBSYSTEM:WINDOWS)
     target_link_options(${PROJECT_NAME} PRIVATE

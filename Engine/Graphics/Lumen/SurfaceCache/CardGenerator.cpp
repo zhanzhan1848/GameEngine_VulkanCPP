@@ -3,6 +3,12 @@
 #include "CoverageCardBudget.h"
 #include "Common/CoreLogStream.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
+// R3（Windows 首编 IWYU）：algorithm/cmath/cstring/limits 此前靠传递链。
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <vector>
 
 namespace primal::graphics::lumen {
 

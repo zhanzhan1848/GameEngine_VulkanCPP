@@ -30,6 +30,13 @@
 #include <cstdio>
 #include <set>
 #include <cmath>
+// R3（Windows 首编 IWYU）：std::string/pair/vector 此前靠 libc++ 传递链可见，
+// MSVC STL 传递面不同会 C2039——使用点直接补齐（同 TU 顺序两端一致，macOS 零变化）。
+#include <string>
+#include <utility>
+#include <vector>
+#include <algorithm>
+#include <limits>
 #include "Engine/Common/CoreLogStream.h"
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 #include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"

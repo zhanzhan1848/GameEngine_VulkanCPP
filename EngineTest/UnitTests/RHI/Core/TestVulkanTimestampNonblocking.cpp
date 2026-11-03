@@ -4,6 +4,7 @@
 #include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
 #include "Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
 #include "Graphics/RHI/Platforms/Vulkan/VulkanQuery.h"
+#include "EngineTest/Utils/TestEnv.h"   // R3: 可移植 setenv/unsetenv（MSVC 无 POSIX 版）
 #include <cstdlib>
 #include <cstdint>
 #include <iostream>
@@ -25,7 +26,7 @@ struct GPU {
  VulkanCommandBuffer* begin(CommandBufferHandle& h){h=d->CreateCommandBuffer(CommandQueueType::Compute);auto* c=vk->GetCommandBuffer(h);check(c&&c->Reset()&&c->Begin(),"begin command buffer");return c;}
 };
 void run(){
- check(setenv("PRIMAL_VK_QUERY_NONBLOCKING","1",1)==0,"set experiment");GPU g;
+ check(primaltest::SetEnv("PRIMAL_VK_QUERY_NONBLOCKING","1")==0,"set experiment");GPU g;
  QueryPoolDesc q{};q.type=QueryType::Timestamp;q.queryCount=2;g.query=g.d->CreateQueryPool(q);check(g.query!=handles::INVALID_QUERY_POOL,"timestamp pool");
  auto* pool=g.vk->GetQueryPool(g.query);check(pool&&pool->GetNativePool()!=VK_NULL_HANDLE,"native pool");
  // A completed GPU reset guarantees queries are unavailable, without relying
@@ -49,7 +50,7 @@ void run(){
  check(g.d->GetQueryPoolResults(g.query,0,2,result,sizeof(uint64_t)),"completed timestamps readable");
  check(result[0]>0&&result[1]>result[0],"completed timestamp values strictly increasing");
  std::cout<<"{\"unwritten_not_ready\":true,\"recorded_unsubmitted_not_ready\":true,\"immediate_ready\":"<<(immediate?"true":"false")<<",\"completed_ticks\":["<<result[0]<<','<<result[1]<<"]}\n";
- unsetenv("PRIMAL_VK_QUERY_NONBLOCKING");result[0]=result[1]=0;
+ primaltest::UnsetEnv("PRIMAL_VK_QUERY_NONBLOCKING");result[0]=result[1]=0;
  check(g.d->GetQueryPoolResults(g.query,0,2,result,sizeof(uint64_t))&&result[0]>0&&result[1]>result[0],"default WAIT path still reads completed results");
 }
 }

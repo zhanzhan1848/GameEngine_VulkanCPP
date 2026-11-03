@@ -27,7 +27,11 @@ target_include_directories(contenttools_remesh PUBLIC
 
 target_link_libraries(contenttools_remesh PUBLIC pmp)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(contenttools_remesh PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     # Disable -ffast-math (inherited from the top-level add_compile_options)
@@ -41,6 +45,7 @@ target_compile_options(contenttools_remesh PRIVATE
     -Wno-unknown-pragmas
     -Wno-unused-variable
     -Wno-unused-but-set-variable
+    >
 )
 
 if(APPLE)

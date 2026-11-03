@@ -1,5 +1,6 @@
 // Isolated native contracts for the opt-in Vulkan albedo array mip path.
 #include "../../TestFramework.h"
+#include "EngineTest/Utils/TestEnv.h"   // R3: portable setenv/unsetenv (MSVC lacks POSIX ones)
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
 #include "Graphics/RHI/Platforms/Vulkan/VulkanDevice.h"
 #include "Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.h"
@@ -68,11 +69,11 @@ void chainCase(u32 w,u32 h,u32 layers,DataFormat format,bool ready,bool mixed=fa
 }
 void builderCase(bool enabled,bool generic=false){
     GPU g;std::vector<u8> white(4,255),real=pattern(16,16,1);auto placeholder=g.source(1,1,DataFormat::RGBA8_sRGB,white,true),source=g.source(16,16,DataFormat::RGBA8_sRGB,real,true);
-    setenv("PRIMAL_VK_ALBEDO_MIPS",enabled?"1":"0",1);ResourceHandle array=handles::INVALID_RESOURCE;
+    primaltest::SetEnv("PRIMAL_VK_ALBEDO_MIPS",enabled?"1":"0");ResourceHandle array=handles::INVALID_RESOURCE;
     require(nanite::MaterialDataBuilder::CreateTextureArray(g.d,nullptr,{placeholder,source},"AlbedoMipGpuTest",array,generic?nanite::TextureArrayChannel::Generic:nanite::TextureArrayChannel::Albedo),"Builder array success");g.textures.push_back(array);
     require(g.vk->GetTexture(array)->GetTextureDesc().mipLevels==(enabled&&!generic?5u:1u),"Only explicit Vulkan albedo policy enables mips");auto pixels=g.read(array,!(enabled&&!generic));require(pixels[0][1]==real,"Builder real mip0 byte-exact");
     if(enabled&&!generic)for(const auto& level:pixels)require(std::all_of(level[0].begin(),level[0].end(),[](u8 v){return v==255;}),"Placeholder initialized white at every mip");
-    unsetenv("PRIMAL_VK_ALBEDO_MIPS");
+    primaltest::UnsetEnv("PRIMAL_VK_ALBEDO_MIPS");
 }
 void rejectionCase(u32 which){
     GPU g;CommandBufferHandle handle;auto* c=g.begin(handle);

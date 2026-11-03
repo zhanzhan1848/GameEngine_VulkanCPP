@@ -1,5 +1,6 @@
 // Real AddTAAPass execution, uploaded CB and logical history contract.
 #include "../../TestFramework.h"
+#include "EngineTest/Utils/TestEnv.h"   // R3: portable setenv (MSVC lacks POSIX one)
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
@@ -168,7 +169,7 @@ struct Scenario {
  ResourceHandle texture(DataFormat format,u32 width,u32 height,std::function<void(u32,u32,u8*)> fill,u32 bpp){TextureDesc d{};d.size={width,height,1};d.format=format;d.type=TextureType::Texture2D;d.mipLevels=d.arraySize=1;std::vector<u8> bytes(u64(width)*height*bpp);for(u32 y=0;y<height;++y)for(u32 x=0;x<width;++x)fill(x,y,bytes.data()+(u64(y)*width+x)*bpp);auto t=CreateAndUploadTexture(f,d,bytes,"TAAJitterFixture");check(t!=handles::INVALID_RESOURCE,"Upload actual fixture texture");textures.push_back(t);return t;}
  ResourceHandle depth(DataFormat format,u32 width,u32 height){return texture(format,width,height,[](u32,u32,u8* p){float z=.5f;std::memcpy(p,&z,4);},4);}
  Capture frame(const std::string& label,u32 n,int fault=0,bool buildOnly=false){
-  auto dir=rootOut()/label;std::filesystem::create_directories(dir);setenv("LUMEN_COMPARE_DIR",dir.c_str(),1);auto ord=std::to_string(n+1);setenv("LUMEN_COMPARE_FRAMES",ord.c_str(),1);setenv("LUMEN_COMPARE_PASSES","TAAPass,Test.Output",1);setenv("LUMEN_COMPARE_STAGING_MIB","64",1);primal::graphics::lumencompare::Begin(n+1);
+  auto dir=rootOut()/label;std::filesystem::create_directories(dir);primaltest::SetEnv("LUMEN_COMPARE_DIR",dir.c_str());auto ord=std::to_string(n+1);primaltest::SetEnv("LUMEN_COMPARE_FRAMES",ord.c_str());primaltest::SetEnv("LUMEN_COMPARE_PASSES","TAAPass,Test.Output");primaltest::SetEnv("LUMEN_COMPARE_STAGING_MIB","64");primal::graphics::lumencompare::Begin(n+1);
   RenderGraph graph(*f.base);auto in=graph.ImportResource("TAAFixtureColor",color,ResourceState::ShaderResource),vel=graph.ImportResource("TAAFixtureVelocity",velocity,ResourceState::ShaderResource);auto dep=graph.ImportResource("TAAFixtureDepth",current,ResourceState::ShaderResource);
   bool published=false;u32 calls=0;auto jitter=primal::graphics::utils::GetJitterOffset(n,w,h);
   struct Producer {RGResourceHandle depth;};

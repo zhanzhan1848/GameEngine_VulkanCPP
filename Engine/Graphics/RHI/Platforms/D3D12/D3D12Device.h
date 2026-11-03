@@ -37,6 +37,11 @@
 #include "D3D12MemAlloc.h"
 
 #include "../../Core/RHIDevice.h"
+// R3（Windows 首编）：RHIAllocator<T> 按值成员（bufferAllocator_ 等 ×9）需要
+// 完整模板定义。此前仅经 RHIResource.h:19 / RHICommand.h:20 的前向声明传递
+// （"incomplete type" MSVC 报错源）——clang 下靠传递链侥幸可见。对齐兄弟后端
+// （MetalDevice.h:28 / VulkanDevice.h:23 / DawnDevice.h:8）直接 include。
+#include "../../Core/RHIAllocator.h"
 #include "D3D12BackendLinks.h"
 #include "D3D12Buffer.h"
 #include "D3D12CommandBuffer.h"
