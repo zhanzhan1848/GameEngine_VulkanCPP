@@ -183,8 +183,9 @@ ray_geometry::SceneBVH stackedScene(bool farFirst){
     mesh.num_vertices=4;mesh.num_indices=6;mesh.index_size=4;mesh.position_buffer.resize(sizeof(positions));mesh.index_buffer.resize(sizeof(indices));
     std::memcpy(mesh.position_buffer.data(),positions,sizeof(positions));std::memcpy(mesh.index_buffer.data(),indices,sizeof(indices));
     auto blas=ray_geometry::BuildMeshBLAS(mesh);require(bool(blas),"Build stacked plane BLAS");
-    math::m4x4 near{};near.columns[0]={1,0,0,0};near.columns[1]={0,1,0,0};near.columns[2]={0,0,1,0};near.columns[3]={0,0,.8f,1};auto far=near;far.columns[3].z=1.3f;
-    std::array<ray_geometry::InstanceInput,2> inputs{{{blas,near,18},{blas,far,19}}};ray_geometry::SceneBVH out;buildScene(inputs,out);
+    // R4: 局部变量避开 near/far 名字（Windows rpcndr.h 空宏）。
+    math::m4x4 nearMat{};nearMat.columns[0]={1,0,0,0};nearMat.columns[1]={0,1,0,0};nearMat.columns[2]={0,0,1,0};nearMat.columns[3]={0,0,.8f,1};auto farMat=nearMat;farMat.columns[3].z=1.3f;
+    std::array<ray_geometry::InstanceInput,2> inputs{{{blas,nearMat,18},{blas,farMat,19}}};ray_geometry::SceneBVH out;buildScene(inputs,out);
     require(out.top.size()==3,"Two actual TLAS leaves");
     const u32 left=out.top[0].links[0],right=out.top[0].links[1];
     const bool rightFar=out.instances[out.top[right].links[2]].instance_id==19;

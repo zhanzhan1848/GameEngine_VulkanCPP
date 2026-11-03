@@ -10,13 +10,19 @@
 #include "NeuralFrameGenBackend.h"
 
 #if defined(__APPLE__)
-
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
+#endif
 
+// R4（Windows 四测修复）：namespace 必须包裹真实现与 stub 两个分支——R3 版本
+// 把开括号放在 __APPLE__ 分支内、闭括号在 #endif 之后，非 Apple 编译时 stub
+// 定义裸露全局作用域（MSVC C2653 "NeuralFrameGenBackend 不是类或命名空间名
+// 称" + 级联 C2059/C2143）。头文件 include 不能进 namespace，故拆两段 #if。
 namespace primal::graphics::neural {
+
+#if defined(__APPLE__)
 
 namespace {
 

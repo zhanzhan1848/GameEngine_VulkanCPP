@@ -56,8 +56,16 @@ endif()
 # NOT_SUPPORTED（对齐既有 _WIN32 verb 门控模式），schema 输出不变（快照门
 # 不受构建配置影响）。用 if(TARGET ...) 而非 BUILD_CONTENT_TOOLS 变量，
 # 与 EngineTest/IntegrationTests 的门控口径一致。
-find_package(ZLIB REQUIRED)
-target_link_libraries(${PROJECT_NAME} PRIVATE EngineDLL Engine ZLIB::ZLIB)
+# R4（Windows 四测）：Windows 无系统 zlib——find_package(ZLIB REQUIRED) 必炸；
+# R5：根 CMakeLists WIN32 段经 FetchContent 拉 zlib 1.3.1（zlibstatic，ALIAS
+# primal_zlib_static）。Engine 在本目录之前 add_subdirectory，目标必可见。非 Windows
+# 维持 find_package 现状零变化。
+if(WIN32 AND TARGET primal_zlib_static)
+    target_link_libraries(${PROJECT_NAME} PRIVATE EngineDLL Engine primal_zlib_static)
+else()
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE EngineDLL Engine ZLIB::ZLIB)
+endif()
 if(TARGET ContentTools)
     target_link_libraries(${PROJECT_NAME} PRIVATE ContentTools contenttools_pipeline)
     target_compile_definitions(${PROJECT_NAME} PRIVATE PRIMAL_CLI_CONTENT_TOOLS=1)

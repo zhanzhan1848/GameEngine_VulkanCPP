@@ -892,7 +892,18 @@ elseif(APPLE AND NOT EMSCRIPTEN)
     # target_link_libraries(${PROJECT_NAME} PRIVATE
     #     ${ACCELERATE}
     # )
-    
+
+elseif(WIN32)
+    # R5（Windows 四测后续）：Windows 无系统 zlib——消费根 CMakeLists WIN32 段
+    # FetchContent 拉取的 zlib 1.3.1（zlibstatic，经 primal_zlib_static ALIAS 保
+    # 下游目标名不变）。include 路径经 zlibstatic 的 PUBLIC 接口传递（source dir
+    # + binary dir 生成的 zconf.h），不再手挂 third_party 路径（vendor 副本已删）。
+    # 非 WIN32 分支（上方 APPLE 的 find_package(ZLIB)）逐字不变。
+    if(TARGET primal_zlib_static)
+        target_link_libraries(${PROJECT_NAME} PRIVATE primal_zlib_static)
+    else()
+        message(FATAL_ERROR "Engine(WIN32): primal_zlib_static target missing — root CMakeLists zlib FetchContent block did not run")
+    endif()
 endif()
 
 # === moodycamel::ConcurrentQueue 支持 ===

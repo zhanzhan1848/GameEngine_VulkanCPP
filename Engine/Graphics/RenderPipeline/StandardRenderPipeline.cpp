@@ -2085,15 +2085,17 @@ void StandardRenderPipeline::InitializeLumenPasses() {
         if (vols.empty()) {
             vols.push_back(lumen::LumenVolumeConfig{});   // near defaults filled below
             if (config.ddgi_enable_far_volume) {
-                lumen::LumenVolumeConfig far{};
-                far.probe_count_x = config.ddgi_far_probe_count_x;
-                far.probe_count_y = config.ddgi_far_probe_count_y;
-                far.probe_count_z = config.ddgi_far_probe_count_z;
-                far.probe_spacing = config.ddgi_far_probe_spacing;
-                far.rays_per_probe = config.ddgi_rays_per_probe;
-                far.ray_max_distance = config.ddgi_far_ray_max_distance;
-                far.update_budget_divisor = 4;
-                vols.push_back(far);
+                // R4: 局部变量改名 farVol——Windows 侧 rpcndr.h 把 near/far 定义为
+                // 空宏（`far.xxx` → `.xxx` C2059、`push_back(far)` → 0 实参 C2661）。
+                lumen::LumenVolumeConfig farVol{};
+                farVol.probe_count_x = config.ddgi_far_probe_count_x;
+                farVol.probe_count_y = config.ddgi_far_probe_count_y;
+                farVol.probe_count_z = config.ddgi_far_probe_count_z;
+                farVol.probe_spacing = config.ddgi_far_probe_spacing;
+                farVol.rays_per_probe = config.ddgi_rays_per_probe;
+                farVol.ray_max_distance = config.ddgi_far_ray_max_distance;
+                farVol.update_budget_divisor = 4;
+                vols.push_back(farVol);
             }
             if (ddgiFit) {
                 // Scene-fit near volume: fitted counts + min-corner origin

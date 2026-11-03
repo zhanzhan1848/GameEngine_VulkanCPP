@@ -39,3 +39,18 @@ target_compile_options(contenttools_meshlet PRIVATE
     -Wno-shorten-64-to-32
     >
 )
+
+# R4（Windows 四测）：Meshlet.cpp 在 MSVC 下触发 C1001 ICE（xutility std::copy
+# 实例化点，用户日志 Meshlet.cpp(113)）。已做根治性微重构（聚合临时
+# emplace_back → 命名局部 + push_back(std::move)），本条 /Od 是双保险兜底
+# ——对齐 Engine/CMakeLists.txt LumenDDGIPass.cpp 先例（R2-5/R3-5）：per-source
+# 选项追加在 target 选项之后（非 Debug 的 /Ox 被压住；Debug 本就 /Od）；
+# 属性读回 + STATUS 凭证（Windows configure 输出必须含下述行，空=未生效）。
+if(MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Meshlet.cpp"
+        PROPERTIES COMPILE_OPTIONS "/Od")
+    get_source_file_property(PRIMAL_MESHLET_ICE_OD_FLAGS
+        "${CMAKE_CURRENT_SOURCE_DIR}/Meshlet.cpp" COMPILE_OPTIONS)
+    message(STATUS "C1001 mitigation (meshlet): Meshlet.cpp='${PRIMAL_MESHLET_ICE_OD_FLAGS}'")
+endif()

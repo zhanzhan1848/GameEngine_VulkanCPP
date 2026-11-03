@@ -531,7 +531,7 @@ void LumenWRCPass::UpdateProbeCardList(const SurfaceCacheCard* cards, u32 cardCo
                 c.center.x - probePos.x, c.center.y - probePos.y, c.center.z - probePos.z };
             const float d2 = d.x * d.x + d.y * d.y + d.z * d.z;
             const float ex = c.extent.x, ey = c.extent.y, ez = c.extent.z;
-            const uint axis = c.axis_direction & 0xFFu;
+            const u32 axis = c.axis_direction & 0xFFu;
             const float hu = (axis == 0u) ? ey : ex;
             const float hv = (axis == 0u) ? ez : (axis == 1u ? ez : ey);
             const float faceArea = 4.0f * hu * hv;

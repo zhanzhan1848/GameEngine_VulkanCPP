@@ -2515,8 +2515,9 @@ void SurfaceCachePass::AddCardCapturePasses(
                     return false;
                 if (geometry_audit_requested_ && !geometry_audit_enabled_)
                     return false;
-                const uint axis = card.axis_direction & 0xFFu;
-                const uint dir  = (card.axis_direction >> 8u) & 0xFFu;
+                // R4: 裸 uint 是 POSIX typedef，MSVC 无此名（C2065/C2086 级联源）→ u32。
+                const u32 axis = card.axis_direction & 0xFFu;
+                const u32 dir  = (card.axis_direction >> 8u) & 0xFFu;
 
                 math::v3 fwd, up;
                 float hu = 0.0f, hv = 0.0f, halfAxis = 0.0f;
@@ -2609,7 +2610,7 @@ void SurfaceCachePass::AddCardCapturePasses(
                     const auto& c = cards[k];
                     if (c.resolution == 0) continue;
                     const float ex = c.extent.x, ey = c.extent.y, ez = c.extent.z;
-                    const uint capAxis = c.axis_direction & 0xFFu;
+                    const u32 capAxis = c.axis_direction & 0xFFu;
                     const float hu2 = (capAxis == 0u) ? ey : ex;
                     const float hv2 = (capAxis == 0u) ? ez : (capAxis == 1u ? ez : ey);
                     const u32 age = current_frame_index
@@ -2723,7 +2724,7 @@ static float ScCardPriority(const SurfaceCacheCard& card, const math::v3& camPos
                             float importanceWeight, float updateDistance,
                             u32 currentFrame, const u32* lastFrame) {
     const float ex = card.extent.x, ey = card.extent.y, ez = card.extent.z;
-    const uint axis = card.axis_direction & 0xFFu;
+    const u32 axis = card.axis_direction & 0xFFu;
     const float hu = (axis == 0u) ? ey : ex;
     const float hv = (axis == 0u) ? ez : (axis == 1u ? ez : ey);
     const float coverage = 4.0f * hu * hv;

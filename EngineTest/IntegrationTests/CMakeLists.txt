@@ -139,11 +139,18 @@ target_include_directories(TestSponzaVT PRIVATE
     ${CMAKE_SOURCE_DIR}/ContentTools/common
     ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source
 )
-find_package(ZLIB QUIET)
-if(ZLIB_FOUND)
-    target_link_libraries(TestSponzaVT PRIVATE Engine astcenc-native-static ZLIB::ZLIB)
+# R5：Windows 无系统 zlib——优先根 CMakeLists WIN32 段 FetchContent 的
+# zlibstatic（ALIAS primal_zlib_static），否则保持原 find_package(QUIET)+z
+# 回退（macOS/Linux 逐字不变）。
+if(WIN32 AND TARGET primal_zlib_static)
+    target_link_libraries(TestSponzaVT PRIVATE Engine astcenc-native-static primal_zlib_static)
 else()
-    target_link_libraries(TestSponzaVT PRIVATE Engine astcenc-native-static z)
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        target_link_libraries(TestSponzaVT PRIVATE Engine astcenc-native-static ZLIB::ZLIB)
+    else()
+        target_link_libraries(TestSponzaVT PRIVATE Engine astcenc-native-static z)
+    endif()
 endif()
 target_compile_definitions(TestSponzaVT PRIVATE "ENABLE_VULKAN=1")
 

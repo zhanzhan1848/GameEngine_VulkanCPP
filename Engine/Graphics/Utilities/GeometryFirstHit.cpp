@@ -99,27 +99,29 @@ bool SceneBVH::Build(std::span<const InstanceInput> inputs) {
         } return at;
     }; build(build,0,u32(entries.size())); return true;
 }
-static bool box(const Node& n,const float* o,const float* d,float near,float far) {
+// R4: 参数名对齐头文件 tmin/tmax——Windows 侧 rpcndr.h 把 near/far 定义为
+// 空宏（`near<0` → `<0` 等语法错级联）。
+static bool box(const Node& n,const float* o,const float* d,float tmin,float tmax) {
     for(u32 k=0;k<3;++k) {
         if(d[k]==0.f) { if(o[k]<n.lo[k]||o[k]>n.hi[k]) return false; }
-        else { float a=(n.lo[k]-o[k])/d[k],b=(n.hi[k]-o[k])/d[k]; near=std::max(near,std::min(a,b)); far=std::min(far,std::max(a,b)); if(near>far) return false; }
+        else { float a=(n.lo[k]-o[k])/d[k],b=(n.hi[k]-o[k])/d[k]; tmin=std::max(tmin,std::min(a,b)); tmax=std::min(tmax,std::max(a,b)); if(tmin>tmax) return false; }
     } return true;
 }
-int Trace(const SceneBVH& scene,const float* o,const float* d,float near,float far,Hit& hit) {
-    hit={}; hit.t=far;
-    if(!finite(near)||!finite(far)||near<0||near>=far||scene.top.empty()) return -1;
+int Trace(const SceneBVH& scene,const float* o,const float* d,float tmin,float tmax,Hit& hit) {
+    hit={}; hit.t=tmax;
+    if(!finite(tmin)||!finite(tmax)||tmin<0||tmin>=tmax||scene.top.empty()) return -1;
     double norm=0; for(u32 k=0;k<3;++k) { if(!finite(o[k])||!finite(d[k])) return -1; norm+=double(d[k])*d[k]; }
     if(norm==0) return -1;
     u32 stack[64]{0},sp=1; bool found=false;
     while(sp) {
-        const auto& n=scene.top[stack[--sp]]; if(!box(n,o,d,near,hit.t)) continue;
+        const auto& n=scene.top[stack[--sp]]; if(!box(n,o,d,tmin,hit.t)) continue;
         if(!n.links[3]) { if(sp+2>64) return -1; stack[sp++]=n.links[0]; stack[sp++]=n.links[1]; continue; }
         const auto& inst=scene.instances[n.links[2]]; float localO[3],localD[3];
         for(u32 r=0;r<3;++r) { localO[r]=inst.inverse_rows[r][3]; localD[r]=0; for(u32 c=0;c<3;++c) { localO[r]+=inst.inverse_rows[r][c]*o[c]; localD[r]+=inst.inverse_rows[r][c]*d[c]; } }
         // Do not normalize localD: the ray parameter must remain world-space t.
         u32 bs[64]{inst.root},bp=1;
         while(bp) {
-            const auto& b=scene.bottom[bs[--bp]]; if(!box(b,localO,localD,near,hit.t)) continue;
+            const auto& b=scene.bottom[bs[--bp]]; if(!box(b,localO,localD,tmin,hit.t)) continue;
             if(!b.links[3]) { if(bp+2>64) return -1; bs[bp++]=b.links[0]; bs[bp++]=b.links[1]; continue; }
             for(u32 i=0;i<b.links[3];++i) {
                 const auto& tri=scene.triangles[b.links[2]+i];
@@ -129,7 +131,7 @@ int Trace(const SceneBVH& scene,const float* o,const float* d,float near,float f
                 double u=0; for(u32 k=0;k<3;++k) u+=v[k]*p[k]; u/=det; if(u<0||u>1) continue;
                 for(u32 k=0;k<3;++k) {u32 a=(k+1)%3,c=(k+2)%3;q[k]=v[a]*tri.e1[c]-v[c]*tri.e1[a];}
                 double bary=0,t=0;for(u32 k=0;k<3;++k) {bary+=localD[k]*q[k];t+=tri.e2[k]*q[k];} bary/=det;t/=det;
-                if(bary<0||u+bary>1||t<near||t>hit.t) continue;
+                if(bary<0||u+bary>1||t<tmin||t>hit.t) continue;
                 u32 id=std::bit_cast<u32>(tri.a[3]);
                 if(found && float(t)==hit.t && (inst.instance_id>hit.instance_id || (inst.instance_id==hit.instance_id && id>=hit.triangle_id))) continue;
                 hit={float(t),float(u),float(bary),inst.instance_id,id,u64(inst.pad[0])|(u64(inst.pad[1])<<32u)}; found=true;

@@ -362,6 +362,57 @@ option(BUILD_CONTENT_TOOLS "Build ContentTools (Windows requires FBX SDK + Direc
 # 与 BUILD_CONTENT_TOOLS 解耦 — 本机(macOS)ContentTools 主工程因 FBX SDK
 # 不可配置,但 vtbake 必须可构建可验证)
 option(BUILD_VTBAKE "Build vtbake CLI (VT offline baker, needs zlib)" ON)
+# R5：zlib 1.3.1 改为 FetchContent git 拉取（用户要求源码不进 git 仓库传递；
+# R4 的 third_party/zlib vendor 副本已删除，来源/实测记录迁至
+# Docs/RHI/D3D12_Windows_Integration_Runbook.md）。Windows 无系统 zlib——用户日志
+# ForwardSceneRenderer.cpp(55) 与 VirtualTextureSystem.cpp(16) 双 C1083
+# （zlib.h 打不开），且 vtbake/CLI/VT 测试的 find_package(ZLIB) 在 Windows 无从
+# 命中。定义放在所有消费者（vtbake → Engine → PrimalEngineCli → EngineTest）
+# add_subdirectory 之前。非 WIN32 零影响（各平台 find_package 现状不变）。
+if(WIN32)
+    include(FetchContent)
+    # v1.3.1 锁定 commit（git ls-remote refs/tags/v1.3.1^{} 实测 2026-11-03，
+    # 与 R4 tarball 逐文件 diff 交叉验证一致；tag 对象 925af44f）。
+    set(PRIMAL_ZLIB_GIT_SHA "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf")
+    # 离线/本地覆盖（对齐 Agility 链 PRIMAL_D3D12_AGILITY_VERSION 风格）：
+    # 指向含 CMakeLists.txt 的本地 zlib 源目录（如用户已有 clone），存在则跳过网络。
+    set(PRIMAL_ZLIB_SOURCE_DIR "" CACHE PATH
+        "Local zlib source directory (must contain CMakeLists.txt) used instead of git fetch")
+    # zlib 1.3.1 自带 CMakeLists 选项面（本机读其源码实测）：唯一 option 是
+    # ZLIB_BUILD_EXAMPLES；**不存在** ZLIB_BUILD_SHARED_LIBS/ZLIB_BUILD_STATIC_LIBS
+    # （那是 zlib-ng/后续版本的变量）——zlib(SHARED) 与 zlibstatic(STATIC) 两目标
+    # 无条件同时定义。这里关掉 examples，链接 zlibstatic（经 ALIAS 保下游目标名），
+    # 并把无人消费的 SHARED zlib 目标排除出 ALL（被排除的目标仍可被依赖构建）。
+    set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_ALL ON)  # 普通变量：抑制子项目 install 规则（zlib CMakeLists 实测）
+    if(PRIMAL_ZLIB_SOURCE_DIR)
+        if(NOT EXISTS "${PRIMAL_ZLIB_SOURCE_DIR}/CMakeLists.txt")
+            message(FATAL_ERROR
+                "PRIMAL_ZLIB_SOURCE_DIR='${PRIMAL_ZLIB_SOURCE_DIR}' has no CMakeLists.txt — "
+                "point it at a zlib 1.3.1 source checkout or unset it to git-fetch "
+                "${PRIMAL_ZLIB_GIT_SHA} from https://github.com/madler/zlib.git")
+        endif()
+        FetchContent_Declare(zlib SOURCE_DIR "${PRIMAL_ZLIB_SOURCE_DIR}")
+    else()
+        FetchContent_Declare(zlib
+            GIT_REPOSITORY https://github.com/madler/zlib.git
+            GIT_TAG ${PRIMAL_ZLIB_GIT_SHA})
+    endif()
+    FetchContent_MakeAvailable(zlib)
+    if(NOT TARGET zlibstatic)
+        message(FATAL_ERROR "Primal: zlib FetchContent produced no zlibstatic target")
+    endif()
+    add_library(primal_zlib_static ALIAS zlibstatic)
+    set_property(TARGET zlib PROPERTY EXCLUDE_FROM_ALL TRUE)
+    # zconf.h 由 zlib 的 CMakeLists configure_file 生成在 binary dir；zlibstatic 的
+    # PUBLIC include 已含 source+binary 两目录，消费者仅链接即得（无需手挂路径）。
+    if(PRIMAL_ZLIB_SOURCE_DIR)
+        set(PRIMAL_ZLIB_ORIGIN "local-dir")
+    else()
+        set(PRIMAL_ZLIB_ORIGIN "git-fetch")
+    endif()
+    message(STATUS "Primal: zlib 1.3.1 static (source: ${PRIMAL_ZLIB_ORIGIN}, commit ${PRIMAL_ZLIB_GIT_SHA}, dir ${zlib_SOURCE_DIR})")
+endif()
 if(NOT EMSCRIPTEN AND BUILD_VTBAKE)
     # 走 astc-encoder 根 CMakeLists(负责声明/翻译 ISA 选项),单 ISA native;
     # 关 WERROR 避免第三方警告在 CI 高版本编译器下变 fatal

@@ -2901,11 +2901,12 @@ void TestVulkanSponzaRenderGraph::Run() {
             << " source_rebind_completion=not_observed" << std::endl;
     }
     if(const char* audit=std::getenv("DDGI_FAR_UPDATE_AUDIT"); audit && std::strcmp(audit,"1")==0) {
-        const auto* near=pipeline_->GetDDGIVolume(0); const auto* far=pipeline_->GetDDGIVolume(1);
+        // R4: 局部变量避开 near/far 名字（Windows rpcndr.h 空宏）。
+        const auto* nearVol=pipeline_->GetDDGIVolume(0); const auto* farVol=pipeline_->GetDDGIVolume(1);
         PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_FAR_FRAME] native_frame=" << frameCount_
-            << " near_count=" << (near?near->GetLastUpdateCount():0)
-            << " far_count=" << (far?far->GetLastUpdateCount():0)
-            << " far_policy=" << (far&&far->UsesFarUpdatePolicy()) << std::endl;
+            << " near_count=" << (nearVol?nearVol->GetLastUpdateCount():0)
+            << " far_count=" << (farVol?farVol->GetLastUpdateCount():0)
+            << " far_policy=" << (farVol&&farVol->UsesFarUpdatePolicy()) << std::endl;
     }
     const double renderMs = timingEnabled ? std::chrono::duration<double,std::milli>(FrameClock::now()-renderStart).count() : 0.0;
     if(frameCount_==119 || frameCount_==239) {
@@ -2997,14 +2998,14 @@ void TestVulkanSponzaRenderGraph::Run() {
     if(auto* gather=pipeline_->GetGIGatherModule()) {
         const char* audit=std::getenv("DDGI_BOUNDS_FIRST_AUDIT");
         if(boundsInterleaved || ((frameCount_==119||frameCount_==239)&&audit&&std::strcmp(audit,"1")==0)) {
-            const auto* near=pipeline_->GetDDGIPass();const auto* far=pipeline_->GetDDGIVolume(1);
+            const auto* nearPass=pipeline_->GetDDGIPass();const auto* farVol=pipeline_->GetDDGIVolume(1);
             const auto* sc=pipeline_->GetSurfaceCachePass();
             const auto witness=sc?sc->GetGeometryWitnessView(frameIdx):lumen::SurfaceCachePass::GeometryWitnessView{};
             std::cout << (boundsInterleaved?"[DDGI_BOUNDS_FIRST_BENCH] frame=":"[DDGI_BOUNDS_FIRST_AUDIT] frame=") << frameCount_ << " block=" << boundsBlock << " offset=" << boundsOffset
                 << " requested_bounds=" << gather->IsGeometryBoundsFirstRequested() << " active_bounds=" << gather->WasGeometryBoundsFirstUsed() << " actual_bounds=" << gather->WasGeometryBoundsFirstUsed()
                 << " active_kernel=" << gather->WasGeometryQueryKernelUsed() << " active_upper=" << gather->WasUpperBVHUsed()
-                << " near_count=" << (near?near->GetLastUpdateCount():0) << " far_count=" << (far?far->GetLastUpdateCount():0)
-                << " near_rays=" << (near?near->GetVolumeData().RaysPerProbe:0) << " far_rays=" << (far?far->GetVolumeData().RaysPerProbe:0)
+                << " near_count=" << (nearPass?nearPass->GetLastUpdateCount():0) << " far_count=" << (farVol?farVol->GetLastUpdateCount():0)
+                << " near_rays=" << (nearPass?nearPass->GetVolumeData().RaysPerProbe:0) << " far_rays=" << (farVol?farVol->GetVolumeData().RaysPerProbe:0)
                 << " slot=" << witness.slot << " scene_epoch=" << witness.scene_epoch << " source_digest=" << witness.source_digest
                 << " shader_fnv1a64=" << gather->GeometryBoundsFirstActiveShaderHash() << " interval_ms=" << intervalMs << std::endl;
             if(boundsInterleaved && frameCount_>=120 && (gather->WasGeometryBoundsFirstUsed()!=(boundsMode!=0) || !gather->WasGeometryQueryKernelUsed() || gather->WasUpperBVHUsed())) {
@@ -5566,7 +5567,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                             const float* p = data + (u64(x) + u64(y) * cx + u64(z) * cx * cy) * 128u;
                             float dmin = 1e30f, dmax = 0.0f;
                             double dsum = 0.0, vsum = 0.0;
-                            u32 open = 0, near = 0, invalid = 0;
+                            u32 open = 0, nearCount = 0, invalid = 0;
                             for (u32 t = 0; t < 64; ++t) {
                                 const float d = p[t], v = p[64 + t];
                                 if (!std::isfinite(d) || !std::isfinite(v) || d < 0 || v < 0) ++invalid;
@@ -5574,12 +5575,12 @@ void TestVulkanSponzaRenderGraph::Run() {
                                 dmax = std::max(dmax, d);
                                 dsum += d; vsum += v;
                                 if (d >= pass->GetParams().ray_max_distance * 0.9f) ++open;
-                                if (d < vol.spacing) ++near;
+                                if (d < vol.spacing) ++nearCount;
                             }
                             fprintf(out, "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f,%u,%u,%u\n",
                                     vol.origin.x + x * vol.spacing, vol.origin.y + y * vol.spacing,
                                     vol.origin.z + z * vol.spacing, dmin, float(dsum / 64.0),
-                                    dmax, float(vsum / 64.0), open, near, invalid);
+                                    dmax, float(vsum / 64.0), open, nearCount, invalid);
                         }
                         fclose(out);
                         std::cerr << "[DDGI_DUMP] wrote /tmp/ddgi_depth_moments.csv" << std::endl;

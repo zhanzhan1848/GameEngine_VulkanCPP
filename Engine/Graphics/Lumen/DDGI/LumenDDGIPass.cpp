@@ -3431,7 +3431,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             auto* cpuHistory=cpu_stall_audit::NewHistory();
             if(cpuHistory) {cpu_stall_audit::VolumeName(*cpuHistory,rg_name_prefix_.empty()?"Near":rg_name_prefix_.c_str());
                 cpuHistory->probe_count=probeCountTotal;cpuHistory->volume_frame=camera_data.frame_index;cpuHistory->slot=frameIdx;cpuHistory->first=isFirstFrame;
-                cpuHistory->far=farPolicy;cpuHistory->copies=depth_ring_copies_;cpuHistory->rays=params_.rays_per_probe;
+                cpuHistory->far_policy=farPolicy;cpuHistory->copies=depth_ring_copies_;cpuHistory->rays=params_.rays_per_probe;
                 cpuHistory->variance_fenced=varianceFenced;cpuHistory->variance_confirmed=variance_cpu_confirmed_;cpuHistory->variance_skip=5;
                 cpuHistory->mode=volume_data_.RaySampleMode;cpuHistory->budget=max_probes_per_frame_;cpuHistory->gi_frame=camera_data.gi_frame_index;
                 cpuHistory->delta_bits=std::bit_cast<u32>(camera_data.delta_time);cpuHistory->volume_uploaded=volumeUploaded;

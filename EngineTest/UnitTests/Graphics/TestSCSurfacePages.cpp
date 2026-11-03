@@ -16,11 +16,19 @@
 #include <filesystem>
 #include <iostream>
 #include <cstring>
+// R4: unistd.h 不存在于 MSVC——getpid 仅用于临时文件名防撞，走可移植 shim
+// （Windows 的 process.h 提供 _getpid，语义相同）。
+#if defined(_WIN32)
+#include <process.h>
+static unsigned sc_test_pid() { return static_cast<unsigned>(_getpid()); }
+#else
 #include <unistd.h>
+static unsigned sc_test_pid() { return static_cast<unsigned>(getpid()); }
+#endif
 using namespace primal::graphics::lumen;
 namespace ray_geometry = primal::graphics::ray_geometry;
 int main() {
-    const auto path = std::filesystem::temp_directory_path() / ("sc-pages-" + std::to_string(getpid()) + ".scsurf");
+    const auto path = std::filesystem::temp_directory_path() / ("sc-pages-" + std::to_string(sc_test_pid()) + ".scsurf");
     ScsHeaderRT h{};
     h.magic = SurfaceStaticPages::kScsMagic; h.version = 4; h.header_bytes = sizeof(h);
     h.capture_near=.05f; h.capture_far_scale=1.f; h.capture_far_bias=.5f;

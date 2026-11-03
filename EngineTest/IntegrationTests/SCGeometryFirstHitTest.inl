@@ -7,8 +7,9 @@ static bool RunSCGeometryFirstHitTest(RHIDeviceBase* device) {
     mesh.index_buffer.resize(sizeof(indices));std::memcpy(mesh.index_buffer.data(),indices,sizeof(indices));
     auto blas=BuildMeshBLAS(mesh);if(!blas) return false;
     auto matrix=[](float x,float y,float z){math::m4x4 m{};m.columns[0]={x,0,0,0};m.columns[1]={0,y,0,0};m.columns[2]={0,0,z,0};m.columns[3]={0,0,0,1};return m;};
-    auto far=matrix(1,1,1),near=matrix(-2,3,.25),rotated=matrix(1,1,1);
-    far.columns[3].z=5;near.columns[3].z=2;
+    // R4: 局部变量避开 near/far 名字（Windows rpcndr.h 空宏）。
+    auto farMat=matrix(1,1,1),nearMat=matrix(-2,3,.25),rotated=matrix(1,1,1);
+    farMat.columns[3].z=5;nearMat.columns[3].z=2;
     rotated.columns[0]={0,0,-2,0};rotated.columns[1]={.3f,3,0,0};rotated.columns[2]={.25f,0,0,0};rotated.columns[3]={4,0,0,1};
     // Captured Sponza ray/skinny triangle whose old GPU triple-product t
     // differed from the independent float64 oracle by 2.9458e-5 m.
@@ -22,7 +23,7 @@ static bool RunSCGeometryFirstHitTest(RHIDeviceBase* device) {
         bounds.hi[k]=std::max({a[k],a[k]+e1[k],a[k]+e2[k]});}
     triangle.a[3]=std::bit_cast<float>(6869u);bounds.links[3]=1;
     skinny->triangles.push_back(triangle);skinny->nodes.push_back(bounds);
-    const InstanceInput inputs[]={{blas,far,10},{blas,near,22},{blas,rotated,7},{skinny,matrix(1,1,1),391}};
+    const InstanceInput inputs[]={{blas,farMat,10},{blas,nearMat,22},{blas,rotated,7},{skinny,matrix(1,1,1),391}};
     SceneBVH scene;if(!scene.Build(inputs))return false;
     const float queries[][8]={
         {0,0,0,.05f,0,0,1,50}, {0,0,0,3,0,0,1,50}, {0,0,0,.05f,0,0,1,1},

@@ -111,6 +111,11 @@ set_target_properties(TestLightmapBaking PROPERTIES
 # M1-a MLX 后端对拍门禁：shim 缺失 SKIP，库存在而对拍失败 FAIL。
 # 依赖 Tools/NeuralMLXShim 的构建产物（dylib + mlx.metallib），见
 # scripts/build_neural_mlx_metallib.sh 与 Docs/2026-09-15-neural-mlx-backend-plan.md。
+# R4（Windows 四测）：测试本体直接 dlopen libNeuralMLXShim.dylib（dlfcn.h +
+# Swift/MLX shim 均 macOS 专属）→ APPLE-only 门控，非 Apple 平台不编不注册。
+# 与 R3-2 的后端 stub 降级语义一致：Windows 的 NeuralMLXBackend 编 stub
+# （Initialize 恒 false），本对拍门禁在那边本就无意义。
+if(APPLE)
 add_executable(TestNeuralMLXShim
     Neural/TestNeuralMLXShim.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/Neural/NeuralWeights.cpp
@@ -123,6 +128,7 @@ add_test(NAME TestNeuralMLXShim COMMAND TestNeuralMLXShim
 set_target_properties(TestNeuralMLXShim PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
+endif()
 
 # R2.1 神经帧生成机制门禁：shim 缺失 SKIP，插值机制失败 FAIL。
 add_executable(TestNeuralFrameGen
@@ -1091,11 +1097,18 @@ if(BUILD_VTBAKE)
         ${CMAKE_SOURCE_DIR}/third_party/stb
         ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source
     )
-    find_package(ZLIB QUIET)
-    if(ZLIB_FOUND)
-        target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static ZLIB::ZLIB)
+    # R4：Windows 无系统 zlib——优先根 CMakeLists WIN32 段 FetchContent 的
+    # zlibstatic（ALIAS primal_zlib_static），否则保持原 find_package(QUIET)+z
+    # 回退（macOS/Linux 逐字不变）。
+    if(WIN32 AND TARGET primal_zlib_static)
+        target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static primal_zlib_static)
     else()
-        target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static z)
+        find_package(ZLIB QUIET)
+        if(ZLIB_FOUND)
+            target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static ZLIB::ZLIB)
+        else()
+            target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static z)
+        endif()
     endif()
     add_test(NAME TestVTEXContainer COMMAND TestVTEXContainer)
     set_target_properties(TestVTEXContainer PROPERTIES
@@ -1117,11 +1130,17 @@ if(BUILD_VTBAKE AND ENABLE_VULKAN)
         ${CMAKE_SOURCE_DIR}/third_party/stb
         ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source
     )
-    find_package(ZLIB QUIET)
-    if(ZLIB_FOUND)
-        target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static ZLIB::ZLIB)
+    # R4/R5：同上 TestVTEXContainer——Windows 走 FetchContent zlibstatic
+    # （ALIAS primal_zlib_static），其余平台原样。
+    if(WIN32 AND TARGET primal_zlib_static)
+        target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static primal_zlib_static)
     else()
-        target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static z)
+        find_package(ZLIB QUIET)
+        if(ZLIB_FOUND)
+            target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static ZLIB::ZLIB)
+        else()
+            target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static z)
+        endif()
     endif()
     target_compile_definitions(TestVTSVTRuntime PRIVATE ENABLE_VULKAN=1)
     add_test(NAME TestVTSVTRuntime COMMAND TestVTSVTRuntime)

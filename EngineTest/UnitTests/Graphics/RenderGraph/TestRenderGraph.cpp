@@ -1,6 +1,7 @@
 #include "../../TestFramework.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
+#include "EngineTest/Utils/TestEnv.h"   // R4: portable setenv/unsetenv (MSVC lacks POSIX ones)
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
@@ -361,7 +362,7 @@ Engine::Test::TestResult TestTimestampPolicy() {
     const char* old=std::getenv("PRIMAL_RG_TIMESTAMPS");const bool hadOld=old!=nullptr;const std::string oldValue=old?old:"";
     bool passed=true;
     for(const char* value:{static_cast<const char*>(nullptr),"1","0","00","false",""}) {
-        if(value)setenv("PRIMAL_RG_TIMESTAMPS",value,1);else unsetenv("PRIMAL_RG_TIMESTAMPS");
+        if(value)primaltest::SetEnv("PRIMAL_RG_TIMESTAMPS",value);else primaltest::UnsetEnv("PRIMAL_RG_TIMESTAMPS");
         const bool expected=!(value&&std::strcmp(value,"0")==0);
         MockRHIDevice device;device.timestampsAvailable=true;MockRHICommandBuffer cmd(device);
         {
@@ -382,7 +383,7 @@ Engine::Test::TestResult TestTimestampPolicy() {
         }
         passed=passed&&(device.queryCreates==device.queryDestroys);
     }
-    if(hadOld)setenv("PRIMAL_RG_TIMESTAMPS",oldValue.c_str(),1);else unsetenv("PRIMAL_RG_TIMESTAMPS");
+    if(hadOld)primaltest::SetEnv("PRIMAL_RG_TIMESTAMPS",oldValue.c_str());else primaltest::UnsetEnv("PRIMAL_RG_TIMESTAMPS");
     return passed?Engine::Test::TestResult::Passed:Engine::Test::TestResult::Failed;
 }
 

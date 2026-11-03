@@ -25,16 +25,20 @@ bool Run(const ProcessableMesh& m, const Params& params,
     out.meshlet_triangles.clear();
 
     if (m.positions.empty() || m.indices.empty()) {
-        errors.emplace_back(ErrorReport{
+        // R4: 命名局部 + push_back(std::move(...))——聚合临时经 emplace_back
+        // 进 vector 的拷贝实例化（xutility std::copy）在 MSVC 触发 C1001 ICE。
+        ErrorReport report{
             Severity::Warning, "meshlet.empty_input",
-            "meshlet: empty input mesh, skipping", "meshlet"});
+            "meshlet: empty input mesh, skipping", "meshlet"};
+        errors.push_back(std::move(report));
         return false;
     }
     if (params.max_vertices < 3u || params.max_triangles == 0u) {
-        errors.emplace_back(ErrorReport{
+        ErrorReport report{
             Severity::Error, "meshlet.invalid_caps",
             "meshlet: max_vertices must be >= 3 and max_triangles >= 1",
-            "meshlet"});
+            "meshlet"};
+        errors.push_back(std::move(report));
         return false;
     }
 
@@ -50,9 +54,10 @@ bool Run(const ProcessableMesh& m, const Params& params,
     const size_t max_meshlets = meshopt_buildMeshletsBound(
         indices.size(), params.max_vertices, params.max_triangles);
     if (max_meshlets == 0) {
-        errors.emplace_back(ErrorReport{
+        ErrorReport report{
             Severity::Error, "meshlet.zero_bound",
-            "meshlet: meshopt_buildMeshletsBound returned 0", "meshlet"});
+            "meshlet: meshopt_buildMeshletsBound returned 0", "meshlet"};
+        errors.push_back(std::move(report));
         return false;
     }
 
@@ -68,10 +73,11 @@ bool Run(const ProcessableMesh& m, const Params& params,
         params.max_vertices, params.max_triangles,
         params.cone_weight);
     if (meshlet_count == 0) {
-        errors.emplace_back(ErrorReport{
+        ErrorReport report{
             Severity::Error, "meshlet.build_failed",
             "meshlet: meshopt_buildMeshlets produced 0 meshlets",
-            "meshlet"});
+            "meshlet"};
+        errors.push_back(std::move(report));
         return false;
     }
 
@@ -115,11 +121,14 @@ bool Run(const ProcessableMesh& m, const Params& params,
         out.meshlets.emplace_back(out_ml);
     }
 
-    errors.emplace_back(ErrorReport{
+    // R4 C1001 ICE 主触发点（用户日志 Meshlet.cpp(113)）：聚合临时内的
+    // 字符串拼接 + emplace_back 拷贝路径 → 改命名局部逐字段构造再 move。
+    ErrorReport ok_report{
         Severity::Info, "meshlet.ok",
         "meshlet: built " + std::to_string(meshlet_count) +
         " meshlets (" + std::to_string(v_end) + " vert refs, " +
-        std::to_string(t_end) + " triangle bytes)", "meshlet"});
+        std::to_string(t_end) + " triangle bytes)", "meshlet"};
+    errors.push_back(std::move(ok_report));
     return true;
 }
 

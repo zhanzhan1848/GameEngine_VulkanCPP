@@ -2696,7 +2696,7 @@ void TestVulkanDLSSRenderGraph::Run() {
                             const float* p = data + (u64(x) + u64(y) * cx + u64(z) * cx * cy) * 128u;
                             float dmin = 1e30f, dmax = 0.0f;
                             double dsum = 0.0, vsum = 0.0;
-                            u32 open = 0, near = 0, invalid = 0;
+                            u32 open = 0, nearCount = 0, invalid = 0;
                             for (u32 t = 0; t < 64; ++t) {
                                 const float d = p[t], v = p[64 + t];
                                 if (!std::isfinite(d) || !std::isfinite(v) || d < 0 || v < 0) ++invalid;
@@ -2704,12 +2704,12 @@ void TestVulkanDLSSRenderGraph::Run() {
                                 dmax = std::max(dmax, d);
                                 dsum += d; vsum += v;
                                 if (d >= pass->GetParams().ray_max_distance * 0.9f) ++open;
-                                if (d < vol.spacing) ++near;
+                                if (d < vol.spacing) ++nearCount;
                             }
                             fprintf(out, "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,%.4f,%u,%u,%u\n",
                                     vol.origin.x + x * vol.spacing, vol.origin.y + y * vol.spacing,
                                     vol.origin.z + z * vol.spacing, dmin, float(dsum / 64.0),
-                                    dmax, float(vsum / 64.0), open, near, invalid);
+                                    dmax, float(vsum / 64.0), open, nearCount, invalid);
                         }
                         fclose(out);
                         std::cerr << "[DDGI_DUMP] wrote /tmp/ddgi_depth_moments.csv" << std::endl;

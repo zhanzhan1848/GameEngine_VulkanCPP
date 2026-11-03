@@ -1,6 +1,8 @@
 #pragma once
 #include "Graphics/RHI/Core/FrameSlotCompletion.h"
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstdint>
 namespace primal::graphics::rhi::pass_timestamp {
 inline bool FiniteDouble(double value){volatile uint64_t bits=std::bit_cast<uint64_t>(value);return (bits&0x7ff0000000000000ull)!=0x7ff0000000000000ull;}
