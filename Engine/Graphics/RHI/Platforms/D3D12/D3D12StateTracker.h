@@ -17,10 +17,13 @@
  *               写类目标（RT/DS/CopyDest/UAV/ResolveDest...）必须显式
  *               transition。simultaneous-access 纹理的"提升到任意状态"
  *               扩展需要 Windows 层的创建 flag，M0 留 TODO。
- *            ③ 提交边界衰减（decay）：ExecuteCommandLists 完成后
- *               buffer 全部衰减回 COMMON；纹理仅当状态来自提升（而非显式
- *               transition）时衰减。OnSubmitBoundary() 返回需衰减的集合
- *               并更新内部状态；初版 decayOnSubmit 开关（默认开）。
+ *            ③ 提交边界衰减（decay）（R17-A 修正）：ExecuteCommandLists
+ *               完成后仅 buffer 全部衰减回 COMMON；纹理一律不衰减——D3D12
+ *               的 DEFAULT-heap 非 simultaneous 纹理（本引擎唯一纹理形态）
+ *               状态含提升态均跨提交持久，M0 初版"纹理提升态衰减"与 GPU
+ *               真实语义相反，是 barrier StateBefore 失配（#538 家族）的
+ *               tracker/GPU 分歧源（runbook §26-A）。OnSubmitBoundary()
+ *               返回衰减集合并更新内部状态；decayOnSubmit 开关（默认开）。
  *            ④ 同状态 UnorderedAccess -> UnorderedAccess（compute->compute
  *               WAW）必发 UAV barrier（不改变状态）。
  *            ⑤ 相同状态的 transition 请求（除 ④ 的 UAV 特例）不产出 op。

@@ -774,12 +774,51 @@ void D3D12CommandBufferImpl::CopyTextureToBuffer(ResourceHandle srcTexture,
     if (!tex || !buf) return;
     UpdateStats(CommandType::CopyTextureToBuffer);
 
-    // 源 → COPY_SOURCE；读回后收敛回 ShaderResource（对齐 Vulkan P0-B 收尾）。
-    TransitionTexture(tex, srcTexture, ResourceState::CopySource,
-                      kD3D12ResourceBarrierAllSubresources);
-
+    // R17-A：pre/post 状态转换按 region 的线性子资源索引作用域化，post
+    // 回置各子资源的"读前态"（不再无条件整资源收敛 ShaderResource）。
+    // 原实现（ALL 键 pre→COPY_SOURCE / post→ShaderResource）是 Windows
+    // 十六测 M1 #538 的 tracker/GPU 分歧源（macOS 探针 P3/P4 实证）：
+    //   ① ALL 键 pre 把未被本次拷贝读取的子资源在 tracker 里零 barrier
+    //      "提升"成 COPY_SOURCE——GPU 只在使用点提升实际被读的子资源，
+    //      未读的仍 COMMON；post 的显式 COPY_SOURCE→SRV barrier 于是对
+    //      GPU 实际 COMMON 的子资源携带错误 StateBefore（barrier 拒绝/
+    //      tracker 与 GPU 各执一词）。
+    //   ② 无条件回置 ShaderResource 破坏 RT/DS/UAV 纹理的既有态（调用方
+    //      自管收尾 barrier 时与本函数内部转换打架——M1 帧尾读回的宿主
+    //      RT→CS / CS→RT 三明治即该形态）。
+    // 修法 = tracker 驱动的显式转换（任务核心原则）：pre 逐子资源
+    // →COPY_SOURCE（tracker 记录态≠所需态即发显式 barrier，含
+    // COPY_DEST→COPY_SOURCE / SRV→COPY_SOURCE 任意合法对）；post 逐子
+    // 资源回置 QueryState 存下的读前态（未注册/查询失败回退 SRV 兼容
+    // 旧尾态语义）。
     const D3D12_RESOURCE_DESC texDesc = tex->GetNativeDesc();
     const u64 texelBytes = tex->BytesPerTexel();
+
+    utl::vector<u32> subs;              // 去重后的 region 线性子资源（录制序）
+    utl::vector<ResourceState> prev;    // 对应读前态（post 回置目标）
+    for (u32 i = 0; i < regionCount; ++i) {
+        const u32 sub = regions[i].imageSubresource.mipLevel
+                        + texDesc.MipLevels * regions[i].imageSubresource.baseArrayLayer;
+        bool dup = false;
+        for (u32 j = 0; j < subs.size(); ++j) dup = dup || (subs[j] == sub);
+        if (dup) continue;
+        subs.push_back(sub);
+        ResourceState pre = ResourceState::ShaderResource;  // 查询失败回退（旧尾态）
+        D3D12SubresourceKey key{};
+        key.resource = srcTexture;
+        key.subresource = sub;
+        key.isTexture = true;
+        // 注意 QueryState 在 bits 不可映射时会先覆写 out=Unknown 再返回
+        // false——查询后仍需兜底（Unknown 不可作 Transition 目标）。
+        if (!dev.GetStateTracker().QueryState(key, pre) || pre == ResourceState::Unknown) {
+            pre = ResourceState::ShaderResource;
+        }
+        prev.push_back(pre);
+    }
+    for (u32 j = 0; j < subs.size(); ++j) {
+        TransitionTexture(tex, srcTexture, ResourceState::CopySource, subs[j]);
+    }
+
     for (u32 i = 0; i < regionCount; ++i) {
         const BufferTextureCopyRegion& r = regions[i];
         const UINT srcRowTexels = r.bufferRowLength ? r.bufferRowLength
@@ -805,8 +844,10 @@ void D3D12CommandBufferImpl::CopyTextureToBuffer(ResourceHandle srcTexture,
         commandList_->CopyTextureRegion(&srcLoc, r.imageOffset.x, r.imageOffset.y,
                                         r.imageOffset.z, &dstLoc, nullptr);
     }
-    TransitionTexture(tex, srcTexture, ResourceState::ShaderResource,
-                      kD3D12ResourceBarrierAllSubresources);
+
+    for (u32 j = 0; j < subs.size(); ++j) {
+        TransitionTexture(tex, srcTexture, prev[j], subs[j]);
+    }
 }
 
 void D3D12CommandBufferImpl::BlitTexture(ResourceHandle src, ResourceHandle dst,

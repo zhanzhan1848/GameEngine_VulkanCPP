@@ -343,6 +343,12 @@ void D3D12UploadRing::FlushBlocking() {
     }
     pool.lastUseTarget = target;
     fence.Wait(target, 10000);
+    // R17-A：本函数自带一次独立 ExecuteCommandLists 提交——D3D12 的 buffer
+    // 衰减发生在每个 ECL 完成边界，tracker 建模须在此同步推进（此前仅设备
+    // submitImpl/endFrameImpl 两处调用，环的阻塞 flush 提交被漏掉：经环更新
+    // 过的 buffer 在 tracker 里滞留提升态，后续显式转换的 StateBefore 与
+    // GPU 已衰减的 COMMON 失配——与设备路径同一分歧族，runbook §26-A）。
+    (void)device_->GetStateTracker().OnSubmitBoundary();
 }
 
 } // namespace primal::graphics::rhi::d3d12

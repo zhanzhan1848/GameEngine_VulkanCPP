@@ -179,14 +179,22 @@ bool D3D12StateTracker::QueryState(const D3D12SubresourceKey& key,
 utl::vector<D3D12DecayRecord> D3D12StateTracker::OnSubmitBoundary() {
     utl::vector<D3D12DecayRecord> decayed;
     if (!config_.decayOnSubmit) return decayed;
-    // 规则 ③：buffer 全部衰减；纹理仅提升态衰减。按注册序 + 子资源升序。
+    // 规则 ③（R17-A 修正）：仅 buffer 衰减；纹理一律不衰减。按注册序 +
+    // 子资源升序。D3D12 提交边界（ExecuteCommandLists 完成）的真实衰减面 =
+    // buffer（全部）+ UPLOAD/READBACK heap 资源 + simultaneous-access 纹理；
+    // 本引擎纹理恒为 DEFAULT-heap committed 且不带 ALLOW_SIMULTANEOUS_ACCESS
+    //（D3D12Texture::Initialize），其状态——含从 COMMON 隐式提升出的读类态
+    //——在 GPU 侧跨提交持久。M0 初版"纹理提升态衰减"把 tracker 拉回 COMMON
+    // 而 GPU 保留提升态：此后任何转换 barrier 的 StateBefore=COMMON 与 GPU
+    // 实际不符（debug-layer 拒绝→资源停留旧态，下一次 CopyTextureRegion
+    // 即 #538 INVALID_SUBRESOURCE_STATE——Windows 十六测 M1 的 tracker/GPU
+    // 分歧源之一，macOS 探针 P5 实证；runbook §26-A）。simultaneous-access
+    // 纹理接入时需按资源 flag 恢复条件衰减（TODO M4+ 多队列/共享纹理）。
     for (auto& [id, entry] : entries_) {
-        const bool alwaysDecay = !entry.isTexture;
+        if (entry.isTexture) continue;  // R17-A：纹理不衰减（GPU 真实语义）
         for (u32 s = 0; s < entry.subresourceCount; ++s) {
             SubEntry& sub = entry.subresources[s];
             if (sub.stateBits == kD3D12ResourceState_Common) continue;
-            const bool decays = alwaysDecay || sub.promoted;
-            if (!decays) continue;
             D3D12DecayRecord rec;
             rec.resource = id;
             rec.subresource = s;
