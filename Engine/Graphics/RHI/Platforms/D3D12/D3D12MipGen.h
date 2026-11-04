@@ -5,10 +5,10 @@
 // 形态：一个根签名（SRV t0 描述符表 + 静态线性采样器 s0——不占 sampler
 // 堆槽位）+ 按 RTV 格式惰性创建的图形 PSO 缓存（PSO 的 RTVFormats[0]
 // 必须与目标纹理格式一致，格式数有限，逐格式缓存）。shader 字节来自
-// 构建期生成的嵌入头 D3D12MipGenShaders.h（MipGen.hlsl → dxc/fxc → cso
-// → 字节数组，见 Engine/CMakeLists.txt 编译块）；编译器缺失时嵌入为空
-// → HasShaderBytes()=false，GenerateMipmaps 维持 NOT-IMPLEMENTED Error
-// 日志（显式降级）。
+// checked-in 静态嵌入头 D3D12MipGenShaders.h（MipGen.hlsl 离线 dxc
+// 预编译 → cso → 字节数组，scripts/build_d3d12_mipgen.py 重生成——
+// R14-2 起构建期零 HLSL 编译器依赖，Windows 0x80070459 根治）；
+// HasShaderBytes() 仅防御性检查（静态头正常恒有字节）。
 //
 // 线程模型：设备单线程使用（与 D3D12Device 其余子系统一致），无锁。
 #pragma once
@@ -33,7 +33,7 @@ public:
     bool Initialize(ID3D12Device* device);
     void Shutdown();
 
-    /// 嵌入 shader 字节可用性（构建期无 dxc/fxc → false）。
+    /// 嵌入 shader 字节可用性（checked-in 静态头恒有字节；防御性检查）。
     bool HasShaderBytes() const;
 
     /// 该 RTV 格式的 PSO（惰性创建 + 缓存）。失败（含字节缺失）=nullptr。

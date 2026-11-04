@@ -250,100 +250,17 @@ if(WIN32 AND ENABLE_D3D12)
     message(STATUS "D3D12 RHI backend enabled (Engine/Graphics/RHI/Platforms/D3D12, Agility SDK ${PRIMAL_D3D12_AGILITY_VERSION}, D3D12MemAlloc v3.0.1)")
 
     # ------------------------------------------------------------------
-    # R13/T2: GenerateMipmaps 像素下采样 shader（MipGen.hlsl → .cso → 嵌入头）。
-    # 后端无文件路径上下文（M7 F7-3 结论），字节走生成头 D3D12MipGenShaders.h
-    # 编入 D3D12MipGen.cpp。
-    # 编译器探针（最轻方案——环境优先、缺失显式降级，风格对齐 R5 zlib 的
-    # PRIMAL_ZLIB_SOURCE_DIR 本地覆盖而非 FetchContent 拉编译器）：
-    #   1) Windows SDK dxc.exe（VS2022 自带）：$ENV{WindowsSdkDir}bin\<ver>\x64\
-    #      与默认安装根 C:/Program Files (x86)/Windows Kits/10/bin/ 逐版本
-    #      glob，字典序最高版本优先；
-    #   2) find_program(dxc)（VS 开发者命令行 PATH 命中）；
-    #   3) 同位置 fxc.exe 兜底（D3DCompiler；MipGen.hlsl 只用 SM5.0 基础
-    #      特性，vs_5_0/ps_5_0 可编——探针双通道保证普通 cmd 也能编）。
-    # 全部未命中 → configure 期即生成哨兵嵌入头（零字节 + STATUS 说明）：
-    # 构建保持绿，运行期 GenerateMipmaps 维持 NOT-IMPLEMENTED Error 日志
-    #（显式降级，不静默；与 R5 zlib FATAL_ERROR 不同——缺编译器不阻断
-    # 其余 D3D12 修复面的编译验证）。
-    set(_mipgen_src "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/Shaders/MipGen.hlsl")
-    set(_mipgen_bindir "${CMAKE_CURRENT_BINARY_DIR}/D3D12MipGen")
-    set(_mipgen_vs_cso "${_mipgen_bindir}/MipGen.vs.cso")
-    set(_mipgen_ps_cso "${_mipgen_bindir}/MipGen.ps.cso")
-    set(PRIMAL_D3D12_MIPGEN_HEADER "${_mipgen_bindir}/D3D12MipGenShaders.h")
-
-    set(_hlsl_tool "")
-    set(_hlsl_kind "")  # dxc | fxc
-    file(GLOB _sdk_bin_dirs LIST_DIRECTORIES true
-        "$ENV{WindowsSdkDir}bin/*"
-        "C:/Program Files (x86)/Windows Kits/10/bin/*")
-    if(_sdk_bin_dirs)
-        list(REMOVE_DUPLICATES _sdk_bin_dirs)
-        list(SORT _sdk_bin_dirs)
-        list(REVERSE _sdk_bin_dirs)  # 字典序最高 SDK 版本优先
-    endif()
-    foreach(_tool_kind dxc fxc)
-        if(_hlsl_tool)
-            break()
-        endif()
-        foreach(_d IN LISTS _sdk_bin_dirs)
-            if(EXISTS "${_d}/x64/${_tool_kind}.exe")
-                set(_hlsl_tool "${_d}/x64/${_tool_kind}.exe")
-                set(_hlsl_kind "${_tool_kind}")
-                break()
-            endif()
-        endforeach()
-        if(NOT _hlsl_tool)
-            find_program(_hlsl_tool_found ${_tool_kind})
-            if(_hlsl_tool_found)
-                set(_hlsl_tool "${_hlsl_tool_found}")
-                set(_hlsl_kind "${_tool_kind}")
-            endif()
-        endif()
-    endforeach()
-
-    if(_hlsl_tool)
-        if(_hlsl_kind STREQUAL "dxc")
-            set(_vs_args -T vs_6_0 -E MipGenVS -Fo "${_mipgen_vs_cso}" "${_mipgen_src}")
-            set(_ps_args -T ps_6_0 -E MipGenPS -Fo "${_mipgen_ps_cso}" "${_mipgen_src}")
-        else()
-            set(_vs_args /T vs_5_0 /E MipGenVS /Fo "${_mipgen_vs_cso}" "${_mipgen_src}")
-            set(_ps_args /T ps_5_0 /E MipGenPS /Fo "${_mipgen_ps_cso}" "${_mipgen_src}")
-        endif()
-        add_custom_command(
-            OUTPUT "${_mipgen_vs_cso}"
-            COMMAND "${_hlsl_tool}" ${_vs_args}
-            DEPENDS "${_mipgen_src}"
-            COMMENT "D3D12 MipGen: compiling MipGenVS (${_hlsl_kind})"
-            VERBATIM)
-        add_custom_command(
-            OUTPUT "${_mipgen_ps_cso}"
-            COMMAND "${_hlsl_tool}" ${_ps_args}
-            DEPENDS "${_mipgen_src}"
-            COMMENT "D3D12 MipGen: compiling MipGenPS (${_hlsl_kind})"
-            VERBATIM)
-        add_custom_command(
-            OUTPUT "${PRIMAL_D3D12_MIPGEN_HEADER}"
-            COMMAND ${CMAKE_COMMAND}
-                -DVS_BLOB="${_mipgen_vs_cso}" -DPS_BLOB="${_mipgen_ps_cso}"
-                -DOUT="${PRIMAL_D3D12_MIPGEN_HEADER}" -DSRC="${_mipgen_src}"
-                -P "${CMAKE_SOURCE_DIR}/CMake/EmbedD3D12ShaderBlob.cmake"
-            DEPENDS "${_mipgen_vs_cso}" "${_mipgen_ps_cso}"
-                "${CMAKE_SOURCE_DIR}/CMake/EmbedD3D12ShaderBlob.cmake"
-            COMMENT "D3D12 MipGen: embedding shader bytes into D3D12MipGenShaders.h"
-            VERBATIM)
-        # 生成头先于 Engine 任意 TU 编译（跨生成器保险：custom target 依赖，
-        # 而非依赖生成器的 include 扫描）。
-        add_custom_target(D3D12MipGenShaders DEPENDS "${PRIMAL_D3D12_MIPGEN_HEADER}")
-        message(STATUS "D3D12 MipGen: HLSL compiler ${_hlsl_kind} = ${_hlsl_tool}")
-    else()
-        # 哨兵头（configure 期一次；无编译器可跟随源变化重生成无意义）。
-        execute_process(COMMAND ${CMAKE_COMMAND}
-            -DVS_BLOB= -DPS_BLOB=
-            -DOUT="${PRIMAL_D3D12_MIPGEN_HEADER}" -DSRC="${_mipgen_src}"
-            -P "${CMAKE_SOURCE_DIR}/CMake/EmbedD3D12ShaderBlob.cmake")
-        message(STATUS "D3D12 MipGen: no dxc/fxc found — embedded blob empty; "
-            "GenerateMipmaps stays NOT-IMPLEMENTED at runtime (explicit degrade)")
-    endif()
+    # R14-2: GenerateMipmaps 像素下采样 shader 改离线预编译静态嵌入
+    #（方案 B，根治 Windows 构建期 DXC 自定义命令 0x80070459
+    # ERROR_NO_UNICODE_TRANSLATION + MSB8066——R13-A 的 dxc/fxc 构建期
+    # 探针链已整体移除，构建不再依赖任何 HLSL 编译器）。
+    # 字节来自 checked-in 静态头
+    # Graphics/RHI/Platforms/D3D12/D3D12MipGenShaders.h（本目录被上方
+    # GLOB_RECURSE 收入，D3D12MipGen.cpp 同目录 include 即命中，无须
+    # build 树 include 目录与 custom target 接线）。变更 MipGen.hlsl 后
+    # 用 scripts/build_d3d12_mipgen.py 重生成该头（macOS dxc 预编译，
+    # 源 SHA→cso SHA 清单写在头注释里；--check 为 freshness 闸门）。
+    # 选型记录见 Docs/RHI/D3D12_Windows_Integration_Runbook.md §23-2。
 else()
     file(GLOB D3D12_NEUTRAL_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/D3D12Abi.h"
@@ -539,16 +456,9 @@ if(WIN32)
         ${CMAKE_CURRENT_SOURCE_DIR}/Common
         $ENV{VULKAN_SDK}/include
     )
-    # R13/T2：MipGen 生成头（D3D12MipGen.cpp include 之；目录=build 树
-    # D3D12MipGen/，见上方编译块。custom target 保证头先于本目标编译）。
-    if(PRIMAL_D3D12_MIPGEN_HEADER)
-        target_include_directories(${PROJECT_NAME} PRIVATE
-            "${CMAKE_CURRENT_BINARY_DIR}/D3D12MipGen")
-        target_sources(${PROJECT_NAME} PRIVATE "${PRIMAL_D3D12_MIPGEN_HEADER}")
-        if(TARGET D3D12MipGenShaders)
-            add_dependencies(${PROJECT_NAME} D3D12MipGenShaders)
-        endif()
-    endif()
+    # R14-2：MipGen 嵌入头已静态化（源码树同目录 checked-in 文件，上方
+    # GLOB_RECURSE 已收录；R13-A 的 build 树 include/custom target 接线
+    # 随构建期编译块一并移除——见上方 WIN32 块注释与 runbook §23-2）。
 elseif(APPLE AND NOT EMSCRIPTEN)
 
     # 设置LLVM编译器

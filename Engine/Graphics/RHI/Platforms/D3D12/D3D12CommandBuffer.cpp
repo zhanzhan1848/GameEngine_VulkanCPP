@@ -911,8 +911,9 @@ void D3D12CommandBufferImpl::GenerateMipmaps(ResourceHandle texture) {
     if (mipCount <= 1) return;  // Vulkan 版同款 no-op
 
     // 支持面（对齐 Vulkan"仅 2D、full-mipchain"简化）：Texture2D 单 slice +
-    // 格式支持 RTV（CheckFormatSupport 拦截 BC 压缩/深度/TYPELESS——BC 无
-    // RTV 能力，mip 生成保持 NOT-IMPLEMENTED Error 并登记后续）。
+    // 格式支持 RTV（CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT) 拦截
+    // BC 压缩/深度/TYPELESS——BC 无 RTV 能力，mip 生成保持 NOT-IMPLEMENTED
+    // Error 并登记后续）。
     if (td.type != TextureType::Texture2D) {
         PRIMAL_LOG_STREAM(Error, "RHI")
             << "[D3D12CommandBuffer] GenerateMipmaps NOT-IMPLEMENTED for "
@@ -921,10 +922,14 @@ void D3D12CommandBufferImpl::GenerateMipmaps(ResourceHandle texture) {
         return;
     }
     const u32 dxgi = d3d12::ToDxgiFormat(td.format);
-    UINT formatSupport = 0;
-    if (FAILED(dev.GetNativeDevice()->CheckFormatSupport(
-            static_cast<DXGI_FORMAT>(dxgi), &formatSupport))
-        || (formatSupport & D3D12_FORMAT_SUPPORT_RENDER_TARGET) == 0) {
+    // D3D12 无 ID3D12Device::CheckFormatSupport（那是 D3D11 API；R14-1 修
+    // 正 MSVC C2039/C2065）——能力查询走 CheckFeatureSupport +
+    // D3D12_FEATURE_DATA_FORMAT_SUPPORT（Support1 含 RENDER_TARGET 位）。
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT formatSupport{};
+    formatSupport.Format = static_cast<DXGI_FORMAT>(dxgi);
+    if (FAILED(dev.GetNativeDevice()->CheckFeatureSupport(
+            D3D12_FEATURE_FORMAT_SUPPORT, &formatSupport, sizeof(formatSupport)))
+        || (formatSupport.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) == 0) {
         PRIMAL_LOG_STREAM(Error, "RHI")
             << "[D3D12CommandBuffer] GenerateMipmaps NOT-IMPLEMENTED for "
                "format 0x" << std::hex << dxgi << std::dec
@@ -1019,7 +1024,7 @@ void D3D12CommandBufferImpl::GenerateMipmaps(ResourceHandle texture) {
         commandList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
         commandList_->SetGraphicsRootDescriptorTable(
             0, heaps.CbvSrvUavGpuHandle(srvBase + m));
-        commandList_->Draw(3, 0, 1, 0);
+        commandList_->DrawInstanced(3, 1, 0, 0);
 
         TransitionTexture(tex, texture, ResourceState::ShaderResource, m + 1);
     }

@@ -7,7 +7,7 @@
 
 #include <utility>
 
-#include "D3D12MipGenShaders.h"  // 生成头（Engine/CMakeLists.txt 编译块产物）
+#include "D3D12MipGenShaders.h"  // checked-in 静态嵌入头（scripts/build_d3d12_mipgen.py 离线预编译生成，R14-2）
 
 #include "Engine/Common/CoreLogStream.h"
 
