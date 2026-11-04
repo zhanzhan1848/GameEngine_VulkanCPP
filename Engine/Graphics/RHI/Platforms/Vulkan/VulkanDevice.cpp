@@ -35,6 +35,7 @@
 
 #include <iostream>
 #include <vector>
+#include <algorithm>
 #include <cstring>
 #include <set>
 
@@ -193,9 +194,22 @@ bool VulkanDevice::initializeImpl() {
                 VkDescriptorBufferInfo dbi{};
                 dbi.buffer = implicitComputeUBO_;
                 dbi.offset = 0;
-                // range = region 容量:动态偏移(region 基址 + bump)+ range
-                // 恰好不超过 buffer 总量(VUID-01979)
-                dbi.range = kImplicitUBOBytes / 4;
+                // range ≤ maxUniformBufferRange（VUID-VkWriteDescriptorSet-
+                // descriptorType-00332）：桌面 GPU 常为 64KB，region 容量 256KB
+                // 直接作 range 在这些设备上触发验证错误（八测实测 262144 >
+                // 65536，MoltenVK 上限更高所以 macOS 从未暴露）。取 min：
+                // 上限足够的实现（MoltenVK）行为零变化；上限更小的实现按
+                // 设备实际上限收缩——真实单次用量 = SetComputeBytes 的 size
+                // （P4c 验收形态 ≈ maxPushConstants+512=640B，远小于 64KB），
+                // 超限请求由 AllocImplicitComputeUBO 显式拒绝（同 region 耗尽
+                // 的丢弃路径+Error 日志，不静默截断）。动态偏移(region 基址 +
+                // bump) + range 仍恰好不超过 buffer 总量(VUID-01979)。
+                VkPhysicalDeviceProperties pdProps{};
+                vkGetPhysicalDeviceProperties(physicalDevice_, &pdProps);
+                implicitComputeUBORange_ =
+                    std::min<u64>(kImplicitUBOBytes / 4,
+                                  static_cast<u64>(pdProps.limits.maxUniformBufferRange));
+                dbi.range = implicitComputeUBORange_;
                 VkWriteDescriptorSet w{};
                 w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 w.dstSet = implicitComputeDescSet_;
@@ -322,6 +336,10 @@ void VulkanDevice::beginFrameImpl() {
 VulkanDevice::ImplicitUBOAlloc VulkanDevice::AllocImplicitComputeUBO(u32 size) {
     ImplicitUBOAlloc ret{};
     if (implicitComputeUBOMapped_ == nullptr || size == 0) return ret;
+    // VUID-00332 收缩后的 range 上限：单次 payload 超过设备 maxUniformBufferRange
+    // 时无法用 uniform descriptor 表达（走 SSBO 是另一形态，超出本回退的
+    // 设计面）——与 region 耗尽同路拒绝，调用方打 Error 日志。
+    if (implicitComputeUBORange_ == 0 || size > implicitComputeUBORange_) return ret;
 
     // per-frame-region ring:1MB / 4 region = 每 region 256KB 独立地址段
     // (region 间基址隔离 — 跨帧的 SetComputeBytes 数据不会互相覆写;

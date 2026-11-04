@@ -814,34 +814,17 @@ if(ENABLE_D3D12)
             target_compile_definitions(${PROJECT_NAME} PRIVATE
                 PRIMAL_D3D12_AGILITY_RUNTIME=1
             )
-            # 运行时 DLL 暂存（R8 修正契约）：Agility side-load 官方契约 =
-            # 导出 D3D12SDKVersion 的每个 exe 的同目录下必须有 .\D3D12\
-            # 子目录（D3D12Core.dll / d3d12SDKLayers.dll）。七测实测：单测
-            # exe 输出在 <build>/Tests/UnitTests/（UnitTests/CMakeLists L8
-            # 独立设根），此前只暂存 Windows/<Config>/ 一个根 → TestRHIDeviceFactory
-            # 等全部单测 exe 启动即 0xC0000142（STATUS_DLL_INIT_FAILED），
-            # 用户手工补 DLL 才能起进程。目的地枚举 = 全部会链接 Engine
-            # （ENABLE_D3D12 下导出 D3D12SDKVersion）的 exe 输出根：
-            #   ① Windows/<Config>/        —— EngineDLL、primal-engine、集成测试（setup_test_target 三者同根）
-            #   ② <build>/Tests/UnitTests/ —— 全部单测 exe（含 TestRHIDeviceFactory）
-            #   ③ <build>/bin/<Config>/    —— 全局默认输出根（CMakeLists WIN32 分支；预防性覆盖）
-            # 未配置单测的树会多建空 D3D12/ 目录（make_directory 副作用，无害）。
+            # 运行时 DLL 暂存（R9 修正契约）：Agility side-load 官方契约 =
+            # 每个导出 D3D12SDKVersion/D3D12SDKPath 的 exe 同目录下必须有
+            # .\D3D12\ 子目录（D3D12Core.dll / d3d12SDKLayers.dll）。R8 的
+            # 全局三根硬编码在多配置下错位（八测实证：单测 exe 实际输出
+            # <build>/Tests/UnitTests/Release/，暂存却去了 Tests/UnitTests/D3D12
+            # 缺 Release 层；CMAKE_SOURCE_DIR 根还污染源码树）。R9 改为
+            # 逐 exe POST_BUILD 拷到 $<TARGET_FILE_DIR:tgt>/D3D12/（见本文件
+            # 末尾 primal_stage_d3d12_agility 函数与各调用点）。
             if(PRIMAL_D3D12_AGILITY_BIN_DIR)
-                set(PRIMAL_D3D12_AGILITY_STAGING_ROOTS
-                    "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>"
-                    "${CMAKE_BINARY_DIR}/Tests/UnitTests"
-                    "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
-                foreach(PRIMAL_D3D12_AGILITY_ROOT_DIR ${PRIMAL_D3D12_AGILITY_STAGING_ROOTS})
-                    foreach(PRIMAL_D3D12_AGILITY_DLL D3D12Core.dll d3d12SDKLayers.dll)
-                        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-                            COMMAND ${CMAKE_COMMAND} -E make_directory
-                                "${PRIMAL_D3D12_AGILITY_ROOT_DIR}/D3D12"
-                            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                                "${PRIMAL_D3D12_AGILITY_BIN_DIR}/${PRIMAL_D3D12_AGILITY_DLL}"
-                                "${PRIMAL_D3D12_AGILITY_ROOT_DIR}/D3D12/${PRIMAL_D3D12_AGILITY_DLL}"
-                            VERBATIM)
-                    endforeach()
-                endforeach()
+                set(PRIMAL_D3D12_AGILITY_BIN_DIR "${PRIMAL_D3D12_AGILITY_BIN_DIR}"
+                    CACHE INTERNAL "Agility SDK runtime DLL dir (consumed by primal_stage_d3d12_agility)")
             endif()
             message(STATUS "Agility SDK (Microsoft.Direct3D.D3D12) ${PRIMAL_D3D12_AGILITY_VERSION} active: include='${PRIMAL_D3D12_AGILITY_INCLUDE_DIR}' runtime DLLs='${PRIMAL_D3D12_AGILITY_BIN_DIR}'")
         else()
@@ -857,6 +840,44 @@ if(ENABLE_D3D12)
         endif()
     endif()
 endif()
+
+# R9: 逐 exe Agility 运行时暂存钩子（无条件定义，体内守卫——非 Windows /
+# Agility 离线树 PRIMAL_D3D12_AGILITY_BIN_DIR 为空 CACHE INTERNAL，调用点
+# 无副作用，macOS configure 零变化）。调用方必须在各自 target 定义之后：
+#   - Tools/PrimalEngineCli、Tools/PrimalPlayer（各自 CMakeLists）
+#   - EngineTest/IntegrationTests（setup_test_target 内，覆盖全部集成测试）
+#   - EngineTest/UnitTests（目录末尾 foreach BUILDSYSTEM_TARGETS，覆盖全部单测）
+# $<TARGET_FILE_DIR:tgt> 逐 exe 跟随真实输出目录：VS 多配置的 per-config
+# 子目录（<...>/Release/）与源码树输出目标（primal-engine 的 Windows/<Config>）
+# 均自动正确。EngineDLL（SHARED）不挂——Agility 契约检查进程 exe 的导出
+# 面，编辑器 Windows 通道不在本轮范围（runbook §18 登记）。
+function(primal_stage_d3d12_agility staged_target)
+    if(NOT PRIMAL_D3D12_AGILITY_BIN_DIR)
+        return()
+    endif()
+    if(NOT TARGET ${staged_target})
+        message(WARNING "primal_stage_d3d12_agility: '${staged_target}' is not a target, skipping")
+        return()
+    endif()
+    get_target_property(_primal_staged_type ${staged_target} TYPE)
+    if(NOT _primal_staged_type STREQUAL "EXECUTABLE")
+        return()
+    endif()
+    get_target_property(_primal_agility_staged ${staged_target} PROPERTY PRIMAL_AGILITY_STAGED)
+    if(_primal_agility_staged)
+        return()
+    endif()
+    set_target_properties(${staged_target} PROPERTIES PRIMAL_AGILITY_STAGED TRUE)
+    foreach(_primal_agility_dll D3D12Core.dll d3d12SDKLayers.dll)
+        add_custom_command(TARGET ${staged_target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:${staged_target}>/D3D12"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PRIMAL_D3D12_AGILITY_BIN_DIR}/${_primal_agility_dll}"
+                "$<TARGET_FILE_DIR:${staged_target}>/D3D12/${_primal_agility_dll}"
+            VERBATIM)
+    endforeach()
+endfunction()
 
 # === Jolt Physics（物理内核；Jolt 头文件只允许出现在 Engine/Simulation/ 内部）===
 if(TARGET Jolt)

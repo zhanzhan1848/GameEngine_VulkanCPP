@@ -1,4 +1,5 @@
 #include "TestFramework.h"
+#include "../../Utils/TestEnv.h"
 #include "Graphics/RHI/Systems/RenderSystem.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
@@ -113,6 +114,10 @@ public:
     
     DescriptorSetLayoutDesc lastLayoutDesc;
     std::vector<DescriptorSetLayoutBinding> lastBindings;
+    // R9: Render(scene, view) 之后"最后一次" layout 几乎必然是某个渲染 pass
+    // 的（SSR/后处理等），材质的 bindless layout 会被覆盖——原断言查
+    // lastLayoutDesc 永远追不到材质 flags。记录全部 layout 历史供存在性断言。
+    std::vector<std::vector<DescriptorSetLayoutBinding>> allBindingsHistory;
 
     MockRHIDeviceIntegration() : RHIDevice(DeviceDesc()) {
         isValid_ = true;
@@ -163,11 +168,12 @@ public:
         if (desc.bindingCount > 0 && desc.bindings) {
             lastBindings.assign(desc.bindings, desc.bindings + desc.bindingCount);
             lastLayoutDesc.bindings = lastBindings.data();
+            allBindingsHistory.emplace_back(lastBindings);
         } else {
             lastBindings.clear();
             lastLayoutDesc.bindings = nullptr;
         }
-        return (DescriptorSetLayoutHandle)4001; 
+        return (DescriptorSetLayoutHandle)4001;
     }
     void destroyDescriptorSetLayoutImpl(DescriptorSetLayoutHandle) {}
     
@@ -453,15 +459,26 @@ public:
              return Engine::Test::TestResult::Failed;
         }
         
-        // Verify Bindless flags
-        auto flags = device.lastLayoutDesc.bindings[0].flags;
-        if ((flags & DescriptorBindingFlags::PartiallyBound) == DescriptorBindingFlags::None) {
-            std::cerr << "Error: Bindless flags (PartiallyBound) not set correctly." << std::endl;
-            return Engine::Test::TestResult::Failed;
-        }
-        if ((flags & DescriptorBindingFlags::UpdateAfterBind) == DescriptorBindingFlags::None) {
-            std::cerr << "Error: Bindless flags (UpdateAfterBind) not set correctly." << std::endl;
-            return Engine::Test::TestResult::Failed;
+        // Verify Bindless flags — existence over the full layout history:
+        // 材质 blob 声明 PartiallyBound|UpdateAfterBind（见上方 Append），断言
+        // 的是"该 flags 组合确实传达到了某个 CreateDescriptorSetLayout"，
+        // 而不是"恰好是最后一次创建的 layout"（后者会被渲染 pass 覆盖）。
+        {
+            const auto required = DescriptorBindingFlags::PartiallyBound
+                                | DescriptorBindingFlags::UpdateAfterBind;
+            bool found = false;
+            for (const auto& layoutBindings : device.allBindingsHistory) {
+                for (const auto& b : layoutBindings) {
+                    if ((b.flags & required) == required) { found = true; break; }
+                }
+                if (found) break;
+            }
+            if (!found) {
+                std::cerr << "Error: no descriptor layout carries the material bindless flags "
+                             "(PartiallyBound|UpdateAfterBind) — checked "
+                          << device.allBindingsHistory.size() << " layouts" << std::endl;
+                return Engine::Test::TestResult::Failed;
+            }
         }
 
         // Cleanup
@@ -473,7 +490,10 @@ public:
 };
 
 int main() {
+    // R9：与 TestRenderSystem.cpp 同款 shader 根锚定（解除源码树相对 shader
+    // 路径的 cwd 依赖；macOS 指向同一源码根，行为零变化）。
+    primaltest::SetEnv("PRIMAL_SHADER_ROOT", PRIMAL_TEST_SHADER_ROOT);
     TestRenderSystemIntegration test;
-    test.RunAllTests();
-    return 0;
+    const auto runStats = test.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

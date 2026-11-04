@@ -21,6 +21,9 @@ function(setup_test_target target_name)
     set_target_properties(${target_name} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/"
     )
+    # R9: Agility runtime DLL staging per exe (no-op outside Windows+D3D12
+    # trees; defined in Engine/CMakeLists.txt which configures first).
+    primal_stage_d3d12_agility(${target_name})
     target_include_directories(${target_name} PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Common"
@@ -1050,3 +1053,11 @@ else()
     message(STATUS "Integration tests skipped: ContentTools disabled (BUILD_CONTENT_TOOLS=OFF)")
     add_custom_target(IntegrationTests)
 endif()
+
+# R9: Agility runtime DLL staging for every exe defined in this directory
+# (covers the six WFC targets that bypass setup_test_target; the function is
+# idempotent via PRIMAL_AGILITY_STAGED). No-op on non-Windows trees.
+get_directory_property(PRIMAL_INTEG_TEST_TARGETS BUILDSYSTEM_TARGETS)
+foreach(_primal_it ${PRIMAL_INTEG_TEST_TARGETS})
+    primal_stage_d3d12_agility(${_primal_it})
+endforeach()

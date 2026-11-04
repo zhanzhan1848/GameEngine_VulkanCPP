@@ -2349,7 +2349,11 @@ add_test(NAME StandaloneGraphics_RenderSystem_Test COMMAND StandaloneGraphics_Re
 set_target_properties(StandaloneGraphics_RenderSystem_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneGraphics_RenderSystem_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
+target_compile_definitions(StandaloneGraphics_RenderSystem_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>
+    # R9: 测试 main 里锚定 PRIMAL_SHADER_ROOT（源码根绝对路径），解除
+    # ShaderRegistry 源码树相对路径的 cwd 依赖（Windows build 树在源码
+    # 树外时上溯解析不到 → ForwardRenderer/SSR init 失败）。
+    PRIMAL_TEST_SHADER_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(StandaloneGraphics_RenderSystem_Test PROPERTIES FOLDER "Tests/Graphics")
 
 
@@ -2646,7 +2650,8 @@ set_target_properties(TestRenderSystemECS PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "Tests/Graphics"
 )
-target_compile_definitions(TestRenderSystemECS PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
+target_compile_definitions(TestRenderSystemECS PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>
+    PRIMAL_TEST_SHADER_ROOT="${CMAKE_SOURCE_DIR}")
 
 ## 创建一个宏来运行所有RHI测试
 # Timestamp 测试仅 Apple 存在（Metal 绑定），聚合命令按平台条件注入
@@ -2873,7 +2878,8 @@ add_test(NAME TestRenderSystemIntegration COMMAND TestRenderSystemIntegration)
 set_target_properties(TestRenderSystemIntegration PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestRenderSystemIntegration PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
+target_compile_definitions(TestRenderSystemIntegration PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>
+    PRIMAL_TEST_SHADER_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(TestRenderSystemIntegration PROPERTIES FOLDER "Tests/Graphics")
 
 
@@ -4123,8 +4129,12 @@ if(ENABLE_VULKAN)
         add_test(NAME ${query_target} COMMAND ${query_target})
     endforeach()
     # Independent cache modules; existing SPVs are never outputs of this rule.
+    # Resolve the interpreter via the official module: a bare `python3` on
+    # Windows resolves to the Microsoft Store alias stub (MSB8066 exit 9009).
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    message(STATUS "Primal: GatherInstanceCacheTestShaders interpreter = ${Python3_EXECUTABLE}")
     add_custom_target(GatherInstanceCacheTestShaders
-        COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/build_ddgi_instance_cache_spv.py
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/build_ddgi_instance_cache_spv.py
         DEPENDS ${GG_CONNECTION_LUMEN}/DDGIInstanceNormalProduce.comp ${GG_CONNECTION_LUMEN}/DDGIInstanceNormalVerify.comp
             ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
     add_executable(TestVulkanDDGIInstanceNormalCache RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
@@ -4718,3 +4728,12 @@ if(ENABLE_VULKAN)
     endif()
     set_target_properties(TestEnvironmentHybridCertificate PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
 endif()
+
+# R9: Agility runtime DLL staging for every exe in this directory (per-exe
+# $<TARGET_FILE_DIR> follows the multi-config per-config subdirectory that
+# hard-coded roots missed; no-op on non-Windows trees). Defined in
+# Engine/CMakeLists.txt which configures before this directory.
+get_directory_property(PRIMAL_UNIT_TEST_TARGETS BUILDSYSTEM_TARGETS)
+foreach(_primal_ut ${PRIMAL_UNIT_TEST_TARGETS})
+    primal_stage_d3d12_agility(${_primal_ut})
+endforeach()

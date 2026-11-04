@@ -67,7 +67,13 @@ target_include_directories(TestLuaBackend PRIVATE
     ${CMAKE_SOURCE_DIR}/EngineTest/IntegrationTests/ScriptLuaBackend
 )
 target_link_libraries(TestLuaBackend PRIVATE Engine lua_static)
-add_test(NAME TestLuaBackend COMMAND TestLuaBackend)
+# R9: 测试内 Lua fixtures 是源码树相对路径
+# （EngineTest/IntegrationTests/ScriptLuaBackend/scripts/*.lua）。ctest 默认
+# cwd=build 树时 33 个用例全部找不到脚本（Windows 八测实测；macOS 直跑
+# cwd=仓库根所以从未暴露）。锚定 WORKING_DIRECTORY=源码根，与
+# UnitTests/CMakeLists 既有先例（L142/156）同款。
+add_test(NAME TestLuaBackend COMMAND TestLuaBackend
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 set_target_properties(TestLuaBackend PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )

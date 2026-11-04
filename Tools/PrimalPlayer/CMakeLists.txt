@@ -65,3 +65,7 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             "$<TARGET_FILE:EngineDLL>" "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
     COMMENT "Deploying EngineDLL next to PrimalPlayer"
 )
+
+# R9: Agility runtime DLL staging (.\D3D12\ next to this exe; no-op outside
+# Windows+D3D12 trees).
+primal_stage_d3d12_agility(${PROJECT_NAME})

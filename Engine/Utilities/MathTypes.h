@@ -45,10 +45,17 @@ constexpr f32 epsilon{ 1e-5f };
 		constexpr float operator[](int i) const { return i == 0 ? x : y; }
 		v2 operator+(const v2& o) const { return {x + o.x, y + o.y}; }
 		v2 operator-(const v2& o) const { return {x - o.x, y - o.y}; }
+		// Scalar add/sub broadcast — Apple simd::floatN provides these as
+		// built-in vector/scalar operators; portable branch mirrors that set
+		// (ContentTools SDF/CardBake rely on v3 ± f32, MSVC C2678/C2679 without).
+		v2 operator+(float s) const { return {x + s, y + s}; }
+		v2 operator-(float s) const { return {x - s, y - s}; }
 		v2 operator*(float s) const { return {x * s, y * s}; }
 		v2 operator/(float s) const { return {x / s, y / s}; }
 		v2& operator+=(const v2& o) { x += o.x; y += o.y; return *this; }
 		v2& operator-=(const v2& o) { x -= o.x; y -= o.y; return *this; }
+		v2& operator+=(float s) { x += s; y += s; return *this; }
+		v2& operator-=(float s) { x -= s; y -= s; return *this; }
 	};
 	using v2a = v2;
 
@@ -63,11 +70,15 @@ constexpr f32 epsilon{ 1e-5f };
 		constexpr float operator[](int i) const { switch(i) { case 0: return x; case 1: return y; case 2: return z; default: return _pad; } }
 		v3 operator+(const v3& o) const { return {x + o.x, y + o.y, z + o.z}; }
 		v3 operator-(const v3& o) const { return {x - o.x, y - o.y, z - o.z}; }
+		v3 operator+(float s) const { return {x + s, y + s, z + s}; }
+		v3 operator-(float s) const { return {x - s, y - s, z - s}; }
 		v3 operator*(float s) const { return {x * s, y * s, z * s}; }
 		v3 operator/(float s) const { return {x / s, y / s, z / s}; }
 		v3 operator*(const v3& o) const { return {x * o.x, y * o.y, z * o.z}; }
 		v3& operator+=(const v3& o) { x += o.x; y += o.y; z += o.z; return *this; }
 		v3& operator-=(const v3& o) { x -= o.x; y -= o.y; z -= o.z; return *this; }
+		v3& operator+=(float s) { x += s; y += s; z += s; return *this; }
+		v3& operator-=(float s) { x -= s; y -= s; z -= s; return *this; }
 		v3& operator/=(float s) { x /= s; y /= s; z /= s; return *this; }
 		bool operator==(const v3& o) const { return x == o.x && y == o.y && z == o.z; }
 	};
@@ -87,9 +98,13 @@ constexpr f32 epsilon{ 1e-5f };
 		constexpr float operator[](int i) const { switch(i) { case 0: return x; case 1: return y; case 2: return z; default: return w; } }
 		v4 operator+(const v4& o) const { return {x + o.x, y + o.y, z + o.z, w + o.w}; }
 		v4 operator-(const v4& o) const { return {x - o.x, y - o.y, z - o.z, w - o.w}; }
+		v4 operator+(float s) const { return {x + s, y + s, z + s, w + s}; }
+		v4 operator-(float s) const { return {x - s, y - s, z - s, w - s}; }
 		v4 operator*(float s) const { return {x * s, y * s, z * s, w * s}; }
 		v4 operator/(float s) const { return {x / s, y / s, z / s, w / s}; }
 		v4& operator+=(const v4& o) { x += o.x; y += o.y; z += o.z; w += o.w; return *this; }
+		v4& operator+=(float s) { x += s; y += s; z += s; w += s; return *this; }
+		v4& operator-=(float s) { x -= s; y -= s; z -= s; w -= s; return *this; }
 		v4& operator/=(float s) { x /= s; y /= s; z /= s; w /= s; return *this; }
 		bool operator==(const v4& o) const { return x == o.x && y == o.y && z == o.z && w == o.w; }
 	};

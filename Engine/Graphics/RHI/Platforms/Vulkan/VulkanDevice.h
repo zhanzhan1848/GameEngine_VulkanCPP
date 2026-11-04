@@ -310,6 +310,10 @@ private:
     VmaAllocation         implicitComputeUBOAlloc_{nullptr};
     void*                 implicitComputeUBOMapped_{nullptr};
     u64                   implicitComputeUBOCapacity_{0};
+    // descriptor range 实际写入值 = min(region 容量, maxUniformBufferRange)
+    // （VUID-VkWriteDescriptorSet-descriptorType-00332；R9 收缩， AllocImplicit
+    // ComputeUBO 以此为单次 payload 上限拒绝超限请求）
+    u64                   implicitComputeUBORange_{0};
     u64                   implicitUBOOffset_[4] = {0, 0, 0, 0};  // per-frame-region bump
     u32                   implicitUBOLastRegion_{UINT32_MAX};
     VkDescriptorSetLayout implicitComputeSetLayout_{VK_NULL_HANDLE};

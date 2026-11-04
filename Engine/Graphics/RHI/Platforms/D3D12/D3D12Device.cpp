@@ -16,14 +16,21 @@
 #if defined(PRIMAL_D3D12_AGILITY_RUNTIME) && PRIMAL_D3D12_AGILITY_RUNTIME
 // Agility SDK 运行时导出（Engine/CMakeLists.txt 动态接入链在场时定义）：
 // D3D12 系统运行时按二进制的 D3D12SDKVersion 导出值选择 side-load 的
-// <exe 目录>\D3D12\D3D12Core.dll（官方 Agility 集成约定；该 DLL 由 Engine
-// POST_BUILD copy_if_different 暂存到全部 exe 输出根的 D3D12/ 子目录，
-// R8 起含 <build>/Tests/UnitTests——见 Engine/CMakeLists 暂存目的地表）。本 TU 经
+// <exe 目录>\D3D12\D3D12Core.dll（官方 Agility 集成约定；R9 起该 DLL 由
+// primal_stage_d3d12_agility() 逐 exe POST_BUILD 暂存到各自
+// $<TARGET_FILE_DIR>/D3D12/——见 Engine/CMakeLists 暂存钩子注释）。本 TU 经
 // RHIDeviceFactory（CreateRHIDevice → new D3D12Device）必然被静态库链接
 // 拉入，导出稳定可见。离线回退路径（PRIMAL_D3D12_AGILITY_RUNTIME=0）不
 // 导出——无 side-load DLL 时导出反而令 d3d12.dll 找 .\D3D12\ 失败。
+// R9：补齐官方契约的第二导出 D3D12SDKPath（D3D12 Redistributable 规范：
+// Agility side-load 需 D3D12SDKVersion + D3D12SDKPath 两个导出，缺 SDKPath
+// 时加载器只采样到系统 d3d12.dll——八测 dumpbin 实证本 TU 只导出了
+// SDKVersion）。窄字面量而非官方样例的 u8"..."：C++20 下 u8 字面量是
+// const char8_t[]，赋给 const char* 为 ill-formed（legacy D3D12Core.cpp 的
+// u8 版本自 F0-3 起已排除出构建）；字节内容与官方 u8 版逐字一致（纯 ASCII）。
 extern "C" {
 __declspec(dllexport) extern const UINT D3D12SDKVersion = D3D12_SDK_VERSION;
+__declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
 }
 #endif
 

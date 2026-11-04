@@ -3,7 +3,10 @@
 from pathlib import Path
 import subprocess, tempfile, hashlib
 root=Path(__file__).resolve().parents[1]
-s=root/'Engine/Graphics/Vulkan/Shaders';l=s/'Lumen'
+# Lower-case 'shaders' matches the git-tracked path and GG_CONNECTION_LUMEN
+# (EngineTest/UnitTests/CMakeLists.txt). Windows checkouts are case-sensitive:
+# an upper-case 'Shaders' would write a parallel tree the tests never read.
+s=root/'Engine/Graphics/Vulkan/shaders';l=s/'Lumen'
 with tempfile.TemporaryDirectory(prefix='primal-instance-normal-') as tmp:
     outputs=[]
     for name in ['DDGIInstanceNormalProduce','DDGIInstanceNormalVerify','DDGIGIGather_instance_cache']:

@@ -100,3 +100,7 @@ if(TARGET ContentTools)
         COMMENT "Deploying ContentTools next to primal-engine"
     )
 endif()
+
+# R9: Agility runtime DLL staging (.\D3D12\ next to this exe; no-op outside
+# Windows+D3D12 trees — the exe's own output root stays as-is on macOS).
+primal_stage_d3d12_agility(${PROJECT_NAME})
