@@ -46,6 +46,12 @@ namespace primal::graphics::rhi::d3d12 {
 /// 纹理 subresource 为 D3D12 线性子资源索引
 /// （mip + levelCount * (arraySlice + arraySize * planeSlice)），
 /// 或 kD3D12ResourceBarrierAllSubresources 表示整资源。
+///
+/// R16-A 键空间契约：条目键 = (resource 数值, isTexture) 二元组。RHI 的
+/// buffer/texture 分配器是两个独立 free_list，各自从 0 起编号——同数值
+/// 句柄必然跨类型重叠（M0 初版仅按 resource 数值查键：后注册方被"双注册
+/// 防御"静默拒绝、其全部 Transition 返回空 op——Windows 十五测 #538
+/// INVALID_SUBRESOURCE_STATE 的根因链，见 runbook §25-A）。
 struct D3D12SubresourceKey {
     u64 resource = 0;
     u32 subresource = 0;
@@ -94,21 +100,26 @@ public:
 
     /// 注册资源几何。纹理传真实 mip/array/plane 数（决定整资源展开与
     /// 衰减集合）；buffer 三参传 1。initialState 为创建时的 D3D12 初始状态。
-    /// 重复注册同一 resource：断言冲突（防御双注册），Debug 下返回 false。
+    /// 重复注册同一 (resource, isTexture)：断言冲突（防御双注册），返回
+    /// false。同数值 resource 但不同 isTexture（buffer/texture 分池同号）：
+    /// 合法共存，各自独立跟踪（R16-A 键空间契约，见 D3D12SubresourceKey 注）。
     bool RegisterResource(u64 resource, bool isTexture, u32 mipLevels,
                           u32 arraySize, u32 planeSlices,
                           ResourceState initialState = ResourceState::General);
 
-    /// 注销资源（销毁路径）。未注册资源返回 false。
-    bool UnregisterResource(u64 resource);
+    /// 注销资源（销毁路径）。isTexture 必须与注册时一致——同数值句柄的
+    /// 另一类型条目不受影响（跨类型误注销会静默 orphan 对方，R16-A 前
+    /// 的实际行为）。未注册该 (resource, isTexture) 返回 false。
+    bool UnregisterResource(u64 resource, bool isTexture);
 
     /// 声明"该子资源当下处于 state"（外部事实注入：初始状态/别的路径改过）。
     /// 生命周期态被拒绝（返回 false）；未注册资源拒绝。
     bool Track(const D3D12SubresourceKey& key, ResourceState state);
 
     /// 请求把 key（可为整资源 ALL）转入 target，返回需下发的有序 op 列表
-    /// 并更新内部跟踪状态。规则见文件头 ②④⑤；非法请求（未注册/生命周期
-    /// 态/子资源越界）返回空列表（显式失败，不静默）。
+    /// 并更新内部跟踪状态。规则见文件头 ②④⑤；非法请求（未注册——含
+    /// (resource, isTexture) 类型不匹配/生命周期态/子资源越界）返回空列表
+    /// （显式失败，不静默）。
     utl::vector<D3D12ResourceBarrierOp> Transition(const D3D12SubresourceKey& key,
                                                    ResourceState target);
 

@@ -36,11 +36,17 @@
 #include <unordered_map>
 #include <vector>
 
+// R16-B（Windows 十六测预备）：原 #else 分支的 unistd.h 同时覆盖 Linux 与
+// Windows——后者无此头（十五测 Player 编译失败点之一）。平台块细分后：
+// Apple=AppKit 窗口（player_window.mm，仅 Apple 编译）；Linux=无窗口 Vulkan
+// （readlink 需要 unistd.h）；Windows=无窗口 D3D12（exe 路径走
+// GetModuleFileNameA，cwd 切换走 std::filesystem::current_path）。
 #if defined(__APPLE__)
 #include <mach-o/dyld.h>
-#include <unistd.h>
 #define PRIMAL_PLAYER_WINDOW 1
-#else
+#elif defined(_WIN32)
+#include <Windows.h>
+#elif defined(__linux__)
 #include <unistd.h>
 #endif
 
@@ -930,12 +936,19 @@ static std::vector<AudioVoiceInfo> g_audio_voices_info;
 
 // audio S2：宿主播放回调（AudioPlay → 此处 → 平台 AVAudioPlayer 桥）。
 // 捕获式 lambda 不能转 C 函数指针——用全局包路径。
+// R16-B：播放桥（player_window.mm）只在 Apple 编译——无窗口平台回调
+// 返回 0（"只解码不发声"，与下方 autoplay 注释的无窗口语义一致，fail-closed）。
 static std::string g_audio_scene_path;
 static std::uint32_t PlayerHostAudioPlay(const char* raw_path, float gain, float pan,
                                          std::uint32_t loop)
 {
+#if defined(PRIMAL_PLAYER_WINDOW)
     const std::string abs = ResolveAssetPath(raw_path, g_audio_scene_path);
     return PlayerAudioPlaySpatial(abs.c_str(), gain, pan, loop ? 1 : 0) ? 1u : 0u;
+#else
+    (void)raw_path; (void)gain; (void)pan; (void)loop;
+    return 0u;
+#endif
 }
 static std::uint32_t camera_entity = 0xFFFFFFFFu;
 
@@ -1484,12 +1497,17 @@ std::string ExeDir()
 #if defined(__APPLE__)
     std::uint32_t size = static_cast<std::uint32_t>(buf.size());
     if (_NSGetExecutablePath(buf.data(), &size) != 0) return {};
+#elif defined(_WIN32)
+    const DWORD len = ::GetModuleFileNameA(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+    if (len == 0 || len >= buf.size()) return {};
+    buf[len] = '\0';
 #else
-    ssize_t len = readlink("/proc/self/exe", buf.data(), buf.size() - 1);
+    const ssize_t len = readlink("/proc/self/exe", buf.data(), buf.size() - 1);
     if (len <= 0) return {};
+    buf[len] = '\0';
 #endif
     std::string exe(buf.data());
-    auto slash = exe.find_last_of('/');
+    auto slash = exe.find_last_of("/\\");
     return slash == std::string::npos ? std::string() : exe.substr(0, slash);
 }
 
@@ -1553,9 +1571,12 @@ int main(int argc, char** argv)
     }
 
     // 引擎 shader blob 按 cwd 相对路径解析——切到 exe 目录（Darwin/<config>）。
+    // R16-B：chdir 换 std::filesystem::current_path（POSIX-only 符号，Windows 无）。
     const std::string dir = ExeDir();
     if (!dir.empty()) {
-        if (::chdir(dir.c_str()) != 0)
+        std::error_code cwdEc;
+        std::filesystem::current_path(std::filesystem::path(dir), cwdEc);
+        if (cwdEc)
             std::fprintf(stderr, "[player] chdir(%s) failed — shader blob may not load\n", dir.c_str());
     }
 
@@ -1934,6 +1955,10 @@ int main(int argc, char** argv)
         // audio S2：空间声源每帧求值（监听者=主相机实体位姿；S2 无自由yaw
         // ——相机朝向由 fly 相机控制，yaw 用 0 近似正前方 +Z；声像仍随水平
         // 方位变化）。voice volume = 分组级联 × 空间衰减；pan = 立体声像。
+        // R16-B：voice 更新桥（PlayerAudioUpdateVoice）与声源登记同源——
+        // 都只在 Apple 窗口路径存在；非窗口平台 g_audio_voices_info 恒空，
+        // 整块门控与原空容器短路语义一致（零行为差异，链接面清零）。
+#if defined(PRIMAL_PLAYER_WINDOW)
         if (!g_audio_voices_info.empty()) {
             float listener_pos[3] = { g_camera_pos[0], g_camera_pos[1], g_camera_pos[2] };
             const float params5[5] = { 1.f, 1.f, 500.f, 1.f, 0.f };
@@ -1956,6 +1981,7 @@ int main(int argc, char** argv)
                             g_audio_voices_info.front().last_pan);
             }
         }
+#endif // PRIMAL_PLAYER_WINDOW
 
         // pfx：周期性统计（E2E 冒烟断言粒子系统真正在跑）
         if (!g_pfx_emitters.empty() && frame_counter % 30 == 0) {

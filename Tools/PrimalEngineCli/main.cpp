@@ -38,9 +38,14 @@
 #include <string>
 #include <vector>
 #include <filesystem>
-#include <sys/stat.h>
 
-#if defined(__APPLE__)
+// R16-B（Windows 十六测预备）：exe 目录锚定与文件探测改走 std::filesystem
+// （S_ISDIR/S_ISREG/chdir 为 POSIX-only，MSVC 下编译失败——R3/R4 的
+// temp_directory_path 化同族跨平台正解）。unistd.h 保留给非 Windows 的
+// fork/execv 子进程路径（RunChild）；Windows 侧 exe 路径用 GetModuleFileNameA。
+#if defined(_WIN32)
+#include <Windows.h>
+#elif defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <unistd.h>
 #elif defined(__linux__)
@@ -71,8 +76,8 @@ extern "C" std::uint32_t PfxDebugDump(const char* asset_path, std::uint32_t fram
 
 bool DirExists(const char* path)
 {
-    struct stat st;
-    return ::stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+    std::error_code ec;
+    return std::filesystem::is_directory(std::filesystem::path(path), ec);
 }
 
 // --- JSON 输出小助手（离线 verb 的载荷都是扁平对象，不值得引依赖） ---
@@ -112,6 +117,31 @@ void LogToStderr(const char* message)
     std::fprintf(stderr, "[primal-engine] %s\n", message);
 }
 
+// exe 自身路径（含文件名）；平台不支持或失败返回空串。
+std::string GetExecutablePath()
+{
+#if defined(__APPLE__)
+    char path[4096];
+    std::uint32_t size = sizeof(path);
+    if (_NSGetExecutablePath(path, &size) != 0) return {};
+    return path;
+#elif defined(__linux__)
+    char path[4096];
+    const ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (len <= 0) return {};
+    path[len] = '\0';
+    return path;
+#elif defined(_WIN32)
+    char path[4096];
+    const DWORD len = ::GetModuleFileNameA(nullptr, path, static_cast<DWORD>(sizeof(path)));
+    if (len == 0 || len >= sizeof(path)) return {};
+    path[len] = '\0';
+    return path;
+#else
+    return {};
+#endif
+}
+
 // §9 风险 #3：引擎按 cwd 相对解析 shader blob。one-shot CLI 必须把 cwd 锚到
 // 可执行目录（复刻编辑器 C# 侧 AnchorWorkingDirectoryToExecutable 的语义），
 // 否则从任意工作目录调用都会静默丢光渲染通道。
@@ -120,22 +150,14 @@ void LogToStderr(const char* message)
 // 则回退到同级 C# 目录（同配置名），并保持清晰日志。
 void AnchorWorkingDirectoryToExecutable()
 {
-#if defined(__APPLE__)
-    char path[4096];
-    std::uint32_t size = sizeof(path);
-    if (_NSGetExecutablePath(path, &size) != 0) return;
-#elif defined(__linux__)
-    char path[4096];
-    const ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
-    if (len <= 0) return;
-    path[len] = '\0';
-#else
-    return;
-#endif
-    char* lastSlash = std::strrchr(path, '/');
-    if (lastSlash == nullptr) return;
-    *lastSlash = '\0';
-    if (chdir(path) != 0) return;
+    const std::string exePath = GetExecutablePath();
+    const std::size_t lastSlash = exePath.find_last_of("/\\");
+    if (exePath.empty() || lastSlash == std::string::npos) return;
+    const std::string path = exePath.substr(0, lastSlash);
+
+    std::error_code ec;
+    std::filesystem::current_path(std::filesystem::path(path), ec);
+    if (ec) return;
 
     if (DirExists("shaders"))
     {
@@ -144,18 +166,22 @@ void AnchorWorkingDirectoryToExecutable()
     }
 
     // 同级 C# 输出目录回退：../PrimalEditor_Avalonia/<本目录名>/shaders
-    const std::string configName = [](const char* dir) {
-        const std::string d = dir;
-        const auto pos = d.find_last_of('/');
+    const std::string configName = [](const std::string& d) {
+        const auto pos = d.find_last_of("/\\");
         return pos == std::string::npos ? d : d.substr(pos + 1);
     }(path);
     const std::string candidate =
-        std::string(path) + "/../PrimalEditor_Avalonia/" + configName;
-    if (DirExists((candidate + "/shaders").c_str()) && chdir(candidate.c_str()) == 0)
+        path + "/../PrimalEditor_Avalonia/" + configName;
+    if (DirExists((candidate + "/shaders").c_str()))
     {
-        LogToStderr((std::string("cwd anchored to ") + candidate +
-                     " (shaders live on the C# side)").c_str());
-        return;
+        std::error_code chdirEc;
+        std::filesystem::current_path(std::filesystem::path(candidate), chdirEc);
+        if (!chdirEc)
+        {
+            LogToStderr((std::string("cwd anchored to ") + candidate +
+                         " (shaders live on the C# side)").c_str());
+            return;
+        }
     }
 
     LogToStderr((std::string("cwd anchored to ") + path +
@@ -2237,8 +2263,8 @@ int RunChild(const std::string& exe, const std::vector<std::string>& args)
 // 可执行文件同目录查找（AnchorWorkingDirectoryToExecutable 已把 cwd 锚到 exe 目录）。
 bool FileExists(const std::string& path)
 {
-    struct stat st;
-    return ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+    std::error_code ec;
+    return std::filesystem::is_regular_file(std::filesystem::path(path), ec);
 }
 
 int VerbBakeVt(int argc, char** argv)

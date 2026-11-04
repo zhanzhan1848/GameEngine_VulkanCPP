@@ -12,7 +12,16 @@ if(APPLE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
 endif()
 
-add_executable(${PROJECT_NAME} "main.cpp" "player_window.mm")
+# R16-B：player_window.mm（AppKit NSView/AVAudioPlayer 窗口宿主）只属于 Apple
+# 窗口路径（main.cpp 的 PRIMAL_PLAYER_WINDOW 门控对应）；Windows/Linux 为无窗口
+# 运行时宿主——.mm 以 C++ 编译时 #import <AppKit/AppKit.h> 直接报错（十五测
+# Player 编译失败点）。Windows 侧 Agility 暂存钩子（R9 F4b）仍挂在本 target 上，
+# 即 Windows+D3D12 树照常构建 PrimalPlayer（无窗口 exe），不排除出构建。
+if(APPLE)
+    add_executable(${PROJECT_NAME} "main.cpp" "player_window.mm")
+else()
+    add_executable(${PROJECT_NAME} "main.cpp")
+endif()
 
 if(APPLE)
     # .mm 走 C++ 编译器 + per-source `-x objective-c++`（enable_language(OBJCXX)

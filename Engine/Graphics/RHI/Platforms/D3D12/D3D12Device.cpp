@@ -722,15 +722,21 @@ ResourceHandle D3D12Device::WrapSwapChainBuffer(RHISwapChain& /*owner*/,
         return handles::INVALID_RESOURCE;
     }
     // tracker 注册：Present 初始态（D3D12 位值 = COMMON；渲染前经
-    // BeginRenderPass 显式转 RENDER_TARGET）。
-    stateTracker_.RegisterResource(ResourceHandle(id), true, desc.mipLevels,
-                                   desc.arraySize, 1, ResourceState::Present);
+    // BeginRenderPass 显式转 RENDER_TARGET）。R16-A：注册失败显式告警
+    // （仅同 (id,texture) 双注册会失败——同号 buffer 共存自 R16-A 起合法）。
+    if (!stateTracker_.RegisterResource(ResourceHandle(id), true, desc.mipLevels,
+                                         desc.arraySize, 1, ResourceState::Present)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] tracker register rejected (double-register) "
+               "backbuffer wrap id=" << id << std::endl;
+    }
     return ResourceHandle(id);
 }
 
 void D3D12Device::UnwrapSwapChainBuffer(ResourceHandle handle) {
     if (handle == handles::INVALID_RESOURCE) return;
-    stateTracker_.UnregisterResource(handle);
+    // R16-A：注销按 (id, isTexture=true)——不波及同号 buffer 条目。
+    stateTracker_.UnregisterResource(handle, true);
     textureAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -751,9 +757,15 @@ ResourceHandle D3D12Device::createBufferImpl(const BufferDesc& desc) {
     // 注释仍成立——tracker 规则② COMMON→任意状态零 barrier 提升；注册后
     // UAV→INDIRECT_ARGUMENT 等 buffer 显式转换才能产出 op（F5-2 arg buffer
     // 状态流转，对齐 D3D12ExecuteIndirect 官方样例模式）。BufferDesc 无
-    // initialState → 恒按 COMMON（General）注册。
-    stateTracker_.RegisterResource(ResourceHandle(id), false, 1, 1, 1,
-                                   ResourceState::General);
+    // initialState → 恒按 COMMON（General）注册。R16-A：注册失败显式告警
+    //（仅同 (id,buffer) 双注册会失败；同号纹理共存自 R16-A 起合法——
+    // bufferAllocator_/textureAllocator_ 两池各自从 0 编号，同号必然重叠）。
+    if (!stateTracker_.RegisterResource(ResourceHandle(id), false, 1, 1, 1,
+                                        ResourceState::General)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] tracker register rejected (double-register) "
+               "buffer id=" << id << " name='" << desc.name << "'" << std::endl;
+    }
     return ResourceHandle(id);
 }
 
@@ -764,7 +776,7 @@ void D3D12Device::destroyBufferImpl(ResourceHandle handle) {
             << "[D3D12Device] double-free buffer handle=" << handle << " — skipping" << std::endl;
         return;
     }
-    stateTracker_.UnregisterResource(handle);  // M5：与纹理对称
+    stateTracker_.UnregisterResource(handle, false);  // M5+R16-A：与纹理对称，按类型注销
     bufferAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -797,11 +809,21 @@ ResourceHandle D3D12Device::createTextureImpl(const TextureDesc& desc) {
     // = mipLevels×1×plane）——arraySize 恒按 1 注册（防御误传 >1 时模型
     // 与 D3D12 实际子资源几何脱钩；单测 TestM6Texture3DSubresourceModel）。
     d3d12::D3D12Texture* stored = textureAllocator_.Get(id);
-    stateTracker_.RegisterResource(ResourceHandle(id), true, desc.mipLevels,
-                                   desc.type == TextureType::Texture3D
-                                       ? 1u : desc.arraySize,
-                                   stored->PlaneCount(),
-                                   ResourceState::General);
+    // R16-A：注册失败显式告警。这是 #538 根因链的静默点——M0 键空间下
+    // 同号 buffer 先注册即令本注册被"双注册防御"拒绝且无人知晓，此后该
+    // 纹理全部 Transition 返回空 op（无 barrier），GPU 态滞留 COMMON 直至
+    // mipgen 首个写类状态被 debug-layer #538 拦下（Windows 十五测实证）。
+    // 十六测若仍见本日志，属同 id 同纹理真双注册（生命周期 bug），不再是
+    // 同号冲突。
+    if (!stateTracker_.RegisterResource(ResourceHandle(id), true, desc.mipLevels,
+                                        desc.type == TextureType::Texture3D
+                                            ? 1u : desc.arraySize,
+                                        stored->PlaneCount(),
+                                        ResourceState::General)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] tracker register rejected (double-register) "
+               "texture id=" << id << " name='" << desc.name << "'" << std::endl;
+    }
     return ResourceHandle(id);
 }
 
@@ -812,7 +834,7 @@ void D3D12Device::destroyTextureImpl(ResourceHandle handle) {
             << "[D3D12Device] double-free texture handle=" << handle << " — skipping" << std::endl;
         return;
     }
-    stateTracker_.UnregisterResource(handle);
+    stateTracker_.UnregisterResource(handle, true);  // R16-A：按 (id, texture) 注销
     textureAllocator_.Free(static_cast<u32>(handle));
 }
 

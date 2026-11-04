@@ -13,6 +13,10 @@
  *          ⑨ M2 F2-3：比较采样器映射（ComparisonFunc 全值 / 比较谓词与
  *            VulkanSampler compareEnable 对齐 / 滤波档 COMPARISON 平移）
  *          ⑩ M2 F2-2：阴影深度 pass 转换（DEPTH_WRITE <-> SRV/DEPTH_READ）
+ *          ⑫ R16-A：buffer/texture 同数值句柄共存与路由（两池各自从 0
+ *            编号，同号必然重叠；M0 键空间下后注册方被静默拒绝、其全部
+ *            Transition 返回空 op = Windows 十五测 #538 根因链）+ mipgen
+ *            逐 mip 序列回归（GenerateMipmaps 发射链的 tracker 语义快照）
  */
 
 #include "../../TestFramework.h"
@@ -249,9 +253,9 @@ TestResult TestTrackAndRejections() {
     TEST_ASSERT(tracker.Transition({11, 0, true}, ResourceState::Ready).empty(), "lifecycle target rejected");
     TEST_ASSERT(tracker.Transition({42, 0, true}, ResourceState::General).empty(), "unregistered transition rejected");
 
-    // 注销
-    TEST_ASSERT(tracker.UnregisterResource(11), "unregister");
-    TEST_ASSERT(!tracker.UnregisterResource(11), "double unregister rejected");
+    // 注销（R16-A：签名带 isTexture——同号另一类型条目不受影响）
+    TEST_ASSERT(tracker.UnregisterResource(11, true), "unregister");
+    TEST_ASSERT(!tracker.UnregisterResource(11, true), "double unregister rejected");
     TEST_ASSERT(tracker.RegisteredResourceCount() == 0, "empty after unregister");
     return TestResult::Passed;
 }
@@ -445,6 +449,139 @@ TestResult TestM6Texture3DSubresourceModel() {
     return TestResult::Passed;
 }
 
+// ===== ⑫ R16-A：buffer/texture 同数值句柄共存 + 路由 + 跨类型注销隔离 =====
+// 背景（Windows 十五测 #538 根因链，runbook §25-A）：D3D12Device 的
+// bufferAllocator_ / textureAllocator_ 是两个独立 free_list，各自从 0 起编号
+// ——同数值句柄必然跨类型重叠。M0 键空间仅按 resource 数值查条目：
+// 后注册方被"双注册防御"静默拒绝（D3D12Device 侧不查返回值），其全部
+// Transition 返回空 op（无 barrier），GPU 态滞留 COMMON；读类经 D3D12 隐式
+// COMMON 提升照常工作（SRV 采样/拷贝均无感），首个写类状态（mipgen 的
+// RENDER_TARGET）才被 debug-layer #538 拦下。R16-A 起 key = (resource,
+// isTexture)：同号共存合法、路由独立、跨类型注销互不波及。
+TestResult TestR16BufferTextureIdCoexistence() {
+    // --- 顺序 A：buffer 先注册（十五测的实际触发序：mesh buffer 先于纹理）---
+    D3D12StateTracker tracker;
+    TEST_ASSERT(tracker.RegisterResource(64, false, 1, 1, 1, ResourceState::General),
+                "buffer id=64 registers first");
+    // M0 行为下此处返回 false（被静默拒绝）→ 后续纹理 Transition 全空 —— #538。
+    TEST_ASSERT(tracker.RegisterResource(64, true, 4, 1, 1, ResourceState::General),
+                "texture id=64 coexists with same-numeric buffer (R16-A key space)");
+    TEST_ASSERT(tracker.RegisteredResourceCount() == 2, "two independent entries");
+
+    // 纹理键路由到纹理条目：mip1 COMMON→RT 显式（十五测缺失的那条 barrier）
+    auto ops = tracker.Transition({64, 1, true}, ResourceState::RenderTarget);
+    TEST_ASSERT(ops.size() == 1 && ops[0].subresource == 1,
+                "texture key routes to texture entry (sub=1)");
+    TEST_ASSERT(ops[0].stateBefore == kD3D12ResourceState_Common
+                && ops[0].stateAfter == kD3D12ResourceState_RenderTarget,
+                "texture mip1 COMMON->RT (the #538 barrier)");
+
+    // buffer 键路由到 buffer 条目：COMMON→读类提升（零 op），状态独立无串扰
+    TEST_ASSERT(tracker.Transition({64, 0, false}, ResourceState::ShaderResource).empty(),
+                "buffer key routes to buffer entry (promotion, no cross-talk)");
+    ResourceState texS = ResourceState::Unknown, bufS = ResourceState::Unknown;
+    TEST_ASSERT(tracker.QueryState({64, 1, true}, texS) && texS == ResourceState::RenderTarget,
+                "texture entry state independent");
+    TEST_ASSERT(tracker.QueryState({64, 0, false}, bufS) && bufS == ResourceState::ShaderResource,
+                "buffer entry state independent");
+
+    // 错类型键的越界拒绝：buffer 条目无 sub=1（subresourceCount=1）
+    TEST_ASSERT(tracker.Transition({64, 1, false}, ResourceState::RenderTarget).empty(),
+                "wrong-type key sub=1 out of range for buffer entry");
+
+    // 跨类型注销隔离：销毁 buffer 不得带走同号纹理条目（M0 键空间会）
+    TEST_ASSERT(tracker.UnregisterResource(64, false), "unregister buffer only");
+    TEST_ASSERT(!tracker.UnregisterResource(64, false), "buffer already gone");
+    TEST_ASSERT(tracker.RegisteredResourceCount() == 1, "texture entry survives buffer destroy");
+    TEST_ASSERT(tracker.QueryState({64, 1, true}, texS) && texS == ResourceState::RenderTarget,
+                "texture state intact after cross-type destroy");
+    TEST_ASSERT(tracker.Transition({64, 2, true}, ResourceState::RenderTarget).size() == 1,
+                "texture transitions still emit after buffer destroy");
+    TEST_ASSERT(tracker.UnregisterResource(64, true), "texture unregister (typed)");
+
+    // --- 顺序 B：纹理先注册（对称锁定）---
+    D3D12StateTracker trackerB;
+    TEST_ASSERT(trackerB.RegisterResource(65, true, 2, 1, 1, ResourceState::General),
+                "texture id=65 registers first");
+    TEST_ASSERT(trackerB.RegisterResource(65, false, 1, 1, 1, ResourceState::General),
+                "buffer id=65 coexists (reverse order)");
+    TEST_ASSERT(trackerB.Transition({65, 1, true}, ResourceState::RenderTarget).size() == 1,
+                "reverse-order texture routing intact");
+    TEST_ASSERT(trackerB.Transition({65, 0, false}, ResourceState::UnorderedAccess).empty(),
+                "reverse-order buffer promotion intact");
+    TEST_ASSERT(trackerB.UnregisterResource(65, true), "reverse-order typed unregister");
+    TEST_ASSERT(trackerB.RegisteredResourceCount() == 1, "buffer survives texture destroy");
+
+    // 同 (id, 类型) 双注册仍是冲突（M0 原语义保留）
+    TEST_ASSERT(!trackerB.RegisterResource(65, false, 1, 1, 1, ResourceState::General),
+                "same id+type double-register still rejected");
+    return TestResult::Passed;
+}
+
+// ===== ⑫ R16-A：mipgen 序列回归（GenerateMipmaps 发射链的 tracker 快照） =====
+// 逐条复刻 D3D12CommandBuffer::GenerateMipmaps mip 循环对 tracker 的调用序
+//（L1017/L1018/L1045 三拍：src mip m →SRV、dst mip m+1 →RT、画后 →SRV），
+// 前置上传尾转换（D3D12Upload::EncodePoolCopies 的 sub0 CopyDest→backState
+// ——十五测场景只传 base mip，sub1..3 保持 COMMON）。关键断言 = 首轮
+// dst 转换必须产出 (sub1, COMMON→RENDER_TARGET) 一条 op——即 Windows
+// debug-layer #538 报缺的那条 barrier；同号 buffer 先注册在场（根因序）。
+TestResult TestR16MipgenSequence() {
+    D3D12StateTracker tracker;
+    // 根因序：同号 buffer 先注册 + 纹理后注册（mips=4，COMMON）
+    TEST_ASSERT(tracker.RegisterResource(64, false, 1, 1, 1, ResourceState::General),
+                "same-numeric buffer present (root-cause ordering)");
+    TEST_ASSERT(tracker.RegisterResource(64, true, 4, 1, 1, ResourceState::General),
+                "4-mip texture registers despite buffer id collision");
+
+    // 上传尾（D3D12Upload 同构）：sub0 → COPY_DEST → backState(SRV)
+    auto ops = tracker.Transition({64, 0, true}, ResourceState::CopyDest);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_Common
+                && ops[0].stateAfter == kD3D12ResourceState_CopyDest,
+                "upload: sub0 COMMON->COPY_DEST");
+    ops = tracker.Transition({64, 0, true}, ResourceState::ShaderResource);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_CopyDest
+                && ops[0].stateAfter == kD3D12ResourceState_AllShaderResource,
+                "upload tail: sub0 COPY_DEST->SRV");
+
+    // mipgen 循环 m=0..2（srvCount = mipCount-1）
+    for (u32 m = 0; m + 1 < 4; ++m) {
+        // 拍 1（L1017）：src mip m → SRV——m=0 幂等零 op（上传尾已 SRV）；
+        // m>=1 为 COMMON 读类提升（零 op）。两分支都不得产出 barrier。
+        ops = tracker.Transition({64, m, true}, ResourceState::ShaderResource);
+        TEST_ASSERT(ops.empty(), "src mip promote/idempotent: 0 ops");
+
+        // 拍 2（L1018）：dst mip m+1 → RT——COMMON 起点写类必显式，恰好 1 op，
+        // 子资源号 = m+1，before=COMMON，after=RENDER_TARGET。
+        ops = tracker.Transition({64, m + 1, true}, ResourceState::RenderTarget);
+        TEST_ASSERT(ops.size() == 1, "dst mip COMMON->RT: exactly 1 op");
+        TEST_ASSERT(ops[0].kind == D3D12ResourceBarrierOp::Kind::Transition,
+                    "dst op is a Transition");
+        TEST_ASSERT(ops[0].subresource == m + 1, "dst op subresource = m+1");
+        TEST_ASSERT(ops[0].stateBefore == kD3D12ResourceState_Common,
+                    "dst op before=COMMON (GPU-truthful)");
+        TEST_ASSERT(ops[0].stateAfter == kD3D12ResourceState_RenderTarget,
+                    "dst op after=RENDER_TARGET");
+
+        // 拍 3（L1045）：画后 dst mip m+1 → SRV——RT→SRV 显式 1 op。
+        ops = tracker.Transition({64, m + 1, true}, ResourceState::ShaderResource);
+        TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_RenderTarget
+                    && ops[0].stateAfter == kD3D12ResourceState_AllShaderResource,
+                    "post-draw RT->SRV");
+    }
+
+    // 终态：全 mip ShaderResource（与 Vulkan 版 SHADER_READ_ONLY 收敛一致）
+    for (u32 s = 0; s < 4; ++s) {
+        ResourceState st = ResourceState::Unknown;
+        TEST_ASSERT(tracker.QueryState({64, s, true}, st) && st == ResourceState::ShaderResource,
+                    "final: all mips ShaderResource");
+    }
+    // buffer 条目未被 mipgen 序列波及（仍 COMMON → 提升路径可用）
+    ResourceState bufS = ResourceState::Unknown;
+    TEST_ASSERT(tracker.QueryState({64, 0, false}, bufS) && bufS == ResourceState::General,
+                "same-numeric buffer untouched by texture mipgen sequence");
+    return TestResult::Passed;
+}
+
 void RegisterD3D12StateTrackerTests() {
     auto suite = std::make_shared<TestSuite>("D3D12StateTrackerTests");
     suite->AddTestCase(TestCase("StateMappingTable", TestStateMappingTable));
@@ -458,6 +595,8 @@ void RegisterD3D12StateTrackerTests() {
     suite->AddTestCase(TestCase("ShadowDepthPassTransitions", TestShadowDepthPassTransitions));
     suite->AddTestCase(TestCase("M5ComputeChainUavDiscipline", TestM5ComputeChainUavDiscipline));
     suite->AddTestCase(TestCase("M6Texture3DSubresourceModel", TestM6Texture3DSubresourceModel));
+    suite->AddTestCase(TestCase("R16BufferTextureIdCoexistence", TestR16BufferTextureIdCoexistence));
+    suite->AddTestCase(TestCase("R16MipgenSequence", TestR16MipgenSequence));
     TestRunner::RegisterTestSuite(suite);
 }
 
