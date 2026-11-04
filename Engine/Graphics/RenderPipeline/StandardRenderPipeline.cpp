@@ -1388,7 +1388,8 @@ void StandardRenderPipeline::SelfLoadPipelineShaders() {
     const rhi::RHIPlatform platform = device_->GetPlatform();
     const bool metal = (platform == rhi::RHIPlatform::Metal);
     auto load = [&](const char* vulkanFile, const char* metalFile, const char* metalDir,
-                    const char* metalEntry, ShaderStage stage, ShaderHandle& out) {
+                    const char* metalEntry, ShaderStage stage, ShaderHandle& out,
+                    const char* vulkanEntry = "main") {
         if (out != handles::INVALID_SHADER) return;
         auto bytes = SelfLoadShaderSource(metal ? metalFile : vulkanFile, platform,
                                           stage, metalDir);
@@ -1398,8 +1399,13 @@ void StandardRenderPipeline::SelfLoadPipelineShaders() {
                 << (metal ? metalFile : vulkanFile) << std::endl;
             return;
         }
+        // R11/VUID-00707: Vulkan 侧此前一律用入口 "main"，但 Lumen 预编 spv 的
+        // OpEntryPoint 是功能名（DDGIGIGather=ddgi_gi_gather、
+        // FusionIndirect=fusion_indirect 等）——十测 Windows 上 sc_card_radiance/
+        // sc_probe_irradiance 自加载建计算管线时报 "No entrypoint found named
+        // `main`"（72 条）。入口名随装配表逐行传入。
         out = device_->CreateShader(bytes.data(), bytes.size(), stage,
-                                    metal ? metalEntry : "main");
+                                    metal ? metalEntry : vulkanEntry);
         if (out == handles::INVALID_SHADER) {
             PRIMAL_LOG_STREAM(Error, "Render")
                 << "[Pipeline] CreateShader failed: " << metalFile << " / " << metalEntry
@@ -1431,13 +1437,16 @@ void StandardRenderPipeline::SelfLoadPipelineShaders() {
         load("Forward/DeferredLighting", nullptr, nullptr, "deferred_ps", ShaderStage::Pixel, deferred_ps_);
         load("Forward/Blit", nullptr, nullptr, "blit_vs", ShaderStage::Vertex, blit_vs_);
         load("Forward/Blit", nullptr, nullptr, "blit_ps", ShaderStage::Pixel, blit_ps_);
-        load("Lumen/DDGIGIGather.comp", nullptr, nullptr, "gi_gather", ShaderStage::Compute, gi_gather_shader_);
-        load("Lumen/FusionIndirect", nullptr, nullptr, "fusion_indirect", ShaderStage::Pixel, fusion_indirect_ps_);
-        load("Lumen/FusionComposite", nullptr, nullptr, "fusion_composite", ShaderStage::Pixel, fusion_composite_ps_);
+        load("Lumen/DDGIGIGather.comp", nullptr, nullptr, "gi_gather", ShaderStage::Compute, gi_gather_shader_,
+             "ddgi_gi_gather");
+        load("Lumen/FusionIndirect", nullptr, nullptr, "fusion_indirect", ShaderStage::Pixel, fusion_indirect_ps_,
+             "fusion_indirect");
+        load("Lumen/FusionComposite", nullptr, nullptr, "fusion_composite", ShaderStage::Pixel, fusion_composite_ps_,
+             "fusion_composite");
         load("Lumen/DDGICardRadianceAvg.comp", nullptr, nullptr, "sc_card_radiance",
-             ShaderStage::Compute, sc_card_radiance_shader_);
+             ShaderStage::Compute, sc_card_radiance_shader_, "ddgi_card_radiance_avg");
         load("Lumen/DDGIProbeIrradianceFromCards.comp", nullptr, nullptr, "sc_probe_irradiance",
-             ShaderStage::Compute, sc_probe_irradiance_shader_);
+             ShaderStage::Compute, sc_probe_irradiance_shader_, "ddgi_probe_irradiance_from_cards");
     }
     u32 loaded = 0;
     for (ShaderHandle h : {deferred_vs_, deferred_ps_, blit_vs_, blit_ps_,

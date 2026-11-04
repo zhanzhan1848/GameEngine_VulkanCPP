@@ -579,11 +579,12 @@ bool VulkanTexture::updateDataImpl(const void* data, u64 size, u64 offset) {
     const VkImageAspectFlags aspect = GetAspectMask();
     // 布局闭合由 RHI 内部负责(与 Metal 语义对齐,调用方无需手动 barrier):
     // currentLayout_ → TRANSFER_DST → 拷贝 → 回 currentLayout_(UNDEFINED 时
-    // 提升为 SHADER_READ_ONLY)。
+    // 提升为用途位决定的回落布局——R11 前硬编码 SRO,对无 SAMPLED 位的深度图
+    // 触发 VUID-01211)。
     const VkImageLayout layoutBefore = currentLayout_;
     const VkImageLayout layoutAfter =
         (layoutBefore != VK_IMAGE_LAYOUT_UNDEFINED && layoutBefore != VK_IMAGE_LAYOUT_PREINITIALIZED)
-            ? layoutBefore : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            ? layoutBefore : GetRestingLayout();
 
     // === P4c-F4: 帧内模式 — staging 队列(下一 cmdbuf Begin 编码,零等待) ===
     // 契约:帧内更新的数据在下一个 command buffer 开始时可见;需要本 cmdbuf
@@ -835,13 +836,14 @@ bool VulkanTexture::updateRegion(const void* data, u64 size, const TextureRegion
                                             ? currentLayout_
                                             : GetMipLayout(region.mipLevel);
     // old 用真实跟踪布局(UNDEFINED 合法,首传丢弃语义);back-layout 在
-    // 未定义时提升为 SHADER_READ_ONLY — 两者不能混用(旧实现把提升值同时
+    // 未定义时提升为用途位决定的回落布局(R11 前硬编码 SRO,无 SAMPLED 位
+    // 的深度图非法,VUID-01201/01211 家族) — 两者不能混用(旧实现把提升值同时
     // 当 old 传给首屏障,触发 validation "expects SHADER_READ_ONLY, got
     // UNDEFINED")。
     const VkImageLayout layoutBefore = trackedLayout;
     const VkImageLayout layoutAfter =
         (trackedLayout != VK_IMAGE_LAYOUT_UNDEFINED && trackedLayout != VK_IMAGE_LAYOUT_PREINITIALIZED)
-            ? trackedLayout : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            ? trackedLayout : GetRestingLayout();
 
     // === 帧内模式:staging 队列(下一 cmdbuf Begin 编码,零等待) ===
     if (vkDev.IsFrameRecording()) {

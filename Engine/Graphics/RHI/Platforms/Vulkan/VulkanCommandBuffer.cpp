@@ -418,10 +418,12 @@ void VulkanCommandBuffer::CopyTextureToBuffer(ResourceHandle srcTexture, Resourc
                            buf->GetNativeBuffer(),
                            regionCount, copies.data());
     // P0-B（validation 预热瞬态收尾）: 拷贝完成后把源纹理收敛回
-    // SHADER_READ_ONLY—— sampled 用例（历史环/调试读回）远多于继续 TRANSFER
-    // 的用例；updateData 的 backLayout 惯例与此一致。truth-based，已 SRO 时
-    // 后续 barrier 自然 no-op。
-    TransitionImageLayout(tex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // 采样态—— sampled 用例（历史环/调试读回）远多于继续 TRANSFER
+    // 的用例；updateData 的 backLayout 惯例与此一致。truth-based，已
+    // 落定时后续 barrier 自然 no-op。R11: 回落目标按用途位选择
+    // (GetRestingLayout)——无 SAMPLED 位的深度图回 SRO 触发 VUID-01211
+    // (十测 TestVulkanDepthAspect 实锤)。
+    TransitionImageLayout(tex, tex->GetRestingLayout());
     UpdateStats(CommandType::CopyTextureToBuffer);
 }
 
@@ -465,11 +467,12 @@ void VulkanCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
                    srcTex->GetNativeImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    dstTex->GetNativeImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    regionCount, blits.data(), vkFilter);
-    // P0-B: blit 完成后把两端收敛回 SHADER_READ_ONLY（与上面 CopyTextureTo
+    // P0-B: blit 完成后把两端收敛回采样态（与上面 CopyTextureTo
     // Buffer 的收尾同理）。调用方既有的回置 barrier（TAA histBarrier、
     // ColorHistory restore 等）由 InsertBarrier 的同布局 skip 变为 no-op。
-    TransitionImageLayout(srcTex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    TransitionImageLayout(dstTex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // R11: 回落目标按用途位选择（GetRestingLayout，VUID-01211）。
+    TransitionImageLayout(srcTex, srcTex->GetRestingLayout());
+    TransitionImageLayout(dstTex, dstTex->GetRestingLayout());
     UpdateStats(CommandType::BlitTexture);
 }
 
@@ -928,6 +931,14 @@ void VulkanCommandBuffer::TransitionImageLayout(VulkanTexture* tex, VkImageLayou
         case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
             b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
             break;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            // R11: GetRestingLayout 会把无 SAMPLED 位的深度图回落到 DS
+            // attachment 布局;与下方 dstStage 的 EARLY/LATE_FRAGMENT_TESTS
+            // 配对的显式 access 组合,避免 default 的 MEMORY_* 与 fragment
+            // stage 搭配触发 VUID-02819 类 stage/access 不匹配。
+            b.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            break;
         default:
             b.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
             break;
@@ -941,6 +952,11 @@ void VulkanCommandBuffer::TransitionImageLayout(VulkanTexture* tex, VkImageLayou
             break;
         case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
             b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            // R11: 同上 srcAccess 注释——DS 布局的显式 access/stage 配对。
+            b.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
             break;
         default:
             b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;

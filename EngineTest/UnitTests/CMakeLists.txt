@@ -846,7 +846,8 @@ if(ENABLE_VULKAN)
     )
     target_link_libraries(TestVulkanIBL_BRDFLUT PRIVATE Engine)
     target_compile_definitions(TestVulkanIBL_BRDFLUT PRIVATE ENABLE_VULKAN=1)
-    add_test(NAME TestVulkanIBL_BRDFLUT COMMAND TestVulkanIBL_BRDFLUT)
+    add_test(NAME TestVulkanIBL_BRDFLUT COMMAND TestVulkanIBL_BRDFLUT
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
     set_target_properties(TestVulkanIBL_BRDFLUT PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
@@ -982,7 +983,14 @@ if(ENABLE_VULKAN)
     )
     target_link_libraries(TestVulkanIBL_Equirect PRIVATE Engine)
     target_compile_definitions(TestVulkanIBL_Equirect PRIVATE ENABLE_VULKAN=1)
-    add_test(NAME TestVulkanIBL_Equirect COMMAND TestVulkanIBL_Equirect)
+    # R11: 测试用相对路径 Assets/Shaders/*.spv 读 SPIR-V。CTest 默认 CWD 是
+    # CMAKE_CURRENT_BINARY_DIR(EngineTest/UnitTests)——该目录并无 Assets
+    # （assets 由 UnitTestAssetsCopy 部署到 Tests/UnitTests/Assets），此前仅
+    # 在手跑 exe 或个别 build 树遗留拷贝时侥幸通过（十测 Windows 上
+    # Equirect 过/Prefilter 挂、macOS ctest 两个都挂）。锚定部署目录使两侧
+    # 一致可复现。
+    add_test(NAME TestVulkanIBL_Equirect COMMAND TestVulkanIBL_Equirect
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
     set_target_properties(TestVulkanIBL_Equirect PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
@@ -1003,7 +1011,8 @@ if(ENABLE_VULKAN)
     )
     target_link_libraries(TestVulkanIBL_IrradiancePrefilter PRIVATE Engine)
     target_compile_definitions(TestVulkanIBL_IrradiancePrefilter PRIVATE ENABLE_VULKAN=1)
-    add_test(NAME TestVulkanIBL_IrradiancePrefilter COMMAND TestVulkanIBL_IrradiancePrefilter)
+    add_test(NAME TestVulkanIBL_IrradiancePrefilter COMMAND TestVulkanIBL_IrradiancePrefilter
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
     set_target_properties(TestVulkanIBL_IrradiancePrefilter PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )

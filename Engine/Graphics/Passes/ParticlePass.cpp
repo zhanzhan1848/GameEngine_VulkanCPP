@@ -9,6 +9,7 @@
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #endif
 #include "Engine/Content/ContentToEngine.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include "Utilities/IOStream.h"
 
 #include <cstring>
@@ -85,12 +86,16 @@ bool ParticlePass::initialize(rhi::RHIDeviceBase* device) {
         }
     } else {
         // Metal path: load .metal text, use named entry points.
-        std::string shader_path = "EngineTest/shaders/ParticleAtlas.metal";
+        // R11: 旧实现先试 cwd 相对路径，失败后回退硬编码的
+        // /Users/zhanyuanwei/... 绝对路径——十测实测 Windows 上两处都打不开
+        // （build 树不在源码树内），ForwardRenderer 初始化失败连坐
+        // RenderSystem 三件套。改走 ShaderRegistry 统一解析
+        // （$PRIMAL_SHADER_ROOT → cwd 及祖先 → exe 及祖先）：测试侧 R9 已注入
+        // PRIMAL_SHADER_ROOT=源码根，Windows 独立 build 树可解析；macOS 走
+        // cwd/exe 上溯，行为不变（BlurPass 同款惯例）。
+        std::string shader_path =
+            utils::ShaderRegistry::ResolveShaderPath("EngineTest/shaders/ParticleAtlas.metal");
         std::ifstream shader_file(shader_path);
-        if (!shader_file.is_open()) {
-            shader_path = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/ParticleAtlas.metal";
-            shader_file.open(shader_path);
-        }
         if (!shader_file.is_open()) {
             PRIMAL_LOG_STREAM(Error, "Engine") << "ParticlePass: Failed to open shader file: " << shader_path << std::endl;
             return false;

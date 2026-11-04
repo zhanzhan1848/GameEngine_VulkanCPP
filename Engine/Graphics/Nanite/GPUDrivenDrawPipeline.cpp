@@ -756,7 +756,13 @@ u32 GPUDrivenDrawPipeline::RegisterEditorMaterial(rhi::ResourceHandle albedo_tex
 
     // [PassDebugView 排查] 回读 albedo 层 4×4 像素验证拷贝落地；写 /tmp 文件
     //（open 启动的 .app stderr 不落盘，CLI 日志环被刷屏）。
-    {
+    // R11: 该诊断块无条件 WaitIdle()→gc_.Flush()——它在 UpdateGeometryData
+    //（Execute 期间）执行，主 command buffer 仍在录制，Flush 会把
+    // EndRenderPass 延迟销毁的临时 framebuffer 提前释放，后续 barrier 录制
+    // 进已失效 cmdbuf（十测 TestVulkanNaniteSmoke 420 条
+    // InvalidCommandBuffer-VkFramebuffer destroyed 实锤）。默认关闭，
+    // 仅 PRIMAL_NANITE_DIAG=1 时启用。
+    if (const char* diag=std::getenv("PRIMAL_NANITE_DIAG"); diag && diag[0]=='1') {
         rhi::BufferDesc rbDesc{};
         rbDesc.size = 4 * 4 * 4;
         rbDesc.bindFlags = (u32)(rhi::BufferUsageFlags::TransferDst);
@@ -2272,7 +2278,11 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     total_meshlet_count_ = totalMeshlets;
 
     // [PassDebugView 排查] 一次性回读材质数据缓冲头 48B，验证记录 0（白模默认）落地。
-    if (global_material_data_buffer_ != rhi::handles::INVALID_RESOURCE) {
+    // R11: 同上——无条件 WaitIdle()→gc_.Flush() 会把录制中 cmdbuf 引用的临时
+    // framebuffer 提前销毁（VUID InvalidCommandBuffer-VkFramebuffer destroyed），
+    // 默认关闭，仅 PRIMAL_NANITE_DIAG=1 时启用。
+    if (const char* diag=std::getenv("PRIMAL_NANITE_DIAG");
+        diag && diag[0]=='1' && global_material_data_buffer_ != rhi::handles::INVALID_RESOURCE) {
         rhi::BufferDesc rbDesc2{};
         rbDesc2.size = 48;
         rbDesc2.bindFlags = (u32)(rhi::BufferUsageFlags::TransferDst);

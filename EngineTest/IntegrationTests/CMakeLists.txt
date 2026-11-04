@@ -138,6 +138,14 @@ add_executable(TestSponzaVT
     ${CMAKE_SOURCE_DIR}/ContentTools/common/VTBaker.cpp
 )
 setup_test_target(TestSponzaVT)
+# R11/T5: 测试按相对路径读 EngineTest/assets/Sponza.model、Engine/Graphics/
+# Vulkan/shaders/*.spv、EngineTest/assets/models/Sponza/*.png——此前 add_test 无
+# WORKING_DIRECTORY（CWD=CMAKE_CURRENT_BINARY_DIR），十测 Windows 30s 超时零
+# 输出、macOS ctest 亦复现失败；锚定源码根后三类路径全部可解析（BakeSubset
+# 的 png 路径已同步改为源码根相对+旧形态回退）。仅对本测试设置，不影响
+# setup_test_target 的其余集成测试。
+set_tests_properties(Engine_Integration_Tests_TestSponzaVT PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 target_include_directories(TestSponzaVT PRIVATE
     ${CMAKE_SOURCE_DIR}/ContentTools/common
     ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source

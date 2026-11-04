@@ -282,7 +282,12 @@ int main() {
     auto materialGeometry=mesh;materialGeometry.element_buffer.resize(4);materialGeometry.element_buffer[0]=1;
     auto modified=ray_geometry::LoadOrBuildMeshBLAS(materialGeometry,dir,&loaded);
     check(modified&&!loaded&&modified->geometry_digest!=blas->geometry_digest,"normal/UV source changes invalidate shared SC/BVH identity");
-    bool persisted=true;auto memoryOnly=ray_geometry::LoadOrBuildMeshBLAS(mesh,"/dev/null/unwritable",nullptr,&persisted);
+    // R11: 旧用例用 "/dev/null/unwritable" 模拟写失败——该路径只在 POSIX 语义
+    // 下必然不可写；Windows 把它当当前盘根相对路径 \dev\null\unwritable，十测
+    // 实测该机器 create_directories 成功 → 保存成功 → persisted=true → 断言
+    // 翻转失败。改用"把已存在的 BLAS 文件当目录"：两平台上 create_directories
+    // 都必然失败，写失败模拟跨平台确定。
+    bool persisted=true;auto memoryOnly=ray_geometry::LoadOrBuildMeshBLAS(mesh,blasFile/"unwritable",nullptr,&persisted);
     check(memoryOnly&&!persisted,"write failure keeps valid geometry and reports not persisted");
     u64 source=ray_geometry::SceneSourceDigest(in);
     check(ray_geometry::SaveSceneBVH(sceneFile,scene,source),"two-level scene saved");

@@ -151,7 +151,16 @@ inline bool Write(const char* path, const std::vector<Mesh>& meshes) {
     bool ok=std::fwrite(bytes.data(),1,bytes.size(),f)==bytes.size();
     if (std::fflush(f)!=0) ok=false;
     if (std::fclose(f)!=0) ok=false;
-    if (!ok || std::rename(temporary.c_str(),path)!=0) { std::remove(temporary.c_str()); return false; }
+    if (!ok) { std::remove(temporary.c_str()); return false; }
+    if (std::rename(temporary.c_str(),path)!=0) {
+        // R11: POSIX rename 原子替换已存在目标；Windows CRT rename 对已存在
+        // 目标返回失败（十测实测：TestSCSurfacePages 三个"覆写已存在
+        // .scboundary"的 Write 全部 false）。remove 后重试一次，保持
+        // temp-then-rename 写入路径；POSIX 上首个 rename 即成功，行为不变。
+        if (std::remove(path)!=0 || std::rename(temporary.c_str(),path)!=0) {
+            std::remove(temporary.c_str()); return false;
+        }
+    }
     return true;
 }
 // Search the canonical sorted directory returned by Decode/Read.

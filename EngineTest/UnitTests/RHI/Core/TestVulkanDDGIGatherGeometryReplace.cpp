@@ -459,7 +459,20 @@ Result dispatch(const Config& cfg){
         diffuse[i]=g.texture(width,height,DataFormat::RGBA16_Float,nullptr,0);spec[i]=g.texture(width,height,DataFormat::RGBA16_Float,nullptr,0);
 #endif
     }
-    auto viewBuffer=g.buffer(sizeof(view),BufferType::Constant,GPUMemoryUsage::Dynamic,&view),volumeBuffer=g.buffer(sizeof(volume),BufferType::Constant,GPUMemoryUsage::Dynamic,&volume);
+    // R11/VUID-00327: bindings 5/6 sub-allocate one 128B constant block at
+    // legacy offsets 64/80. minUniformBufferOffsetAlignment is device
+    // dependent (NVIDIA desktop 256 — GTX1060 十测实测 0x100；MoltenVK 16)，
+    // so pack the three slices at runtime-aligned offsets instead of the
+    // fixed 64/80 layout that only survives align<=16 devices.
+    VkPhysicalDeviceProperties devProps{};vkGetPhysicalDeviceProperties(g.vk->GetNativePhysicalDevice(),&devProps);
+    const u64 uboAlign=std::max<u64>(devProps.limits.minUniformBufferOffsetAlignment,1);
+    auto alignUbo=[uboAlign](u64 v){return (v+uboAlign-1)/uboAlign*uboAlign;};
+    const u64 originOff=alignUbo(64),tailOff=alignUbo(originOff+16);
+    std::vector<u8> viewPadded(size_t(tailOff+48),0);
+    std::memcpy(viewPadded.data(),&view.invVP,sizeof(view.invVP));
+    std::memcpy(viewPadded.data()+originOff,&view.origin,sizeof(view.origin));
+    std::memcpy(viewPadded.data()+tailOff,&view.counts,sizeof(view.counts)+sizeof(view.camera)+sizeof(view.debug));
+    auto viewBuffer=g.buffer(viewPadded.size(),BufferType::Constant,GPUMemoryUsage::Dynamic,viewPadded.data()),volumeBuffer=g.buffer(sizeof(volume),BufferType::Constant,GPUMemoryUsage::Dynamic,&volume);
     std::array<u8,176> staticProbe{};std::array<float,36> staticSH{};std::array<float,8> staticFactor{};
     auto staticCB=g.buffer(sizeof(staticProbe),BufferType::Constant,GPUMemoryUsage::Dynamic,staticProbe.data()),sky=g.buffer(sizeof(staticSH),BufferType::Raw,GPUMemoryUsage::Dynamic,staticSH.data()),skyFactor=g.buffer(sizeof(staticFactor),BufferType::Raw,GPUMemoryUsage::Dynamic,staticFactor.data());
     auto nearSH=g.buffer(sizeof(sh),BufferType::Raw,GPUMemoryUsage::Dynamic,sh.data()),depthBuffer=g.buffer(sizeof(moments),BufferType::Raw,GPUMemoryUsage::Dynamic,moments.data()),originBuffer=g.buffer(sizeof(origins),BufferType::Raw,GPUMemoryUsage::Dynamic,origins.data()),conf=g.buffer(sizeof(confidence),BufferType::Raw,GPUMemoryUsage::Dynamic,confidence.data());
@@ -519,7 +532,7 @@ Result dispatch(const Config& cfg){
         const u32 imageBindings[]={0,1,2,3,13,14};std::vector<WriteDescriptorSet> writes;
         for(u32 i=0;i<6;++i)writes.push_back({g.sets[phase],imageBindings[i],0,1,i==0?DescriptorType::SampledDepthImage:(i==2||i==5?DescriptorType::StorageImage:DescriptorType::SampledImage),&images[i],nullptr});
         const u32 bindings[]={4,5,6,7,8,9,10,11,12,17,18,19,20,23,24,25,26,27};
-        DescriptorBufferInfo buffers[]={{viewBuffer,0,64},{viewBuffer,64,16},{viewBuffer,80,48},{sky,0,sizeof(staticSH)},{skyFactor,0,sizeof(staticFactor)},{staticCB,0,sizeof(staticProbe)},{conf,0,sizeof(confidence)},{nearSH,0,sizeof(sh)},{depthBuffer,0,sizeof(moments)},{flatBuffer,256,sizeof(sh)},{volumeBuffer,0,sizeof(volume)},{originBuffer,0,sizeof(origins)},{openBuffer,256,sizeof(open)},
+        DescriptorBufferInfo buffers[]={{viewBuffer,0,64},{viewBuffer,originOff,16},{viewBuffer,tailOff,48},{sky,0,sizeof(staticSH)},{skyFactor,0,sizeof(staticFactor)},{staticCB,0,sizeof(staticProbe)},{conf,0,sizeof(confidence)},{nearSH,0,sizeof(sh)},{depthBuffer,0,sizeof(moments)},{flatBuffer,256,sizeof(sh)},{volumeBuffer,0,sizeof(volume)},{originBuffer,0,sizeof(origins)},{openBuffer,256,sizeof(open)},
             {geometryBuffers[0],0,geometry.top.size()*sizeof(ray_geometry::Node)},{geometryBuffers[1],0,geometry.bottom.size()*sizeof(ray_geometry::Node)},{geometryBuffers[2],0,geometry.triangles.size()*sizeof(ray_geometry::Triangle)},{geometryBuffers[3],0,geometry.instances.size()*sizeof(ray_geometry::Instance)},{policyBuffer,0,sizeof(policy)}};
 #ifdef GG_CONNECTION_UPPER_TEST
 #if defined(GG_CONNECTION_TRAVERSAL_TEST) || defined(GG_CONNECTION_QUERY_KERNEL_TEST)
