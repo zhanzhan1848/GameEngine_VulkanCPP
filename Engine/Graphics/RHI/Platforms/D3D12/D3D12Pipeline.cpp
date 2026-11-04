@@ -473,12 +473,36 @@ bool D3D12Pipeline::InitializeGraphics(const GraphicsPipelineDesc& desc) {
     }
 
     D3D12Shader* vs = device_.GetShader(desc.vertexShader);
-    D3D12Shader* ps = device_.GetShader(desc.pixelShader);
-    if (!vs || !ps) {
+    if (!vs) {
         PRIMAL_LOG_STREAM(Error, "RHI")
-            << "[D3D12Pipeline] vertex/pixel shader handle unresolved (DXIL must be "
+            << "[D3D12Pipeline] vertex shader handle unresolved (DXIL must be "
             << "created via CreateShader before pipeline)" << std::endl;
         return false;
+    }
+    // depth-only 契约（R12/Windows）：pixelShader == handles::INVALID_SHADER
+    // 合法——PSO PixelShader 留空字节码（pso{} 零初始化即 {}），D3D12 规范
+    // 下完全合法，是 depth-only 渲染的标准形态（OMSetRenderTargets 0 RT +
+    // DSV）。先例与参照：
+    //   - legacy 分支 GPass 深度管线：Engine/Graphics/Direct3D12/D3D12GPass.cpp
+    //     的 depth_pipeline_states[]——depth pass 用独立无 PS PSO 绘制；
+    //   - 宿主 M2 阴影段：TestRHISponzaShared.cpp "dpd.pixelShader =
+    //     INVALID_SHADER // depth-only"（M2ShadowDepth.vert 无 PS）；
+    //   - 用户参照的 HLSL 惯例样例 EngineTest/TestShader.hlsl（Common.hlsli
+    //     include + ELEMENTS_TYPE 编译期配置，VS-only 变体同源）；
+    //   - Vulkan 侧 VulkanPipeline::addStage 对 INVALID_SHADER 跳过——RHI
+    //     层语义本就允许无 PS 图形管线，本处对齐（此前成对要求是后端偏差，
+    //     R12 修复）。
+    // 注意 GetShader(INVALID_SHADER) 静默返回 nullptr，与"句柄失效"不可区分，
+    // 故必须先判 INVALID 再解析；句柄非 INVALID 但解析失败仍是真错误（不掩盖）。
+    D3D12Shader* ps = nullptr;
+    if (desc.pixelShader != handles::INVALID_SHADER) {
+        ps = device_.GetShader(desc.pixelShader);
+        if (!ps) {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12Pipeline] pixel shader handle unresolved (non-null handle "
+                << "must resolve; pass INVALID_SHADER for depth-only)" << std::endl;
+            return false;
+        }
     }
 
     // ---- 输入布局（顶点绑定/属性直译；32B stride 等由 desc 原样承载）----
@@ -573,7 +597,11 @@ bool D3D12Pipeline::InitializeGraphics(const GraphicsPipelineDesc& desc) {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC pso{};
     pso.pRootSignature = GetRootSignature();
     pso.VS = vs->ByteCode();
-    pso.PS = ps->ByteCode();
+    // depth-only：ps == nullptr → PSO PixelShader 保持零初始化空字节码
+    // （契约见上方 shader 解析段注释）；0 RT + DSV 的绑定路径由
+    // D3D12CommandBuffer::BeginRenderPass 承载（rtCount=0 + DSV，
+    // 无 PS 专用断言）。
+    if (ps) pso.PS = ps->ByteCode();
     // GS/HS/DS：DXIL 字节码直通（M1 语料未用；提供即接线）
     if (desc.geometryShader != handles::INVALID_SHADER) {
         if (D3D12Shader* gs = device_.GetShader(desc.geometryShader)) pso.GS = gs->ByteCode();
