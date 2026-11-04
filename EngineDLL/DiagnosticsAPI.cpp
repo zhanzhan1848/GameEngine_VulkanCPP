@@ -35,7 +35,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #else
-#include <io.h>
+#include <fcntl.h>   // _O_WRONLY/_O_CREAT/_O_TRUNC/_O_BINARY（MSVC 下与 io.h 分家——R13-B 十二测 C2065）
+#include <io.h>      // _open/_write/_close
 #include <windows.h>
 #endif
 

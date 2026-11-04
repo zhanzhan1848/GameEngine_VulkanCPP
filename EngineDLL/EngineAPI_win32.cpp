@@ -1,6 +1,9 @@
 #if defined(_MSC_VER)
 
 #include "Common.h"
+// s32（width/height 参数）：Common.h 只定义 EDITOR_INTERFACE，不含类型别名。
+// 先例同 D3D12Fence.h L18 —— 本头不经其它头传递链，须自含（R3 起的类型真源）。
+#include "Common/PrimitiveTypes.h"
 #include <Windows.h>
 
 #pragma comment(lib, "Engine.lib")

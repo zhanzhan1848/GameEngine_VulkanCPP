@@ -194,6 +194,21 @@ if(TARGET ContentTools)
     target_link_libraries(${PROJECT_NAME} PRIVATE ContentTools)
 endif()
 
+# R13-B（Windows 十二测）：HeadlessRender.cpp 用 zlib.h/z_stream/deflate/crc32
+# 写 PNG——Windows 无系统 zlib（C1083），接 R5 的 vendored primal_zlib_static
+# （root CMakeLists WIN32 FetchContent，ALIAS zlibstatic；PUBLIC include 含
+# source+binary 两目录，zlibstatic 链接即得 zlib.h 与生成的 zconf.h）。
+# 非 WIN32 维持现状：macOS libSystem 自带 zlib 符号（EngineDLL 一直无显式链接）。
+# 注意 Engine 的 primal_zlib_static 是 PRIVATE 链接——include 路径不传递，
+# 本目标必须自己链接才能拿到头文件路径。
+if(WIN32)
+    if(TARGET primal_zlib_static)
+        target_link_libraries(${PROJECT_NAME} PRIVATE primal_zlib_static)
+    else()
+        message(FATAL_ERROR "EngineDLL(WIN32): primal_zlib_static target missing — root CMakeLists zlib FetchContent block did not run")
+    endif()
+endif()
+
 # EngineDLL.dll 部署到测试输出目录：TestMaterialGraphAPI / TestParticleMaterialAPI /
 # TestMaterialAPIExtended 直接链接本 DLL。此前 DLL 只输出到源码树 Windows/，exe
 # 启动时找不到 → STATUS_DLL_NOT_FOUND(0xc0000135)。VS 生成器把 exe 放在

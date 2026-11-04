@@ -414,7 +414,10 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
                 break;
         }
         native->CreateShaderResourceView(resource_.Get(), &srvDesc,
-                                         heaps.CbvSrvUavCpuHandle(srvSlot_));
+                                         heaps.CbvSrvUavShadowCpuHandle(srvSlot_));
+        // R13/T1 双写：先落 shadow（该持久槽是 UpdateDescriptorSets/区段迁移
+        // 的拷贝源——直写 visible 会让后续读源踩 #654），再镜像进 visible。
+        heaps.CopyCbvSrvUavShadowToVisible(srvSlot_);
     }
 
     // ---- UAV（UnorderedAccess usage；M1 无 view 变体） ----
@@ -442,7 +445,9 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
             uavDesc.Texture2D.PlaneSlice = 0;
         }
         native->CreateUnorderedAccessView(resource_.Get(), nullptr, &uavDesc,
-                                          heaps.CbvSrvUavCpuHandle(uavSlot_));
+                                          heaps.CbvSrvUavShadowCpuHandle(uavSlot_));
+        // R13/T1 双写（同 SRV：shadow 落点 + 镜像，拷贝源语义见 SRV 注释）。
+        heaps.CopyCbvSrvUavShadowToVisible(uavSlot_);
     }
     return true;
 }

@@ -439,7 +439,15 @@ target_include_directories(TestCardBake PRIVATE
     ${CMAKE_SOURCE_DIR}/OSAPI/MAC
 )
 
-target_link_libraries(TestCardBake PRIVATE ContentTools)
+# R13-C/T2（2026-11-04 Windows 十一测 LNK2019）：GetSceneSize/SerializeScene
+# 定义于 SceneBlobWriter.cpp、WalkSceneBlob 定义于 SceneBlobReader.cpp，两者
+# 只编入 contenttools_pipeline 静态库。macOS 上 ContentTools 为 SHARED dylib
+# 且默认导出 PRIVATE 链入的静态库符号（nm -gU 实证三符号导出），故仅链
+# ContentTools 也能解析；Windows DLL 只导出 __declspec(dllexport) 符号，
+# pipeline 全体无 dllexport，导入库不含三符号 → LNK2019。补链静态库与
+# TestSceneBlobWriter/TestAssetPipeline/TestPackedMeshDecoder/TestGltfImporter
+# 同模式（对齐本文件既有惯例）。
+target_link_libraries(TestCardBake PRIVATE ContentTools contenttools_pipeline)
 
 # R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
 # MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发

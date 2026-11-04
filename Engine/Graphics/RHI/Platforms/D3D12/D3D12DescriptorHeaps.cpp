@@ -86,6 +86,21 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12DescriptorHeaps] DSV heap creation failed" << std::endl;
         return false;
     }
+    // shadow 堆（R13/T1 双写模型，语义见头文件）：与 visible 堆同容量、
+    // 非 shader-visible。失败=fatal（后续所有 Create*View 双写与 CopyDescriptors
+    // 源读都依赖它们，缺省必然回到 #654 非法读）。
+    if (!CreateTypedHeap(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                         config.cbvSrvUavCapacity, false, cbvSrvUavShadowHeap_)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12DescriptorHeaps] CBV/SRV/UAV shadow heap creation failed" << std::endl;
+        return false;
+    }
+    if (!CreateTypedHeap(device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+                         config.samplerCapacity, false, samplerShadowHeap_)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12DescriptorHeaps] sampler shadow heap creation failed" << std::endl;
+        return false;
+    }
 
     device_ = device;
     cbvSrvUavDescriptorSize_ = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
@@ -97,6 +112,8 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
     cbvSrvUavGpuStart_ = cbvSrvUavHeap_->GetGPUDescriptorHandleForHeapStart();
     samplerCpuStart_ = samplerHeap_->GetCPUDescriptorHandleForHeapStart();
     samplerGpuStart_ = samplerHeap_->GetGPUDescriptorHandleForHeapStart();
+    cbvSrvUavShadowCpuStart_ = cbvSrvUavShadowHeap_->GetCPUDescriptorHandleForHeapStart();
+    samplerShadowCpuStart_ = samplerShadowHeap_->GetCPUDescriptorHandleForHeapStart();
     rtvCpuStart_ = rtvHeap_->GetCPUDescriptorHandleForHeapStart();
     dsvCpuStart_ = dsvHeap_->GetCPUDescriptorHandleForHeapStart();
 
@@ -141,6 +158,8 @@ void D3D12DescriptorHeapManager::Shutdown() {
     samplerHeap_.Reset();
     rtvHeap_.Reset();
     dsvHeap_.Reset();
+    cbvSrvUavShadowHeap_.Reset();
+    samplerShadowHeap_.Reset();
     perSlotGuardTarget_.clear();
 }
 
@@ -202,6 +221,41 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12DescriptorHeapManager::CbvSrvUavGpuHandle(u32 s
     D3D12_GPU_DESCRIPTOR_HANDLE h = cbvSrvUavGpuStart_;
     h.ptr += static_cast<UINT64>(slot) * cbvSrvUavDescriptorSize_;
     return h;
+}
+
+// ============================================================================
+// shadow 堆句柄换算 + 双写拷贝（R13/T1；语义见头文件双堆模型）
+// ============================================================================
+
+D3D12_CPU_DESCRIPTOR_HANDLE D3D12DescriptorHeapManager::CbvSrvUavShadowCpuHandle(u32 slot) const {
+    D3D12_CPU_DESCRIPTOR_HANDLE h = cbvSrvUavShadowCpuStart_;
+    h.ptr += static_cast<SIZE_T>(slot) * cbvSrvUavDescriptorSize_;
+    return h;
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE D3D12DescriptorHeapManager::SamplerShadowCpuHandle(u32 slot) const {
+    D3D12_CPU_DESCRIPTOR_HANDLE h = samplerShadowCpuStart_;
+    h.ptr += static_cast<SIZE_T>(slot) * samplerDescriptorSize_;
+    return h;
+}
+
+void D3D12DescriptorHeapManager::CopyCbvSrvUavShadowToVisible(u32 slot, u32 count) {
+    if (!device_ || count == 0) return;
+    D3D12_CPU_DESCRIPTOR_HANDLE src = cbvSrvUavShadowCpuStart_;
+    src.ptr += static_cast<SIZE_T>(slot) * cbvSrvUavDescriptorSize_;
+    // 目的=visible 堆同槽位（write-only 合法方向）；源=shadow（可读）。
+    D3D12_CPU_DESCRIPTOR_HANDLE dst = cbvSrvUavCpuStart_;
+    dst.ptr += static_cast<SIZE_T>(slot) * cbvSrvUavDescriptorSize_;
+    device_->CopyDescriptorsSimple(count, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+}
+
+void D3D12DescriptorHeapManager::CopySamplerShadowToVisible(u32 slot, u32 count) {
+    if (!device_ || count == 0) return;
+    D3D12_CPU_DESCRIPTOR_HANDLE src = samplerShadowCpuStart_;
+    src.ptr += static_cast<SIZE_T>(slot) * samplerDescriptorSize_;
+    D3D12_CPU_DESCRIPTOR_HANDLE dst = samplerCpuStart_;
+    dst.ptr += static_cast<SIZE_T>(slot) * samplerDescriptorSize_;
+    device_->CopyDescriptorsSimple(count, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
 }
 
 u32 D3D12DescriptorHeapManager::AllocRtv() { return rtvSlots_.Alloc(); }
@@ -446,7 +500,10 @@ bool D3D12Sampler::Initialize(ID3D12Device* device, D3D12DescriptorHeapManager& 
     s.MinLOD = desc.minLod;
     s.MaxLOD = desc.maxLod;
 
-    device->CreateSampler(&s, heaps.SamplerCpuHandle(slot_));
+    // R13/T1 双写：先写 shadow（持久槽位同时是未来 set 写入的拷贝源），
+    // 再 shadow→visible（原实现直写 visible 堆，作源即 #654）。
+    device->CreateSampler(&s, heaps.SamplerShadowCpuHandle(slot_));
+    heaps.CopySamplerShadowToVisible(slot_);
     return true;
 }
 

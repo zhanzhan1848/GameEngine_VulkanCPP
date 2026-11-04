@@ -21,9 +21,10 @@
 //   - BlitTexture：M7 F7-3 起支持同格式 1:1 拷贝（CopyTextureRegion 直译，
 //     整资源 CopySource/CopyDest 收敛模型与 Vulkan BlitTexture 同构）；
 //     格式转换与缩放 blit 显式 NOT-IMPLEMENTED（登记）。
-//   - GenerateMipmaps：维持 NOT-IMPLEMENTED——M5 工具 shader（M5Mipmap.comp，
-//     整数 box）已交付，接线（cso 嵌入 + 逐 mip dispatch + UAV barrier）
-//     按 M7 移交协议登记至 Windows 集成会话（runbook §7）。
+//   - GenerateMipmaps（R13/T2）：Texture2D 单 slice + RTV 能力格式的
+//     PS downsample 全 mip 链（每 mip：src SRV + dst RTV + 全屏三角形
+//     双线性=2x2 box；shader=MipGen.hlsl 构建期嵌入，见 D3D12MipGen.h）。
+//     BC 压缩/深度/TYPELESS 与非 2D 类型保持 NOT-IMPLEMENTED Error（登记）。
 //
 // 视口契约（阶段文档 §7.2-1）：SetViewport 以负高度 {0, H, W, -H} 下发——
 // D3D12 官方 Y 翻转手段；使原始帧与 Vulkan 原始读回同向（共享对比免

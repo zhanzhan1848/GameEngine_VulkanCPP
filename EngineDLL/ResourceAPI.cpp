@@ -5,7 +5,13 @@
 #include "../Graphics/Renderer.h"
 #include "../Graphics/EditorShaders.h"
 #include "../Content/ContentToEngine.h"
+// R13-B（Windows 十二测 MetalCommonHeaders.h:8 C1083）：MetalContent.h 无条件
+// include 拉入 <Metal/Metal.hpp>（仅 Apple 存在）。Metal 后端只在 APPLE 编译
+// （Engine/CMakeLists.txt 仅 APPLE 分支 glob Graphics/Metal），本 TU 的两处
+// metal::content::submesh::add 调用点同门控、非 Apple fail-closed（见下）。
+#if defined(__APPLE__)
 #include "../Graphics/Metal/MetalContent.h"
+#endif
 
 #include <cstdio>
 #include <atomic>
@@ -435,6 +441,7 @@ EDITOR_INTERFACE u64 RegisterProceduralMeshSubmesh(u64 rhi_geometry_content_id)
                 static_cast<std::size_t>(index_size) * index_count);
 
     const u8* blob_data = blob.data();
+#if defined(__APPLE__)
     const id_eng::id_type submesh_view_id =
         primal::graphics::metal::content::submesh::add(blob_data);
     if (submesh_view_id == id_eng::invalid_id) {
@@ -462,6 +469,14 @@ EDITOR_INTERFACE u64 RegisterProceduralMeshSubmesh(u64 rhi_geometry_content_id)
     }
 
     return static_cast<u64>(new_geometry_id);
+#else
+    // R13-B：非 Apple 编译域无 Metal submesh 注册器（D3D12/Vulkan 后端不经此
+    // 桥），fail-closed 返回 invalid_id；导出面保留（C# 桥按名 P/Invoke）。
+    // 尾段 fake_pointer 桥接编码 submesh_view_id（Apple 门内变量），一并入门。
+    (void)blob_data;
+    std::fprintf(stderr, "[RegisterProceduralMeshSubmesh] metal submesh registry unavailable on this platform\n");
+    return id_eng::invalid_id;
+#endif // defined(__APPLE__)
 }
 
 // Create a new sphere mesh with its vertices translated by (offset_x, offset_y,
@@ -549,6 +564,7 @@ EDITOR_INTERFACE u64 CreateTranslatedProceduralMesh(u64 rhi_geometry_content_id,
                 static_cast<std::size_t>(index_size) * index_count);
 
     const u8* blob_data = blob.data();
+#if defined(__APPLE__)
     const id_eng::id_type submesh_view_id =
         primal::graphics::metal::content::submesh::add(blob_data);
     if (submesh_view_id == id_eng::invalid_id) {
@@ -569,4 +585,11 @@ EDITOR_INTERFACE u64 CreateTranslatedProceduralMesh(u64 rhi_geometry_content_id,
     }
 
     return static_cast<u64>(new_geometry_id);
+#else
+    // R13-B：同 RegisterProceduralMeshSubmesh——非 Apple fail-closed（见上注，
+    // fake_pointer 尾段编码 submesh_view_id，一并入门）。
+    (void)blob_data;
+    std::fprintf(stderr, "[CreateTranslatedProceduralMesh] metal submesh registry unavailable on this platform\n");
+    return id_eng::invalid_id;
+#endif // defined(__APPLE__)
 }

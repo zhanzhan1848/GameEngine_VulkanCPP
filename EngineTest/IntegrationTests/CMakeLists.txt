@@ -62,6 +62,15 @@ function(setup_test_target target_name)
             "-framework AppKit"
         )
     elseif(WIN32)
+        # R13-C/T1（2026-11-04 Windows 十一测）：全部集成测试宿主都是 main()
+        # 入口（TestRHISponzaShared.cpp L4151 等），而旧 /SUBSYSTEM:WINDOWS 让
+        # 链接器默认入口=WinMainCRTStartup——找 WinMain 而非 main，产生
+        # "无 main 入口符号"（用户实测 /ENTRY:mainCRTStartup 可绕过）。
+        # 正规修法：控制台子系统（CONSOLE 默认入口即 mainCRTStartup，与
+        # main() 匹配，stdout/ctest 输出可见）。显式 WIN32_EXECUTABLE OFF
+        # 属性双保险：即使日后有人删掉显式 /SUBSYSTEM 选项，CMake 也不会
+        # 再注入 GUI 子系统。对 APPLE 无副作用（本分支仅 WIN32 进入）。
+        set_target_properties(${target_name} PROPERTIES WIN32_EXECUTABLE OFF)
         target_compile_definitions(${target_name} PRIVATE
             "_CONSOLE"
             "_HAS_EXCEPTIONS=0"
@@ -76,7 +85,7 @@ function(setup_test_target target_name)
             $<$<CONFIG:Release>:/O2>
         )
         target_link_options(${target_name} PRIVATE
-            /SUBSYSTEM:WINDOWS
+            /SUBSYSTEM:CONSOLE
             /IGNORE:4099
             $<$<CONFIG:Debug>:/DEBUG>
             $<$<CONFIG:Release>:/INCREMENTAL:NO /OPT:REF /OPT:ICF>
@@ -1005,19 +1014,17 @@ if(APPLE)
     endif()
 
 elseif(WIN32)
-    # Windows下使用 TestRenderer
-    add_executable(TestRenderer
-        "Lights.cpp"
-        "Main.cpp"
-        "RenderItem.cpp"
-        "Scripts.cpp"
-        "ShaderCompilation.cpp"
-        "TestRenderer.cpp"
-        ${COMMON_HEADERS}
-    )
-    setup_test_target(TestRenderer)
-
-    add_custom_target(IntegrationTests DEPENDS TestRenderer)
+    # R13-C/T3（用户指示 2026-11-04）：旧集成测试不再迭代，失败不阻塞验收。
+    # legacy TestRenderer 的 28 项 MSVC 编译错误不修（Main.cpp C1189 无启用
+    # 测试 / RenderItem.cpp add_shader_function_name / Scripts.cpp 数学向量
+    # 类型 / D3D12Helpers.h sampler_state 重定义 / ShaderCompilation.cpp
+    # 硬编码 dxcapi.h 缺失——十二测报告，详见
+    # Docs/RHI/D3D12_Windows_Integration_Runbook.md §22-C）。
+    # 该 target 从 Windows 构建移除；保留空 IntegrationTests 聚合目标供
+    # run_integration_tests / run_all_tests 的 DEPENDS 引用（与下方
+    # BUILD_CONTENT_TOOLS=OFF 分支同模式）。macOS 零影响：本分支仅 WIN32
+    # 进入，macOS 走上方 APPLE 分支，TestRenderer 本就不在 macOS 生成。
+    add_custom_target(IntegrationTests)
 
 elseif(LINUX)
     # Linux下使用 TestRenderer (假设兼容)

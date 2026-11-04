@@ -363,6 +363,13 @@ bool D3D12Device::createResourceSubsystems() {
         return false;
     }
     uploadRing_.Initialize(this);
+    // R13/T2：mip gen 根签名（失败不 fatal——GenerateMipmaps 按调用量降级
+    // 为 NOT-IMPLEMENTED Error；其余设备功能不受影响）。
+    if (!mipGenerator_.Initialize(device_.Get())) {
+        PRIMAL_LOG_STREAM(Warn, "RHI")
+            << "[D3D12Device] mip generator root signature init failed — "
+               "GenerateMipmaps will degrade to NOT-IMPLEMENTED" << std::endl;
+    }
     PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 6.1 descriptor heaps + upload ring ready" << std::endl;
     return true;
 }
@@ -421,6 +428,7 @@ void D3D12Device::shutdownImpl() {
 
     // M1 资源层子系统：逆初始化序（先 staging/描述符，再 allocator/device）。
     uploadRing_.Shutdown();
+    mipGenerator_.Shutdown();
     descriptorHeaps_.Shutdown();
 
     // 各类型分配器整队释放（触发资源析构 → GC 延迟入队），随后强制排干
@@ -1115,26 +1123,28 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
     d3d12::D3D12DescriptorHeapManager& heaps = descriptorHeaps_;
 
     // 主区段迁移（内容逐描述符拷贝——heap 描述符自包含）。
+    // R13/T1：源改 shadow 堆（原实现读 visible 堆作源 = debug-layer
+    // #654 COPY_DESCRIPTORS_WRITE_ONLY_DESCRIPTOR，Windows 十二测全部
+    // exit 2170 的直接根因）；迁移同时维护镜像不变量（shadow(new) 先收
+    // 下旧内容，再 shadow(new)→visible(new) 合法方向下发）。
     if (set->MainCount() > 0) {
         u32 newBase = 0;
         if (!heaps.AllocShaderVisible(set->MainCount(), newBase)) return;
-        for (u32 i = 0; i < set->MainCount(); ++i) {
-            native->CopyDescriptorsSimple(
-                1, heaps.CbvSrvUavCpuHandle(newBase + i),
-                heaps.CbvSrvUavCpuHandle(set->BaseSlot() + i),
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        }
+        native->CopyDescriptorsSimple(
+            set->MainCount(), heaps.CbvSrvUavShadowCpuHandle(newBase),
+            heaps.CbvSrvUavShadowCpuHandle(set->BaseSlot()),
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        heaps.CopyCbvSrvUavShadowToVisible(newBase, set->MainCount());
         set->baseSlot_ = newBase;
     }
     if (set->SamplerCount() > 0) {
         u32 newSamplerBase = 0;
         if (!heaps.AllocSamplerRange(set->SamplerCount(), newSamplerBase)) return;
-        for (u32 i = 0; i < set->SamplerCount(); ++i) {
-            native->CopyDescriptorsSimple(
-                1, heaps.SamplerCpuHandle(newSamplerBase + i),
-                heaps.SamplerCpuHandle(set->SamplerBaseSlot() + i),
-                D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-        }
+        native->CopyDescriptorsSimple(
+            set->SamplerCount(), heaps.SamplerShadowCpuHandle(newSamplerBase),
+            heaps.SamplerShadowCpuHandle(set->SamplerBaseSlot()),
+            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        heaps.CopySamplerShadowToVisible(newSamplerBase, set->SamplerCount());
         set->samplerBaseSlot_ = newSamplerBase;
     }
     set->ownerSlot_ = currentFrameIndex_;
@@ -1162,7 +1172,8 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                 d3d12::D3D12Buffer* buffer = GetBuffer(bi.buffer);
                 if (!buffer) continue;
                 const u32 slot = set->BaseSlot() + info.mainOffset + write.dstArrayElement + e;
-                const D3D12_CPU_DESCRIPTOR_HANDLE dst = descriptorHeaps_.CbvSrvUavCpuHandle(slot);
+                // R13/T1 双写第一步：Create*View 落 shadow 堆（dst = shadow 槽）。
+                const D3D12_CPU_DESCRIPTOR_HANDLE dst = descriptorHeaps_.CbvSrvUavShadowCpuHandle(slot);
                 switch (info.mainType) {
                     case D3D12_DESCRIPTOR_RANGE_TYPE_CBV: {
                         // CBV 尺寸须 256 倍数；BufferLocation 256 对齐（烘焙偏移）。
@@ -1200,6 +1211,9 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                     }
                     default: break;
                 }
+                // 双写第二步：shadow → visible 同槽（ClassifyBinding 只产
+                // CBV/SRV/UAV 三值，default 分支不可达；三分支统一在此镜像）。
+                descriptorHeaps_.CopyCbvSrvUavShadowToVisible(slot);
             }
             // --- 图像/sampler 段（拷贝现成描述符——纹理创建时已建 SRV/UAV）---
             else if (write.imageInfo) {
@@ -1212,10 +1226,13 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                     if (srcSlot == d3d12::D3D12Texture::kInvalidDescriptorSlot) continue;
                     const u32 dstSlot = set->BaseSlot() + info.mainOffset
                                         + write.dstArrayElement + e;
+                    // R13/T1 双写：源读纹理持久槽的 shadow 副本（原实现读
+                    // visible 堆 = #654），先落 shadow(dst) 再镜像 visible(dst)。
                     native->CopyDescriptorsSimple(
-                        1, descriptorHeaps_.CbvSrvUavCpuHandle(dstSlot),
-                        descriptorHeaps_.CbvSrvUavCpuHandle(srcSlot),
+                        1, descriptorHeaps_.CbvSrvUavShadowCpuHandle(dstSlot),
+                        descriptorHeaps_.CbvSrvUavShadowCpuHandle(srcSlot),
                         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                    descriptorHeaps_.CopyCbvSrvUavShadowToVisible(dstSlot);
                 }
                 if (info.hasSampler) {
                     d3d12::D3D12Sampler* sampler = GetSampler(ii.sampler);
@@ -1223,9 +1240,10 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                     const u32 dstSlot = set->SamplerBaseSlot() + info.samplerOffset
                                         + write.dstArrayElement + e;
                     native->CopyDescriptorsSimple(
-                        1, descriptorHeaps_.SamplerCpuHandle(dstSlot),
-                        descriptorHeaps_.SamplerCpuHandle(sampler->Slot()),
+                        1, descriptorHeaps_.SamplerShadowCpuHandle(dstSlot),
+                        descriptorHeaps_.SamplerShadowCpuHandle(sampler->Slot()),
                         D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+                    descriptorHeaps_.CopySamplerShadowToVisible(dstSlot);
                 }
             }
         }

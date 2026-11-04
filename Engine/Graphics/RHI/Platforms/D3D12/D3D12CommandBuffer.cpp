@@ -7,6 +7,8 @@
 
 #include "D3D12DescriptorHeaps.h"
 #include "D3D12Device.h"
+#include "D3D12Format.h"
+#include "D3D12MipGen.h"
 #include "D3D12Pipeline.h"
 #include "D3D12Texture.h"
 #include "D3D12Upload.h"
@@ -891,20 +893,137 @@ void D3D12CommandBufferImpl::BlitTexture(ResourceHandle src, ResourceHandle dst,
                       kD3D12ResourceBarrierAllSubresources);
 }
 
-void D3D12CommandBufferImpl::GenerateMipmaps(ResourceHandle) {
-    // M7 F7-3 接通评估结论：NOT-IMPLEMENTED 维持，移交 Windows 集成会话。
-    // 原因：D3D12 无 vkCmdBlitImage 直译（Vulkan 侧为整链 blit 硬件过滤），
-    // 等价物=M5Mipmap.comp（整数 box，工具 shader 已交付，Vulkan 侧
-    // RHI_TEST_MIPGEN 逐字节验证）逐 mip dispatch。接通所需：
-    //   ① M5Mipmap.cso 字节进后端（嵌入头或 blob 装载——后端无文件路径
-    //      上下文，且 freshness gate 需覆盖嵌入物）；
-    //   ② 设备级惰性 compute PSO + 逐 mip SRV/UAV 描述符（native 侧直接
-    //      建 1-mip 视图，无 RHI 视图限制）+ mip 间全局 UAV barrier。
-    // 成本与风险（无 macOS 编译验证的新机制）超 M7"成本可控"线，按 PhaseDoc
-    // 移交协议登记（见 D3D12_Windows_Integration_Runbook.md §7）。
-    PRIMAL_LOG_STREAM(Error, "RHI")
-        << "[D3D12CommandBuffer] GenerateMipmaps NOT-IMPLEMENTED "
-        << "(tool shader delivered; wiring deferred to Windows session)" << std::endl;
+void D3D12CommandBufferImpl::GenerateMipmaps(ResourceHandle texture) {
+    // R13/T2：canonical PS downsample（M7 F7-3 移交项的 Windows 侧接通）。
+    // 方案：每级 mip 一次全屏三角形 draw——src mip（i）经 1-mip SRV 绑 t0、
+    // dst mip（i+1）绑 RTV；PS 双线性采样在半尺寸目标纹素中心 = src 2x2
+    // box 均值（与 Vulkan 侧 vkCmdBlitImage LINEAR blit 链同档滤波）。
+    // shader 字节=构建期嵌入头（MipGen.hlsl → dxc/fxc → cso → 字节数组，
+    // Engine/CMakeLists.txt 编译块；构建机无 HLSL 编译器 → 嵌入为空 → 此处
+    // 保持 NOT-IMPLEMENTED Error，显式降级不静默）。
+    if (!commandList_) return;
+    D3D12Device& dev = static_cast<D3D12Device&>(device_);
+    d3d12::D3D12Texture* tex = dev.GetTexture(texture);
+    if (!tex || !tex->GetNativeResource()) return;
+
+    const TextureDesc& td = tex->GetTextureDesc();
+    const u32 mipCount = td.mipLevels;
+    if (mipCount <= 1) return;  // Vulkan 版同款 no-op
+
+    // 支持面（对齐 Vulkan"仅 2D、full-mipchain"简化）：Texture2D 单 slice +
+    // 格式支持 RTV（CheckFormatSupport 拦截 BC 压缩/深度/TYPELESS——BC 无
+    // RTV 能力，mip 生成保持 NOT-IMPLEMENTED Error 并登记后续）。
+    if (td.type != TextureType::Texture2D) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12CommandBuffer] GenerateMipmaps NOT-IMPLEMENTED for "
+               "texture type " << static_cast<u32>(td.type)
+            << " (Texture2D only, Vulkan parity) — skipped" << std::endl;
+        return;
+    }
+    const u32 dxgi = d3d12::ToDxgiFormat(td.format);
+    UINT formatSupport = 0;
+    if (FAILED(dev.GetNativeDevice()->CheckFormatSupport(
+            static_cast<DXGI_FORMAT>(dxgi), &formatSupport))
+        || (formatSupport & D3D12_FORMAT_SUPPORT_RENDER_TARGET) == 0) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12CommandBuffer] GenerateMipmaps NOT-IMPLEMENTED for "
+               "format 0x" << std::hex << dxgi << std::dec
+            << " (no RTV support: BC-compressed/depth/TYPELESS family — "
+               "registered as follow-up) — skipped" << std::endl;
+        return;
+    }
+    ID3D12PipelineState* pso = dev.GetMipGenerator().GetOrCreatePipeline(dxgi);
+    if (!pso || !dev.GetMipGenerator().GetRootSignature()) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12CommandBuffer] GenerateMipmaps NOT-IMPLEMENTED "
+               "(embedded shader bytes missing or PSO creation failed — "
+               "build machine had no dxc/fxc) — skipped" << std::endl;
+        return;
+    }
+    UpdateStats(CommandType::GenerateMipmaps);
+
+    // SRV 描述符：每 mip 独占槽（同帧各 draw 引用不同槽，无覆写冒险），
+    // 帧槽线性区分配（跨帧护栏与 set 实例区段同款）。R13/T1 双写：先落
+    // shadow 再整段镜像 visible。
+    d3d12::D3D12DescriptorHeapManager& heaps = dev.GetDescriptorHeaps();
+    const u32 srvCount = mipCount - 1;
+    u32 srvBase = d3d12::D3D12DescriptorHeapManager::kInvalidSlot;
+    if (!heaps.AllocShaderVisible(srvCount, srvBase)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12CommandBuffer] GenerateMipmaps frame-slot descriptor "
+               "capacity exhausted — skipped" << std::endl;
+        return;
+    }
+    ID3D12Device* native = dev.GetNativeDevice();
+    for (u32 m = 0; m < srvCount; ++m) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
+        srv.Format = static_cast<DXGI_FORMAT>(dxgi);
+        srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srv.Texture2D.MostDetailedMip = m;   // src = 第 m 级
+        srv.Texture2D.MipLevels = 1;
+        srv.Texture2D.PlaneSlice = 0;
+        srv.Texture2D.ResourceMinLODClamp = 0.0f;
+        native->CreateShaderResourceView(tex->GetNativeResource(), &srv,
+                                         heaps.CbvSrvUavShadowCpuHandle(srvBase + m));
+    }
+    heaps.CopyCbvSrvUavShadowToVisible(srvBase, srvCount);
+
+    // RTV 槽复用：RTV/DSV 描述符在 OMSetRenderTargets 录制期即被解析进
+    // 命令流（非 shader-visible 堆无法被 GPU 侧延迟读取），录制后立即改写
+    // 安全——单槽逐 mip 重写即可。
+    const u32 rtvSlot = heaps.AllocRtv();
+    if (rtvSlot == d3d12::D3D12DescriptorHeapManager::kInvalidSlot) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12CommandBuffer] GenerateMipmaps RTV slot exhausted — "
+               "skipped" << std::endl;
+        return;
+    }
+
+    // 状态机（tracker 驱动，逐子资源）：mip i → PIXEL_SHADER_RESOURCE 读、
+    // mip i+1 → RENDER_TARGET 写；画完 mip i+1 → PIXEL_SHADER_RESOURCE
+    //（下一轮读源 + 终态）。上传路径后 tracker 已在 ShaderResource（上传环
+    // 拷贝尾转换），首轮 transition 幂等零 op。终态=全 mip ShaderResource，
+    // 与 Vulkan 版 SHADER_READ_ONLY 收敛一致。
+    EnsureDescriptorHeapsBound();
+    commandList_->SetGraphicsRootSignature(dev.GetMipGenerator().GetRootSignature());
+    commandList_->SetPipelineState(pso);
+    commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    for (u32 m = 0; m < srvCount; ++m) {
+        const u32 dstW = td.size.x > (1u << (m + 1)) ? td.size.x >> (m + 1) : 1u;
+        const u32 dstH = td.size.y > (1u << (m + 1)) ? td.size.y >> (m + 1) : 1u;
+
+        TransitionTexture(tex, texture, ResourceState::ShaderResource, m);
+        TransitionTexture(tex, texture, ResourceState::RenderTarget, m + 1);
+
+        D3D12_RENDER_TARGET_VIEW_DESC rtvDesc{};
+        rtvDesc.Format = static_cast<DXGI_FORMAT>(dxgi);
+        rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+        rtvDesc.Texture2D.MipSlice = static_cast<UINT>(m + 1);
+        rtvDesc.Texture2D.PlaneSlice = 0;
+        native->CreateRenderTargetView(tex->GetNativeResource(), &rtvDesc,
+                                       heaps.RtvCpuHandle(rtvSlot));
+
+        // 正高度视口：mip gen 无呈现 Y 翻转参与（src/dst 同为纹理行主序，
+        // UV 直映），与引擎交换链负高度视口契约无关。
+        D3D12_VIEWPORT viewport{};
+        viewport.Width = static_cast<FLOAT>(dstW);
+        viewport.Height = static_cast<FLOAT>(dstH);
+        viewport.MaxDepth = 1.0f;
+        D3D12_RECT scissor{};
+        scissor.right = static_cast<LONG>(dstW);
+        scissor.bottom = static_cast<LONG>(dstH);
+        commandList_->RSSetViewports(1, &viewport);
+        commandList_->RSSetScissorRects(1, &scissor);
+        const D3D12_CPU_DESCRIPTOR_HANDLE rtv = heaps.RtvCpuHandle(rtvSlot);
+        commandList_->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        commandList_->SetGraphicsRootDescriptorTable(
+            0, heaps.CbvSrvUavGpuHandle(srvBase + m));
+        commandList_->Draw(3, 0, 1, 0);
+
+        TransitionTexture(tex, texture, ResourceState::ShaderResource, m + 1);
+    }
+    heaps.FreeRtv(rtvSlot);
 }
 
 } // namespace primal::graphics::rhi::d3d12

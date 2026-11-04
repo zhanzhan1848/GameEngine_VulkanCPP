@@ -20,8 +20,30 @@
 //      延迟槽位释放，与资源同款护栏）。
 //   3. RTV / DSV 堆：非 shader-visible（CPU 写入即可），持久槽位 free-list。
 //
-// 句柄语义：调用方持有的是"槽位号"（u32），CPU/GPU 句柄由本管理器换算
-// （堆基址 + 槽位 * 描述符尺寸）。kInvalidSlot = 无效。
+// 双堆（shadow）模型（R13/T1）：两个 shader-visible 堆（CBV/SRV/UAV 主堆
+// 与 Sampler 堆）各配一个**同容量、同槽位布局的非 shader-visible 阴影堆**。
+// 根因（Windows 十一测 CDB 实证，debug-layer error #654
+// COPY_DESCRIPTORS_WRITE_ONLY_DESCRIPTOR）：shader-visible 堆的 CPU 句柄是
+// write-only——任何 CopyDescriptorsSimple 以它作源 = 非法。M1 设计里纹理
+// SRV/UAV 持久槽与 set 区段迁移/拷贝全在可见堆内自拷，12 次运行全在首帧
+// 前 exit 2170（0x87A debug break）。修法=标准双写模式：
+//   - 描述符先写 shadow 堆（Create*View/CreateSampler 目标 = shadow 句柄，
+//     或 CopyDescriptorsSimple 拷入 shadow 槽）；
+//   - 再 CopyDescriptorsSimple(shadow → visible) 同槽位（唯一合法方向）；
+//   - 一切"读描述符做源"的拷贝（纹理 SRV/UAV 源、sampler 源、set 区段
+//     迁移源）一律读 shadow 堆。
+// 不变量：任一 live 槽位的 shadow 内容 == visible 内容（每次写都双落）。
+// GPU 句柄仍只来自 visible 堆（descriptor table 绑定模型不变）；幂等/
+// 迁移/帧槽回收语义不变（shadow 与 visible 槽位一一对应，bump/free-list
+// 只有一套，作用于两者共用的"槽位号"坐标）。RTV/DSV 非可见堆无此限制，
+// 不配 shadow。
+//
+// 句柄语义（双堆下按堆归属命名）：调用方持有的是"槽位号"（u32）；
+//   - CbvSrvUavCpuHandle / SamplerCpuHandle       = **visible 堆** CPU 句柄
+//     （write-only：仅可作 Create*View 目标或 CopyDescriptors 目标，禁作源）；
+//   - CbvSrvUavShadowCpuHandle / SamplerShadowCpuHandle = **shadow 堆** CPU
+//     句柄（read-write：Create*View 目标 + 一切拷贝的源/中转）。
+// GPU 句柄由 visible 堆换算。kInvalidSlot = 无效。
 #pragma once
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
@@ -222,6 +244,18 @@ public:
     D3D12_GPU_DESCRIPTOR_HANDLE CbvSrvUavGpuHandle(u32 slot) const;
 
     // ------------------------------------------------------------------
+    // shadow 堆（R13/T1 双写模式——语义见文件头）
+    // ------------------------------------------------------------------
+    /// shadow 堆 CPU 句柄（read-write：Create*View 目标 / 一切拷贝源）。
+    D3D12_CPU_DESCRIPTOR_HANDLE CbvSrvUavShadowCpuHandle(u32 slot) const;
+    D3D12_CPU_DESCRIPTOR_HANDLE SamplerShadowCpuHandle(u32 slot) const;
+
+    /// 双写第二步：CopyDescriptorsSimple(shadow → visible) 同槽位起 count 个
+    /// 连续描述符（唯一合法方向；Initialize 后可用）。
+    void CopyCbvSrvUavShadowToVisible(u32 slot, u32 count = 1);
+    void CopySamplerShadowToVisible(u32 slot, u32 count = 1);
+
+    // ------------------------------------------------------------------
     // 持久槽位（RTV/DSV 非可见堆 + sampler shader-visible 堆）
     // ------------------------------------------------------------------
     u32 AllocRtv();
@@ -268,6 +302,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> samplerHeap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> rtvHeap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> dsvHeap_;
+    // shadow 堆（R13/T1）：与对应 visible 堆同容量/同槽位布局的非可见堆
+    //（拷贝源 + Create*View 落点；语义见文件头双堆模型）。
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> cbvSrvUavShadowHeap_;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> samplerShadowHeap_;
 
     u32 cbvSrvUavDescriptorSize_ = 0;
     u32 samplerDescriptorSize_ = 0;
@@ -278,6 +316,8 @@ private:
     D3D12_GPU_DESCRIPTOR_HANDLE cbvSrvUavGpuStart_{};
     D3D12_CPU_DESCRIPTOR_HANDLE samplerCpuStart_{};
     D3D12_GPU_DESCRIPTOR_HANDLE samplerGpuStart_{};
+    D3D12_CPU_DESCRIPTOR_HANDLE cbvSrvUavShadowCpuStart_{};  // R13/T1
+    D3D12_CPU_DESCRIPTOR_HANDLE samplerShadowCpuStart_{};    // R13/T1
     D3D12_CPU_DESCRIPTOR_HANDLE rtvCpuStart_{};
     D3D12_CPU_DESCRIPTOR_HANDLE dsvCpuStart_{};
 

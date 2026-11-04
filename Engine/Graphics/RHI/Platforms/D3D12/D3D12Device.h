@@ -47,6 +47,7 @@
 #include "D3D12CommandBuffer.h"
 #include "D3D12DescriptorHeaps.h"
 #include "D3D12Fence.h"
+#include "D3D12MipGen.h"
 #include "D3D12Pipeline.h"
 #include "D3D12Shader.h"
 #include "D3D12StateTracker.h"
@@ -69,6 +70,8 @@ public:
 
     // --- 原生访问（后端内部与诊断；共享代码禁 include——F0-12 门禁）---
     ID3D12Device* GetNativeDevice() const { return device_.Get(); }
+    /// R13/T2：GenerateMipmaps 渲染资产（根签名/按格式 PSO 缓存）。
+    d3d12::D3D12MipGenerator& GetMipGenerator() { return mipGenerator_; }
     ID3D12CommandQueue* GetGraphicsQueue() const { return graphicsQueue_.Get(); }
     IDXGIAdapter4* GetNativeAdapter() const { return adapter_.Get(); }
     bool IsWarp() const { return warp_; }
@@ -253,6 +256,9 @@ private:
     d3d12::D3D12DescriptorHeapManager descriptorHeaps_;
     d3d12::D3D12UploadRing uploadRing_;
     d3d12::D3D12StateTracker stateTracker_;
+    // R13/T2：GenerateMipmaps 的设备级渲染资产（根签名 + 按格式惰性 PSO；
+    // shader 字节 = 构建期嵌入头，见 D3D12MipGen.h）。
+    d3d12::D3D12MipGenerator mipGenerator_;
 
     // === Per-type free_list 分配器（延迟释放与 Vulkan 同款护栏）===
     RHIAllocator<d3d12::D3D12Buffer> bufferAllocator_;
