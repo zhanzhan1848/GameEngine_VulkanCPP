@@ -1,6 +1,12 @@
 #include "PrimitiveMesh.h"
 #include "Geometry.h"
 
+#if defined(_MSC_VER)
+// R8（Windows 首编）：下方 _MSC_VER 分支的 XMScalarSin/XMScalarCos 是
+// DirectXMath 标量函数（仅 float 参数、无 XMFLOAT 类型混用），Windows SDK
+// 自带 directxmath.h，无需额外 include 路径；此前无人包含 → C3861。
+#include <directxmath.h>
+#endif
 
 namespace primal::tools
 {

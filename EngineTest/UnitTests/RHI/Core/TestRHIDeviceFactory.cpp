@@ -48,9 +48,15 @@ TestResult TestUnimplementedBackendsReturnNull() {
 
     desc.platform = RHIPlatform::Vulkan;
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
+    // R8 埋点（八测定时超时定位）：双后端构建里本用例先建 Vulkan 设备再建
+    // D3D12 设备——每步一行带 flush 的 stdout，ctest 超时时日志尾部即挂起步。
+    std::cout << "[FactoryTest] step 1: CreateRHIDevice(Vulkan) enter" << std::endl;
     RHIDeviceBase* vk = CreateRHIDevice(desc);
+    std::cout << "[FactoryTest] step 2: CreateRHIDevice(Vulkan) returned "
+              << (vk ? "non-null" : "null") << std::endl;
     TEST_ASSERT(vk != nullptr, "Vulkan backend should return non-null when ENABLE_VULKAN is defined");
     DestroyRHIDevice(vk);
+    std::cout << "[FactoryTest] step 3: Vulkan device destroyed" << std::endl;
 #else
     TEST_ASSERT(CreateRHIDevice(desc) == nullptr, "Vulkan backend should return nullptr when ENABLE_VULKAN is undefined");
 #endif
@@ -60,9 +66,13 @@ TestResult TestUnimplementedBackendsReturnNull() {
     // F0-9（D3D12 M0）：Windows + ENABLE_D3D12 时工厂应实例化 D3D12Device
     // 最小闭环（此分支在 macOS 不编译；本文件由 UnitTests CMake 在
     // WIN32+ENABLE_D3D12 时传 ENABLE_D3D12=1 宏）。
+    std::cout << "[FactoryTest] step 4: CreateRHIDevice(D3D12) enter" << std::endl;
     RHIDeviceBase* d3d = CreateRHIDevice(desc);
+    std::cout << "[FactoryTest] step 5: CreateRHIDevice(D3D12) returned "
+              << (d3d ? "non-null" : "null") << std::endl;
     TEST_ASSERT(d3d != nullptr, "D3D12 backend should return non-null when ENABLE_D3D12 is defined on Windows");
     DestroyRHIDevice(d3d);
+    std::cout << "[FactoryTest] step 6: D3D12 device destroyed" << std::endl;
 #else
     TEST_ASSERT(CreateRHIDevice(desc) == nullptr, "D3D12 backend should return nullptr (not implemented)");
 #endif

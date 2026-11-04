@@ -4,6 +4,7 @@
 #if defined(_MSC_VER)
 #include <direct.h>
 #include <io.h>
+#include <cmath>
 #elif defined(__clang__)
 #include <sys/stat.h>
 #include <unistd.h>
@@ -24,6 +25,26 @@ namespace primal::tools
 {
 	namespace
 	{
+		// R8（Windows 首编）：原 _MSC_VER 分支用 DirectXMath 归一化
+		// （XMLoadFloat3/4 + XMVector3/4Normalize + XMStoreFloat3/4），但
+		// math::v3/v4 在 Windows 是本仓可移植结构体（MathTypes.h：不能别名
+		// XMFLOAT*），XMLoadFloat3/4 只收 XMFLOAT3/4* → 类型不匹配。此标量
+		// 版本与 __clang__ 分支的 simd_normalize 数值语义一致：乘倒数而非
+		// 除法，零长度输入产生 NaN（simd_normalize 实测 normalize(0)=NaN）。
+#if defined(_MSC_VER)
+		inline math::v3 normalize_v3(const math::v3& v)
+		{
+			const f32 inv{ 1.f / std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z) };
+			return { v.x * inv, v.y * inv, v.z * inv };
+		}
+
+		inline math::v4 normalize_v4(const math::v4& v)
+		{
+			const f32 inv{ 1.f / std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z + v.w * v.w) };
+			return { v.x * inv, v.y * inv, v.z * inv, v.w * inv };
+		}
+#endif
+
 		std::mutex		obj_mutex{};
 
 		std::string base_path{ "C:\\Users\\zy\\Desktop\\PrimalMerge\\PrimalEngine" };
@@ -310,7 +331,6 @@ namespace primal::tools
 		{
 #if defined(_MSC_VER)
 			assert(geos->index_count % 3 == 0);
-			using namespace DirectX;
 			for (u32 i{ 0 }; i < geos->index_count; i += 3)
 			{
 				u32 i0 = geos->indices[i];
@@ -337,9 +357,7 @@ namespace primal::tools
 					fc * (deltaV2 * edge1.y - deltaV1 * edge2.y),
 					fc * (deltaV2 * edge1.z - deltaV1 * edge2.z)};
 
-				XMVECTOR tang = XMLoadFloat3(&tangent);
-				tang = XMVector3Normalize(tang);
-				XMStoreFloat3(&tangent, tang);
+				tangent = normalize_v3(tangent);
 
 				f32 sx = deltaU1, sy = deltaU2;
 				f32 tx = deltaV1, ty = deltaV2;
@@ -905,8 +923,7 @@ namespace primal::tools
 								_attribute.normals[index * 3 + 2],
 								1.f };
 #if defined(_MSC_VER)
-					DirectX::XMVECTOR N = DirectX::XMLoadFloat4(&n);
-					DirectX::XMStoreFloat4(&n, DirectX::XMVector4Normalize(N));
+					n = normalize_v4(n);
 					m.normals.emplace_back((f32)n.x, (f32)n.y, (f32)n.z);
 #elif defined(__clang__)
 					n = simd_normalize(n);
@@ -962,9 +979,7 @@ namespace primal::tools
 					fc * (deltaV2 * edge1.y - deltaV1 * edge2.y),
 					fc * (deltaV2 * edge1.z - deltaV1 * edge2.z) };
 
-				DirectX::XMVECTOR tang = XMLoadFloat3(&tangent);
-				tang = DirectX::XMVector3Normalize(tang);
-				DirectX::XMStoreFloat3(&tangent, tang);
+				tangent = normalize_v3(tangent);
 
 				f32 sx = deltaU1, sy = deltaU2;
 				f32 tx = deltaV1, ty = deltaV2;

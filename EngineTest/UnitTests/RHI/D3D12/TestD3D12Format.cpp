@@ -197,7 +197,7 @@ void RegisterD3D12FormatTests() {
 #ifndef UNIT_TEST_LIB
 int main() {
     RegisterD3D12FormatTests();
-    TestRunner::RunAllSuites();
-    return 0;
+    const auto runStats = TestRunner::RunAllSuites();
+    return runStats.failedTests == 0 ? 0 : 1;
 }
 #endif

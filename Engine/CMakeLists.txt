@@ -814,18 +814,33 @@ if(ENABLE_D3D12)
             target_compile_definitions(${PROJECT_NAME} PRIVATE
                 PRIMAL_D3D12_AGILITY_RUNTIME=1
             )
-            # 运行时 DLL 暂存到共享运行输出根的 D3D12/ 子目录（EngineDLL、
-            # 全部集成测试 exe 与编辑器加载路径共用该根；官方 NuGet targets
-            # 同样复制到 .\D3D12\ 而非 exe 平级）。
+            # 运行时 DLL 暂存（R8 修正契约）：Agility side-load 官方契约 =
+            # 导出 D3D12SDKVersion 的每个 exe 的同目录下必须有 .\D3D12\
+            # 子目录（D3D12Core.dll / d3d12SDKLayers.dll）。七测实测：单测
+            # exe 输出在 <build>/Tests/UnitTests/（UnitTests/CMakeLists L8
+            # 独立设根），此前只暂存 Windows/<Config>/ 一个根 → TestRHIDeviceFactory
+            # 等全部单测 exe 启动即 0xC0000142（STATUS_DLL_INIT_FAILED），
+            # 用户手工补 DLL 才能起进程。目的地枚举 = 全部会链接 Engine
+            # （ENABLE_D3D12 下导出 D3D12SDKVersion）的 exe 输出根：
+            #   ① Windows/<Config>/        —— EngineDLL、primal-engine、集成测试（setup_test_target 三者同根）
+            #   ② <build>/Tests/UnitTests/ —— 全部单测 exe（含 TestRHIDeviceFactory）
+            #   ③ <build>/bin/<Config>/    —— 全局默认输出根（CMakeLists WIN32 分支；预防性覆盖）
+            # 未配置单测的树会多建空 D3D12/ 目录（make_directory 副作用，无害）。
             if(PRIMAL_D3D12_AGILITY_BIN_DIR)
-                foreach(PRIMAL_D3D12_AGILITY_DLL D3D12Core.dll d3d12SDKLayers.dll)
-                    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-                        COMMAND ${CMAKE_COMMAND} -E make_directory
-                            "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/D3D12"
-                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                            "${PRIMAL_D3D12_AGILITY_BIN_DIR}/${PRIMAL_D3D12_AGILITY_DLL}"
-                            "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/D3D12/${PRIMAL_D3D12_AGILITY_DLL}"
-                        VERBATIM)
+                set(PRIMAL_D3D12_AGILITY_STAGING_ROOTS
+                    "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>"
+                    "${CMAKE_BINARY_DIR}/Tests/UnitTests"
+                    "${CMAKE_BINARY_DIR}/bin/$<CONFIG>")
+                foreach(PRIMAL_D3D12_AGILITY_ROOT_DIR ${PRIMAL_D3D12_AGILITY_STAGING_ROOTS})
+                    foreach(PRIMAL_D3D12_AGILITY_DLL D3D12Core.dll d3d12SDKLayers.dll)
+                        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                            COMMAND ${CMAKE_COMMAND} -E make_directory
+                                "${PRIMAL_D3D12_AGILITY_ROOT_DIR}/D3D12"
+                            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                                "${PRIMAL_D3D12_AGILITY_BIN_DIR}/${PRIMAL_D3D12_AGILITY_DLL}"
+                                "${PRIMAL_D3D12_AGILITY_ROOT_DIR}/D3D12/${PRIMAL_D3D12_AGILITY_DLL}"
+                            VERBATIM)
+                    endforeach()
                 endforeach()
             endif()
             message(STATUS "Agility SDK (Microsoft.Direct3D.D3D12) ${PRIMAL_D3D12_AGILITY_VERSION} active: include='${PRIMAL_D3D12_AGILITY_INCLUDE_DIR}' runtime DLLs='${PRIMAL_D3D12_AGILITY_BIN_DIR}'")

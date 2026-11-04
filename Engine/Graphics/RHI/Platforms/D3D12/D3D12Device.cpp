@@ -17,7 +17,8 @@
 // Agility SDK 运行时导出（Engine/CMakeLists.txt 动态接入链在场时定义）：
 // D3D12 系统运行时按二进制的 D3D12SDKVersion 导出值选择 side-load 的
 // <exe 目录>\D3D12\D3D12Core.dll（官方 Agility 集成约定；该 DLL 由 Engine
-// POST_BUILD copy_if_different 暂存到共享运行输出根）。本 TU 经
+// POST_BUILD copy_if_different 暂存到全部 exe 输出根的 D3D12/ 子目录，
+// R8 起含 <build>/Tests/UnitTests——见 Engine/CMakeLists 暂存目的地表）。本 TU 经
 // RHIDeviceFactory（CreateRHIDevice → new D3D12Device）必然被静态库链接
 // 拉入，导出稳定可见。离线回退路径（PRIMAL_D3D12_AGILITY_RUNTIME=0）不
 // 导出——无 side-load DLL 时导出反而令 d3d12.dll 找 .\D3D12\ 失败。
@@ -100,15 +101,34 @@ D3D12Device::~D3D12Device() {
 // ============================================================================
 
 bool D3D12Device::initializeImpl() {
+    // R8 分阶段埋点（八测定时超时定位用）：每阶段入口一行 Info 日志
+    //（stderr，PRIMAL_LOG_STREAM 自带缓冲；日志尾部最后一行 = 挂起阶段）。
+#if defined(PRIMAL_D3D12_AGILITY_RUNTIME) && PRIMAL_D3D12_AGILITY_RUNTIME
+    constexpr const char* kAgilityRuntime = "1";
+#else
+    constexpr const char* kAgilityRuntime = "0";
+#endif
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+        << "[D3D12:init] stage 0 enter (agility_runtime=" << kAgilityRuntime
+        << ", debug=" << (desc_.enableDebug ? 1 : 0)
+        << ", validation=" << (desc_.enableValidation ? 1 : 0)
+        << ", warp_env=" << (EnvFlag("PRIMAL_D3D12_WARP") ? 1 : 0) << ")" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 1 debug layer" << std::endl;
     if (!enableDebugLayer()) return false;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 2 adapter selection" << std::endl;
     if (!selectAdapter()) return false;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 3 device + queue" << std::endl;
     if (!createDeviceAndQueue()) return false;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 4 fence pool" << std::endl;
     if (!fencePool_.Initialize(device_.Get())) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] fence pool init failed" << std::endl;
         return false;
     }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 5 allocator" << std::endl;
     if (!createAllocator()) return false;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 6 resource subsystems" << std::endl;
     if (!createResourceSubsystems()) return false;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 7 capability query" << std::endl;
 
     // M5 F5-3：descriptor indexing 能力真实查询（初始化期一次，缓存结果；
     // CheckFeatureSupport 失败=能力未知 → 按 tier0/不支持处理，不静默）。
@@ -160,6 +180,7 @@ bool D3D12Device::initializeImpl() {
     // M0 §5.1 教训：注册式桥的链接锚点（防静态库裁剪；幂等）。
     EnsureD3D12BackendLinksLinked();
 
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 8 device removal check" << std::endl;
     // 首次设备丢失检查：创建即失败时带原因上报。
     const HRESULT reason = device_->GetDeviceRemovedReason();
     if (reason != S_OK) {
@@ -168,15 +189,18 @@ bool D3D12Device::initializeImpl() {
     }
     PRIMAL_LOG_STREAM(Info, "RHI") << "[D3D12Device] initialized (M1 resource layer)"
         << (warp_ ? " (WARP)" : "") << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 9 done" << std::endl;
     return true;
 }
 
 bool D3D12Device::enableDebugLayer() {
     if (!desc_.enableDebug && !desc_.enableValidation) return true;
 
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 1.1 D3D12GetDebugInterface" << std::endl;
     ComPtr<ID3D12Debug> debug0;
     if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug0)))) {
         debug0->EnableDebugLayer();
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 1.2 debug layer enabled" << std::endl;
     } else {
         PRIMAL_LOG_STREAM(Error, "RHI")
             << "[D3D12Device] D3D12GetDebugInterface failed (debug tools missing?)" << std::endl;
@@ -201,9 +225,11 @@ bool D3D12Device::selectAdapter() {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] CreateDXGIFactory2 failed" << std::endl;
         return false;
     }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 2.0 DXGI factory created" << std::endl;
 
     // WARP 回退：PRIMAL_D3D12_WARP=1 强制软件适配器（CI / 无 GPU 场景）。
     if (EnvFlag("PRIMAL_D3D12_WARP")) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 2.1w EnumWarpAdapter" << std::endl;
         ComPtr<IDXGIAdapter> warp;
         if (SUCCEEDED(dxgiFactory_->EnumWarpAdapter(IID_PPV_ARGS(&warp)))
             && SUCCEEDED(warp.As(&adapter_))) {
@@ -216,12 +242,17 @@ bool D3D12Device::selectAdapter() {
 
     // 硬件适配器：按 desc_.adapterIndex 选；越界/枚举耗尽 → 回退索引 0，
     // 仍失败 → WARP 兜底（显式记录，不静默）。
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+        << "[D3D12:init] stage 2.1 hardware adapter enum (want index "
+        << desc_.adapterIndex << ")" << std::endl;
     ComPtr<IDXGIAdapter1> candidate;
     u32 index = 0;
     bool found = false;
-    while (dxgiFactory_->EnumAdapterByGpuPreference(
-               index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&candidate))
-           != DXGI_ERROR_NOT_FOUND) {
+    // R8 修正：原循环条件 `hr != DXGI_ERROR_NOT_FOUND` 把任何非 NOT_FOUND 的
+    // 持续失败（INVALID_CALL/E_FAIL 等）当作"继续枚举" → 无限循环（八测
+    // 补 DLL 后定时超时的静态挂起嫌疑之一）。标准形式 = SUCCEEDED 终止。
+    while (SUCCEEDED(dxgiFactory_->EnumAdapterByGpuPreference(
+               index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&candidate)))) {
         if (index == desc_.adapterIndex) {
             DXGI_ADAPTER_DESC1 desc1{};
             candidate->GetDesc1(&desc1);
@@ -232,6 +263,9 @@ bool D3D12Device::selectAdapter() {
         }
         ++index;
     }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+        << "[D3D12:init] stage 2.2 enum done (last_index=" << index
+        << ", found=" << (found ? 1 : 0) << ")" << std::endl;
     if (!found) {
         PRIMAL_LOG_STREAM(Warn, "RHI")
             << "[D3D12Device] adapter " << desc_.adapterIndex
@@ -254,6 +288,10 @@ bool D3D12Device::createDeviceAndQueue() {
     };
     HRESULT hr = E_FAIL;
     for (const D3D_FEATURE_LEVEL level : levels) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12:init] stage 3.1 D3D12CreateDevice (FL=0x"
+            << std::hex << static_cast<unsigned long>(level) << std::dec
+            << ", adapter=" << (warp_ ? "WARP" : "hw") << ")" << std::endl;
         hr = D3D12CreateDevice(adapter_.Get(), level, IID_PPV_ARGS(&device_));
         if (SUCCEEDED(hr)) break;
     }
@@ -263,6 +301,7 @@ bool D3D12Device::createDeviceAndQueue() {
             << std::hex << static_cast<unsigned long>(hr) << std::dec << std::endl;
         return false;
     }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 3.2 device created" << std::endl;
 
     // InfoQueue fail-fast（debug/验证开启时）：腐蚀/错误级别直接断点 + 全量落日志。
     if (desc_.enableDebug || desc_.enableValidation) {
@@ -282,6 +321,7 @@ bool D3D12Device::createDeviceAndQueue() {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] DIRECT queue creation failed" << std::endl;
         return false;
     }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 3.3 DIRECT queue created" << std::endl;
     return true;
 }
 
@@ -305,6 +345,7 @@ bool D3D12Device::createAllocator() {
         d3d12maAllocator_ = nullptr;
         return false;  // fail-fast：allocator 是资源层前置，创建失败=初始化失败
     }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 5.1 allocator created" << std::endl;
     return true;
 }
 
@@ -315,6 +356,7 @@ bool D3D12Device::createResourceSubsystems() {
         return false;
     }
     uploadRing_.Initialize(this);
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 6.1 descriptor heaps + upload ring ready" << std::endl;
     return true;
 }
 
@@ -361,7 +403,12 @@ void D3D12Device::shutdownImpl() {
     if (device_ && graphicsQueue_ && fencePool_.GetCompletedValue() != UINT64_MAX) {
         const u64 target = fencePool_.NextTarget();
         if (fencePool_.Signal(graphicsQueue_.Get(), target)) {
-            fencePool_.Wait(target, 5000);
+            if (!fencePool_.Wait(target, 5000)) {
+                // R8 埋点：关闭期 fence 等待有限超时（5s）可见化。
+                PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+                    << "[D3D12:shutdown] final fence wait TIMEOUT (5000ms, target="
+                    << target << ")" << std::endl;
+            }
         }
     }
 
@@ -421,7 +468,13 @@ void D3D12Device::waitIdleImpl() const {
     }
     const u64 target = self->fencePool_.NextTarget();
     if (self->fencePool_.Signal(graphicsQueue_.Get(), target)) {
-        self->fencePool_.Wait(target, 10000);
+        if (!self->fencePool_.Wait(target, 10000)) {
+            // R8 埋点：有限超时（10s）返回 false 而非挂起——日志可见即证
+            // "超时"类症状不在此路径的无限等待（区分挂起点用）。
+            PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+                << "[D3D12:init/wait] waitIdle fence wait TIMEOUT (10000ms, target="
+                << target << ")" << std::endl;
+        }
     }
 }
 
