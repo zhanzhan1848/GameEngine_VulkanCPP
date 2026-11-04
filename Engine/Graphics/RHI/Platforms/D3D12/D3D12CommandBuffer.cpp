@@ -937,6 +937,22 @@ void D3D12CommandBufferImpl::GenerateMipmaps(ResourceHandle texture) {
                "registered as follow-up) — skipped" << std::endl;
         return;
     }
+    // R15-1 层2（RTV 守卫）：格式能力门之上再核资源标志——资源无
+    // ALLOW_RENDER_TARGET 时 CreateRenderTargetView 是 debug-layer 必错项
+    //（#42 CREATERENDERTARGETVIEW_INVALIDRESOURCE；Windows 十四测唯一渲染
+    // 阻塞，CDB 实证本函数 mip 循环内的 RTV 创建点）。层1 已在创建期为
+    // mips>1 采样颜色纹理增补该标志；此处兜底残余入口（wrap/view 模式
+    // 资源、usage 无 ShaderResource 位等），Warn 显式跳过不生成 mip——对齐
+    // Vulkan 侧对不可服务纹理的跳过观感（其 blit 链因隐式 TRANSFER 标志
+    // 从不缺能力，mips<=1 为静默 no-op）。
+    if ((tex->GetNativeDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0) {
+        PRIMAL_LOG_STREAM(Warn, "RHI")
+            << "[D3D12CommandBuffer] GenerateMipmaps skipped: texture '"
+            << td.name << "' resource lacks D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET "
+               "(usage=" << static_cast<u32>(td.usage) << ", mips=" << mipCount
+            << ") — RTV creation would raise debug-layer #42" << std::endl;
+        return;
+    }
     ID3D12PipelineState* pso = dev.GetMipGenerator().GetOrCreatePipeline(dxgi);
     if (!pso || !dev.GetMipGenerator().GetRootSignature()) {
         PRIMAL_LOG_STREAM(Error, "RHI")

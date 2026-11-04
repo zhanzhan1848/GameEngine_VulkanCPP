@@ -267,6 +267,32 @@ bool D3D12Texture::Initialize() {
             resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         }
 
+        // R15-1 层1：GenerateMipmaps 服务承诺的创建期标志增补。Vulkan 侧
+        // ToVkImageUsageFlags（VulkanMath.h）对含 ShaderResource/RenderTarget
+        // 的 usage 隐式补 TRANSFER_SRC/DST，blit 链 mipgen 因此恒可用；D3D12
+        // mipgen 走 PS downsample 需 RTV，而资源缺 ALLOW_RENDER_TARGET 时
+        // mipgen 的 CreateRenderTargetView 触发 debug-layer #42
+        // (CREATERENDERTARGETVIEW_INVALIDRESOURCE；Windows 十四测 exit 2170
+        // 首帧阻塞，CDB 实证)。故对 mips>1 且含 ShaderResource 的纹理，以与
+        // mipgen 入口同口径的 CheckFeatureSupport(RENDER_TARGET 位) 判定格式
+        // 能力后增补 RT 标志（深度/BC/TYPELESS 格式无该位、天然不增补）。
+        // 合法性：D3D12 资源标志仅 DENY_SHADER_RESOURCE 与 RT/DS 互斥
+        // (d3d12.h 注释)，RT 标志与 SRV/COPY/UAV 标志无互斥；增补不改 RHI
+        // usage 语义，描述符仍按 usage 创建（无 RenderTarget 位 → 不分配
+        // RTV 槽，mipgen 自取临时 RTV 槽）。
+        if (texDesc_.mipLevels > 1
+            && (texDesc_.usage & TextureUsage::ShaderResource) != TextureUsage::Unknown
+            && !isDepthFamily) {
+            D3D12_FEATURE_DATA_FORMAT_SUPPORT mipRtvSupport{};
+            mipRtvSupport.Format = static_cast<DXGI_FORMAT>(dxgi);
+            if (SUCCEEDED(native->CheckFeatureSupport(
+                    D3D12_FEATURE_FORMAT_SUPPORT, &mipRtvSupport,
+                    sizeof(mipRtvSupport)))
+                && (mipRtvSupport.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) != 0) {
+                resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            }
+        }
+
         // 初始状态：COMMON（纹理写类使用必须显式 transition——COMMON 只能
         // 自动提升到读类状态；提升/衰减规则见 D3D12StateTracker 文件头）。
         D3D12MA::ALLOCATION_DESC allocDesc{};

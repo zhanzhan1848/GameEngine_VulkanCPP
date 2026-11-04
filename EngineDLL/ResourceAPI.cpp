@@ -287,8 +287,16 @@ void build_default_material_once()
         g_default_material.compile_failed = true;
         return;
     }
+    // R15-2（Windows 十四测 C2039/C3861）：add_shader_function_name 是
+    // Metal entry-point 登记 API，声明与定义在 ContentToEngine.h/.cpp 内
+    // #if defined(__APPLE__) 门控（e0145d2c Metal 轮起即为 Apple-only，
+    // 唯一消费者是 MetalContent.cpp 的 create_pso）。本函数整链 Metal-only：
+    // 非 Apple 上 compile_msl_to_metallib 的 xcrun 必失败并在上方
+    // early-return（compile_failed），此处为不可达死代码，调用点同门控。
+#if defined(__APPLE__)
     primal::content::add_shader_function_name(
         static_cast<id_eng::id_type>(g_default_material.vs_group_id), "sphere_vs");
+#endif // defined(__APPLE__)
 
     const u8* ps_ptr = ps_blob.data();
     const u32 ps_key = 0xFFFFFFFFu; // u32_invalid_id sentinel
@@ -298,8 +306,10 @@ void build_default_material_once()
         g_default_material.compile_failed = true;
         return;
     }
+#if defined(__APPLE__)
     primal::content::add_shader_function_name(
         static_cast<id_eng::id_type>(g_default_material.ps_group_id), "sphere_ps");
+#endif // defined(__APPLE__)
 
     primal::graphics::material_init_info info{};
     info.type = primal::graphics::material_type::opauqe;
