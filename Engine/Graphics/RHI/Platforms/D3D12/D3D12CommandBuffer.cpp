@@ -27,8 +27,13 @@ D3D12CommandBufferImpl::D3D12CommandBufferImpl(D3D12Device& device, CommandQueue
 D3D12CommandBufferImpl::D3D12CommandBufferImpl(D3D12CommandBufferImpl&& other) noexcept
     : RHICommandBuffer(std::move(other)),
       currentAllocator_(other.currentAllocator_),
-      boundPipeline_(other.boundPipeline_),
-      boundLayout_(other.boundLayout_),
+      boundGraphicsPipeline_(other.boundGraphicsPipeline_),
+      boundGraphicsLayout_(other.boundGraphicsLayout_),
+      boundComputePipeline_(other.boundComputePipeline_),
+      boundComputeLayout_(other.boundComputeLayout_),
+      effectivePso_(other.effectivePso_),
+      graphicsRootSigSet_(other.graphicsRootSigSet_),
+      computeRootSigSet_(other.computeRootSigSet_),
       descriptorHeapsBound_(other.descriptorHeapsBound_),
       lastExecuteTarget_(other.lastExecuteTarget_),
       isRecording_(other.isRecording_) {
@@ -37,8 +42,13 @@ D3D12CommandBufferImpl::D3D12CommandBufferImpl(D3D12CommandBufferImpl&& other) n
         allocatorLastUseTarget_[i] = other.allocatorLastUseTarget_[i];
     }
     commandList_ = std::move(other.commandList_);
-    other.boundPipeline_ = nullptr;
-    other.boundLayout_ = nullptr;
+    other.boundGraphicsPipeline_ = nullptr;
+    other.boundGraphicsLayout_ = nullptr;
+    other.boundComputePipeline_ = nullptr;
+    other.boundComputeLayout_ = nullptr;
+    other.effectivePso_ = nullptr;
+    other.graphicsRootSigSet_ = nullptr;
+    other.computeRootSigSet_ = nullptr;
     other.isRecording_ = false;
 }
 
@@ -51,13 +61,23 @@ D3D12CommandBufferImpl& D3D12CommandBufferImpl::operator=(D3D12CommandBufferImpl
         }
         commandList_ = std::move(other.commandList_);
         currentAllocator_ = other.currentAllocator_;
-        boundPipeline_ = other.boundPipeline_;
-        boundLayout_ = other.boundLayout_;
+        boundGraphicsPipeline_ = other.boundGraphicsPipeline_;
+        boundGraphicsLayout_ = other.boundGraphicsLayout_;
+        boundComputePipeline_ = other.boundComputePipeline_;
+        boundComputeLayout_ = other.boundComputeLayout_;
+        effectivePso_ = other.effectivePso_;
+        graphicsRootSigSet_ = other.graphicsRootSigSet_;
+        computeRootSigSet_ = other.computeRootSigSet_;
         descriptorHeapsBound_ = other.descriptorHeapsBound_;
         lastExecuteTarget_ = other.lastExecuteTarget_;
         isRecording_ = other.isRecording_;
-        other.boundPipeline_ = nullptr;
-        other.boundLayout_ = nullptr;
+        other.boundGraphicsPipeline_ = nullptr;
+        other.boundGraphicsLayout_ = nullptr;
+        other.boundComputePipeline_ = nullptr;
+        other.boundComputeLayout_ = nullptr;
+        other.effectivePso_ = nullptr;
+        other.graphicsRootSigSet_ = nullptr;
+        other.computeRootSigSet_ = nullptr;
         other.isRecording_ = false;
     }
     return *this;
@@ -94,14 +114,24 @@ bool D3D12CommandBufferImpl::Initialize() {
 void D3D12CommandBufferImpl::destroyImpl() {
     commandList_.Reset();
     for (u32 i = 0; i < kAllocatorSlots; ++i) allocators_[i].Reset();
-    boundPipeline_ = nullptr;
-    boundLayout_ = nullptr;
+    boundGraphicsPipeline_ = nullptr;
+    boundGraphicsLayout_ = nullptr;
+    boundComputePipeline_ = nullptr;
+    boundComputeLayout_ = nullptr;
+    effectivePso_ = nullptr;
+    graphicsRootSigSet_ = nullptr;
+    computeRootSigSet_ = nullptr;
 }
 
 bool D3D12CommandBufferImpl::resetImpl() {
     // GPU 侧复用判定在 beginImpl（allocator 轮转处）统一处理；这里只清绑定态。
-    boundPipeline_ = nullptr;
-    boundLayout_ = nullptr;
+    boundGraphicsPipeline_ = nullptr;
+    boundGraphicsLayout_ = nullptr;
+    boundComputePipeline_ = nullptr;
+    boundComputeLayout_ = nullptr;
+    effectivePso_ = nullptr;
+    graphicsRootSigSet_ = nullptr;
+    computeRootSigSet_ = nullptr;
     descriptorHeapsBound_ = false;
     return true;
 }
@@ -131,6 +161,21 @@ bool D3D12CommandBufferImpl::beginImpl() {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12CommandBuffer] list Reset failed" << std::endl;
         return false;
     }
+
+    // R20-A：commandList_->Reset 清空命令列表全部绑定态（PSO 单槽 +
+    // graphics/compute 两根签名槽）。镜像必须同步全清——Begin 可从
+    // Executed 态直入（宿主无显式 Reset 时，如 TestRHISponzaShared 纹理
+    // 上传 helper 的逐次 Begin），残留镜像会让 PushConstants/Dispatch 按
+    // 上一会话的布局/管线路由，对着已被清空的命令列表槽位下发
+    // （Windows 十九测 #709 SET_ROOT_CONSTANT_INVALID 的「签名未设」
+    // 子句机制；镜像≠实际的一切分歧入口由此闭合）。
+    boundGraphicsPipeline_ = nullptr;
+    boundGraphicsLayout_ = nullptr;
+    boundComputePipeline_ = nullptr;
+    boundComputeLayout_ = nullptr;
+    effectivePso_ = nullptr;
+    graphicsRootSigSet_ = nullptr;
+    computeRootSigSet_ = nullptr;
 
     isRecording_ = true;
     dev.IncrementRecording();
@@ -399,19 +444,113 @@ void D3D12CommandBufferImpl::SetScissor(const Rect& scissor) {
 // 管线 / 绑定
 // ============================================================================
 
+// R20-A：Bind{Graphics,Compute}Pipeline 共用落点。原实现的两个缺口：
+//   ①单一 boundPipeline_/boundLayout_ 镜像——跨管线类型切换后
+//     PushConstants/BindDescriptorSets 的布局来源与目标 bind point 脱钩；
+//   ②pipe->GetRootSignature() 为空时静默跳过 Set*RootSignature——
+//     创建期异常态被吞，缺陷延后到 Dispatch（#952）/PushConstants
+//     （#709）处才在 debug layer 显形。现为按 bind point 独立镜像 +
+//     空签名 Error 显式记录；PSO/根签名下发按槽位镜像幂等跳过。
+void D3D12CommandBufferImpl::ApplyPipelineBind(D3D12Pipeline* pipe) {
+    if (pipe->IsCompute()) {
+        boundComputePipeline_ = pipe;
+        boundComputeLayout_ = pipe->GetPipelineLayout();
+        if (ID3D12RootSignature* rs = pipe->GetRootSignature()) {
+            if (computeRootSigSet_ != rs) {
+                commandList_->SetComputeRootSignature(rs);
+                computeRootSigSet_ = rs;
+            }
+        } else {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12CommandBuffer] BindComputePipeline: pipeline has null "
+                << "root signature — Dispatch would raise debug-layer "
+                << "#952 (DISPATCH_ROOT_SIGNATURE_NOT_SET)" << std::endl;
+        }
+    } else {
+        boundGraphicsPipeline_ = pipe;
+        boundGraphicsLayout_ = pipe->GetPipelineLayout();
+        if (ID3D12RootSignature* rs = pipe->GetRootSignature()) {
+            if (graphicsRootSigSet_ != rs) {
+                commandList_->SetGraphicsRootSignature(rs);
+                graphicsRootSigSet_ = rs;
+            }
+        } else {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12CommandBuffer] BindGraphicsPipeline: pipeline has "
+                << "null root signature — draw/push would raise debug-layer "
+                << "#709 (SET_ROOT_CONSTANT_INVALID) family" << std::endl;
+        }
+        commandList_->IASetPrimitiveTopology(pipe->GetIaTopology());
+    }
+    // PSO 槽 graphics/compute 共用：按 effectivePso_ 镜像幂等下发。
+    if (ID3D12PipelineState* pso = pipe->GetPso()) {
+        if (effectivePso_ != pso) {
+            commandList_->SetPipelineState(pso);
+            effectivePso_ = pso;
+        }
+    }
+}
+
+// 消费方前置自愈：compute 槽（PSO+根签名）。镜像在会话内从未绑定 →
+// false（调用方跳过录制——把必错命令发给 debug layer 只会产生
+// #952/#882 族噪声，Error 日志已给出现场）。
+bool D3D12CommandBufferImpl::EnsureComputeState() {
+    if (!commandList_) return false;
+    if (!boundComputePipeline_) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12CommandBuffer] Dispatch without BindComputePipeline in "
+            << "this recording session — command skipped (would raise "
+            << "debug-layer #952 DISPATCH_ROOT_SIGNATURE_NOT_SET)" << std::endl;
+        return false;
+    }
+    if (ID3D12RootSignature* rs = boundComputePipeline_->GetRootSignature()) {
+        if (computeRootSigSet_ != rs) {
+            commandList_->SetComputeRootSignature(rs);
+            computeRootSigSet_ = rs;
+        }
+    } else {
+        return false;
+    }
+    if (effectivePso_ != boundComputePipeline_->GetPso()) {
+        commandList_->SetPipelineState(boundComputePipeline_->GetPso());
+        effectivePso_ = boundComputePipeline_->GetPso();
+    }
+    return true;
+}
+
+// 消费方前置自愈：graphics 槽（PSO+根签名），对称 EnsureComputeState。
+bool D3D12CommandBufferImpl::EnsureGraphicsState() {
+    if (!commandList_) return false;
+    if (!boundGraphicsPipeline_) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12CommandBuffer] Draw/ExecuteIndirect without "
+            << "BindGraphicsPipeline in this recording session — command "
+            << "skipped (would raise debug-layer #110 DRAW_ROOT_SIGNATURE_"
+            << "NOT_SET family)" << std::endl;
+        return false;
+    }
+    if (ID3D12RootSignature* rs = boundGraphicsPipeline_->GetRootSignature()) {
+        if (graphicsRootSigSet_ != rs) {
+            commandList_->SetGraphicsRootSignature(rs);
+            graphicsRootSigSet_ = rs;
+        }
+    } else {
+        return false;
+    }
+    if (effectivePso_ != boundGraphicsPipeline_->GetPso()) {
+        commandList_->SetPipelineState(boundGraphicsPipeline_->GetPso());
+        effectivePso_ = boundGraphicsPipeline_->GetPso();
+    }
+    return true;
+}
+
 void D3D12CommandBufferImpl::BindGraphicsPipeline(PipelineHandle pipeline) {
     if (!commandList_) return;
     UpdateStats(CommandType::BindGraphicsPipeline);
     D3D12Device& dev = static_cast<D3D12Device&>(device_);
     D3D12Pipeline* pipe = dev.GetPipeline(pipeline);
     if (!pipe || pipe->IsCompute()) return;
-    boundPipeline_ = pipe;
-    boundLayout_ = pipe->GetPipelineLayout();
-    commandList_->SetPipelineState(pipe->GetPso());
-    if (ID3D12RootSignature* rs = pipe->GetRootSignature()) {
-        commandList_->SetGraphicsRootSignature(rs);
-    }
-    commandList_->IASetPrimitiveTopology(pipe->GetIaTopology());
+    ApplyPipelineBind(pipe);
 }
 
 void D3D12CommandBufferImpl::BindComputePipeline(PipelineHandle pipeline) {
@@ -420,12 +559,7 @@ void D3D12CommandBufferImpl::BindComputePipeline(PipelineHandle pipeline) {
     D3D12Device& dev = static_cast<D3D12Device&>(device_);
     D3D12Pipeline* pipe = dev.GetPipeline(pipeline);
     if (!pipe || !pipe->IsCompute()) return;
-    boundPipeline_ = pipe;
-    boundLayout_ = pipe->GetPipelineLayout();
-    commandList_->SetPipelineState(pipe->GetPso());
-    if (ID3D12RootSignature* rs = pipe->GetRootSignature()) {
-        commandList_->SetComputeRootSignature(rs);
-    }
+    ApplyPipelineBind(pipe);
 }
 
 void D3D12CommandBufferImpl::EnsureDescriptorHeapsBound() {
@@ -450,10 +584,12 @@ void D3D12CommandBufferImpl::BindVertexBuffers(u32 firstSlot, u32 slotCount,
         if (!buffer) continue;
         const u64 offset = offsets ? offsets[i] : 0;
         // stride 优先取绑定管线的顶点布局声明（32B stride 先例）；管线未
-        // 声明该槽时回退 BufferDesc.vertex.vertexStride。
+        // 声明该槽时回退 BufferDesc.vertex.vertexStride。（R20-A：stride
+        // 声明属 graphics 侧——改读 boundGraphicsPipeline_，compute 绑定
+        // 不再参与该查找。）
         UINT stride = buffer->GetBufferDesc().vertex.vertexStride;
-        if (boundPipeline_ && !boundPipeline_->IsCompute()) {
-            for (const auto& vb : boundPipeline_->GetGraphicsDesc().vertexBindings) {
+        if (boundGraphicsPipeline_) {
+            for (const auto& vb : boundGraphicsPipeline_->GetGraphicsDesc().vertexBindings) {
                 if (vb.binding == firstSlot + i) {
                     stride = vb.stride;
                     break;
@@ -506,6 +642,23 @@ void D3D12CommandBufferImpl::BindDescriptorSets(PipelineBindPoint bindPoint,
             << "(baked at UpdateDescriptorSets; per-frame set re-update path)" << std::endl;
     }
 
+    const bool compute = bindPoint == PipelineBindPoint::Compute;
+    // R20-A：root 参数索引按目标 bind point 取对应侧绑定布局（原实现用
+    // 单一 boundLayout_——最近绑定是另一类型管线时，Graphics 绑定会拿
+    // compute 布局的 tableParam 对 graphics 签名下发 = #708/#709 族的
+    // 参数索引错位）。前置自愈：对应槽位缺/错时按镜像补设。
+    const D3D12PipelineLayout* boundLayout = compute ? boundComputeLayout_
+                                                     : boundGraphicsLayout_;
+    if (!boundLayout && !warnedSetsNoLayout_) {
+        warnedSetsNoLayout_ = true;
+        PRIMAL_LOG_STREAM(Warn, "RHI")
+            << "[D3D12CommandBuffer] BindDescriptorSets("
+            << (compute ? "Compute" : "Graphics")
+            << ") with no pipeline bound on that bind point in this session "
+            << "— sets ignored" << std::endl;
+    }
+    if (!boundLayout || !(compute ? EnsureComputeState() : EnsureGraphicsState())) return;
+
     for (u32 i = 0; i < setCount; ++i) {
         const u32 setIndex = firstSet + i;
         D3D12DescriptorSet* set = dev.GetDescriptorSet(descriptorSets[i]);
@@ -513,11 +666,9 @@ void D3D12CommandBufferImpl::BindDescriptorSets(PipelineBindPoint bindPoint,
         // 长寿命 set 跨帧护栏：区段属旧帧槽 → 迁移到当前槽（见设备声明）。
         dev.EnsureSetRegionCurrent(set);
         // root 参数索引由绑定管线布局的映射表提供（契约 §3）。
-        const D3D12RootSignatureLayout* rootLayout = boundLayout_
-            ? &boundLayout_->GetRootLayout() : nullptr;
-        if (!rootLayout || setIndex >= rootLayout->sets.size()) continue;
+        const D3D12RootSignatureLayout* rootLayout = &boundLayout->GetRootLayout();
+        if (setIndex >= rootLayout->sets.size()) continue;
         const D3D12SetRootParams& params = rootLayout->sets[setIndex];
-        const bool compute = bindPoint == PipelineBindPoint::Compute;
         if (params.tableParam != D3D12SetRootParams::kInvalidRootParam
             && set->BaseSlot() != D3D12DescriptorHeapManager::kInvalidSlot) {
             const D3D12_GPU_DESCRIPTOR_HANDLE gpu =
@@ -541,25 +692,83 @@ void D3D12CommandBufferImpl::BindDescriptorSets(PipelineBindPoint bindPoint,
     }
 }
 
-void D3D12CommandBufferImpl::PushConstants(PipelineLayoutHandle /*layout*/,
-                                           ShaderStage /*stageFlags*/,
+// R20-A 重写（契约对齐 VulkanCommandBuffer::PushConstants）：
+//   - 布局来源：layout 句柄优先解析（调用方传入的布局即常量归属——
+//     constantsParam 与根签名同源，参数索引恒与命令列表当前签名一致，
+//     #709 SET_ROOT_CONSTANT_INVALID 双子句「签名未设/索引不匹配」由此
+//     根治）；句柄无效回退目标 bind point 的绑定布局。
+//   - Graphics/Compute 前缀按 stageFlags 路由（原实现按单一镜像
+//     boundPipeline_->IsCompute()——跨管线类型切换后路由与布局来源可能
+//     脱钩）；歧义（无位/多位混合）回退：仅单侧已绑取该侧，双侧已绑取
+//     graphics（M1-M6 语料全部为显式 Vertex/Compute 单位）。
+//   - 下发前 Ensure*State：目标槽（PSO+根签名）按镜像自愈——若命令列表
+//     签名与常量来源布局的签名不同步（layout 参数指向他者布局），以
+//     布局的签名为准重设该槽（常量调用自身保持内部一致；后续 Draw 若
+//     因此报 DRAW_ROOT_SIGNATURE_MISMATCH，则指向真实的宿主布局错配）。
+void D3D12CommandBufferImpl::PushConstants(PipelineLayoutHandle layout,
+                                           ShaderStage stageFlags,
                                            u32 offset, u32 size, const void* pValues) {
     if (!commandList_ || !pValues || size == 0) return;
-    // root constants（绑定模型契约 §3 尾参）；offset/size 按 32 位字对齐。
-    const D3D12RootSignatureLayout* rootLayout = boundLayout_
-        ? &boundLayout_->GetRootLayout() : nullptr;
-    if (!rootLayout
-        || rootLayout->constantsParam == D3D12SetRootParams::kInvalidRootParam) {
+    D3D12Device& dev = static_cast<D3D12Device&>(device_);
+    D3D12PipelineLayout* targetLayout = nullptr;
+    if (layout != handles::INVALID_PIPELINE_LAYOUT) {
+        targetLayout = dev.GetPipelineLayout(layout);
+    }
+    const u32 stageBits = static_cast<u32>(stageFlags);
+    const u32 computeBit = static_cast<u32>(ShaderStage::Compute);
+    const u32 graphicsBits = static_cast<u32>(ShaderStage::Vertex)
+        | static_cast<u32>(ShaderStage::Pixel)
+        | static_cast<u32>(ShaderStage::Geometry)
+        | static_cast<u32>(ShaderStage::Hull)
+        | static_cast<u32>(ShaderStage::Domain);
+    bool compute = false;
+    if (stageBits == computeBit) {
+        compute = true;
+    } else if ((stageBits & graphicsBits) != 0 && (stageBits & computeBit) == 0) {
+        compute = false;
+    } else {
+        compute = boundComputePipeline_ && !boundGraphicsPipeline_;
+    }
+    if (!targetLayout) targetLayout = compute ? boundComputeLayout_ : boundGraphicsLayout_;
+    if (!targetLayout) {
+        if (!warnedPushNoLayout_) {
+            warnedPushNoLayout_ = true;
+            PRIMAL_LOG_STREAM(Warn, "RHI")
+                << "[D3D12CommandBuffer] PushConstants with no usable "
+                << "pipeline layout (layout handle unresolved and no "
+                << (compute ? "compute" : "graphics")
+                << " pipeline bound) — push ignored" << std::endl;
+        }
         return;
     }
+    // root constants（绑定模型契约 §3 尾参）；offset/size 按 32 位字对齐。
+    const D3D12RootSignatureLayout& rootLayout = targetLayout->GetRootLayout();
+    if (rootLayout.constantsParam == D3D12SetRootParams::kInvalidRootParam) {
+        return;   // 该布局无 push constant range（合法：M5 剔除布局即如此）
+    }
+    // 目标槽自愈：布局的签名与该槽已设不同步时，以布局签名为准重设。
+    if (ID3D12RootSignature* layoutRs = targetLayout->GetRootSignature()) {
+        ID3D12RootSignature*& slotSet = compute ? computeRootSigSet_ : graphicsRootSigSet_;
+        if (slotSet != layoutRs) {
+            if (compute) {
+                commandList_->SetComputeRootSignature(layoutRs);
+            } else {
+                commandList_->SetGraphicsRootSignature(layoutRs);
+            }
+            slotSet = layoutRs;
+        }
+    }
+    // PSO 槽：目标侧有绑定镜像且当前槽位不同步时补设（无镜像不强行切
+    // PSO——常量语义不依赖 PSO，仅依赖签名；保持 Draw/Dispatch 各自的
+    // Ensure 语义）。
     const u32 wordOffset = offset / 4;
     const u32 wordCount = size / 4;
-    if (boundPipeline_ && boundPipeline_->IsCompute()) {
+    if (compute) {
         commandList_->SetComputeRoot32BitConstants(
-            rootLayout->constantsParam, wordCount, pValues, wordOffset);
+            rootLayout.constantsParam, wordCount, pValues, wordOffset);
     } else {
         commandList_->SetGraphicsRoot32BitConstants(
-            rootLayout->constantsParam, wordCount, pValues, wordOffset);
+            rootLayout.constantsParam, wordCount, pValues, wordOffset);
     }
 }
 
@@ -588,6 +797,7 @@ void D3D12CommandBufferImpl::WriteTimestamp(QueryPoolHandle, u32) {
 void D3D12CommandBufferImpl::Draw(u32 vertexCount, u32 startVertex,
                                   u32 instanceCount, u32 startInstance) {
     if (!commandList_) return;
+    if (!EnsureGraphicsState()) return;   // R20-A：签名/PSO 自愈 + 守卫
     UpdateStats(CommandType::Draw);
     commandList_->DrawInstanced(vertexCount, instanceCount, startVertex, startInstance);
 }
@@ -596,6 +806,7 @@ void D3D12CommandBufferImpl::DrawIndexed(u32 indexCount, u32 startIndex,
                                          u32 baseVertex, u32 instanceCount,
                                          u32 startInstance) {
     if (!commandList_) return;
+    if (!EnsureGraphicsState()) return;   // R20-A：签名/PSO 自愈 + 守卫
     UpdateStats(CommandType::DrawIndexed);
     commandList_->DrawIndexedInstanced(indexCount, instanceCount, startIndex,
                                        baseVertex, startInstance);
@@ -624,6 +835,7 @@ void D3D12CommandBufferImpl::DrawIndirect(ResourceHandle buffer, u64 offset, u32
     if (!buf) return;
     ID3D12CommandSignature* sig = dev.GetDrawIndirectSignature();
     if (!sig) return;
+    if (!EnsureGraphicsState()) return;   // R20-A：签名/PSO 自愈 + 守卫
     D3D12SubresourceKey key{};
     key.resource = buffer;
     key.subresource = 0;
@@ -647,6 +859,7 @@ void D3D12CommandBufferImpl::DrawIndexedIndirect(ResourceHandle buffer, u64 offs
     if (!buf) return;
     ID3D12CommandSignature* sig = dev.GetDrawIndexedIndirectSignature();
     if (!sig) return;
+    if (!EnsureGraphicsState()) return;   // R20-A：签名/PSO 自愈 + 守卫（M5 GPU-driven 直绘消费点）
     D3D12SubresourceKey key{};
     key.resource = buffer;
     key.subresource = 0;
@@ -660,6 +873,10 @@ void D3D12CommandBufferImpl::DrawIndexedIndirect(ResourceHandle buffer, u64 offs
 
 void D3D12CommandBufferImpl::Dispatch(u32 groupCountX, u32 groupCountY, u32 groupCountZ) {
     if (!commandList_) return;
+    // R20-A：Dispatch 前置——compute 槽（PSO+根签名）按镜像自愈；会话内
+    // 未绑定 compute 管线则跳过录制（原实现直通 = debug layer #952
+    // COMMAND_LIST_DISPATCH_ROOT_SIGNATURE_NOT_SET 的必错形态）。
+    if (!EnsureComputeState()) return;
     UpdateStats(CommandType::Dispatch);
     commandList_->Dispatch(groupCountX, groupCountY, groupCountZ);
 }
@@ -676,6 +893,7 @@ void D3D12CommandBufferImpl::DispatchIndirect(ResourceHandle buffer, u64 offset)
     if (!buf) return;
     ID3D12CommandSignature* sig = dev.GetDispatchIndirectSignature();
     if (!sig) return;
+    if (!EnsureComputeState()) return;   // R20-A：签名/PSO 自愈 + 守卫
     D3D12SubresourceKey key{};
     key.resource = buffer;
     key.subresource = 0;
@@ -1068,6 +1286,16 @@ void D3D12CommandBufferImpl::GenerateMipmaps(ResourceHandle texture) {
     commandList_->SetGraphicsRootSignature(dev.GetMipGenerator().GetRootSignature());
     commandList_->SetPipelineState(pso);
     commandList_->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    // R20-A：此处直改命令列表 graphics 槽（RS/PSO/拓扑）——镜像必须同步
+    // （mipgen 无 RHI 管线/布局 → graphics 侧绑定镜像置空）。否则后续
+    // PushConstants/BindDescriptorSets(Graphics) 若未先重绑管线，会拿旧
+    // 布局的 constantsParam/tableParam 对 mipgen 签名（仅 1 个描述符表
+    // 参数）下发 = #709/#708 的参数索引错位子句；镜像置空后这些调用
+    // 走「无布局」早退 + Warn，宿主缺重绑直接显形。
+    boundGraphicsPipeline_ = nullptr;
+    boundGraphicsLayout_ = nullptr;
+    graphicsRootSigSet_ = dev.GetMipGenerator().GetRootSignature();
+    effectivePso_ = pso;
     for (u32 m = 0; m < srvCount; ++m) {
         const u32 dstW = td.size.x > (1u << (m + 1)) ? td.size.x >> (m + 1) : 1u;
         const u32 dstH = td.size.y > (1u << (m + 1)) ? td.size.y >> (m + 1) : 1u;

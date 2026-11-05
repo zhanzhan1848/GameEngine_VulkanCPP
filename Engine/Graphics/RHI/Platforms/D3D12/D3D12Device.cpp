@@ -1222,8 +1222,8 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
         d3d12::D3D12DescriptorSetLayout::BindingClass info;
         if (!layout->QueryBinding(write.dstBinding, info)) continue;
 
-        for (u32 e = 0; e < write.descriptorCount; ++e) {
-            // --- 主段（CBV/SRV/UAV）---
+            for (u32 e = 0; e < write.descriptorCount; ++e) {
+                // --- 主段（CBV/SRV/UAV）---
             if (info.hasMain && write.bufferInfo) {
                 const DescriptorBufferInfo& bi = write.bufferInfo[e];
                 d3d12::D3D12Buffer* buffer = GetBuffer(bi.buffer);
@@ -1287,6 +1287,18 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                     if (srcSlot == d3d12::D3D12Texture::kInvalidDescriptorSlot) continue;
                     const u32 dstSlot = set->BaseSlot() + info.mainOffset
                                         + write.dstArrayElement + e;
+                    // R20-B 埋点（PRIMAL_D3D12_UPLOAD_TRACE 同门）：纹理 SRV
+                    // 持久槽→set 槽复制日志——宿主 albedo 材质集写入证据；
+                    // 十九测黑帧（硬件 M1，无 validation error=状态合法而
+                    // 数据未到位）的描述符错位排查用（mipgen 临时 SRV 槽在
+                    // D3D12CommandBuffer/D3D12MipGen 域——R20-A 线采集）。
+                    if (EnvFlag("PRIMAL_D3D12_UPLOAD_TRACE")) {
+                        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+                            << "[D3D12Device] desc write: texId=" << ii.imageView
+                            << " srcSlot=" << srcSlot << " -> dstSlot=" << dstSlot
+                            << " set=" << write.dstSet
+                            << " binding=" << write.dstBinding << std::endl;
+                    }
                     assert(dstSlot < descriptorHeaps_.CbvSrvUavCapacity());  // R19-4 断言布防（同上）
                     // R13/T1 双写：源读纹理持久槽的 shadow 副本（原实现读
                     // visible 堆 = #654），先落 shadow(dst) 再镜像 visible(dst)。
@@ -1325,10 +1337,24 @@ bool D3D12Device::UploadBufferDataViaRing(ID3D12Resource* dst, const void* data,
         // 容量耗尽：排干在飞后重试一次（Vulkan/Metal 同款约定）。
         uploadRing_.FlushBlocking();
         alloc = uploadRing_.Allocate(size);
-        if (alloc.overflow) return false;
+        if (alloc.overflow) {
+            // R20-B：上传失败不再静默——调用方（如 RenderMesh::Create）可能
+            // 不查返回值，缓冲保持未初始化显存即黑资源/垃圾图元。
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12Device] ring upload FAILED (buffer): size=" << size
+                << " dstOffset=" << dstOffset << " (single shot > slot capacity?)"
+                << std::endl;
+            return false;
+        }
     }
     std::memcpy(alloc.cpuPtr, data, size);
     uploadRing_.QueueCopyBuffer(alloc, dst, dstOffset, size);
+    if (EnvFlag("PRIMAL_D3D12_UPLOAD_TRACE")) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12Device] ring upload (buffer): size=" << size
+            << " dstOffset=" << dstOffset << " stagingOffset=" << alloc.offset
+            << (IsFrameRecording() ? " [frame-queued]" : " [blocking]") << std::endl;
+    }
     if (!IsFrameRecording()) {
         uploadRing_.FlushBlocking();  // 资产加载期语义：立即落 GPU
     }
@@ -1348,7 +1374,27 @@ bool D3D12Device::UploadTextureDataViaRing(ID3D12Resource* texture, ResourceHand
         d3d12::D3D12UploadRing::ComputeRegionLayout(
             d3d12::ToDxgiFormat(format), static_cast<u32>(texelBytes),
             region.width, region.height, region.depth, 0);
-    if (layout.totalBytes == 0 || size < layout.totalBytes) return false;
+    // 源尺寸语义 = 紧密行主序 blob（每层 width×texel×height 紧凑，与
+    // D3D12Texture::updateRegion 的 expected 式、Vulkan/Metal updateRegion
+    // 的 tightly-packed 契约一致）：size ≥ width×texel×height×depth 即合法。
+    // 旧校验 size < layout.totalBytes（padded footprint 需求）把合法紧凑源
+    // 误拒——十九测可选 mipgen 四组合全灭即此（8×8 RGBA8 紧凑 256B <
+    // footprint 需求 1824B；#869 宿主半边，R19-1 改走 UpdateTextureRegion
+    // 后暴露）。staging 分配仍按 totalBytes（footprint 语义，R19-2 §28-2
+    // 已补 512 对齐），紧凑源在下方逐行展开进 padded 布局。
+    const u64 srcRowBytes = u64(region.width) * texelBytes;
+    const u64 srcSliceBytes = srcRowBytes * region.height;
+    const u64 minCompactBytes = srcSliceBytes * region.depth;
+    if (layout.totalBytes == 0 || size < minCompactBytes) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] texture region upload rejected: size " << size
+            << "B < tight-source minimum " << minCompactBytes << "B (region "
+            << region.width << "x" << region.height << "x" << region.depth
+            << " x " << texelBytes << "B/texel; staging footprint "
+            << layout.totalBytes << "B @ RowPitch " << layout.rowPitch << ")"
+            << std::endl;
+        return false;
+    }
 
     // 纹理 staging 分配尺寸=footprint 语义（totalBytes 含行距 padding），
     // 对齐=512（D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT——footprint.Offset
@@ -1362,15 +1408,23 @@ bool D3D12Device::UploadTextureDataViaRing(ID3D12Resource* texture, ResourceHand
         alloc = uploadRing_.Allocate(
             layout.totalBytes,
             d3d12::D3D12UploadRing::TEXTURE_STAGING_ALIGNMENT);
-        if (alloc.overflow) return false;
+        if (alloc.overflow) {
+            // R20-B：上传失败不再静默（同 UploadBufferDataViaRing）。
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12Device] ring upload FAILED (texture): totalBytes="
+                << layout.totalBytes << " region=" << region.width << "x"
+                << region.height << "x" << region.depth << " mip=" << region.mipLevel
+                << std::endl;
+            return false;
+        }
     }
     // 紧密行主序源 → footprint 行距布局（逐行拷贝；末行无 padding）。
     // M7 F7-7 静态终审修复：原实现只拷 depth 第 0 层——region.depth>1（M6
     // GI 3D 体积上传）时 staging 第 1..N-1 层保留上一轮脏数据，经
     // CopyTextureRegion 的全深度 BOX 上传到纹理即垃圾值。源布局=紧密深度
     // 平面（每层 w×texel×h 紧凑，与 updateRegion 的 expected 尺寸式一致）。
-    const u64 srcRowBytes = u64(region.width) * texelBytes;
-    const u64 srcSliceBytes = srcRowBytes * region.height;
+    // srcRowBytes/srcSliceBytes 已随上方紧凑源校验上移定义（源 stride=紧凑
+    // 行字节，dst stride=layout.rowPitch——stride 不等即依赖此逐行展开）。
     u8* dstPtr = static_cast<u8*>(alloc.cpuPtr);
     const u8* srcPtr = static_cast<const u8*>(data);
     for (u32 z = 0; z < region.depth; ++z) {
@@ -1388,6 +1442,13 @@ bool D3D12Device::UploadTextureDataViaRing(ID3D12Resource* texture, ResourceHand
                                  layout.footprint, region.offsetX, region.offsetY,
                                  region.offsetZ, region.width, region.height,
                                  region.depth, ResourceState::ShaderResource);
+    if (EnvFlag("PRIMAL_D3D12_UPLOAD_TRACE")) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12Device] ring upload (texture): texId=" << textureId
+            << " subresource=" << subresource << " totalBytes=" << layout.totalBytes
+            << " stagingOffset=" << alloc.offset
+            << (IsFrameRecording() ? " [frame-queued]" : " [blocking]") << std::endl;
+    }
     if (!IsFrameRecording()) {
         uploadRing_.FlushBlocking();
     }

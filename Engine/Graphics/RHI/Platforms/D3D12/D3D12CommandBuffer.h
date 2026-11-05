@@ -30,6 +30,25 @@
 // D3D12 官方 Y 翻转手段；使原始帧与 Vulkan 原始读回同向（共享对比免
 // FlipYInPlace）。绕序翻转由 PSO 的 cull 取反补偿（D3D12Pipeline.h）。
 // Scissor 不翻转：它是屏幕空间矩形，与光栅化绕序无关。
+//
+// 绑定状态机（R20-A，Windows 十九测 #709/#952）：
+//   - D3D12 的根签名是命令列表状态（graphics/compute 各一槽，PSO 单槽
+//     共用），且 commandList_->Reset（beginImpl）全清——不像 Vulkan 绑
+//     管线自动携带 layout。本类维护与命令列表对齐的镜像：
+//       bound{Graphics,Compute}{Pipeline,Layout}_ —— 各 bind point 最近
+//       Bind*Pipeline 的 RHI 侧镜像（GenerateMipmaps 直设原生态时置空
+//       该侧布局镜像——mipgen 非 RHI 管线，无映射布局）；
+//       effectivePso_ / {graphics,compute}RootSigSet_ —— 命令列表三槽
+//     （PSO、graphics RS、compute RS）当前值镜像；begin/reset 全清。
+//   - 消费方前置自愈（Ensure{Graphics,Compute}State）：Draw/Dispatch/
+//     ExecuteIndirect/PushConstants/BindDescriptorSets 下发前按镜像核对
+//     对应槽位，缺/错则补设（SetPipelineState/Set*RootSignature）；
+//     会话内从未 Bind* 的 bind point → Error 日志 + 跳过录制（不把必错
+//     命令发给 debug layer）。
+//   - PushConstants 契约对齐 Vulkan（VulkanCommandBuffer::PushConstants
+//     L1538-1556）：layout 句柄优先解析（constantsParam 与 RS 同源自此，
+//     保证参数索引恒与命令列表当前签名一致——#709 双子句根治），
+//     Graphics/Compute 前缀按 stageFlags 路由（歧义回退单侧已绑侧）。
 #pragma once
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
@@ -139,6 +158,17 @@ private:
                            ResourceState target, u32 subresource);
     /// 帧首一次 SetDescriptorHeaps。
     void EnsureDescriptorHeapsBound();
+    /// Bind{Graphics,Compute}Pipeline 共用落点：更新对应 bind point 的
+    /// RHI 镜像 + 幂等下发 PSO/根签名（槽位镜像指针比对跳过冗余 Set；
+    /// 管线无根签名 = 创建期异常态，Error 显式记录不静默）。graphics 侧
+    /// 附带 IASetPrimitiveTopology（原行为）。
+    void ApplyPipelineBind(D3D12Pipeline* pipe);
+    /// Dispatch 族前置：compute 槽（PSO+根签名）按镜像自愈；本会话从未
+    /// BindComputePipeline → false（调用方跳过录制并已记 Error）。
+    bool EnsureComputeState();
+    /// Draw 族 / ExecuteIndirect(DRAW*) / PushConstants(graphics) /
+    /// BindDescriptorSets(Graphics) 前置：graphics 槽同款自愈。
+    bool EnsureGraphicsState();
 
     static constexpr u32 kAllocatorSlots = MAX_FRAMES_IN_FLIGHT + 1;  // 4 池轮转
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocators_[kAllocatorSlots];
@@ -146,12 +176,21 @@ private:
     u32 currentAllocator_ = 0;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList_;
 
-    D3D12Pipeline* boundPipeline_ = nullptr;         // 非拥有
-    D3D12PipelineLayout* boundLayout_ = nullptr;     // 非拥有
+    // === 绑定状态机镜像（R20-A；与命令列表三槽对齐，begin/reset 全清）===
+    D3D12Pipeline* boundGraphicsPipeline_ = nullptr;      // 非拥有
+    D3D12PipelineLayout* boundGraphicsLayout_ = nullptr;  // 非拥有
+    D3D12Pipeline* boundComputePipeline_ = nullptr;       // 非拥有
+    D3D12PipelineLayout* boundComputeLayout_ = nullptr;   // 非拥有
+    ID3D12PipelineState* effectivePso_ = nullptr;         // 命令列表 PSO 槽镜像（gfx/compute 共用）
+    ID3D12RootSignature* graphicsRootSigSet_ = nullptr;   // 命令列表 graphics 根签名槽镜像
+    ID3D12RootSignature* computeRootSigSet_ = nullptr;    // 命令列表 compute 根签名槽镜像
+
     bool descriptorHeapsBound_ = false;
     u64 lastExecuteTarget_ = 0;                      // submitImpl/waitForSync 依据
     bool warnedDynamicOffsets_ = false;
     bool warnedComputeBytes_ = false;
+    bool warnedPushNoLayout_ = false;      // PushConstants 无可用布局（一次性）
+    bool warnedSetsNoLayout_ = false;      // BindDescriptorSets 目标侧无布局（一次性）
     bool isRecording_ = false;                       // 设备 IsFrameRecording 镜像
 };
 

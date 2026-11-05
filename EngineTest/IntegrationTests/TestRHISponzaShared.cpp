@@ -3254,6 +3254,18 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                 u32 blackFrames = 0;
                 double litRatioSum = 0.0;
                 double lumSum = 0.0;   // M2：平均亮度（阴影 A/B 消融对照用）
+                // R20-B 黑帧分布采集（十九测硬件 M1 159/240 无分布数据——
+                // 二十测裁决"resize 集中 vs 随机交错"的证据）：帧号列表 +
+                // 逐帧非黑占比；RHI_SHARED_LUM_TRACE=1 时逐帧打印。
+                std::vector<u32> blackFrameList;
+                std::vector<double> frameLitRatio;
+                std::vector<double> frameMeanLum;
+                frameLitRatio.reserve(cfg.totalFrames);
+                frameMeanLum.reserve(cfg.totalFrames);
+                const bool lumTrace = [] {
+                    const char* v = std::getenv("RHI_SHARED_LUM_TRACE");
+                    return v && v[0] == '1';
+                }();
                 // M3：消融统计（POST=1 vs POST=0 / EV±0.5 单调性证据）——
                 // Rec.709 luma 256 bin 直方图（帧均值汇总）+ 贴白像素计数
                 //（>=254：POST=0 硬裁剪签名 vs POST=1 ACES 肩部滚降）。
@@ -3872,11 +3884,22 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                         }
                     }
                     const double litRatio = double(lit) / double(pxCount);
+                    const double meanLum = lumAcc / double(pxCount);
                     litRatioSum += litRatio;
-                    lumSum += lumAcc / double(pxCount);
+                    lumSum += meanLum;
+                    frameLitRatio.push_back(litRatio);
+                    frameMeanLum.push_back(meanLum);
+                    if (lumTrace) {
+                        // R20-B：逐帧非黑占比/亮度（黑帧分布的对照组——
+                        // 黑帧与正常帧的占比台阶比二值黑名单更有诊断力）。
+                        std::cerr << "[LUM] frame " << f
+                                  << " litRatio=" << litRatio
+                                  << " meanLum=" << meanLum << std::endl;
+                    }
                     // 轨迹相机全程朝向画廊内部几何，清屏色=黑 → 非黑比例即几何覆盖。
                     if (litRatio < 0.02) {
                         ++blackFrames;
+                        blackFrameList.push_back(f);
                         std::cerr << "[RHI_SHARED] frame " << f
                                   << " nearly black (" << litRatio << ")"
                                   << std::endl;
@@ -4075,6 +4098,51 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                 Require(blackFrames == 0,
                         "all frames non-black (" + std::to_string(blackFrames) +
                             " nearly-black frames)");
+                // R20-B 黑帧分布汇总（十九测"159/240"无法反推分布——
+                // 集中在 resize 帧后=resize 重建破坏；随机交错=时序竞争/
+                // 轨迹相位相关的数据丢失；全程稀疏=局部纹理/图元缺陷）。
+                if (!blackFrameList.empty()) {
+                    std::cerr << "[BLACK_DIST] total=" << blackFrames << "/"
+                              << cfg.totalFrames << " ("
+                              << (100.0 * blackFrames / double(cfg.totalFrames))
+                              << "%) first=" << blackFrameList.front()
+                              << " last=" << blackFrameList.back() << std::endl;
+                    // 连片 run-length：[start..end] × 长度。
+                    std::cerr << "[BLACK_DIST] runs:";
+                    for (size_t i = 0; i < blackFrameList.size();) {
+                        size_t j = i;
+                        while (j + 1 < blackFrameList.size() &&
+                               blackFrameList[j + 1] == blackFrameList[j] + 1) ++j;
+                        std::cerr << " [" << blackFrameList[i] << ".."
+                                  << blackFrameList[j] << "]x" << (j - i + 1);
+                        i = j + 1;
+                    }
+                    std::cerr << std::endl;
+                    // resize 关联：黑帧落点 vs resize/restore 帧（判"集中在
+                    // resize 后"最直接的键）。
+                    if (cfg.resizeFrame != kNoResize) {
+                        const u32 afterResize = static_cast<u32>(std::count_if(
+                            blackFrameList.begin(), blackFrameList.end(),
+                            [&](u32 fr) { return fr >= cfg.resizeFrame; }));
+                        std::cerr << "[BLACK_DIST] resizeFrame=" << cfg.resizeFrame
+                                  << " restoreFrame=" << cfg.restoreFrame
+                                  << " black-at/after-resize=" << afterResize
+                                  << "/" << blackFrames << std::endl;
+                    }
+                    // 黑帧占比台阶（litRatio 直方粗分档：全 0 / 近 0 / 部分亮）
+                    u32 zeroPx = 0, nearZero = 0, partial = 0;
+                    for (u32 fr : blackFrameList) {
+                        if (fr < frameLitRatio.size()) {
+                            const double r = frameLitRatio[fr];
+                            if (r == 0.0) ++zeroPx;
+                            else if (r < 0.005) ++nearZero;
+                            else ++partial;
+                        }
+                    }
+                    std::cerr << "[BLACK_DIST] litRatio bins: allZero=" << zeroPx
+                              << " <0.5%=" << nearZero << " 0.5-2%=" << partial
+                              << std::endl;
+                }
                 std::cout << "[RHI_SHARED] frames=" << cfg.totalFrames
                           << " final-res=" << curW << "x" << curH
                           << " avg-lit-ratio="

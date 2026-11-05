@@ -11,7 +11,22 @@
 
 #include "Engine/Common/CoreLogStream.h"
 
+#include <cstdlib>
+
 namespace primal::graphics::rhi::d3d12 {
+
+namespace {
+// R20-B 诊断埋点总门（对齐 PRIMAL_D3D12_WARP/GBV 的 env 惯例）：
+// PRIMAL_D3D12_UPLOAD_TRACE=1 时输出上传环 fence/槽位/字节数 Info 日志；
+// 默认关闭 = 零日志零额外 API 调用（仅本函数一次 getenv）。
+bool UploadTraceEnabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("PRIMAL_D3D12_UPLOAD_TRACE");
+        return v && v[0] == '1';
+    }();
+    return enabled;
+}
+} // namespace
 
 D3D12UploadRing::~D3D12UploadRing() { Shutdown(); }
 
@@ -149,11 +164,25 @@ void D3D12UploadRing::BeginFrame() {
     if (guard != 0) {
         D3D12FencePool& fence = device_->GetFencePool();
         if (fence.GetCompletedValue() < guard) {
+            // 硬件深队列下此等待是真实路径（WARP 近同步几乎不触发）——
+            // R20-B 埋点：等待前后各一行（fence 差值=在飞深度）。
             PRIMAL_LOG_STREAM(Warn, "RHI")
                 << "[D3D12Upload] slot " << currentSlot_
                 << " staging still in flight (fence target " << guard
+                << ", completed " << fence.GetCompletedValue()
                 << ") — CPU waiting before reuse" << std::endl;
-            fence.Wait(guard, 10000);
+            if (!fence.Wait(guard, 10000)) {
+                PRIMAL_LOG_STREAM(Error, "RHI")
+                    << "[D3D12Upload] BeginFrame reuse wait TIMEOUT (slot="
+                    << currentSlot_ << ", target=" << guard << ")" << std::endl;
+                return;  // 在飞数据不可覆写——本槽本帧弃用（bump 不归零）
+            }
+            if (UploadTraceEnabled()) {
+                PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+                    << "[D3D12Upload] slot " << currentSlot_
+                    << " reuse wait passed (target=" << guard
+                    << ", completed=" << fence.GetCompletedValue() << ")" << std::endl;
+            }
         }
     }
     pool.offset = 0;
@@ -169,6 +198,17 @@ D3D12UploadRing::Allocation D3D12UploadRing::Allocate(u64 size, u64 alignment) {
     const u64 align = alignment > 1 ? alignment : 1;
     u64 bump = (pool.offset + align - 1) & ~(align - 1);
     if (bump + size > pool.capacity) {
+        // R20-B 埋点：overflow 细节（请求量 vs 剩余量）——加载期 bump 累积
+        // 卡死链（FlushBlocking 归零修复前）在此显形：重试仍 overflow 即
+        // 该链特征（正常重试在归零后必然成功，单笔 > 容量除外）。
+        if (UploadTraceEnabled()) {
+            PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+                << "[D3D12Upload] Allocate overflow: slot=" << currentSlot_
+                << " request=" << size << " align=" << align
+                << " bump=" << bump << " capacity=" << pool.capacity
+                << " (free=" << (pool.capacity > bump ? pool.capacity - bump : 0)
+                << ", pending=" << pool.pending.size() << ")" << std::endl;
+        }
         out.overflow = true;  // 调用方约定：FlushBlocking 后重试一次
         return out;
     }
@@ -321,6 +361,14 @@ void D3D12UploadRing::FlushBlocking() {
     ID3D12CommandQueue* queue = device_->GetGraphicsQueue();
     if (!native || !queue || !pool.buffer) return;
 
+    if (UploadTraceEnabled()) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12Upload] FlushBlocking begin: slot=" << currentSlot_
+            << " pending=" << pool.pending.size() << " bumpOffset=" << pool.offset
+            << "/" << pool.capacity
+            << " lastUseTarget=" << pool.lastUseTarget << std::endl;
+    }
+
     ComPtr<ID3D12CommandAllocator> allocator;
     if (FAILED(native->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
                                               IID_PPV_ARGS(&allocator)))) {
@@ -337,6 +385,11 @@ void D3D12UploadRing::FlushBlocking() {
     list->Close();
 
     // 提交 + fence 目标值登记（复用判定依据）+ CPU 等待。
+    // R20-B 核查结论（十九测黑帧排查）：Signal 用 ID3D12CommandQueue::Signal
+    // 在 ExecuteCommandLists 之后入队（GPU 完成本批拷贝才置位，非 CPU 侧
+    // fence->Signal 立即置位）；fence 值 u64 全链路无 UINT32 截断；等待为
+    // SetEventOnCompletion+WaitForSingleObject 事件等待（非轮询）——语义
+    // 正确，硬件深队列下 Wait 返回即证数据已落 GPU。
     D3D12FencePool& fence = device_->GetFencePool();
     const u64 target = fence.NextTarget();
     ID3D12CommandList* lists[] = {list.Get()};
@@ -346,7 +399,30 @@ void D3D12UploadRing::FlushBlocking() {
         return;
     }
     pool.lastUseTarget = target;
-    fence.Wait(target, 10000);
+    if (!fence.Wait(target, 10000)) {
+        // R20-B：超时不再静默——数据未确认落 GPU，调用方若继续读/采样
+        // 即黑资源；bump 不归零（在飞数据不可覆写），复用判定仍拦在下一次
+        // BeginFrame/FlushBlocking。
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Upload] FlushBlocking fence wait TIMEOUT (10000ms, slot="
+            << currentSlot_ << ", target=" << target
+            << ", completed=" << fence.GetCompletedValue() << ")" << std::endl;
+        return;
+    }
+    // R20-B 修复：等待成功后归零 bump——本批 staging 拷贝已全部被 GPU 消费，
+    // 槽立即可安全复用。原实现不归零：加载期（无 BeginFrame 帧上下文）
+    // bump 单调累积，16MB 耗尽后 Allocate overflow → FlushBlocking（pending
+    // 已被上一笔清空而空转）→ 重试仍 overflow → 上传失败且部分调用方
+    // （RenderMesh::Create）不查返回值即静默丢顶点数据（未初始化 DEFAULT
+    // heap = 硬件显存垃圾 / WARP 零页——渲染黑帧或图元错乱）。十九测资产
+    // Sponza.model 7.4MB < 16MB 未触发；资产超 16MB 或重复加载必踩。
+    if (UploadTraceEnabled()) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12Upload] FlushBlocking done: slot=" << currentSlot_
+            << " target=" << target << " completed=" << fence.GetCompletedValue()
+            << " bumpOffset " << pool.offset << " -> 0" << std::endl;
+    }
+    pool.offset = 0;
     // R17-A：本函数自带一次独立 ExecuteCommandLists 提交——D3D12 的 buffer
     // 衰减发生在每个 ECL 完成边界，tracker 建模须在此同步推进（此前仅设备
     // submitImpl/endFrameImpl 两处调用，环的阻塞 flush 提交被漏掉：经环更新
