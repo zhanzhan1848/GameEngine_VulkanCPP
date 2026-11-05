@@ -10,6 +10,14 @@
 //   → resize 段（中途换一次 RT 尺寸重走创建，若干帧后换回）
 //   → 全量销毁 + 泄漏计数 sanity + 关闭。
 //
+// F2 Y 契约（2026-11-05，d3d12-blackfix 批）：主相机投影在
+// CreatePerspectiveMatrix 后对 y 行整行取反（Y-down clip，与生产 naga 对
+// gl_Position.y 取反同效）→ 两端视口下世界 +Y 落 RT 小行号、帧正立
+//（§7.2-1 旧叙述"两端原始读回同向"仍成立，但方向由倒立改正立）。投影
+// 取反使帧缓冲空间绕序变号，主相机光栅化管线 cull Back→Front 对换
+//（M1 lit / M2 lit / M4 GBuffer / M5 复用 M1；depth 与全屏 pass Cull
+// None 不动）。两端 frontFace 均硬编码 CW、不可配置，故对换在管线侧。
+//
 // M2 F2-6 阴影段（RHI_TEST_SHADOWS=1 启用，默认 0 = M1 行为不变，
 // M1 回归门禁照跑）：每帧先录单级联 shadow depth pass（离屏 D32 2048²，
 // M2ShadowDepth.vert，depth-only/Cull None/Less——生产 ExecuteShadowRaster
@@ -562,8 +570,8 @@ ResourceHandle CreateTextureFromPixels(RHIDeviceBase* device, RHICommandBuffer* 
     return tex;
 }
 
-// PPM 写出：BGRA8 → P6 RGB，无 Y 翻转（M1 §7.2-1：两端原始读回同向；
-// D3D12 负 viewport 高度对齐；Vulkan 生产离屏对比亦无翻转）。
+// PPM 写出：BGRA8 → P6 RGB，无 Y 翻转（F2 后 RT 本身正立：投影 Y-down
+// clip + 两端视口 NDC y=-1→RT 第 0 行；读回链路两端保序）。
 bool WritePPM(const std::string& path, const u8* bgra, u32 w, u32 h) {
     std::ofstream f(path, std::ios::binary);
     if (!f) return false;
@@ -2739,7 +2747,8 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
         gpd.vertexBindings[0].perVertex = true;
         gpd.topology = PrimitiveTopology::TriangleList;
         gpd.fillMode = FillMode::Solid;
-        gpd.cullMode = CullMode::Back;
+        // F2：投影 y 行取反使帧缓冲空间绕序变号，cull 对换保同一批物理面
+        gpd.cullMode = CullMode::Front;
         gpd.renderTargetCount = 1;
         gpd.renderTargetFormats[0] = litRTFormat;   // M3：post on → RGBA16F HDR
         gpd.depthStencilFormat = DataFormat::D32_Float;
@@ -2794,7 +2803,8 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
         lpd.vertexBindings[0].stride = 32;
         lpd.vertexBindings[0].perVertex = true;
         lpd.topology = PrimitiveTopology::TriangleList;
-        lpd.cullMode = CullMode::Back;
+        // F2：投影 y 行取反使绕序变号，cull 对换（与 M1 lit 同理）
+        lpd.cullMode = CullMode::Front;
         lpd.renderTargetCount = 1;
         lpd.renderTargetFormats[0] = litRTFormat;   // M3：post on → RGBA16F HDR
         lpd.depthStencilFormat = DataFormat::D32_Float;
@@ -2926,7 +2936,8 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
             gpd.vertexBindings[0].perVertex = true;
             gpd.topology = PrimitiveTopology::TriangleList;
             gpd.fillMode = FillMode::Solid;
-            gpd.cullMode = CullMode::Back;
+            // F2：投影 y 行取反使绕序变号，cull 对换（与 M1 lit 同理）
+            gpd.cullMode = CullMode::Front;
             gpd.renderTargetCount = 3;                      // F4-2 MRT
             gpd.renderTargetFormats[0] = DataFormat::RGBA8_UNorm;
             gpd.renderTargetFormats[1] = DataFormat::RG16_Float;
@@ -3370,6 +3381,14 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                     math::m4x4 proj = rhimath::CreatePerspectiveMatrix(
                         float(cam.fovDeg * 3.14159265358979 / 180.0), aspect,
                         0.1f, 200.0f);
+                    // F2（Y-down clip 契约）：投影 y 行整行取反 = 左乘
+                    // diag(1,-1,1,1)，与生产 naga 对 gl_Position.y 取反同效。
+                    // 两端视口（Vulkan 正高 / D3D12 负高）都把 NDC y=-1 映到
+                    // RT 第 0 行 → 世界 +Y 落小行号、RT 本身正立。下文
+                    // vd.viewProjection（含 M5 视锥平面提取）与 M4
+                    // invViewProjection 均消费此取反后的同一 proj。
+                    for (int c = 0; c < 4; ++c)
+                        proj.columns[c][1] = -proj.columns[c][1];
                     ViewDataGPU vd{};
                     vd.viewProjection = proj * view;
                     vd.cameraPos = math::v4{cam.position.x, cam.position.y,

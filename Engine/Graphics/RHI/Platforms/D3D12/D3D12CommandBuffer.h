@@ -26,9 +26,12 @@
 //     双线性=2x2 box；shader=MipGen.hlsl 构建期嵌入，见 D3D12MipGen.h）。
 //     BC 压缩/深度/TYPELESS 与非 2D 类型保持 NOT-IMPLEMENTED Error（登记）。
 //
-// 视口契约（阶段文档 §7.2-1）：SetViewport 以负高度 {0, H, W, -H} 下发——
-// D3D12 官方 Y 翻转手段；使原始帧与 Vulkan 原始读回同向（共享对比免
-// FlipYInPlace）。绕序翻转由 PSO 的 cull 取反补偿（D3D12Pipeline.h）。
+// 视口契约（阶段文档 §7.2-1，H2 后真实契约）：SetViewport 以负高度
+// {0, H, W, -H} 下发——D3D12 官方 Y 翻转手段，使 NDC y=-1 映到 RT 第 0
+// 行，与 Vulkan 正高度视口同映射、原始读回同向（共享对比免 FlipYInPlace）。
+// PSO cull 直译（D3D12Pipeline::ToCullMode；FrontCounterClockwise=FALSE 与
+// Vulkan frontFace=CW 同义，负视口已补偿 NDC Y 语义差）。Y 朝向由调用方
+// 投影负责（harness F2：投影 y 行取反，RT 本身正立）。
 // Scissor 不翻转：它是屏幕空间矩形，与光栅化绕序无关。
 //
 // 绑定状态机（R20-A，Windows 十九测 #709/#952）：
