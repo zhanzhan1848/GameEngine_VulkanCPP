@@ -273,6 +273,34 @@ set_target_properties(UnitD3D12RootSigBudget PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 
+# R21-B：命令列表槽位绑定镜像（指针+世代）生命周期单测——纯 C++ 模型
+# （D3D12CommandBuffer.h Windows 守卫之外），macOS 直接编译运行。
+add_executable(UnitD3D12BindSlotMirror RHI/D3D12/TestD3D12BindSlotMirror.cpp)
+target_include_directories(UnitD3D12BindSlotMirror PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(UnitD3D12BindSlotMirror PRIVATE Engine)
+add_test(NAME UnitD3D12BindSlotMirror COMMAND UnitD3D12BindSlotMirror)
+set_target_properties(UnitD3D12BindSlotMirror PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+# R21-C：描述符帧槽线性分配 + 槽纪元策略（header-only 平台中立模型，
+# Windows 生产侧 D3D12DescriptorHeapManager 同源引用）——所有平台编译运行。
+add_executable(UnitD3D12DescriptorSlotPolicy RHI/D3D12/TestD3D12DescriptorSlotPolicy.cpp)
+target_include_directories(UnitD3D12DescriptorSlotPolicy PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(UnitD3D12DescriptorSlotPolicy PRIVATE Engine)
+add_test(NAME UnitD3D12DescriptorSlotPolicy COMMAND UnitD3D12DescriptorSlotPolicy)
+set_target_properties(UnitD3D12DescriptorSlotPolicy PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
 # Vulkan RHI 后端设备测试 — 仅在 ENABLE_VULKAN 时编入 Vulkan 代码路径。
 # ENABLE_VULKAN 未定义时此 TU 仍可编译（main 返回 0），但不会连接 Vulkan SDK。
 if(ENABLE_VULKAN)

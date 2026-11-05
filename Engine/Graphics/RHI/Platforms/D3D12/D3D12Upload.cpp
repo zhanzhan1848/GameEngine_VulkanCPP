@@ -392,13 +392,18 @@ void D3D12UploadRing::FlushBlocking() {
     // 正确，硬件深队列下 Wait 返回即证数据已落 GPU。
     D3D12FencePool& fence = device_->GetFencePool();
     const u64 target = fence.NextTarget();
+    // R21-B：护栏登记前移到 ECL/Signal 之前——Signal 失败路径此前不登记
+    // lastUseTarget 即返回，而本批拷贝已经 ExecuteCommandLists 在飞：下一
+    // 次 BeginFrame 以旧（已完成）guard 判定复用并归零 bump → CPU 覆写
+    // 在飞 staging。登记后：Signal 失败 = target 永不完成 → BeginFrame
+    // 等待超时 → 槽本帧弃用（慢而安全，且 signal failed Error 已在场）。
+    pool.lastUseTarget = target;
     ID3D12CommandList* lists[] = {list.Get()};
     queue->ExecuteCommandLists(1, lists);
     if (!fence.Signal(queue, target)) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Upload] FlushBlocking signal failed" << std::endl;
         return;
     }
-    pool.lastUseTarget = target;
     if (!fence.Wait(target, 10000)) {
         // R20-B：超时不再静默——数据未确认落 GPU，调用方若继续读/采样
         // 即黑资源；bump 不归零（在飞数据不可覆写），复用判定仍拦在下一次

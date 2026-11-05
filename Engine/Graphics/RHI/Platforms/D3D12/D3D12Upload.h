@@ -127,6 +127,22 @@ public:
     bool HasPendingCopies() const { return !pools_[currentSlot_].pending.empty(); }
     bool IsInitialized() const { return device_ != nullptr; }
 
+    // --- R21-C FRAME_TRACE 观察器（PRIMAL_D3D12_FRAME_TRACE 埋点读环状态；
+    // 纯只读，无行为变化。越界槽返回零值。）---
+    u32 TraceCurrentSlot() const { return currentSlot_; }
+    u64 TraceSlotOffset(u32 slot) const {
+        return slot < FRAME_SLOTS ? pools_[slot].offset : 0;
+    }
+    u64 TraceSlotCapacity(u32 slot) const {
+        return slot < FRAME_SLOTS ? pools_[slot].capacity : 0;
+    }
+    u64 TraceSlotLastUseTarget(u32 slot) const {
+        return slot < FRAME_SLOTS ? pools_[slot].lastUseTarget : 0;
+    }
+    size_t TraceSlotPendingCount(u32 slot) const {
+        return slot < FRAME_SLOTS ? pools_[slot].pending.size() : 0;
+    }
+
 private:
     struct PendingCopy {
         ID3D12Resource* srcStaging = nullptr;  // ring buffer 本体（非拥有）

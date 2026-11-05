@@ -5,13 +5,19 @@
 // 堆布局（对齐 M1 阶段文档 F1-5 与 Parity Matrix 的 view 折叠决策）：
 //   1. CBV/SRV/UAV 主堆：唯一 shader-visible 堆（单命令列表同时只能绑一个
 //      CBV/SRV/UAV 堆——全局唯一堆 = descriptor table 绑定模型的硬前提）。
-//      分配策略 = 分帧槽线性分配 + 每槽 fence 完成值回收：
+//      分配策略 = 分帧槽线性分配 + 每槽 fence 完成值回收 + 槽纪元（R21-C）：
 //        - BeginFrame(slot)：若该槽上次提交的 fence 目标值已完成
 //          （D3D12FencePool::GetCompletedValue >= perSlotGuardTarget[slot]），
 //          bump offset 归零（该槽上一轮描述符已不在飞行中，安全复用）；
 //          未完成则 CPU 等待该目标值（防御非 RenderSystem 宿主的提交顺序）。
+//          同时该槽纪元（epoch）自增——旧纪元的全部线性区段作废。
 //        - Alloc(count)：从当前槽线性 bump；容量耗尽 = 显式失败（false），
 //          不静默回绕（回绕会让在飞描述符被覆写）。
+//        - set 区段时效 = (帧槽, 纪元) 双键戳（R21-C）：EnsureSetRegionCurrent
+//          只比槽号的旧判定会在"set 隔一整个槽周期未被触碰后同槽回归"时
+//          放行已被回收的陈旧区段 → 区段重叠互踩；纪元键封死该路径。
+//          数学/纪元策略在 DescriptorFrameSlotPolicy（平台中立，macOS 单测
+//          同源——R21-C）。
 //        - 帧内分配的 fence 护栏 = "下一次将被 Signal 的目标值"
 //          （D3D12FencePool::PeekNextTarget）——消费这些描述符的提交即
 //          Signal 该值；复用判定见上。生命周期以 fence 值为据，无帧数算术。
@@ -54,6 +60,8 @@
 
 #include "../../Core/RHIDescriptorSetLayout.h"
 #include "../../Core/RHIDescriptorSet.h"
+// R21-C：帧槽线性分配 + 槽纪元策略（平台中立模型，macOS 单测同源）。
+#include "D3D12DescriptorSlotPolicy.h"
 
 // 2026-11-03 R2（Windows 首编修复）：本头此前直接开 rhi::d3d12 命名空间且未
 // 前置声明 rhi::D3D12Device / D3D12DescriptorHeapManager——
@@ -180,8 +188,11 @@ public:
     u32 BaseSlot() const { return baseSlot_; }
     u32 SamplerBaseSlot() const { return samplerBaseSlot_; }
 
-    /// 区段属主槽（当前帧槽一致 = 无需迁移）。
+    /// 区段属主槽 + 分配纪元（R21-C：两者都与当前帧槽/纪元一致才免迁移
+    /// ——只比槽号的旧判定在"set 隔一整个槽周期未被触碰后同槽回归"时
+    /// 会放行已被 BeginFrame 回收的陈旧区段 → 区段重叠互踩）。
     u32 OwnerSlot() const { return ownerSlot_; }
+    u64 OwnerEpoch() const { return ownerEpoch_; }
     u32 MainCount() const { return mainCount_; }
     u32 SamplerCount() const { return samplerCount_; }
 
@@ -196,6 +207,7 @@ private:
     u32 baseSlot_ = 0xFFFFFFFFu;
     u32 samplerBaseSlot_ = 0xFFFFFFFFu;
     u32 ownerSlot_ = 0xFFFFFFFFu;
+    u64 ownerEpoch_ = 0;               ///< R21C：分配时槽纪元戳
     u32 mainCount_ = 0;
     u32 samplerCount_ = 0;
 };
@@ -323,6 +335,19 @@ public:
     u32 CbvSrvUavCapacity() const { return cbvSrvUavCapacity_; }
     u32 SamplerCapacity() const { return samplerCapacity_; }
 
+    // ------------------------------------------------------------------
+    // 帧槽线性区状态（R21-C：set 戳记 + FRAME_TRACE 埋点。主堆/sampler
+    // 堆两线性区同帧同 BeginFrame 推进，纪元恒同步——SlotEpoch 取主堆侧）
+    // ------------------------------------------------------------------
+    /// 指定帧槽的当前纪元（set 分配戳用；两线性区同步推进）。
+    u64 SlotEpoch(u32 frameSlot) const { return mainLinear_.SlotEpoch(mainLinear_.SlotIndexOf(frameSlot)); }
+    u32 MainLinearBump() const { return mainLinear_.Bump(); }
+    u32 MainLinearCapacity() const { return mainLinear_.SlotCapacity(); }
+    u32 MainLinearSlot() const { return mainLinear_.CurrentSlot(); }
+    u32 MainHighWater(u32 slot) const { return mainLinear_.HighWaterFor(slot); }
+    u32 SamplerLinearBump() const { return samplerLinear_.Bump(); }
+    u32 SamplerLinearCapacity() const { return samplerLinear_.SlotCapacity(); }
+
 private:
     /// 持久槽位 free-list（RTV/DSV/Sampler 共用实现）
     class SlotPool {
@@ -364,22 +389,20 @@ private:
     D3D12_CPU_DESCRIPTOR_HANDLE rtvCpuStart_{};
     D3D12_CPU_DESCRIPTOR_HANDLE dsvCpuStart_{};
 
-    // 分帧槽线性分配状态
+    // 分帧槽线性分配状态（R21-C：bump/epoch/容量数学收拢进平台中立策略
+    // 类——与 macOS 单测同源；currentSlot_ 与护拦表保留在管理器，
+    // 供 OnSubmit 与 fence 复用判定使用）。
     u32 frameSlotCount_ = 3;
     u32 currentSlot_ = 0;
-    u32 slotBase_ = 0;                 ///< 当前槽子区域起始槽位（线性区）
-    u32 slotCapacity_ = 0;             ///< 每槽子区域容量（线性区）
-    u32 slotBump_ = 0;                 ///< 当前槽内 bump 偏移
     // CBV/SRV/UAV 主堆布局：[0, cbvSrvUavPersistentCapacity_) 持久 SlotPool
     // （纹理 SRV/UAV 拷贝源）；其余为帧槽线性区段（set 实例表）。
     u32 cbvSrvUavLinearBase_ = 0;
+    DescriptorFrameSlotPolicy mainLinear_;    ///< 主堆线性区（bump/epoch/high-water）
     // sampler 堆布局：[0, samplerPersistentCapacity_) 持久 SlotPool；
-    // 其余为帧槽线性区段（set 实例 sampler 表）。
+    // 其余为帧槽线性区段（set 实例的 sampler 表）。
     u32 samplerPersistentCapacity_ = 0;
     u32 samplerLinearBase_ = 0;
-    u32 samplerSlotBase_ = 0;
-    u32 samplerSlotCapacity_ = 0;
-    u32 samplerSlotBump_ = 0;
+    DescriptorFrameSlotPolicy samplerLinear_; ///< sampler 堆线性区（同上）
     std::vector<u64> perSlotGuardTarget_;  ///< 各槽上次提交护拦（复用判定）
 
     SlotPool cbvSrvUavPersistentSlots_;

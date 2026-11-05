@@ -23,6 +23,10 @@
  *            类逐子资源显式；读出=GPU src=texture→COPY_SOURCE 读类+prev
  *            回置；IsReadClassState 方向判别位）——CopyTextureRegion 实参
  *            序反转（纹理误占 pDst 槽）的 #538 回归，tracker 层可编译面
+ *          ⑮-⑰ R21-A：tracker 权威（声明不覆盖实际态——Windows 二十测
+ *            M5 #538 CopyBufferRegion 源态错的根因）+ 无条目事实注入语义
+ *            + buffer 提交边界衰减重建（帧 2+ 跨帧重放，直连 Submit 路径
+ *            R21-A 补挂钩的建模面）
  */
 
 #include "../../TestFramework.h"
@@ -794,6 +798,155 @@ TestResult TestR18ReadbackUploadDirectionContract() {
     return TestResult::Passed;
 }
 
+// ===== ⑮ R21-A：tracker 权威——InsertBarrier 声明不覆盖实际态（M5 #538）=====
+// Windows 二十测 M5 debug 矩阵 #538 CopyBufferRegion 源态错（0x200
+// INDIRECT_ARGUMENT，期望 0x800 COPY_SOURCE）的 tracker 层根因：
+// 旧 InsertBarrier buffer 分支对"声明≠tracker"执行 Track(声明)——把
+// tracker 改成假态后 Transition 产出零 op、GPU 停留实际态。修法语义
+//（D3D12CommandBuffer.cpp buffer 分支在 _WIN32 编译域，此处按同一语义
+//  锁定 tracker 原语行为）：条目在场 = 权威，声明不写入；Transition 一律
+// 从 tracker 实际态出发产出 op。
+TestResult TestR21TrackerAuthoritativeOverBadDeclaration() {
+    D3D12StateTracker tracker;
+    TEST_ASSERT(tracker.RegisterResource(201, false, 1, 1, 1, ResourceState::General),
+                "register args buffer at COMMON (createBufferImpl path)");
+    D3D12SubresourceKey args{201, 0, false};
+
+    // M5 帧 1 前半：dispatch 隐式 UAV 提升（COMMON→UAV，零 op）后，Execute
+    // 的契约 barrier UAV→INDIRECT_ARGUMENT（显式 1 op，官方样例模式）。
+    TEST_ASSERT(tracker.Transition(args, ResourceState::UnorderedAccess).empty(),
+                "COMMON->UAV buffer promotion: 0 ops");
+    auto ops = tracker.Transition(args, ResourceState::IndirectArgument);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_UnorderedAccess
+                && ops[0].stateAfter == kD3D12ResourceState_IndirectArgument,
+                "UAV->INDIRECT_ARGUMENT explicit op (M5Execute barrier)");
+
+    // 读回 barrier：调用方声明 beforeState=CopySource（旧测试代码的声明）
+    // 而 tracker 实际 = INDIRECT_ARGUMENT。修复后语义 = 不 Track(声明)，
+    // 仅 Transition(CopySource) —— op 的 StateBefore 必须是实际态。
+    // （声明本身在 CommandBuffer 层被忽略并 Warn 一次性；此处断言"不
+    //  写入"后的行为等价面：QueryState 仍为实际态。）
+    ResourceState cur = ResourceState::Unknown;
+    TEST_ASSERT(tracker.QueryState(args, cur) && cur == ResourceState::IndirectArgument,
+                "declaration must not overwrite tracked state (entry present)");
+    ops = tracker.Transition(args, ResourceState::CopySource);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_IndirectArgument
+                && ops[0].stateAfter == kD3D12ResourceState_CopySource,
+                "#538 fix op: INDIRECT_ARGUMENT->COPY_SOURCE from ACTUAL state");
+
+    // 负对照（旧缺陷形态锁定）：同序列 buffer 若按旧实现先 Track(CopySource)
+    // 假态注入，Transition(CopySource) 产出零 op —— GPU 停留 INDIRECT_
+    // ARGUMENT 直拷即 #538。用第二 buffer 复现该形态以留档。
+    TEST_ASSERT(tracker.RegisterResource(202, false, 1, 1, 1, ResourceState::General),
+                "register second buffer (old-bug reproduction)");
+    D3D12SubresourceKey b2{202, 0, false};
+    (void)tracker.Transition(b2, ResourceState::UnorderedAccess);   // 提升
+    (void)tracker.Transition(b2, ResourceState::IndirectArgument);  // 显式转换
+    TEST_ASSERT(tracker.Track(b2, ResourceState::CopySource),
+                "old-code shape: Track(declared CopySource) succeeds (the bug)");
+    ops = tracker.Transition(b2, ResourceState::CopySource);
+    TEST_ASSERT(ops.empty(),
+                "old-code result: fake CopySource -> Transition yields ZERO ops (#538 mechanism)");
+    TEST_ASSERT(tracker.QueryState(b2, cur) && cur == ResourceState::CopySource,
+                "old-code result: tracker now holds fake state (diverges from GPU)");
+    return TestResult::Passed;
+}
+
+// ===== ⑯ R21-A：无条目分支的事实注入语义（GPU fact injection）=====
+// 修复保留的另一半：无 tracker 条目且声明非 Unknown → Track 注入（调用
+// 方观测 GPU 已处于某态的首帧声明）；未注册资源的 Track 被跟踪器拒绝
+//（M1 手工 buffer 路径保持零 barrier no-op）。Registered 资源的注入 =
+// 显式态（不参与提升衰减标记）。
+TestResult TestR21BarrierFactInjectionSemantics() {
+    D3D12StateTracker tracker;
+    D3D12SubresourceKey unreg{301, 0, false};
+    ResourceState st = ResourceState::Unknown;
+    TEST_ASSERT(!tracker.QueryState(unreg, st), "unregistered: no entry");
+    TEST_ASSERT(!tracker.Track(unreg, ResourceState::UnorderedAccess),
+                "unregistered Track rejected (M1 manual path stays no-op)");
+    TEST_ASSERT(tracker.Transition(unreg, ResourceState::CopySource).empty(),
+                "unregistered Transition: empty ops (M1 behavior)");
+
+    // 注册后注入：声明 UAV（compute dispatch 已隐式提升的 GPU 事实）。
+    TEST_ASSERT(tracker.RegisterResource(301, false, 1, 1, 1, ResourceState::General),
+                "register (first tracking entry)");
+    TEST_ASSERT(tracker.Track(unreg, ResourceState::UnorderedAccess),
+                "fact injection succeeds once entry exists");
+    TEST_ASSERT(tracker.QueryState(unreg, st) && st == ResourceState::UnorderedAccess,
+                "injected state visible via QueryState");
+    auto ops = tracker.Transition(unreg, ResourceState::IndirectArgument);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_UnorderedAccess,
+                "injected fact drives op StateBefore (UAV->INDIRECT_ARGUMENT)");
+
+    // 声明 Unknown 的无条目分支：不注入——COMMON 起点按规则② 提升
+    //（零 op，CopyBuffer 对未显式化 buffer 的 M1 保持行为）。
+    TEST_ASSERT(tracker.RegisterResource(302, false, 1, 1, 1, ResourceState::General),
+                "register fresh buffer");
+    ops = tracker.Transition({302, 0, false}, ResourceState::CopySource);
+    TEST_ASSERT(ops.empty(), "no-injection path: COMMON->COPY_SOURCE promotion (0 ops)");
+    return TestResult::Passed;
+}
+
+// ===== ⑰ R21-A：buffer 提交边界衰减重建（帧 2+ 跨帧重放）=====
+// M5 修好读回后的新暴露面：帧尾 tracker 若残留 CopySource/UAV 等态，
+// 而 GPU 已按 D3D12 语义在 ExecuteCommandLists 完成后衰减回 COMMON，
+// 下一帧 Transition 会产出 before≠实际的 barrier。OnSubmitBoundary
+//（R17-A 规则③：仅 buffer 全衰、纹理不衰）+ R21-A 直连 Submit 路径
+// 推进（D3D12CommandBufferImpl::submitImpl 补挂钩）后，帧界两侧一致：
+// 帧界后 Query 得 COMMON（General），帧 2 重放全部走合法对。
+TestResult TestR21BufferDecayAcrossSubmitFrames() {
+    D3D12StateTracker tracker;
+    TEST_ASSERT(tracker.RegisterResource(401, false, 1, 1, 1, ResourceState::General),
+                "register args (COMMON)");
+    TEST_ASSERT(tracker.RegisterResource(402, false, 1, 1, 1, ResourceState::General),
+                "register counter (COMMON)");
+    D3D12SubresourceKey args{401, 0, false};
+    D3D12SubresourceKey counter{402, 0, false};
+
+    // --- 帧 1：完整 M5 状态链（含修复后的读回转换）---
+    TEST_ASSERT(tracker.Transition(args, ResourceState::UnorderedAccess).empty(),
+                "args dispatch UAV promotion (0 ops)");
+    TEST_ASSERT(tracker.Transition(counter, ResourceState::UnorderedAccess).empty(),
+                "counter dispatch UAV promotion (0 ops)");
+    TEST_ASSERT(tracker.Transition(args, ResourceState::IndirectArgument).size() == 1,
+                "args UAV->INDIRECT_ARGUMENT (Execute contract barrier)");
+    auto ops = tracker.Transition(args, ResourceState::CopySource);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_IndirectArgument,
+                "args readback: INDIRECT_ARGUMENT->COPY_SOURCE");
+    ops = tracker.Transition(counter, ResourceState::CopySource);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_UnorderedAccess,
+                "counter readback: UAV->COPY_SOURCE");
+
+    // --- 提交边界（直连 Submit 路径 R21-A 挂钩后的建模面）---
+    auto decayed = tracker.OnSubmitBoundary();
+    TEST_ASSERT(decayed.size() == 2, "both buffers decay at submit boundary");
+    ResourceState s1 = ResourceState::Unknown, s2 = ResourceState::Unknown;
+    TEST_ASSERT(tracker.QueryState(args, s1) && s1 == ResourceState::General,
+                "args back to COMMON after frame boundary");
+    TEST_ASSERT(tracker.QueryState(counter, s2) && s2 == ResourceState::General,
+                "counter back to COMMON after frame boundary");
+
+    // --- 帧 2 重放：COMMON 起点全走提升/合法对，无 before≠实际残留 op ---
+    ops = tracker.Transition(args, ResourceState::UnorderedAccess);
+    TEST_ASSERT(ops.empty(), "frame 2 args: COMMON->UAV promotion (0 ops, no stale barrier)");
+    TEST_ASSERT(tracker.Transition(counter, ResourceState::UnorderedAccess).empty(),
+                "frame 2 counter: COMMON->UAV promotion (0 ops)");
+    ops = tracker.Transition(args, ResourceState::IndirectArgument);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_UnorderedAccess,
+                "frame 2 Execute barrier from promoted UAV (valid pair)");
+    ops = tracker.Transition(args, ResourceState::CopySource);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_IndirectArgument,
+                "frame 2 readback: INDIRECT_ARGUMENT->COPY_SOURCE replays identically");
+
+    // 帧 2 末的 CopyBuffer 兜底门（R21-A CopyBuffer 的 COMMON 跳过分支）：
+    // 衰减后处于 COMMON 的 buffer 拷贝零 op（M1 行为保持——READBACK 堆
+    // dst 恒 COPY_DEST 规定态同样落此分支，不发非法显式 barrier）。
+    (void)tracker.OnSubmitBoundary();
+    ops = tracker.Transition(args, ResourceState::CopySource);
+    TEST_ASSERT(ops.empty(), "post-decay COMMON->COPY_SOURCE: 0 ops (CopyBuffer skip branch)");
+    return TestResult::Passed;
+}
+
 void RegisterD3D12StateTrackerTests() {
     auto suite = std::make_shared<TestSuite>("D3D12StateTrackerTests");
     suite->AddTestCase(TestCase("StateMappingTable", TestStateMappingTable));
@@ -812,6 +965,9 @@ void RegisterD3D12StateTrackerTests() {
     suite->AddTestCase(TestCase("R17UploadReadbackAlternation", TestR17UploadReadbackAlternation));
     suite->AddTestCase(TestCase("R17FreshCommonScopedReadback", TestR17FreshCommonScopedReadback));
     suite->AddTestCase(TestCase("R18ReadbackUploadDirectionContract", TestR18ReadbackUploadDirectionContract));
+    suite->AddTestCase(TestCase("R21TrackerAuthoritativeOverBadDeclaration", TestR21TrackerAuthoritativeOverBadDeclaration));
+    suite->AddTestCase(TestCase("R21BarrierFactInjectionSemantics", TestR21BarrierFactInjectionSemantics));
+    suite->AddTestCase(TestCase("R21BufferDecayAcrossSubmitFrames", TestR21BufferDecayAcrossSubmitFrames));
     TestRunner::RegisterTestSuite(suite);
 }
 

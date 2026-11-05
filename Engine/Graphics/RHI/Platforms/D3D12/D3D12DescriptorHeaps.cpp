@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdlib>  // R21-C：FrameTraceEnabled 的 std::getenv
 
 #include "D3D12Abi.h"
 #include "D3D12StateMapping.h"
@@ -132,10 +133,10 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
         return false;
     }
     cbvSrvUavLinearBase_ = config.cbvSrvUavPersistentCapacity;
-    slotCapacity_ = (config.cbvSrvUavCapacity - cbvSrvUavLinearBase_) / frameSlotCount_;
     currentSlot_ = 0;
-    slotBase_ = cbvSrvUavLinearBase_;
-    slotBump_ = 0;
+    mainLinear_.Init(cbvSrvUavLinearBase_,
+                     (config.cbvSrvUavCapacity - cbvSrvUavLinearBase_) / frameSlotCount_,
+                     frameSlotCount_);
 
     // sampler 堆布局：前段持久 SlotPool（SamplerHandle 对象），后段帧槽线性
     // （set 实例的 sampler 表——descriptor table 需要连续槽位）。
@@ -146,9 +147,9 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
     }
     samplerPersistentCapacity_ = config.samplerPersistentCapacity;
     samplerLinearBase_ = config.samplerPersistentCapacity;
-    samplerSlotCapacity_ = (config.samplerCapacity - samplerLinearBase_) / frameSlotCount_;
-    samplerSlotBase_ = samplerLinearBase_;
-    samplerSlotBump_ = 0;
+    samplerLinear_.Init(samplerLinearBase_,
+                        (config.samplerCapacity - samplerLinearBase_) / frameSlotCount_,
+                        frameSlotCount_);
 
     cbvSrvUavPersistentSlots_.Init(config.cbvSrvUavPersistentCapacity);
     rtvSlots_.Init(config.rtvCapacity);
@@ -159,10 +160,10 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
     PRIMAL_LOG_STREAM(Info, "RHI")
         << "[D3D12DescriptorHeaps] heaps ready: cbvSrvUav=" << config.cbvSrvUavCapacity
         << " (persistent " << config.cbvSrvUavPersistentCapacity
-        << ", per-slot " << slotCapacity_ << ")"
+        << ", per-slot " << mainLinear_.SlotCapacity() << ")"
         << ", sampler=" << config.samplerCapacity
         << " (persistent " << config.samplerPersistentCapacity
-        << ", per-slot " << samplerSlotCapacity_ << ")"
+        << ", per-slot " << samplerLinear_.SlotCapacity() << ")"
         << ", rtv=" << config.rtvCapacity << ", dsv=" << config.dsvCapacity << std::endl;
     return true;
 }
@@ -179,15 +180,28 @@ void D3D12DescriptorHeapManager::Shutdown() {
 }
 
 // ============================================================================
-// 帧槽线性分配（fence 完成值复用判定——F0-11 契约 §3.4）
+// 帧槽线性分配（fence 完成值复用判定——F0-11 契约 §3.4；bump/epoch 数学在
+// DescriptorFrameSlotPolicy，R21-C）
 // ============================================================================
+
+namespace {
+/// R21-C 帧级埋点开关（默认关；PRIMAL_D3D12_FRAME_TRACE=1 开——逐帧输出
+/// 堆 high-water/纪元/护拦，黑帧帧号与堆事件对齐用，日志走 stderr）。
+bool FrameTraceEnabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("PRIMAL_D3D12_FRAME_TRACE");
+        return v && v[0] == '1';
+    }();
+    return enabled;
+}
+} // namespace
 
 void D3D12DescriptorHeapManager::BeginFrame(u32 frameSlot, D3D12FencePool& fence) {
     currentSlot_ = frameSlot % frameSlotCount_;
-    slotBase_ = cbvSrvUavLinearBase_ + currentSlot_ * slotCapacity_;
-    slotBump_ = 0;
-    samplerSlotBase_ = samplerLinearBase_ + currentSlot_ * samplerSlotCapacity_;
-    samplerSlotBump_ = 0;
+    // R21-C：策略类推进（bump 归零 + 槽纪元自增——旧纪元的 set 区段全部
+    // 作废，RegionIsCurrent 按 (slot, epoch) 双键判定，见策略头注）。
+    mainLinear_.BeginFrame(frameSlot);
+    samplerLinear_.BeginFrame(frameSlot);
     // 复用判定：该槽上一轮分配的护拦目标值是否已被 GPU 完成。
     // RenderSystem::BeginFrame 已等过本槽 fence（正常路径立即通过）；
     // 未完成（旁路提交顺序）则 CPU 等待——绝不覆写在飞描述符。
@@ -199,18 +213,29 @@ void D3D12DescriptorHeapManager::BeginFrame(u32 frameSlot, D3D12FencePool& fence
             << ") — CPU waiting before reuse" << std::endl;
         fence.Wait(guard, 10000);
     }
+    if (FrameTraceEnabled()) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12FrameTrace] BeginFrame: slot=" << currentSlot_
+            << " epoch=" << mainLinear_.SlotEpoch(currentSlot_)
+            << " mainLastCycle=" << mainLinear_.LastCycleHighFor(currentSlot_)
+            << "/" << mainLinear_.SlotCapacity()
+            << " mainAllTimeHW=" << mainLinear_.HighWaterFor(currentSlot_)
+            << " samplerLastCycle=" << samplerLinear_.LastCycleHighFor(currentSlot_)
+            << "/" << samplerLinear_.SlotCapacity()
+            << " guard=" << guard
+            << " fenceCompleted=" << fence.GetCompletedValue() << std::endl;
+    }
 }
 
 bool D3D12DescriptorHeapManager::AllocShaderVisible(u32 count, u32& outBaseSlot) {
-    if (slotBump_ + count > slotCapacity_) {
+    if (!mainLinear_.Alloc(count, outBaseSlot)) {
         PRIMAL_LOG_STREAM(Error, "RHI")
             << "[D3D12DescriptorHeaps] frame slot " << currentSlot_
-            << " descriptor capacity exhausted (bump=" << slotBump_
-            << " need=" << count << " capacity=" << slotCapacity_ << ")" << std::endl;
+            << " descriptor capacity exhausted (bump=" << mainLinear_.Bump()
+            << " need=" << count << " capacity=" << mainLinear_.SlotCapacity()
+            << ")" << std::endl;
         return false;  // 显式失败，不静默回绕
     }
-    outBaseSlot = slotBase_ + slotBump_;
-    slotBump_ += count;
     return true;
 }
 
@@ -314,15 +339,14 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12DescriptorHeapManager::SamplerGpuHandle(u32 slo
 }
 
 bool D3D12DescriptorHeapManager::AllocSamplerRange(u32 count, u32& outBaseSlot) {
-    if (samplerSlotBump_ + count > samplerSlotCapacity_) {
+    if (!samplerLinear_.Alloc(count, outBaseSlot)) {
         PRIMAL_LOG_STREAM(Error, "RHI")
             << "[D3D12DescriptorHeaps] frame slot " << currentSlot_
-            << " sampler range capacity exhausted (bump=" << samplerSlotBump_
-            << " need=" << count << " capacity=" << samplerSlotCapacity_ << ")" << std::endl;
+            << " sampler range capacity exhausted (bump=" << samplerLinear_.Bump()
+            << " need=" << count << " capacity=" << samplerLinear_.SlotCapacity()
+            << ")" << std::endl;
         return false;
     }
-    outBaseSlot = samplerSlotBase_ + samplerSlotBump_;
-    samplerSlotBump_ += count;
     return true;
 }
 
@@ -476,7 +500,10 @@ bool D3D12DescriptorSet::Initialize() {
             return false;
         }
     }
+    // R21-C：分配戳 = (帧槽, 纪元) 双键——EnsureSetRegionCurrent 的时效
+    // 判定依据（只比槽号的旧判定会放行隔周期回归的陈旧区段）。
     ownerSlot_ = dev.GetCurrentFrameIndex();
+    ownerEpoch_ = heaps.SlotEpoch(ownerSlot_);
     return true;
 }
 

@@ -2015,13 +2015,24 @@ void M5RecordReadback(RHICommandBuffer* cmd, M5GpuDrivenState& s) {
     // InsertBarrier 的 buffer 声明不能替代真实依赖）
     cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
                        AccessFlag::ShaderWrite, AccessFlag::TransferRead);
-    // R19-1：读回拷贝源显式转换（args：INDIRECT_ARGUMENT→COPY_SOURCE、
-    // counter：UAV→COPY_SOURCE）——UAV 标志资源失去隐式提升，tracker 驱动
-    // 显式化（Vulkan buffer barrier 跳过=零影响）。
-    for (ResourceHandle h : {s.argsBuf, s.counterBuf}) {
+    // R21-A：读回拷贝源显式转换（args：INDIRECT_ARGUMENT→COPY_SOURCE、
+    // counter：UAV→COPY_SOURCE）——D3D12 侧 tracker 权威、声明仅参考；此处
+    // 声明真态以便 Vulkan/其他后端语义对照（args 前置态 = M5Execute 的
+    // UAV→INDIRECT_ARGUMENT 显式转换后；counter 前置态 = compute dispatch
+    // UAV 写入态）。Vulkan buffer barrier 跳过=零影响（§4.4 已知债务）。
+    {
         ResourceBarrier rb{};
-        rb.resource = h;
-        rb.beforeState = ResourceState::CopySource;  // 调用方声明（参考）
+        rb.resource = s.argsBuf;
+        rb.beforeState = ResourceState::IndirectArgument;
+        rb.afterState = ResourceState::CopySource;
+        rb.subresource = 0xFFFFFFFF;
+        rb.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&rb, 1);
+    }
+    {
+        ResourceBarrier rb{};
+        rb.resource = s.counterBuf;
+        rb.beforeState = ResourceState::UnorderedAccess;
         rb.afterState = ResourceState::CopySource;
         rb.subresource = 0xFFFFFFFF;
         rb.queueFamily = 0xFFFFFFFF;
@@ -2196,10 +2207,14 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
     // 对齐（D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT）、RowPitch 后端按
     // align(行字节,256) 取（三后端均尊重显式 bufferRowLength：Vulkan
     // texels / Metal bytesPerRow / D3D12 RowPitch）。统一约定 = 级起点
-    // 512 对齐 + 行距 256 对齐 → 三后端读回内存布局一致（槽位 0/2048/
-    // 3072/3584 与 §28-2.6-2 预登记推演一致；缓冲 3840B ≥ 登记需求
-    // 3588B），拷贝与下方校验段同布局读写。原紧凑偏移 0,256,320,336 违
-    // Offset 512 对齐 = 十八测 #849 同族。
+    // 512 对齐 + 行距 256 对齐 → 三后端读回内存布局一致。
+    // R21-A 注（二十测 REPORT 点名）：下方循环不递减 dim（各级均按
+    // kSize=8 计行距/高度）= 既有超分配行为——实际槽位 0/2048/4096/6144、
+    // 读回缓冲 6400B（递减 dim 的紧凑推演才是 0/2048/3072/3584、3840B）。
+    // 读回按 mipOff 偏移比较（拷贝与下方校验段同布局同源计算），超分配
+    // 不影响逐字节比较；行为保持零改动（byte-exact 读回已过门禁，不动
+    // 分配逻辑）。原紧凑偏移 0,256,320,336 违 Offset 512 对齐 = 十八测
+    // #849 同族。
     u64 mipOff[kMipCount]{};
     u32 mipRowPitch[kMipCount]{};
     u64 mipReadbackBytes = 0;

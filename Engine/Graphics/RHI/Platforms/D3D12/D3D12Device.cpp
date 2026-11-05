@@ -6,6 +6,7 @@
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
 #include <cassert>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -45,6 +46,26 @@ bool EnvFlag(const char* name) {
     const char* v = std::getenv(name);
     return v && std::strcmp(v, "1") == 0;
 }
+
+/// R21-D：默认开启类 env 的显式关闭判定（"0"=关，未设/其他值=默认开）。
+bool EnvFlagDisabled(const char* name) {
+    const char* v = std::getenv(name);
+    return v && std::strcmp(v, "0") == 0;
+}
+
+/// R21-C 帧级埋点开关（默认关；PRIMAL_D3D12_FRAME_TRACE=1 开）。逐帧/
+/// 逐提交输出：描述符堆 bump/纪元/迁移、上传环 offset/fence、fence 目标
+/// 值、backbuffer 重建事件——Windows 侧黑帧帧号与设备侧事件对齐用。
+/// 日志走 PRIMAL_LOG（stderr），stdout 留给机器输出。
+bool FrameTraceEnabled() {
+    static const bool enabled = EnvFlag("PRIMAL_D3D12_FRAME_TRACE");
+    return enabled;
+}
+
+/// R21-D：InfoQueue 存储上限（防刷爆；每次 drain 清空，正常轮次远低于此）。
+constexpr u64 kInfoQueueMessageLimit = 512;
+/// R21-D：单条验证消息文本截断上限（D3D12 消息偶有超长；截断保一行）。
+constexpr size_t kInfoQueueTextLimit = 400;
 
 /// DataFormat → 每 texel 字节数（与 D3D12Texture.cpp 的本地表一致；设备侧
 /// 上传路径使用）。
@@ -198,12 +219,28 @@ bool D3D12Device::initializeImpl() {
     }
     PRIMAL_LOG_STREAM(Info, "RHI") << "[D3D12Device] initialized (M1 resource layer)"
         << (warp_ ? " (WARP)" : "") << std::endl;
+    // R21-D：init 尾 drain——宿主 init 期（纹理/buffer/管线创建）到达的
+    // 验证消息在首帧开始前落盘。
+    DrainInfoQueueMessages("init");
     PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 9 done" << std::endl;
     return true;
 }
 
 bool D3D12Device::enableDebugLayer() {
     if (!desc_.enableDebug && !desc_.enableValidation) return true;
+
+    // R21-D 诊断 lane：PRIMAL_D3D12_VALIDATION=0 完全跳过 debug 层创建
+    //（CPU 验证 + InfoQueue + GBV 一并缺席）。用途：`D3D12SDKLayers+0xf2d3e`
+    // 处层内 AV 跨二十测稳定复现时，区分"引擎野指针先行"（VALIDATION=0
+    // 仍崩=崩点在引擎侧）与"验证器对坏输入崩"（VALIDATION=0 不崩=层内
+    // 崩，靠 ERROR_LOG 收集的消息定位坏输入）。仅诊断 lane——默认仍创建
+    // 验证层（验证错误可见性是排障生命线）。
+    if (EnvFlagDisabled("PRIMAL_D3D12_VALIDATION")) {
+        PRIMAL_LOG_STREAM(Warn, "RHI")
+            << "[D3D12Device] PRIMAL_D3D12_VALIDATION=0 diagnostic lane: "
+               "debug layer/GBV/InfoQueue NOT created (no validation)" << std::endl;
+        return true;
+    }
 
     PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 1.1 D3D12GetDebugInterface" << std::endl;
     ComPtr<ID3D12Debug> debug0;
@@ -327,12 +364,35 @@ bool D3D12Device::createDeviceAndQueue() {
     }
     PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 3.2 device created" << std::endl;
 
-    // InfoQueue fail-fast（debug/验证开启时）：腐蚀/错误级别直接断点 + 全量落日志。
-    if (desc_.enableDebug || desc_.enableValidation) {
+    // R21-D InfoQueue 消息通道（验证错误可见化）：debug/验证开启时建立
+    // 消息存储（允许 ERROR/WARNING 入队 + 上限 512 防刷爆），错误经
+    // DrainInfoQueueMessages 落 stderr（见该函数）。break-on-error 由原
+    // "恒开"改 env opt-in（PRIMAL_D3D12_BREAK_ON_ERROR=1）：无调试器的
+    // 正常跑里 break = SDKLayers RaiseException(0x87A) 直接杀进程且
+    // stdout/stderr 无任何 D3D12 ERROR 文本（debug 层走 OutputDebugString，
+    // 无人收集）——二十测 M3/M4/M6 的 0x87A 即此路径；默认不 break 让
+    // 消息进存储被 drain，调试器下需要断点时显式开。
+    // PRIMAL_D3D12_VALIDATION=0 诊断 lane 下跳过（无 debug 层 → QI 必败，
+    // 显式跳过避免误导性的设置尝试日志）。
+    if ((desc_.enableDebug || desc_.enableValidation)
+        && !EnvFlagDisabled("PRIMAL_D3D12_VALIDATION")) {
         if (SUCCEEDED(device_.As(&infoQueue_))) {
-            infoQueue_->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
-            infoQueue_->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
+            // 不动现有 OutputDebugString 输出（FALSE=默认值，显式声明意图）。
+            infoQueue_->SetMuteDebugOutput(FALSE);
+            // storage 允许层：空过滤（无 deny 项）= ERROR/WARNING 全入存储；
+            // 上限 512 防 INFO 类刷爆（每次 drain 后清空，正常轮次远低于限）。
+            D3D12_INFO_QUEUE_FILTER allowAll{};
+            (void)infoQueue_->SetStorageFilter(&allowAll);
+            (void)infoQueue_->SetMessageCountLimit(kInfoQueueMessageLimit);
+            // break 语义：CORRUPTION/ERROR 同门（默认关）；WARNING 恒不 break。
+            const BOOL breakOnError = EnvFlag("PRIMAL_D3D12_BREAK_ON_ERROR") ? TRUE : FALSE;
+            infoQueue_->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, breakOnError);
+            infoQueue_->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, breakOnError);
             infoQueue_->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, FALSE);
+        } else {
+            PRIMAL_LOG_STREAM(Warn, "RHI")
+                << "[D3D12Device] ID3D12InfoQueue unavailable — validation "
+                   "errors will NOT be collected/logged" << std::endl;
         }
     }
 
@@ -347,6 +407,67 @@ bool D3D12Device::createDeviceAndQueue() {
     }
     PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 3.3 DIRECT queue created" << std::endl;
     return true;
+}
+
+void D3D12Device::DrainInfoQueueMessages(const char* context) {
+    // R21-D 验证错误可见化通道：把 debug 层 InfoQueue 已存储的
+    // ERROR/CORRUPTION 消息经 PRIMAL_LOG(Error) 落 stderr（含 message id
+    // ——定位锚，对齐 runbook 的 #849/#882/#654/#538 引用惯例 + 截断文本）。
+    // 默认开（PRIMAL_D3D12_ERROR_LOG=0 显式关——验证错误必须可见是排障
+    // 生命线）；infoQueue_ 为空（debug 层关 / VALIDATION=0 lane）零开销直返。
+    if (!infoQueue_ || EnvFlagDisabled("PRIMAL_D3D12_ERROR_LOG")) return;
+
+    const u64 count = infoQueue_->GetNumStoredMessages();
+    for (u64 i = 0; i < count; ++i) {
+        SIZE_T size = 0;
+        if (FAILED(infoQueue_->GetMessage(i, nullptr, &size)) || size == 0) continue;
+        std::string buffer(size, '\0');
+        if (FAILED(infoQueue_->GetMessage(
+                i, reinterpret_cast<D3D12_MESSAGE*>(buffer.data()), &size))) {
+            continue;
+        }
+        const auto* msg = reinterpret_cast<const D3D12_MESSAGE*>(buffer.data());
+        if (!msg) continue;
+        // 只落 ERROR/CORRUPTION；WARNING/INFO 仍入存储（供设备丢失尾部
+        // 诊断读）但不高刷 stderr。
+        if (msg->Severity != D3D12_MESSAGE_SEVERITY_ERROR
+            && msg->Severity != D3D12_MESSAGE_SEVERITY_CORRUPTION) {
+            continue;
+        }
+        // 截断超长：按 NUL 实长（DescriptionByteLength 含结尾 NUL）取
+        // min(实长, 上限)，截断时标注。
+        size_t len = 0;
+        if (msg->pDescription) {
+            const void* nul = std::memchr(msg->pDescription, '\0', msg->DescriptionByteLength);
+            len = nul ? static_cast<size_t>(static_cast<const char*>(nul) - msg->pDescription)
+                      : msg->DescriptionByteLength;
+        }
+        const bool truncated = len > kInfoQueueTextLimit;
+        const size_t emitLen = truncated ? kInfoQueueTextLimit : len;
+        PRIMAL_LOG_STREAM(Error, "RHI.D3D12")
+            << "[D3D12:validation] " << (context ? context : "")
+            << " id=" << static_cast<unsigned long>(msg->ID)
+            << " severity="
+            << (msg->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION
+                    ? "CORRUPTION" : "ERROR")
+            << ": " << std::string(msg->pDescription ? msg->pDescription : "", emitLen)
+            << (truncated ? " ...(truncated)" : "") << std::endl;
+        // 崩溃不丢：两条日志路径（ConsoleSink/无发射器回退）均为
+        // fprintf(stderr)（stderr 无缓冲），此处显式 flush 再兜底一次——
+        // 若下一条层内 AV 先于下一 drain 点发生，本行必已在盘上。
+        std::fflush(stderr);
+    }
+    // 存储满被拒计数（差分防重复报告）：被拒的可能含 ERROR——保留可见性。
+    const u64 denied = infoQueue_->GetNumMessagesDeniedByStorageFilter();
+    if (denied != infoQueueLastDenied_) {
+        PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+            << "[D3D12:validation] " << (context ? context : "")
+            << " storage denied " << (denied - infoQueueLastDenied_)
+            << " messages since last drain (limit " << kInfoQueueMessageLimit
+            << " — earlier messages may be lost)" << std::endl;
+        infoQueueLastDenied_ = denied;
+    }
+    infoQueue_->ClearStoredMessages();
 }
 
 bool D3D12Device::createAllocator() {
@@ -511,10 +632,20 @@ void D3D12Device::waitIdleImpl() const {
 }
 
 void D3D12Device::beginFrameImpl() {
+    // R21-D：帧首 drain——上一帧提交后/完成期到达的验证消息先落盘。
+    DrainInfoQueueMessages("beginFrame");
     currentFrameIndex_ = static_cast<u32>(frameCount_ % desc_.maxFramesInFlight);
     // 帧槽推进：staging 环 + 描述符槽轮转（复用判定 = fence 完成值）。
     uploadRing_.BeginFrame();
     descriptorHeaps_.BeginFrame(currentFrameIndex_, fencePool_);
+    // R21-C：帧序号推进 + 逐帧埋点（详情行在 DescriptorHeaps::BeginFrame）。
+    ++frameTraceBeginFrameSeq_;
+    if (FrameTraceEnabled()) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12FrameTrace] beginFrame: frameCount=" << frameCount_
+            << " frameIndex=" << currentFrameIndex_
+            << " submitSeq=" << frameTraceSubmitSeq_ << std::endl;
+    }
 }
 
 void D3D12Device::endFrameImpl() {
@@ -731,6 +862,16 @@ void D3D12Device::destroySwapChainImpl(RHISwapChain* swapChain) {
 ResourceHandle D3D12Device::WrapSwapChainBuffer(RHISwapChain& /*owner*/,
                                                const TextureDesc& desc,
                                                ID3D12Resource* buffer) {
+    // R21-C 埋点：backbuffer wrap 重建 = swapchain Resize/创建路径事件
+    //（ResizeBuffers → destroyBackBuffers+createBackBuffers）——resize 事件
+    // 帧号与黑帧对齐（submitSeq 为设备侧帧代理；宿主不驱动 BeginFrame 时
+    // 无 frameCount 可用）。
+    if (FrameTraceEnabled()) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12FrameTrace] backbuffer wrap: id-new submitSeq="
+            << frameTraceSubmitSeq_ << " frameCount=" << frameCount_
+            << " (" << desc.width << "x" << desc.height << ")" << std::endl;
+    }
     const u32 id = textureAllocator_.Allocate(*this, desc, buffer);
     d3d12::D3D12Texture* tex = textureAllocator_.Get(id);
     if (!tex || !tex->Initialize()) {
@@ -752,6 +893,12 @@ ResourceHandle D3D12Device::WrapSwapChainBuffer(RHISwapChain& /*owner*/,
 
 void D3D12Device::UnwrapSwapChainBuffer(ResourceHandle handle) {
     if (handle == handles::INVALID_RESOURCE) return;
+    if (FrameTraceEnabled()) {  // R21-C：同 WrapSwapChainBuffer（resize 事件侧）
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12FrameTrace] backbuffer unwrap: id=" << u32(handle)
+            << " submitSeq=" << frameTraceSubmitSeq_
+            << " frameCount=" << frameCount_ << std::endl;
+    }
     // R16-A：注销按 (id, isTexture=true)——不波及同号 buffer 条目。
     stateTracker_.UnregisterResource(handle, true);
     textureAllocator_.Free(static_cast<u32>(handle));
@@ -978,8 +1125,18 @@ void D3D12Device::destroyCommandBufferImpl(CommandBufferHandle handle) {
 
 u64 D3D12Device::ExecuteAndSignal(ID3D12GraphicsCommandList* list) {
     if (!list || !graphicsQueue_) return 0;
+    // R21-D：pre-execute drain——录制期验证消息（API 调用点即入存储）在
+    // ExecuteCommandLists 之前落盘。放在 ExecuteAndSignal（而非仅 submitImpl）
+    // 是因为共享测试宿主（M1-M6）走命令缓冲直连 Submit
+    //（D3D12CommandBufferImpl::submitImpl → 本函数），不经 submitImpl——
+    // 直连路径若缺 pre drain，层内在 ExecuteCommandLists 里 AV（二十测
+    // D3D12SDKLayers+0xf2d3e 崩溃形态）时录制期消息全部随进程丢失。
+    DrainInfoQueueMessages("pre-execute");
     ID3D12CommandList* lists[] = {list};
     graphicsQueue_->ExecuteCommandLists(1, lists);
+    // R21-D：post-execute drain——debug 层对命令列表的提交期验证
+    //（ExecuteCommandLists 内同步执行）在此已入存储。
+    DrainInfoQueueMessages("post-execute");
     const u64 target = fencePool_.NextTarget();
     if (!fencePool_.Signal(graphicsQueue_.Get(), target)) return 0;
     return target;
@@ -1003,6 +1160,8 @@ bool D3D12Device::submitImpl(const QueueSubmitInfo& info) {
     // buffer 全衰减、提升态纹理衰减——tracker 在提交时点推进建模。
     (void)stateTracker_.OnSubmitBoundary();
 
+    // R21-D：pre/post-execute drain 均在 ExecuteAndSignal 内（直连 Submit
+    // 路径与 submitImpl 共享；见 ExecuteAndSignal 注释）。
     const u64 target = ExecuteAndSignal(cmd->GetCommandList());
     if (target == 0) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] ExecuteCommandLists/Signal failed" << std::endl;
@@ -1012,6 +1171,45 @@ bool D3D12Device::submitImpl(const QueueSubmitInfo& info) {
     // 帧槽设施的护栏登记（该提交消费本槽描述符/staging 分配）。
     descriptorHeaps_.OnSubmit(target);
     uploadRing_.OnSubmitConsumed(target);
+
+    // R21-C 逐提交埋点 + 宿主帧生命周期探测器：连续多次提交而无
+    // BeginFrame（submitSeq 持续领先 beginFrameSeq）说明宿主不驱动设备帧
+    // 循环——此时帧槽轮转/上传环轮转/GC 全部静止（M 系列测试 harness 的
+    // 实测形态；黑帧排查先确认身处哪种宿主形态再谈轮转竞态）。
+    ++frameTraceSubmitSeq_;
+    if (frameTraceSubmitSeq_ > frameTraceBeginFrameSeq_ + 1
+        && !frameTraceWarnedNoBeginFrame_) {
+        frameTraceWarnedNoBeginFrame_ = true;
+        PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+            << "[D3D12FrameTrace] host submits without device BeginFrame ("
+            << frameTraceSubmitSeq_ << " submits / "
+            << frameTraceBeginFrameSeq_ << " beginFrames) — frame-slot "
+               "rotation / upload-ring rotation / GC are ALL INERT in this "
+               "session (per-slot bump is monotonic until capacity)"
+            << std::endl;
+    }
+    if (FrameTraceEnabled()) {
+        const u32 ringSlot = uploadRing_.TraceCurrentSlot();
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12FrameTrace] submit#" << frameTraceSubmitSeq_
+            << " target=" << target
+            << " completed=" << fencePool_.GetCompletedValue()
+            << " frameIndex=" << currentFrameIndex_
+            << " descMain=" << descriptorHeaps_.MainLinearBump()
+            << "/" << descriptorHeaps_.MainLinearCapacity()
+            << " descSampler=" << descriptorHeaps_.SamplerLinearBump()
+            << "/" << descriptorHeaps_.SamplerLinearCapacity()
+            << " migrations=" << frameTraceMigrations_
+            << " setCreates=" << frameTraceSetCreates_
+            << " ring[slot" << ringSlot << "]="
+            << uploadRing_.TraceSlotOffset(ringSlot)
+            << "/" << uploadRing_.TraceSlotCapacity(ringSlot)
+            << " ringPending=" << uploadRing_.TraceSlotPendingCount(ringSlot)
+            << " ringLastUse=" << uploadRing_.TraceSlotLastUseTarget(ringSlot)
+            << std::endl;
+    }
+    frameTraceMigrations_ = 0;
+    frameTraceSetCreates_ = 0;
 
     // signalFence（RenderSystem frameFences_）：目标值 = 该 sync 对象上次 +1，
     // 队列 Signal——WaitForSync 即 CPU 事件等待。无 signalFence 时同步等
@@ -1147,6 +1345,7 @@ DescriptorSetHandle D3D12Device::createDescriptorSetImpl(const DescriptorSetDesc
         descriptorSetAllocator_.Free(id);
         return handles::INVALID_DESCRIPTOR_SET;
     }
+    ++frameTraceSetCreates_;  // R21-C：FRAME_TRACE 逐提交计数
     return DescriptorSetHandle(id);
 }
 
@@ -1157,7 +1356,20 @@ void D3D12Device::destroyDescriptorSetImpl(DescriptorSetHandle handle) {
 
 void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
     if (!set) return;
-    if (set->OwnerSlot() == currentFrameIndex_) return;  // 属主槽即当前槽
+    // R21-C 时效判定 = (帧槽, 纪元) 双键。旧判定只比 ownerSlot ==
+    // currentFrameIndex_：set 恰好隔一整个槽周期（3 帧）未被触碰后同槽
+    // 回归时通过判定，但其区段早已被该槽新一轮 BeginFrame 回收（bump 归零
+    // 后重分配给其他 set）→ 两个 set 共享同段槽位、描述符互踩（黑帧/错图
+    // 根因族）。纪元不匹配 → 走迁移路径重分配。注意迁移在绑定与写入两路
+    // 都触发（BindDescriptorSets / updateDescriptorSetsImpl 均调本函数）。
+    if (set->OwnerSlot() == currentFrameIndex_
+        && set->OwnerEpoch() == descriptorHeaps_.SlotEpoch(currentFrameIndex_)) {
+        return;  // 同槽同纪元——区段仍有效
+    }
+    // R21-C 埋点：迁移前旧戳先留底（新戳落定后旧值不可再读）。
+    const u32 oldBase = set->BaseSlot();
+    const u32 oldOwnerSlot = set->OwnerSlot();
+    const u64 oldOwnerEpoch = set->OwnerEpoch();
     ID3D12Device* native = device_.Get();
     d3d12::D3D12DescriptorHeapManager& heaps = descriptorHeaps_;
 
@@ -1205,6 +1417,18 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
         set->samplerBaseSlot_ = newSamplerBase;
     }
     set->ownerSlot_ = currentFrameIndex_;
+    set->ownerEpoch_ = heaps.SlotEpoch(currentFrameIndex_);  // R21C：新分配戳
+    ++frameTraceMigrations_;
+    if (FrameTraceEnabled()) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12FrameTrace] set migrate: oldBase=" << oldBase
+            << " oldOwner=(" << oldOwnerSlot << "," << oldOwnerEpoch << ")"
+            << " -> newBase=" << set->BaseSlot()
+            << " count=" << set->MainCount()
+            << " samplerBase=" << set->SamplerBaseSlot()
+            << " newOwner=(" << set->OwnerSlot() << "," << set->OwnerEpoch()
+            << ")" << std::endl;
+    }
 }
 
 void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorSet* writes) {

@@ -15,7 +15,28 @@
 
 #include "Engine/Common/CoreLogStream.h"
 
+#include <cstdlib>
+#include <mutex>
+#include <unordered_set>
+
 namespace primal::graphics::rhi::d3d12 {
+
+namespace {
+// R21-B 绑定状态机诊断埋点总门（对齐 R20-B PRIMAL_D3D12_UPLOAD_TRACE 的
+// env 惯例）：PRIMAL_D3D12_BIND_TRACE=1 时输出每次 list Reset（世代+分配
+// 器槽位）、SetPipelineState/Set{Graphics,Compute}RootSignature/
+// SetDescriptorHeaps 真实下发、Ensure 自愈/跳过事件。帧号 ≈ 世代-1（宿主
+// 每帧恰好一次 cmd Reset+Begin，ClearBindingMirrors 每次 Begin 递增世代；
+// 跨会话辅助对账时以 Reset 行的 gen 序列为准）。默认关闭 = 零日志零额外
+// API 调用（仅本函数一次 getenv）。
+bool BindTraceEnabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("PRIMAL_D3D12_BIND_TRACE");
+        return v && v[0] == '1';
+    }();
+    return enabled;
+}
+} // namespace
 
 // ============================================================================
 // 生命周期
@@ -35,6 +56,7 @@ D3D12CommandBufferImpl::D3D12CommandBufferImpl(D3D12CommandBufferImpl&& other) n
       graphicsRootSigSet_(other.graphicsRootSigSet_),
       computeRootSigSet_(other.computeRootSigSet_),
       descriptorHeapsBound_(other.descriptorHeapsBound_),
+      listGeneration_(other.listGeneration_),
       lastExecuteTarget_(other.lastExecuteTarget_),
       isRecording_(other.isRecording_) {
     for (u32 i = 0; i < kAllocatorSlots; ++i) {
@@ -42,13 +64,10 @@ D3D12CommandBufferImpl::D3D12CommandBufferImpl(D3D12CommandBufferImpl&& other) n
         allocatorLastUseTarget_[i] = other.allocatorLastUseTarget_[i];
     }
     commandList_ = std::move(other.commandList_);
-    other.boundGraphicsPipeline_ = nullptr;
-    other.boundGraphicsLayout_ = nullptr;
-    other.boundComputePipeline_ = nullptr;
-    other.boundComputeLayout_ = nullptr;
-    other.effectivePso_ = nullptr;
-    other.graphicsRootSigSet_ = nullptr;
-    other.computeRootSigSet_ = nullptr;
+    // R21-B：三槽镜像按"指针+世代"整体迁移（世代随镜像走，move 后的
+    // Matches 语义不变）；源端全清（ClearBindingMirrors 内含世代递增）。
+    other.ClearBindingMirrors();
+    other.lastExecuteTarget_ = 0;
     other.isRecording_ = false;
 }
 
@@ -69,15 +88,11 @@ D3D12CommandBufferImpl& D3D12CommandBufferImpl::operator=(D3D12CommandBufferImpl
         graphicsRootSigSet_ = other.graphicsRootSigSet_;
         computeRootSigSet_ = other.computeRootSigSet_;
         descriptorHeapsBound_ = other.descriptorHeapsBound_;
+        listGeneration_ = other.listGeneration_;
         lastExecuteTarget_ = other.lastExecuteTarget_;
         isRecording_ = other.isRecording_;
-        other.boundGraphicsPipeline_ = nullptr;
-        other.boundGraphicsLayout_ = nullptr;
-        other.boundComputePipeline_ = nullptr;
-        other.boundComputeLayout_ = nullptr;
-        other.effectivePso_ = nullptr;
-        other.graphicsRootSigSet_ = nullptr;
-        other.computeRootSigSet_ = nullptr;
+        other.ClearBindingMirrors();
+        other.lastExecuteTarget_ = 0;
         other.isRecording_ = false;
     }
     return *this;
@@ -114,25 +129,31 @@ bool D3D12CommandBufferImpl::Initialize() {
 void D3D12CommandBufferImpl::destroyImpl() {
     commandList_.Reset();
     for (u32 i = 0; i < kAllocatorSlots; ++i) allocators_[i].Reset();
+    // R21-B：清空收口到 ClearBindingMirrors（含世代递增）。
+    ClearBindingMirrors();
+}
+
+// R21-B：绑定镜像全清 + 命令列表世代递增——beginImpl/resetImpl/move/
+// destroy 的单一落点。commandList_->Reset 清空命令列表全部绑定态（PSO
+// 单槽 + graphics/compute 两根签名槽 + descriptor heap 绑定），本函数与
+// 之同步；世代递增让一切按旧世代置入的槽位镜像在 Matches 中失效——即使
+// 未来出现遗漏调用本函数的 list Reset 路径，幂等跳过也会因世代不匹配而
+// 退化为真实重下发（防御 Windows 二十测黑帧类的"镜像说已绑/实际已清"）。
+void D3D12CommandBufferImpl::ClearBindingMirrors() {
+    ++listGeneration_;
     boundGraphicsPipeline_ = nullptr;
     boundGraphicsLayout_ = nullptr;
     boundComputePipeline_ = nullptr;
     boundComputeLayout_ = nullptr;
-    effectivePso_ = nullptr;
-    graphicsRootSigSet_ = nullptr;
-    computeRootSigSet_ = nullptr;
+    effectivePso_.Invalidate();
+    graphicsRootSigSet_.Invalidate();
+    computeRootSigSet_.Invalidate();
+    descriptorHeapsBound_ = false;
 }
 
 bool D3D12CommandBufferImpl::resetImpl() {
     // GPU 侧复用判定在 beginImpl（allocator 轮转处）统一处理；这里只清绑定态。
-    boundGraphicsPipeline_ = nullptr;
-    boundGraphicsLayout_ = nullptr;
-    boundComputePipeline_ = nullptr;
-    boundComputeLayout_ = nullptr;
-    effectivePso_ = nullptr;
-    graphicsRootSigSet_ = nullptr;
-    computeRootSigSet_ = nullptr;
-    descriptorHeapsBound_ = false;
+    ClearBindingMirrors();
     return true;
 }
 
@@ -169,17 +190,18 @@ bool D3D12CommandBufferImpl::beginImpl() {
     // 上一会话的布局/管线路由，对着已被清空的命令列表槽位下发
     // （Windows 十九测 #709 SET_ROOT_CONSTANT_INVALID 的「签名未设」
     // 子句机制；镜像≠实际的一切分歧入口由此闭合）。
-    boundGraphicsPipeline_ = nullptr;
-    boundGraphicsLayout_ = nullptr;
-    boundComputePipeline_ = nullptr;
-    boundComputeLayout_ = nullptr;
-    effectivePso_ = nullptr;
-    graphicsRootSigSet_ = nullptr;
-    computeRootSigSet_ = nullptr;
+    // R21-B：清空收口 ClearBindingMirrors（含世代递增 + heap 绑定镜像），
+    // 并在 BIND_TRACE 下输出 Reset 事件（黑帧诊断时可见"帧 N 从空绑定
+    // 起步"——后续每帧应跟 SetDescriptorHeaps/SetPipelineState 记录）。
+    ClearBindingMirrors();
+    if (BindTraceEnabled()) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12Bind] list Reset: gen=" << listGeneration_
+            << " allocatorSlot=" << currentAllocator_ << std::endl;
+    }
 
     isRecording_ = true;
     dev.IncrementRecording();
-    descriptorHeapsBound_ = false;
     EnsureDescriptorHeapsBound();
     // 帧首：上传环挂起拷贝编码（用户 pass 之前——对齐 Vulkan
     // VulkanCommandBuffer::beginImpl 的 EncodePendingBlits 接线）。
@@ -205,6 +227,14 @@ bool D3D12CommandBufferImpl::submitImpl(u32 /*waitFlags*/) {
     // ExecuteCommandLists + fence Signal；两条路径共享 ExecuteAndSignal）。
     D3D12Device& dev = static_cast<D3D12Device&>(device_);
     if (!commandList_) return false;
+    // R21-A（M5 帧 2+ 新暴露面）：本直连路径此前不推进 tracker 提交边界
+    // 衰减——只有设备层 submitImpl/EndFrame 与 upload flush 调
+    // OnSubmitBoundary，而集成测试逐帧 cmd->Submit + WaitForCompletion 恰
+    // 好绕开三者 → buffer 残留上一帧 CopySource/UAV 等假态，下一帧
+    // Transition 产出 before≠GPU 实际（已按 D3D12 衰减语义回 COMMON）的
+    // barrier。与设备层同款：提交时点推进建模（幂等——已 COMMON 的再衰
+    // 减为零记录）。
+    (void)dev.GetStateTracker().OnSubmitBoundary();
     const u64 target = dev.ExecuteAndSignal(commandList_.Get());
     if (target == 0) return false;
     allocatorLastUseTarget_[currentAllocator_] = target;
@@ -263,6 +293,17 @@ void D3D12CommandBufferImpl::TransitionTexture(D3D12Texture* texture, ResourceHa
                    texture->GetNativeResource());
 }
 
+namespace {
+// R21-A：InsertBarrier buffer 分支"声明态与 tracker 不一致"Warn 的一次性
+// 去重（key=resource id；命令录制单线程，mutex 仅作跨线程防御）。
+std::mutex g_barrierDeclWarnMutex;
+std::unordered_set<u64> g_barrierDeclWarned;
+bool WarnBarrierDeclMismatchOnce(u64 resource) {
+    std::lock_guard<std::mutex> lock(g_barrierDeclWarnMutex);
+    return g_barrierDeclWarned.insert(resource).second;
+}
+} // namespace
+
 void D3D12CommandBufferImpl::InsertBarrier(const ResourceBarrier* barriers, u32 barrierCount) {
     if (!barriers || barrierCount == 0 || !commandList_) return;
     D3D12Device& dev = static_cast<D3D12Device&>(device_);
@@ -288,10 +329,14 @@ void D3D12CommandBufferImpl::InsertBarrier(const ResourceBarrier* barriers, u32 
         // M5 F5-2/F5-4：buffer 走 tracker（M1 为 no-op——COMMON 提升覆盖
         // 读路径；但 compute UAV 写→INDIRECT_ARGUMENT 读需显式转换，即
         // D3D12ExecuteIndirect 官方样例的 UAV→INDIRECT_ARGUMENT 模式）。
-        // 语义：rb.beforeState = 调用方事实注入（GPU 侧已处于该态——如
-        // compute dispatch 的隐式 UAV 提升），tracker 与之不符时以 Track()
-        // 采纳后按目标态 Transition（产出 op / 或 COMMON 提升零 op）。
-        // 未注册 buffer（M5 前手工创建路径）保持 M1 no-op 行为。
+        // R21-A（M5 #538 修复）：tracker 权威，rb.beforeState 声明仅参考。
+        // tracker 已有条目时不一致不得 Track 覆盖——旧实现把 tracker 改成
+        // 调用方声明假态，Transition 于假态起点产出零 op、GPU 停留实际态
+        // = Windows 二十测 #538 CopyBufferRegion 源态错（argsBuf 实际
+        // INDIRECT_ARGUMENT、声明 CopySource → 零 barrier 直拷非法）。
+        // 不一致时 Warn 一次性留痕（防刷屏，按 resource 去重）；无条目且
+        // 声明非 Unknown 才 Track 注入（保留 GPU 事实注入语义；未注册
+        // buffer 的 Track 被跟踪器拒绝，自然维持 M1 手工路径 no-op）。
         d3d12::D3D12Buffer* bufHandle = dev.GetBuffer(rb.resource);
         if (bufHandle) {
             D3D12SubresourceKey key{};
@@ -299,8 +344,19 @@ void D3D12CommandBufferImpl::InsertBarrier(const ResourceBarrier* barriers, u32 
             key.subresource = 0;
             key.isTexture = false;
             ResourceState cur{};
-            if (dev.GetStateTracker().QueryState(key, cur) && cur != rb.beforeState
-                && rb.beforeState != ResourceState::Unknown) {
+            if (dev.GetStateTracker().QueryState(key, cur)) {
+                if (cur != rb.beforeState
+                    && rb.beforeState != ResourceState::Unknown
+                    && WarnBarrierDeclMismatchOnce(rb.resource)) {
+                    PRIMAL_LOG_STREAM(Warn, "RHI")
+                        << "[D3D12CommandBuffer] InsertBarrier buffer declaration "
+                           "differs from tracker (tracker authoritative, decl "
+                           "ignored): resource="
+                        << rb.resource
+                        << " declared=" << static_cast<u32>(rb.beforeState)
+                        << " tracked=" << static_cast<u32>(cur) << std::endl;
+                }
+            } else if (rb.beforeState != ResourceState::Unknown) {
                 dev.GetStateTracker().Track(key, rb.beforeState);
             }
             EmitTrackerOps(dev.GetStateTracker().Transition(key, rb.afterState),
@@ -451,14 +507,24 @@ void D3D12CommandBufferImpl::SetScissor(const Rect& scissor) {
 //     创建期异常态被吞，缺陷延后到 Dispatch（#952）/PushConstants
 //     （#709）处才在 debug layer 显形。现为按 bind point 独立镜像 +
 //     空签名 Error 显式记录；PSO/根签名下发按槽位镜像幂等跳过。
+// R21-B：①幂等判定从裸指针等值升级为 D3D12BindSlotMirror「指针+世代」
+//   Matches——跨 list Reset（ClearBindingMirrors 世代递增）后同指针不再
+//   命中，即使镜像清空与 Reset 失同步也只会多下发冗余 Set（安全侧失败），
+//   不可能再漏发（黑帧侧失败）；②原 PSO 缺失（GetPso()==null）为静默
+//   跳过、且 Ensure 侧会以 null 调 SetPipelineState——现 Error 显式。
 void D3D12CommandBufferImpl::ApplyPipelineBind(D3D12Pipeline* pipe) {
     if (pipe->IsCompute()) {
         boundComputePipeline_ = pipe;
         boundComputeLayout_ = pipe->GetPipelineLayout();
         if (ID3D12RootSignature* rs = pipe->GetRootSignature()) {
-            if (computeRootSigSet_ != rs) {
+            if (!computeRootSigSet_.Matches(rs, listGeneration_)) {
                 commandList_->SetComputeRootSignature(rs);
-                computeRootSigSet_ = rs;
+                computeRootSigSet_.Set(rs, listGeneration_);
+                if (BindTraceEnabled()) {
+                    PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+                        << "[D3D12Bind] gen=" << listGeneration_
+                        << " SetComputeRootSignature rs=" << rs << std::endl;
+                }
             }
         } else {
             PRIMAL_LOG_STREAM(Error, "RHI")
@@ -470,9 +536,14 @@ void D3D12CommandBufferImpl::ApplyPipelineBind(D3D12Pipeline* pipe) {
         boundGraphicsPipeline_ = pipe;
         boundGraphicsLayout_ = pipe->GetPipelineLayout();
         if (ID3D12RootSignature* rs = pipe->GetRootSignature()) {
-            if (graphicsRootSigSet_ != rs) {
+            if (!graphicsRootSigSet_.Matches(rs, listGeneration_)) {
                 commandList_->SetGraphicsRootSignature(rs);
-                graphicsRootSigSet_ = rs;
+                graphicsRootSigSet_.Set(rs, listGeneration_);
+                if (BindTraceEnabled()) {
+                    PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+                        << "[D3D12Bind] gen=" << listGeneration_
+                        << " SetGraphicsRootSignature rs=" << rs << std::endl;
+                }
             }
         } else {
             PRIMAL_LOG_STREAM(Error, "RHI")
@@ -482,18 +553,33 @@ void D3D12CommandBufferImpl::ApplyPipelineBind(D3D12Pipeline* pipe) {
         }
         commandList_->IASetPrimitiveTopology(pipe->GetIaTopology());
     }
-    // PSO 槽 graphics/compute 共用：按 effectivePso_ 镜像幂等下发。
+    // PSO 槽 graphics/compute 共用：按 effectivePso_ 镜像（指针+世代）幂等下发。
     if (ID3D12PipelineState* pso = pipe->GetPso()) {
-        if (effectivePso_ != pso) {
+        if (!effectivePso_.Matches(pso, listGeneration_)) {
             commandList_->SetPipelineState(pso);
-            effectivePso_ = pso;
+            effectivePso_.Set(pso, listGeneration_);
+            if (BindTraceEnabled()) {
+                PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+                    << "[D3D12Bind] gen=" << listGeneration_
+                    << " SetPipelineState pso=" << pso << std::endl;
+            }
         }
+    } else {
+        // R21-B：PSO 缺失原为静默跳过（Ensure 侧会以 null 下发
+        // SetPipelineState(nullptr)——debug-layer 必错）。创建期异常态显式化。
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12CommandBuffer] ApplyPipelineBind: pipeline has null "
+            << "PSO (creation-time anomaly) — draws/dispatches would record "
+            << "without a pipeline state" << std::endl;
     }
 }
 
 // 消费方前置自愈：compute 槽（PSO+根签名）。镜像在会话内从未绑定 →
 // false（调用方跳过录制——把必错命令发给 debug layer 只会产生
 // #952/#882 族噪声，Error 日志已给出现场）。
+// R21-B：原 null RS / null PSO 分支静默 return false——若管线创建期即缺
+// RS/PSO，每个 Dispatch/Draw 全部无声跳过 = 整程黑帧且消费点零日志
+// （二十测黑帧排查要求 Ensure 失败路径全部显式）；现一次性 Error。
 bool D3D12CommandBufferImpl::EnsureComputeState() {
     if (!commandList_) return false;
     if (!boundComputePipeline_) {
@@ -504,16 +590,47 @@ bool D3D12CommandBufferImpl::EnsureComputeState() {
         return false;
     }
     if (ID3D12RootSignature* rs = boundComputePipeline_->GetRootSignature()) {
-        if (computeRootSigSet_ != rs) {
+        if (!computeRootSigSet_.Matches(rs, listGeneration_)) {
             commandList_->SetComputeRootSignature(rs);
-            computeRootSigSet_ = rs;
+            computeRootSigSet_.Set(rs, listGeneration_);
+            if (BindTraceEnabled()) {
+                PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+                    << "[D3D12Bind] gen=" << listGeneration_
+                    << " SetComputeRootSignature rs=" << rs
+                    << " (EnsureCompute heal)" << std::endl;
+            }
         }
     } else {
+        if (!warnedEnsureNullRs_) {
+            warnedEnsureNullRs_ = true;
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12CommandBuffer] EnsureComputeState: bound compute "
+                << "pipeline has null root signature — all Dispatches skipped "
+                << "(creation-time anomaly; see BindComputePipeline Error "
+                << "above)" << std::endl;
+        }
         return false;
     }
-    if (effectivePso_ != boundComputePipeline_->GetPso()) {
-        commandList_->SetPipelineState(boundComputePipeline_->GetPso());
-        effectivePso_ = boundComputePipeline_->GetPso();
+    if (ID3D12PipelineState* pso = boundComputePipeline_->GetPso()) {
+        if (!effectivePso_.Matches(pso, listGeneration_)) {
+            commandList_->SetPipelineState(pso);
+            effectivePso_.Set(pso, listGeneration_);
+            if (BindTraceEnabled()) {
+                PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+                    << "[D3D12Bind] gen=" << listGeneration_
+                    << " SetPipelineState pso=" << pso
+                    << " (EnsureCompute heal)" << std::endl;
+            }
+        }
+    } else {
+        // R21-B：原实现以 null 调 SetPipelineState（必错）——跳过并显式。
+        if (!warnedEnsureNullPso_) {
+            warnedEnsureNullPso_ = true;
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12CommandBuffer] EnsureComputeState: bound compute "
+                << "pipeline has null PSO — all Dispatches skipped" << std::endl;
+        }
+        return false;
     }
     return true;
 }
@@ -530,16 +647,47 @@ bool D3D12CommandBufferImpl::EnsureGraphicsState() {
         return false;
     }
     if (ID3D12RootSignature* rs = boundGraphicsPipeline_->GetRootSignature()) {
-        if (graphicsRootSigSet_ != rs) {
+        if (!graphicsRootSigSet_.Matches(rs, listGeneration_)) {
             commandList_->SetGraphicsRootSignature(rs);
-            graphicsRootSigSet_ = rs;
+            graphicsRootSigSet_.Set(rs, listGeneration_);
+            if (BindTraceEnabled()) {
+                PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+                    << "[D3D12Bind] gen=" << listGeneration_
+                    << " SetGraphicsRootSignature rs=" << rs
+                    << " (EnsureGraphics heal)" << std::endl;
+            }
         }
     } else {
+        if (!warnedEnsureNullRs_) {
+            warnedEnsureNullRs_ = true;
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12CommandBuffer] EnsureGraphicsState: bound graphics "
+                << "pipeline has null root signature — all draws skipped "
+                << "(creation-time anomaly; see BindGraphicsPipeline Error "
+                << "above)" << std::endl;
+        }
         return false;
     }
-    if (effectivePso_ != boundGraphicsPipeline_->GetPso()) {
-        commandList_->SetPipelineState(boundGraphicsPipeline_->GetPso());
-        effectivePso_ = boundGraphicsPipeline_->GetPso();
+    if (ID3D12PipelineState* pso = boundGraphicsPipeline_->GetPso()) {
+        if (!effectivePso_.Matches(pso, listGeneration_)) {
+            commandList_->SetPipelineState(pso);
+            effectivePso_.Set(pso, listGeneration_);
+            if (BindTraceEnabled()) {
+                PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+                    << "[D3D12Bind] gen=" << listGeneration_
+                    << " SetPipelineState pso=" << pso
+                    << " (EnsureGraphics heal)" << std::endl;
+            }
+        }
+    } else {
+        // R21-B：原实现以 null 调 SetPipelineState（必错）——跳过并显式。
+        if (!warnedEnsureNullPso_) {
+            warnedEnsureNullPso_ = true;
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12CommandBuffer] EnsureGraphicsState: bound graphics "
+                << "pipeline has null PSO — all draws skipped" << std::endl;
+        }
+        return false;
     }
     return true;
 }
@@ -569,6 +717,15 @@ void D3D12CommandBufferImpl::EnsureDescriptorHeapsBound() {
                                      dev.GetDescriptorHeaps().GetSamplerHeap()};
     commandList_->SetDescriptorHeaps(2, heaps);
     descriptorHeapsBound_ = true;
+    // R21-B：heap 绑定属于命令列表状态（list Reset 清空，descriptorHeapsBound_
+    // 镜像随 ClearBindingMirrors 同步失效）——BIND_TRACE 下帧首可见此行，
+    // 黑帧诊断时"帧 N 无 SetDescriptorHeaps 记录"= heap 绑定镜像/生命周期缺陷。
+    if (BindTraceEnabled()) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12Bind] gen=" << listGeneration_
+            << " SetDescriptorHeaps cbvSrvUav=" << heaps[0]
+            << " sampler=" << heaps[1] << std::endl;
+    }
 }
 
 void D3D12CommandBufferImpl::BindVertexBuffers(u32 firstSlot, u32 slotCount,
@@ -747,15 +904,33 @@ void D3D12CommandBufferImpl::PushConstants(PipelineLayoutHandle layout,
         return;   // 该布局无 push constant range（合法：M5 剔除布局即如此）
     }
     // 目标槽自愈：布局的签名与该槽已设不同步时，以布局签名为准重设。
+    // R21-B：①判定升级为「指针+世代」Matches（跨 Reset 的同指针不再命中）；
+    // ②该路径 = 宿主传入布局与绑定管线布局不同源的显式信号——Set*RootSignature
+    // 会作废该槽此前已绑的根参数（表/常量），且后续 Draw 的 Ensure 会切回
+    // 管线自身签名（常量被换签名解读）。M1-M6 语料全部同源（handle 即管线
+    // 布局）不应走到；一次性 Warn 留痕，二十测日志可直接 grep 定位宿主错配。
     if (ID3D12RootSignature* layoutRs = targetLayout->GetRootSignature()) {
-        ID3D12RootSignature*& slotSet = compute ? computeRootSigSet_ : graphicsRootSigSet_;
-        if (slotSet != layoutRs) {
+        D3D12BindSlotMirror<ID3D12RootSignature*>& slotSet =
+            compute ? computeRootSigSet_ : graphicsRootSigSet_;
+        if (!slotSet.Matches(layoutRs, listGeneration_)) {
+            if (!warnedPushRsDiverge_) {
+                warnedPushRsDiverge_ = true;
+                PRIMAL_LOG_STREAM(Warn, "RHI")
+                    << "[D3D12CommandBuffer] PushConstants: layout root "
+                    << "signature differs from the one currently set on the "
+                    << (compute ? "compute" : "graphics")
+                    << " slot — switching to the layout's signature (root "
+                    << "tables/constants previously set under the old "
+                    << "signature are invalidated; check that the layout "
+                    << "handle passed here belongs to the bound pipeline)"
+                    << std::endl;
+            }
             if (compute) {
                 commandList_->SetComputeRootSignature(layoutRs);
             } else {
                 commandList_->SetGraphicsRootSignature(layoutRs);
             }
-            slotSet = layoutRs;
+            slotSet.Set(layoutRs, listGeneration_);
         }
     }
     // PSO 槽：目标侧有绑定镜像且当前槽位不同步时补设（无镜像不强行切
@@ -920,9 +1095,55 @@ void D3D12CommandBufferImpl::CopyBuffer(ResourceHandle src, ResourceHandle dst,
                       : (srcBuf->GetBufferDesc().size > srcOffset
                              ? srcBuf->GetBufferDesc().size - srcOffset : 0);
     if (bytes == 0) return;
-    // buffer 拷贝零 barrier（promotion + 衰减，见 D3D12Buffer.h）。
+    // R21-A（M5 #538 修复）：tracker 驱动的拷贝态显式转换（对齐 R17-A
+    // CopyTextureToBuffer 先例）。M1 的"零 barrier + COMMON 提升/提交衰减"
+    // 只对 COMMON 起点成立；帧内经 UAV/INDIRECT_ARGUMENT 流转的 buffer
+    //（M5 args/counter——R19-1 UAV 标志 DEFAULT 堆资源，compute dispatch
+    // 写入后 tracker 处 UAV/INDIRECT_ARGUMENT）以当前态直拷 = Windows
+    // 二十测 #538 CopyBufferRegion 源态错。规则：
+    //   - tracker 有条目且现态≠COMMON（General）：pre Transition
+    //     (CopySource/CopyDest) 产出显式 op（与现态任意合法对），拷贝后
+    //     Transition 回 QueryState 存下的快照态（保留调用方既有态契约，
+    //     对齐 R17-A post 回置）；
+    //   - 现态=COMMON 或 tracker 无条目：保持 M1 零 op 行为——buffer 的
+    //     COMMON→COPY_SOURCE/COPY_DEST 属可提升面（二十测 M5 帧 1 compute
+    //     dispatch 的 COMMON→UAV 隐式提升先行成功即实证）；UPLOAD/READBACK
+    //     堆 buffer 恒 GENERIC_READ/COPY_DEST 规定态，对其发显式 transition
+    //     反而非法，快照=COMMON 的跳过分支同时覆盖该面。UAV 标志资源在
+    //     tracker 无条目时（createBufferImpl 全量注册，理论不存在）无法
+    //     产出 op，同样维持零 op。
+    D3D12SubresourceKey srcKey{};
+    srcKey.resource = src;
+    srcKey.subresource = 0;
+    srcKey.isTexture = false;
+    D3D12SubresourceKey dstKey{};
+    dstKey.resource = dst;
+    dstKey.subresource = 0;
+    dstKey.isTexture = false;
+    ResourceState srcPrev = ResourceState::Unknown;
+    ResourceState dstPrev = ResourceState::Unknown;
+    const bool srcExplicit = dev.GetStateTracker().QueryState(srcKey, srcPrev)
+        && srcPrev != ResourceState::General;   // General = COMMON（位值 0）
+    const bool dstExplicit = dev.GetStateTracker().QueryState(dstKey, dstPrev)
+        && dstPrev != ResourceState::General;
+    if (srcExplicit) {
+        EmitTrackerOps(dev.GetStateTracker().Transition(srcKey, ResourceState::CopySource),
+                       srcBuf->GetNativeResource());
+    }
+    if (dstExplicit) {
+        EmitTrackerOps(dev.GetStateTracker().Transition(dstKey, ResourceState::CopyDest),
+                       dstBuf->GetNativeResource());
+    }
     commandList_->CopyBufferRegion(dstBuf->GetNativeResource(), dstOffset,
                                    srcBuf->GetNativeResource(), srcOffset, bytes);
+    if (srcExplicit) {
+        EmitTrackerOps(dev.GetStateTracker().Transition(srcKey, srcPrev),
+                       srcBuf->GetNativeResource());
+    }
+    if (dstExplicit) {
+        EmitTrackerOps(dev.GetStateTracker().Transition(dstKey, dstPrev),
+                       dstBuf->GetNativeResource());
+    }
 }
 
 void D3D12CommandBufferImpl::CopyBufferToTexture(ResourceHandle srcBuffer,
@@ -1292,10 +1513,18 @@ void D3D12CommandBufferImpl::GenerateMipmaps(ResourceHandle texture) {
     // 布局的 constantsParam/tableParam 对 mipgen 签名（仅 1 个描述符表
     // 参数）下发 = #709/#708 的参数索引错位子句；镜像置空后这些调用
     // 走「无布局」早退 + Warn，宿主缺重绑直接显形。
+    // R21-B：槽位镜像经 Set(…, listGeneration_) 记入当前世代（不递增——
+    // 本函数不重置命令列表，只是真实下发后的镜像记账）。
     boundGraphicsPipeline_ = nullptr;
     boundGraphicsLayout_ = nullptr;
-    graphicsRootSigSet_ = dev.GetMipGenerator().GetRootSignature();
-    effectivePso_ = pso;
+    graphicsRootSigSet_.Set(dev.GetMipGenerator().GetRootSignature(), listGeneration_);
+    effectivePso_.Set(pso, listGeneration_);
+    if (BindTraceEnabled()) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12Bind] gen=" << listGeneration_
+            << " mipgen direct set: rs=" << dev.GetMipGenerator().GetRootSignature()
+            << " pso=" << pso << std::endl;
+    }
     for (u32 m = 0; m < srvCount; ++m) {
         const u32 dstW = td.size.x > (1u << (m + 1)) ? td.size.x >> (m + 1) : 1u;
         const u32 dstH = td.size.y > (1u << (m + 1)) ? td.size.y >> (m + 1) : 1u;

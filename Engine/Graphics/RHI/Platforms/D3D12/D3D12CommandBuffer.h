@@ -49,7 +49,50 @@
 //     L1538-1556）：layout 句柄优先解析（constantsParam 与 RS 同源自此，
 //     保证参数索引恒与命令列表当前签名一致——#709 双子句根治），
 //     Graphics/Compute 前缀按 stageFlags 路由（歧义回退单侧已绑侧）。
+//   - R21-B（Windows 二十测黑帧回归）：三槽镜像从裸指针升级为"指针+命令
+//     列表世代"（D3D12BindSlotMirror，本文件 Windows 守卫之外——纯 C++，
+//     macOS 单测可直接包含建模验证）。幂等跳过必须指针与世代同时相等：
+//     跨 Reset/Begin 后同指针不再被判"已绑定"，强制真实重下发——D3D12 的
+//     SetPipelineState/Set{Graphics,Compute}RootSignature/SetDescriptorHeaps
+//     均为命令列表状态、list Reset 全清；裸指针等值判定缺世代参与时，任何
+//     "镜像未与 Reset 同步清空"的路径都会把空绑定误判为已绑定 → 黑帧
+//     （本类缺陷的机械化防御，不再依赖各清空点手工不漏）。Ensure 失败
+//     路径全部显式 Error（原 null RS/PSO 静默 return false = 无日志黑帧）。
 #pragma once
+#include <cstdint>
+
+namespace primal::graphics::rhi {
+namespace d3d12 {
+
+/// 命令列表槽位绑定镜像小模型（R21-B；纯 C++，无 D3D12 类型——macOS 单测
+/// 直接包含本文件验证生命周期语义，见 TestD3D12BindSlotMirror.cpp）。
+/// 语义：ptr = 槽位当前值镜像；generation = ptr 置入时的命令列表世代。
+/// Matches 要求指针与世代同时相等（且非空）——跨 Reset（世代递增）后
+/// 同指针不再命中，幂等跳过被强制退化为真实重下发。
+template <typename PtrT>
+struct D3D12BindSlotMirror {
+    PtrT ptr = nullptr;            ///< 槽位当前值镜像（非拥有）
+    std::uint64_t generation = 0;  ///< ptr 置入时的命令列表世代（0 = 未置入）
+
+    /// 幂等跳过判定：候选指针与当前世代一致且非空才视为"命令列表已持有"。
+    bool Matches(const PtrT& candidate, std::uint64_t currentGeneration) const {
+        return ptr != nullptr && ptr == candidate && generation == currentGeneration;
+    }
+    /// 记录一次真实下发后的槽位值。
+    void Set(const PtrT& candidate, std::uint64_t currentGeneration) {
+        ptr = candidate;
+        generation = currentGeneration;
+    }
+    /// 列表 Reset/Begin：镜像与置入世代一起失效。
+    void Invalidate() {
+        ptr = nullptr;
+        generation = 0;
+    }
+};
+
+} // namespace d3d12
+} // namespace primal::graphics::rhi
+
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
 #include <d3d12.h>
@@ -169,6 +212,10 @@ private:
     /// Draw 族 / ExecuteIndirect(DRAW*) / PushConstants(graphics) /
     /// BindDescriptorSets(Graphics) 前置：graphics 槽同款自愈。
     bool EnsureGraphicsState();
+    /// R21-B：绑定镜像全清 + listGeneration_ 递增——beginImpl/resetImpl/
+    /// move/destroy 的单一落点（原三处手工清空列表的漂移面收口；任何未来
+    /// 新增的 list Reset 路径必须经由本函数，世代递增保证旧镜像全部失效）。
+    void ClearBindingMirrors();
 
     static constexpr u32 kAllocatorSlots = MAX_FRAMES_IN_FLIGHT + 1;  // 4 池轮转
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocators_[kAllocatorSlots];
@@ -176,21 +223,29 @@ private:
     u32 currentAllocator_ = 0;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList_;
 
-    // === 绑定状态机镜像（R20-A；与命令列表三槽对齐，begin/reset 全清）===
+    // === 绑定状态机镜像（R20-A；与命令列表三槽对齐，begin/reset 全清。
+    //     R21-B：三槽镜像升级为 D3D12BindSlotMirror"指针+世代"——清空与
+    //     幂等判定都以 listGeneration_ 为锚，单一函数收口）===
     D3D12Pipeline* boundGraphicsPipeline_ = nullptr;      // 非拥有
     D3D12PipelineLayout* boundGraphicsLayout_ = nullptr;  // 非拥有
     D3D12Pipeline* boundComputePipeline_ = nullptr;       // 非拥有
     D3D12PipelineLayout* boundComputeLayout_ = nullptr;   // 非拥有
-    ID3D12PipelineState* effectivePso_ = nullptr;         // 命令列表 PSO 槽镜像（gfx/compute 共用）
-    ID3D12RootSignature* graphicsRootSigSet_ = nullptr;   // 命令列表 graphics 根签名槽镜像
-    ID3D12RootSignature* computeRootSigSet_ = nullptr;    // 命令列表 compute 根签名槽镜像
+    D3D12BindSlotMirror<ID3D12PipelineState*> effectivePso_;    // PSO 槽镜像（gfx/compute 共用）
+    D3D12BindSlotMirror<ID3D12RootSignature*> graphicsRootSigSet_;  // graphics 根签名槽镜像
+    D3D12BindSlotMirror<ID3D12RootSignature*> computeRootSigSet_;   // compute 根签名槽镜像
 
     bool descriptorHeapsBound_ = false;
+    /// 命令列表世代：ClearBindingMirrors（Reset/Begin/move/destroy 落点）
+    /// 每次递增；三槽镜像的幂等跳过必须在本世代内成立。
+    std::uint64_t listGeneration_ = 0;
     u64 lastExecuteTarget_ = 0;                      // submitImpl/waitForSync 依据
     bool warnedDynamicOffsets_ = false;
     bool warnedComputeBytes_ = false;
     bool warnedPushNoLayout_ = false;      // PushConstants 无可用布局（一次性）
     bool warnedSetsNoLayout_ = false;      // BindDescriptorSets 目标侧无布局（一次性）
+    bool warnedEnsureNullRs_ = false;      // Ensure* 撞空根签名管线（一次性，R21-B）
+    bool warnedEnsureNullPso_ = false;     // Ensure* 撞空 PSO 管线（一次性，R21-B）
+    bool warnedPushRsDiverge_ = false;     // PushConstants 布局签名与槽位分歧（一次性，R21-B）
     bool isRecording_ = false;                       // 设备 IsFrameRecording 镜像
 };
 

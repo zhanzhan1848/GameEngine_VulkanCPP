@@ -2,8 +2,14 @@
 //
 // D3D12Device.h — D3D12 设备（M0 F0-8 最小闭环 + M1 全资源层接线）。
 //
-// M0 闭环（保留）：debug layer + GBV + InfoQueue fail-fast / adapter + WARP /
-// DIRECT queue / D3D12MA allocator / WaitIdle / 设备丢失上报。
+// M0 闭环（保留，R21-D 修订）：debug layer + GBV（env opt-in）+ InfoQueue
+// 消息收集通道 / adapter + WARP / DIRECT queue / D3D12MA allocator /
+// WaitIdle / 设备丢失上报。R21-D 起 InfoQueue 语义：ERROR/CORRUPTION 消息
+// 经 DrainInfoQueueMessages 落 stderr（PRIMAL_D3D12_ERROR_LOG=0 关，默认
+// 开）；break-on-error 改 env opt-in（PRIMAL_D3D12_BREAK_ON_ERROR=1，
+// 默认关——无调试器的正常跑里 RaiseException 0x87A 直接杀进程且无人
+// 收集消息，二十测 M3-M6 证据链）；PRIMAL_D3D12_VALIDATION=0 诊断 lane
+// 完全跳过 debug 层创建（区分引擎野指针 vs SDKLayers 层内崩）。
 //
 // M1 新增（阶段文档 F1-1..F1-7）：
 //   - D3D12DescriptorHeapManager（F1-5：分帧槽描述符 + 持久槽位）
@@ -217,6 +223,14 @@ private:
     bool createAllocator();
     void reportDeviceRemoval(HRESULT reason);
 
+    /// R21-D：把 InfoQueue 已存储的 ERROR/CORRUPTION 消息经 PRIMAL_LOG(Error)
+    /// 落 stderr（含 message id + 截断文本），随后清空存储。 drainage 点：
+    /// beginFrame / ExecuteAndSignal（pre+post ExecuteCommandLists——直连
+    /// Submit 与 submitImpl 两路共享）/ init 尾。帧 0 首提交的录制期与
+    /// 提交期验证错误在下一次层内 AV 之前即可见。INFOQUEUE 不可用
+    ///（debug 层关 / VALIDATION=0 lane）时为 no-op。
+    void DrainInfoQueueMessages(const char* context);
+
     // M1：M0 地基之上的资源层子系统初始化（fence pool 之后、闭环检查之前）。
     bool createResourceSubsystems();
 
@@ -243,6 +257,8 @@ private:
 
     Microsoft::WRL::ComPtr<ID3D12Debug1> debugController_;
     Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue_;
+    /// R21-D：上轮 drain 的 storage 拒绝计数（差分防重复告警）。
+    u64 infoQueueLastDenied_ = 0;
     Microsoft::WRL::ComPtr<IDXGIFactory6> dxgiFactory_;
     Microsoft::WRL::ComPtr<IDXGIAdapter4> adapter_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
@@ -280,6 +296,16 @@ private:
     bool warp_ = false;
     u32 currentFrameIndex_ = 0;
     double timestampPeriodNs_ = 1.0;  // D3D12 timestamp unit 恒 1 tick
+
+    // --- R21-C FRAME_TRACE 计数器（PRIMAL_D3D12_FRAME_TRACE 埋点用；
+    // 计数恒更新、输出 env 门控。宿主不驱动 BeginFrame 时 submitSeq 与
+    // beginFrameSeq 的差值即为"无帧生命周期"探测器（M 系列测试 harness
+    // 实测形态：帧槽/上传环/GC 全部静止，帧循环设备侧状态不推进））。---
+    u64 frameTraceSubmitSeq_ = 0;      ///< 提交序号（含 FlushBlocking 独立提交）
+    u64 frameTraceBeginFrameSeq_ = 0;  ///< BeginFrame 序号
+    u64 frameTraceMigrations_ = 0;     ///< 两次提交之间的 set 区段迁移次数
+    u64 frameTraceSetCreates_ = 0;     ///< 两次提交之间的 set 创建次数
+    bool frameTraceWarnedNoBeginFrame_ = false;  ///< 无 BeginFrame 宿主一次性告警
 
     // --- M5 F5-2/F5-3 ---
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndirectSignature_;
