@@ -62,8 +62,12 @@ bool FrameTraceEnabled() {
     return enabled;
 }
 
-/// R21-D：InfoQueue 存储上限（防刷爆；每次 drain 清空，正常轮次远低于此）。
-constexpr u64 kInfoQueueMessageLimit = 512;
+/// R21-D：InfoQueue 存储消息总数上限（SetMessageCountLimit 语义 = 队列总
+/// 容量而非每类上限；满后新消息把最旧消息挤出——MSDN）。512 → 65536
+/// （d3d12-blackfix）：真硬件 debug 层 init 期刷量可超 512，init 尾 drain
+/// 前 9 条消息被挤丢且内容永不可见；抬容量保 init 期全量可见。每次 drain
+/// 清空，正常轮次远低于此。
+constexpr u64 kInfoQueueMessageLimit = 65536;
 /// R21-D：单条验证消息文本截断上限（D3D12 消息偶有超长；截断保一行）。
 constexpr size_t kInfoQueueTextLimit = 400;
 
@@ -379,8 +383,9 @@ bool D3D12Device::createDeviceAndQueue() {
         if (SUCCEEDED(device_.As(&infoQueue_))) {
             // 不动现有 OutputDebugString 输出（FALSE=默认值，显式声明意图）。
             infoQueue_->SetMuteDebugOutput(FALSE);
-            // storage 允许层：空过滤（无 deny 项）= ERROR/WARNING 全入存储；
-            // 上限 512 防 INFO 类刷爆（每次 drain 后清空，正常轮次远低于限）。
+            // storage 允许层：空过滤（无 deny 项）= ERROR/WARNING/INFO 全入
+            // 存储；总量上限见 kInfoQueueMessageLimit（满后最旧被新消息挤出，
+            // 抬至 65536 防真硬件 init 期刷量挤丢——d3d12-blackfix）。
             D3D12_INFO_QUEUE_FILTER allowAll{};
             (void)infoQueue_->PushStorageFilter(&allowAll);
             (void)infoQueue_->SetMessageCountLimit(kInfoQueueMessageLimit);
@@ -413,10 +418,18 @@ void D3D12Device::DrainInfoQueueMessages(const char* context) {
     // R21-D 验证错误可见化通道：把 debug 层 InfoQueue 已存储的
     // ERROR/CORRUPTION 消息经 PRIMAL_LOG(Error) 落 stderr（含 message id
     // ——定位锚，对齐 runbook 的 #849/#882/#654/#538 引用惯例 + 截断文本）。
+    // init drain（context=="init"）额外落 WARNING 全文 + INFO 计数（见下）。
     // 默认开（PRIMAL_D3D12_ERROR_LOG=0 显式关——验证错误必须可见是排障
     // 生命线）；infoQueue_ 为空（debug 层关 / VALIDATION=0 lane）零开销直返。
     if (!infoQueue_ || EnvFlagDisabled("PRIMAL_D3D12_ERROR_LOG")) return;
 
+    // init 尾 drain（context=="init"）额外落 WARNING 全文 + INFO 计数摘要：
+    // init 期是资源/管线创建的刷量主窗口，WARNING 常是 ERROR 的前置线索
+    // （d3d12-blackfix：9 条 init 消息被挤出后永不可见）。热路径
+    // （beginFrame/pre+post-execute）维持只打 ERROR/CORRUPTION 不变。用
+    // context 判定而非加签名参数：本修复不动头文件。
+    const bool verboseInit = context && std::strcmp(context, "init") == 0;
+    u64 infoCount = 0;
     const u64 count = infoQueue_->GetNumStoredMessages();
     for (u64 i = 0; i < count; ++i) {
         SIZE_T size = 0;
@@ -428,10 +441,13 @@ void D3D12Device::DrainInfoQueueMessages(const char* context) {
         }
         const auto* msg = reinterpret_cast<const D3D12_MESSAGE*>(buffer.data());
         if (!msg) continue;
-        // 只落 ERROR/CORRUPTION；WARNING/INFO 仍入存储（供设备丢失尾部
-        // 诊断读）但不高刷 stderr。
-        if (msg->Severity != D3D12_MESSAGE_SEVERITY_ERROR
-            && msg->Severity != D3D12_MESSAGE_SEVERITY_CORRUPTION) {
+        // ERROR/CORRUPTION 恒落；WARNING 仅 init drain 落（见上）；INFO 只
+        // 计数不打全文（防刷屏）。全部仍入存储（供设备丢失尾部诊断读）。
+        if (msg->Severity == D3D12_MESSAGE_SEVERITY_INFO) {
+            ++infoCount;
+            continue;
+        }
+        if (msg->Severity == D3D12_MESSAGE_SEVERITY_WARNING && !verboseInit) {
             continue;
         }
         // 截断超长：按 NUL 实长（DescriptionByteLength 含结尾 NUL）取
@@ -444,29 +460,66 @@ void D3D12Device::DrainInfoQueueMessages(const char* context) {
         }
         const bool truncated = len > kInfoQueueTextLimit;
         const size_t emitLen = truncated ? kInfoQueueTextLimit : len;
-        PRIMAL_LOG_STREAM(Error, "RHI.D3D12")
-            << "[D3D12:validation] " << (context ? context : "")
-            << " id=" << static_cast<unsigned long>(msg->ID)
-            << " severity="
-            << (msg->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION
-                    ? "CORRUPTION" : "ERROR")
-            << ": " << std::string(msg->pDescription ? msg->pDescription : "", emitLen)
-            << (truncated ? " ...(truncated)" : "") << std::endl;
+        const bool isWarning = msg->Severity == D3D12_MESSAGE_SEVERITY_WARNING;
+        const char* severityLabel =
+            isWarning ? "WARNING"
+                      : (msg->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION
+                             ? "CORRUPTION" : "ERROR");
+        // WARNING 走 Warn 级（仅 init drain 到达此处）；ERROR/CORRUPTION 维持
+        // Error 级。级别 token 需编译期常量（kLevel##level），故分支两份同构。
+        if (isWarning) {
+            PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+                << "[D3D12:validation] " << (context ? context : "")
+                << " id=" << static_cast<unsigned long>(msg->ID)
+                << " severity=" << severityLabel
+                << ": " << std::string(msg->pDescription ? msg->pDescription : "", emitLen)
+                << (truncated ? " ...(truncated)" : "") << std::endl;
+        } else {
+            PRIMAL_LOG_STREAM(Error, "RHI.D3D12")
+                << "[D3D12:validation] " << (context ? context : "")
+                << " id=" << static_cast<unsigned long>(msg->ID)
+                << " severity=" << severityLabel
+                << ": " << std::string(msg->pDescription ? msg->pDescription : "", emitLen)
+                << (truncated ? " ...(truncated)" : "") << std::endl;
+        }
         // 崩溃不丢：两条日志路径（ConsoleSink/无发射器回退）均为
         // fprintf(stderr)（stderr 无缓冲），此处显式 flush 再兜底一次——
         // 若下一条层内 AV 先于下一 drain 点发生，本行必已在盘上。
         std::fflush(stderr);
     }
-    // 存储满被拒计数（差分防重复报告）：被拒的可能含 ERROR——保留可见性。
+    // init drain 的 INFO 摘要（计数即可，不打全文防刷屏）。
+    if (verboseInit && infoCount > 0) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12:validation] " << (context ? context : "")
+            << " " << infoCount << " INFO messages stored (full text skipped)"
+            << std::endl;
+    }
+    // 两种"没落盘"分开归因（差分防重复报告；两 getter 均为 InfoQueue 生命
+    // 周期累计值，ClearStoredMessages 不清零，取基线差分 = 自上轮 drain 以来）：
+    // ① storage filter 拒收——消息根本没进存储（当前空 allow-all 过滤下正常
+    //    恒 0；非 0 = 过滤器被改动/失效）。被拒的可能含 ERROR——保留可见性。
+    // ② 消息总数上限挤出——进了队列但被新消息挤掉，内容永不可见
+    //    （d3d12-blackfix：原文案把 ① 的 getter 误标成 "limit 512" 归因）。
     const u64 denied = infoQueue_->GetNumMessagesDeniedByStorageFilter();
     if (denied != infoQueueLastDenied_) {
         PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
             << "[D3D12:validation] " << (context ? context : "")
-            << " storage denied " << (denied - infoQueueLastDenied_)
-            << " messages since last drain (limit " << kInfoQueueMessageLimit
-            << " — earlier messages may be lost)" << std::endl;
+            << " storage filter denied " << (denied - infoQueueLastDenied_)
+            << " messages since last drain (never stored)" << std::endl;
         infoQueueLastDenied_ = denied;
     }
+    // ② 的基线：进程级 static（实例级需头文件成员，本修复不动头文件；新
+    // InfoQueue 计数回落时静默重置基线，防无符号下溢误报）。
+    static u64 lastDiscardedByLimit = 0;
+    const u64 discarded = infoQueue_->GetNumMessagesDiscardedByMessageCountLimit();
+    if (discarded > lastDiscardedByLimit) {
+        PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+            << "[D3D12:validation] " << (context ? context : "")
+            << " message count limit dropped " << (discarded - lastDiscardedByLimit)
+            << " messages since last drain (queue limit " << kInfoQueueMessageLimit
+            << " — oldest messages lost)" << std::endl;
+    }
+    lastDiscardedByLimit = discarded;
     infoQueue_->ClearStoredMessages();
 }
 

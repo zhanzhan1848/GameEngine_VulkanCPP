@@ -86,12 +86,16 @@ D3D12_STENCIL_OP ToStencilOp(StencilOp op) {
     }
 }
 
-/// CullMode 翻转契约（§7.2-1）：负 viewport 高度使屏幕空间绕序相对 Vulkan
-/// 翻转，PSO cull 取反义（RHI Front→D3D12_BACK，Back→D3D12_FRONT，None 不变）。
-D3D12_CULL_MODE ToCullModeFlipped(CullMode mode) {
+/// CullMode 直译契约（§7.2-1 修订，H2 修复）：负 viewport 高度（SetViewport）
+/// 恰好补偿 NDC Y 语义差（Vulkan Y-down vs D3D12 Y-up），光栅化绕序与
+/// Vulkan（frontFace=CW）一致；D3D12 默认 FrontCounterClockwise=FALSE 即
+/// CW=正面，同语义 → cull 不取反（Front→FRONT，Back→BACK，None 不变）。
+/// 历史版本在此再翻一次 cull（视口翻转+cull 翻转=双重取反）→ 绕序判定
+/// 反转、正面被整体剔除（全黑帧根因 H2），已移除。
+D3D12_CULL_MODE ToCullMode(CullMode mode) {
     switch (mode) {
-        case CullMode::Front: return D3D12_CULL_MODE_BACK;
-        case CullMode::Back:  return D3D12_CULL_MODE_FRONT;
+        case CullMode::Front: return D3D12_CULL_MODE_FRONT;
+        case CullMode::Back:  return D3D12_CULL_MODE_BACK;
         case CullMode::None:
         case CullMode::Unknown:
         default:              return D3D12_CULL_MODE_NONE;
@@ -142,6 +146,29 @@ D3D12_SHADER_VISIBILITY ToVisibility(ShaderStage stage) {
     }
 }
 
+/// H1 仪表：根签名日志的 visibility/range 类型可读名（仅诊断用）。
+const char* VisibilityName(D3D12_SHADER_VISIBILITY v) {
+    switch (v) {
+        case D3D12_SHADER_VISIBILITY_ALL:     return "ALL";
+        case D3D12_SHADER_VISIBILITY_VERTEX:  return "VS";
+        case D3D12_SHADER_VISIBILITY_PIXEL:   return "PS";
+        case D3D12_SHADER_VISIBILITY_GEOMETRY: return "GS";
+        case D3D12_SHADER_VISIBILITY_HULL:    return "HS";
+        case D3D12_SHADER_VISIBILITY_DOMAIN:  return "DS";
+        default:                              return "?";
+    }
+}
+
+const char* RangeTypeName(D3D12_DESCRIPTOR_RANGE_TYPE t) {
+    switch (t) {
+        case D3D12_DESCRIPTOR_RANGE_TYPE_CBV:     return "CBV";
+        case D3D12_DESCRIPTOR_RANGE_TYPE_SRV:     return "SRV";
+        case D3D12_DESCRIPTOR_RANGE_TYPE_UAV:     return "UAV";
+        case D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER: return "SAMPLER";
+        default:                                  return "?";
+    }
+}
+
 } // namespace
 
 // ============================================================================
@@ -154,13 +181,33 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
     if (!native) return false;
 
     // ---- 每集参数收集（表 ranges + 预算参数）----
+    // H1 修复（stage 拆组）：main 绑定按 stageFlags 精确值分组，每组一个
+    // 表参数（可见性=ToVisibility(组 stage)，见文件头契约 §2/§3）——异
+    // stage 并入同一 ALL 表会让 VS 可见 b1 与 VS-only root 常量 b1 同
+    // stage 重叠（CreateRootSignature 拒绝），且 next-free 计数会把 push
+    // 推离 shader 落位。组内按 CBV→SRV→UAV 段序、段内 binding 升序切
+    // 连续 range。sampler 与 root 常量（b 空间）寄存器字母不同，恒无
+    // 重叠，保持单表不拆。
+    struct MainGroupBuild {
+        ShaderStage stage = ShaderStage::Unknown;
+        std::vector<D3D12_DESCRIPTOR_RANGE> ranges;   // CBV→SRV→UAV 段序
+    };
     struct SetBuild {
-        std::vector<D3D12_DESCRIPTOR_RANGE> mainRanges;    // CBV→SRV→UAV 段序
+        std::vector<MainGroupBuild> mainGroups;
         std::vector<D3D12_DESCRIPTOR_RANGE> samplerRanges;
         u32 mainCount = 0;
         u32 samplerCount = 0;
     };
     std::vector<SetBuild> setBuilds(desc.setLayoutCount);
+    // stageFlags 精确值 → 组（首次出现序；返回引用供 range 追加）。
+    auto mainGroupOf = [](std::vector<MainGroupBuild>& groups,
+                          ShaderStage stage) -> MainGroupBuild& {
+        for (MainGroupBuild& g : groups) {
+            if (g.stage == stage) return g;
+        }
+        groups.push_back(MainGroupBuild{stage, {}});
+        return groups.back();
+    };
 
     for (u32 setIdx = 0; setIdx < desc.setLayoutCount; ++setIdx) {
         D3D12DescriptorSetLayout* layout =
@@ -173,7 +220,9 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
         SetBuild& build = setBuilds[setIdx];
 
         // ---- 按 D3D12DescriptorSetLayout 区段序（CBV→SRV→UAV）
-        // 逐连续 binding 段产 range（绑定模型契约 §2/§4）----
+        // 逐连续 binding 段产 range（绑定模型契约 §2/§4）；连续段合并
+        // 要求 stageFlags 完全相同（H1，见上）——异 stage 相邻绑定切段，
+        // 各自落入对应 stage 组的表参数。----
         for (int typeIdx = 0; typeIdx < 3; ++typeIdx) {
             const D3D12_DESCRIPTOR_RANGE_TYPE type = typeIdx == 0
                 ? D3D12_DESCRIPTOR_RANGE_TYPE_CBV
@@ -181,26 +230,27 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
                                : D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
             const utl::vector<DescriptorSetLayoutBinding>& bindings = layout->GetBindings();
 
-            // 收集该类的 (binding, count, offset)
-            struct Item { u32 binding; u32 count; u32 offset; };
+            // 收集该类的 (binding, count, offset, stage)
+            struct Item { u32 binding; u32 count; u32 offset; ShaderStage stage; };
             std::vector<Item> items;
             for (const auto& b : bindings) {
                 D3D12DescriptorSetLayout::BindingClass info;
                 if (!layout->QueryBinding(b.binding, info) || !info.hasMain) continue;
                 if (info.mainType != type) continue;
-                items.push_back({b.binding, info.count, info.mainOffset});
+                items.push_back({b.binding, info.count, info.mainOffset, b.stageFlags});
             }
             if (items.empty()) continue;
             std::sort(items.begin(), items.end(),
                       [](const Item& a, const Item& b) { return a.binding < b.binding; });
 
-            // 连续 binding 段合并为一个 range。
+            // 连续且同 stageFlags 的 binding 段合并为一个 range。
             u32 segFirst = 0;
             while (segFirst < items.size()) {
                 u32 segLast = segFirst;
                 u32 covered = items[segFirst].binding + items[segFirst].count;
                 while (segLast + 1 < items.size()
-                       && items[segLast + 1].binding == covered) {
+                       && items[segLast + 1].binding == covered
+                       && items[segLast + 1].stage == items[segFirst].stage) {
                     ++segLast;
                     covered += items[segLast].count;
                 }
@@ -210,7 +260,8 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
                 range.BaseShaderRegister = items[segFirst].binding;
                 range.RegisterSpace = setIdx;  // set N ↔ space N（契约 §1）
                 range.OffsetInDescriptorsFromTableStart = items[segFirst].offset;
-                build.mainRanges.push_back(range);
+                mainGroupOf(build.mainGroups, items[segFirst].stage)
+                    .ranges.push_back(range);
                 segFirst = segLast + 1;
             }
         }
@@ -262,23 +313,34 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
     }
     const u32 constantsCount32 = (pushBytes + 3) / 4;
 
-    // M7 F7-7 静态终审修复：root 常量寄存器 = space0 的"下一个空闲 bN"，
-    // 与 DXIL push constant 固化落位规则严格一致（spike §10 /
-    // d3d12_reflection_contract.py 固化：spirv-cross 把 push_constant 分配
-    // 到 next-free bN——M1Forward/M2ShadowDepth/M4GBuffer 均为 b1，证据=
-    ///tmp/d3d12_m6_evidence/reflection_contract.log "push_constant_register":"b1"）。
-    // 原实现硬编码 ShaderRegister=0：root 常量落在 b0 与 set0 的 b0 CBV
-    // range 重叠，且 shader 声明在 b1 的 cbuffer 永远收不到 PushConstants
-    // 数据（M1-M6 全部带 push constant 的 D3D12 绘制会渲染错）。边界登记：
-    // 绑定布局若存在 b 寄存器空洞（如 b0,b2），spirv-cross 填洞（b1）、
-    // 本规则取 max+1（b3）——M1-M6 语料 b 区间均连续无空洞；出现空洞布局
-    // 时以反射契约测试的 push_constant_register 为准修订本式。
+    // H1 修复：root 常量寄存器 = pushStage 可见的 set0 CBV binding 数
+    // （按 binding stageFlags 过滤计数）——与 DXC 对 spirv-cross HLSL
+    // push constant 的落位规则（该编译单元显式 b 寄存器数的 next-free
+    // bN；binding 号 0..n-1 稠密时即 n，spike §10 /
+    // d3d12_reflection_contract.py 冻结，M1Forward/M2ShadowDepth/M4GBuffer
+    // vert 均为 b1，证据=dxc -dumpbin）严格一致。原实现按合并 range 的
+    // NumDescriptors 计数：M1 语料把 VS|PS ViewData 与 PS-only LightData
+    // 合成 b0-b1 range → push 推到 b2，而 vert shader 落位 b1 → 常量与
+    // DXIL cbuffer 错位、模型矩阵读到 b1 槽 LightData+越界零（全黑帧
+    // 根因 H1）。stage 拆组后 PS-only CBV 表对 VS 不可见，VS 可见 b 区
+    // 与本寄存器无重叠（跨 stage 重叠本就合法）。
+    // 边界登记：pushStage 可见 CBV 若非 0..n-1 稠密（b 空洞），DXC 填
+    // 最小空洞、本式计数取 n——M1-M6 语料均稠密；复合 pushStage（多位）
+    // 时按"任一位命中"计数，DXC 侧按单 stage 编译单元落位可能不同——
+    // 两者出现时以反射契约测试的 push_constant_register 为准修订本式。
     u32 pushConstantRegister = 0;
-    if (!setBuilds.empty()) {
-        for (const D3D12_DESCRIPTOR_RANGE& r : setBuilds[0].mainRanges) {
-            if (r.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_CBV && r.RegisterSpace == 0) {
-                pushConstantRegister = std::max(
-                    pushConstantRegister, r.BaseShaderRegister + r.NumDescriptors);
+    if (pushBytes > 0 && desc.setLayoutCount > 0) {
+        D3D12DescriptorSetLayout* setLayout0 =
+            device.GetDescriptorSetLayout(desc.setLayouts[0]);
+        if (setLayout0) {
+            const u32 pushBits = static_cast<u32>(pushStage);
+            for (const auto& b : setLayout0->GetBindings()) {
+                D3D12DescriptorSetLayout::BindingClass info;
+                if (!setLayout0->QueryBinding(b.binding, info) || !info.hasMain) continue;
+                if (info.mainType != D3D12_DESCRIPTOR_RANGE_TYPE_CBV) continue;
+                if ((static_cast<u32>(b.stageFlags) & pushBits) != 0) {
+                    ++pushConstantRegister;
+                }
             }
         }
     }
@@ -287,7 +349,10 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
     {
         std::vector<D3D12RootParameterDesc> budgetParams;
         for (const SetBuild& b : setBuilds) {
-            if (b.mainCount > 0) budgetParams.push_back({D3D12RootParameterDesc::Kind::DescriptorTable, 0, b.mainCount});
+            // H1 stage 拆组：每个组一个表参数（1 DWORD/表）。
+            for (u32 g = 0; g < b.mainGroups.size(); ++g) {
+                budgetParams.push_back({D3D12RootParameterDesc::Kind::DescriptorTable, 0, b.mainCount});
+            }
             if (b.samplerCount > 0) budgetParams.push_back({D3D12RootParameterDesc::Kind::DescriptorTable, 0, b.samplerCount});
         }
         if (constantsCount32 > 0) {
@@ -312,15 +377,20 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
         D3D12SetRootParams& params = out.sets[setIdx];
         params.descriptorCount = build.mainCount;
         params.samplerCount = build.samplerCount;
-        if (!build.mainRanges.empty()) {
-            D3D12_ROOT_PARAMETER param{};
-            param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-            param.DescriptorTable.NumDescriptorRanges =
-                static_cast<UINT>(build.mainRanges.size());
-            param.DescriptorTable.pDescriptorRanges = build.mainRanges.data();
-            param.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        if (!build.mainGroups.empty()) {
+            // H1：组参数连续排列（BindDescriptorSets 按 [tableParam,
+            // tableParam+tableParamCount) 区间逐个设同一区段句柄）。
             params.tableParam = static_cast<u32>(rootParams.size());
-            rootParams.push_back(param);
+            params.tableParamCount = static_cast<u32>(build.mainGroups.size());
+            for (const MainGroupBuild& group : build.mainGroups) {
+                D3D12_ROOT_PARAMETER param{};
+                param.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                param.DescriptorTable.NumDescriptorRanges =
+                    static_cast<UINT>(group.ranges.size());
+                param.DescriptorTable.pDescriptorRanges = group.ranges.data();
+                param.ShaderVisibility = ToVisibility(group.stage);
+                rootParams.push_back(param);
+            }
         }
         if (!build.samplerRanges.empty()) {
             D3D12_ROOT_PARAMETER param{};
@@ -343,6 +413,67 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
         out.constantsParam = static_cast<u32>(rootParams.size());
         out.constantsCount32 = constantsCount32;
         rootParams.push_back(param);
+    }
+
+    // ---- 合法性自检（H1 验收式）：同 stage 可见的根参数之间寄存器不得
+    // 重叠（跨 stage 重叠合法）。stage 拆组 + pushStage 过滤计数在构造上
+    // 保证不重叠；此处显式复核，冲突时先于 CreateRootSignature 给出可
+    // 定位诊断（debug layer 只回 HRESULT）。----
+    {
+        struct RegSpan { u32 stageBits; char letter; u32 space; u32 first; u32 count; };
+        std::vector<RegSpan> spans;
+        const u32 kAllStages = static_cast<u32>(ShaderStage::Vertex)
+            | static_cast<u32>(ShaderStage::Pixel)
+            | static_cast<u32>(ShaderStage::Geometry)
+            | static_cast<u32>(ShaderStage::Hull)
+            | static_cast<u32>(ShaderStage::Domain)
+            | static_cast<u32>(ShaderStage::Compute);
+        for (const D3D12_ROOT_PARAMETER& p : rootParams) {
+            u32 vis = kAllStages;  // ALL / compute 签名
+            if (p.ShaderVisibility == D3D12_SHADER_VISIBILITY_VERTEX)
+                vis = static_cast<u32>(ShaderStage::Vertex);
+            else if (p.ShaderVisibility == D3D12_SHADER_VISIBILITY_PIXEL)
+                vis = static_cast<u32>(ShaderStage::Pixel);
+            else if (p.ShaderVisibility == D3D12_SHADER_VISIBILITY_GEOMETRY)
+                vis = static_cast<u32>(ShaderStage::Geometry);
+            else if (p.ShaderVisibility == D3D12_SHADER_VISIBILITY_HULL)
+                vis = static_cast<u32>(ShaderStage::Hull);
+            else if (p.ShaderVisibility == D3D12_SHADER_VISIBILITY_DOMAIN)
+                vis = static_cast<u32>(ShaderStage::Domain);
+            if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+                spans.push_back({vis, 'b', p.Constants.RegisterSpace,
+                                 p.Constants.ShaderRegister, 1});
+            } else if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                for (UINT r = 0; r < p.DescriptorTable.NumDescriptorRanges; ++r) {
+                    const D3D12_DESCRIPTOR_RANGE& range =
+                        p.DescriptorTable.pDescriptorRanges[r];
+                    const char letter =
+                        range.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_CBV ? 'b'
+                        : range.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SRV ? 't'
+                        : range.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV ? 'u' : 's';
+                    spans.push_back({vis, letter, range.RegisterSpace,
+                                     range.BaseShaderRegister, range.NumDescriptors});
+                }
+            }
+        }
+        for (u32 i = 0; i < spans.size(); ++i) {
+            for (u32 j = i + 1; j < spans.size(); ++j) {
+                const RegSpan& spanA = spans[i];
+                const RegSpan& spanB = spans[j];
+                if (spanA.letter != spanB.letter || spanA.space != spanB.space) continue;
+                if ((spanA.stageBits & spanB.stageBits) == 0) continue;  // 跨 stage 合法
+                if (spanA.first < spanB.first + spanB.count
+                    && spanB.first < spanA.first + spanA.count) {
+                    PRIMAL_LOG_STREAM(Error, "RHI")
+                        << "[D3D12Pipeline] root parameter register overlap: "
+                        << spanA.letter << spanA.first << "+x" << spanA.count
+                        << " vs " << spanB.letter << spanB.first << "+x" << spanB.count
+                        << ",space" << spanA.space
+                        << " (same-stage visibility) — layout rejected" << std::endl;
+                    return false;
+                }
+            }
+        }
     }
 
     D3D12_ROOT_SIGNATURE_DESC rsDesc{};
@@ -375,6 +506,37 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
             << "[D3D12Pipeline] CreateRootSignature failed hr=0x" << std::hex
             << static_cast<unsigned long>(hr) << std::dec << std::endl;
         return false;
+    }
+    // ---- H1 仪表：根签名布局逐参数记录——Windows 运行日志凭本段直接
+    // 判定 push 常量落位与各组可见性（全黑帧排障凭据）。----
+    {
+        PRIMAL_LOG_STREAM(Info, "RHI")
+            << "[D3D12Pipeline] root signature built: " << rootParams.size()
+            << " params" << (isCompute ? " (compute)" : " (graphics)") << std::endl;
+        for (u32 i = 0; i < rootParams.size(); ++i) {
+            const D3D12_ROOT_PARAMETER& p = rootParams[i];
+            if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+                PRIMAL_LOG_STREAM(Info, "RHI")
+                    << "[D3D12Pipeline]   param[" << i << "] constants b"
+                    << p.Constants.ShaderRegister << ",space"
+                    << p.Constants.RegisterSpace << " x"
+                    << p.Constants.Num32BitValues << " visibility="
+                    << VisibilityName(p.ShaderVisibility) << std::endl;
+            } else if (p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+                for (UINT r = 0; r < p.DescriptorTable.NumDescriptorRanges; ++r) {
+                    const D3D12_DESCRIPTOR_RANGE& range =
+                        p.DescriptorTable.pDescriptorRanges[r];
+                    PRIMAL_LOG_STREAM(Info, "RHI")
+                        << "[D3D12Pipeline]   param[" << i << "] table "
+                        << VisibilityName(p.ShaderVisibility) << ": "
+                        << RangeTypeName(range.RangeType) << " reg="
+                        << range.BaseShaderRegister << ",space"
+                        << range.RegisterSpace << " x" << range.NumDescriptors
+                        << " +" << range.OffsetInDescriptorsFromTableStart
+                        << std::endl;
+                }
+            }
+        }
     }
     out.isCompute = isCompute;
     return true;
@@ -533,12 +695,12 @@ bool D3D12Pipeline::InitializeGraphics(const GraphicsPipelineDesc& desc) {
     D3D12_PRIMITIVE_TOPOLOGY_TYPE topologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     ToTopology(desc.topology, topologyType, iaTopology_);
 
-    // ---- 光栅化（cull 翻转契约见 ToCullModeFlipped）----
+    // ---- 光栅化（cull 直译契约见 ToCullMode，H2 修复）----
     D3D12_RASTERIZER_DESC rasterizer{};
     rasterizer.FillMode = desc.fillMode == FillMode::Wireframe
                               ? D3D12_FILL_MODE_WIREFRAME : D3D12_FILL_MODE_SOLID;
-    rasterizer.CullMode = ToCullModeFlipped(desc.cullMode);
-    rasterizer.FrontCounterClockwise = FALSE;  // 负 viewport + cull 翻转已补偿绕序
+    rasterizer.CullMode = ToCullMode(desc.cullMode);
+    rasterizer.FrontCounterClockwise = FALSE;  // CW=正面：与 Vulkan frontFace=CW 同义（负 viewport 已补偿 NDC Y 语义差）
     // F2-4（M2）bias 直译：VulkanPipeline 同样消费三元组（静态
     // depthBiasConstantFactor/SlopeFactor/Clamp）。语义差异记录在案：
     //   1) D3D12 DepthBias 是整数光栅化单位，Vulkan constantFactor 是

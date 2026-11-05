@@ -472,8 +472,9 @@ void D3D12CommandBufferImpl::EndRenderPass() {
 void D3D12CommandBufferImpl::SetViewport(const ViewportDesc& viewport) {
     if (!commandList_) return;
     UpdateStats(CommandType::SetViewport);
-    // §7.2-1 契约：负高度 {0, H, W, -H}——D3D12 官方 Y 翻转手段，
-    // 使原始帧与 Vulkan 原始读回同向；cull 翻转在 PSO（D3D12Pipeline）。
+    // §7.2-1 契约（H2 修订）：负高度 {0, H, W, -H}——D3D12 官方 Y 翻转
+    // 手段，补偿 NDC Y 语义差后绕序与 Vulkan 一致；PSO cull 直译
+    //（D3D12Pipeline::ToCullMode，不再二次翻转）。
     D3D12_VIEWPORT vp{};
     vp.TopLeftX = viewport.topLeft.x;
     vp.TopLeftY = viewport.topLeft.y + viewport.size.y;  // 翻转锚点=底边
@@ -830,10 +831,17 @@ void D3D12CommandBufferImpl::BindDescriptorSets(PipelineBindPoint bindPoint,
             && set->BaseSlot() != D3D12DescriptorHeapManager::kInvalidSlot) {
             const D3D12_GPU_DESCRIPTOR_HANDLE gpu =
                 dev.GetDescriptorHeaps().CbvSrvUavGpuHandle(set->BaseSlot());
-            if (compute) {
-                commandList_->SetComputeRootDescriptorTable(params.tableParam, gpu);
-            } else {
-                commandList_->SetGraphicsRootDescriptorTable(params.tableParam, gpu);
+            // H1 stage 拆组：main 表参数为连续区间 [tableParam,
+            // tableParam+tableParamCount)，各组绑同一区段起点句柄（range
+            // 偏移是区段内绝对偏移，见 D3D12Pipeline.h 契约 §4）。
+            for (u32 p = 0; p < params.tableParamCount; ++p) {
+                if (compute) {
+                    commandList_->SetComputeRootDescriptorTable(
+                        params.tableParam + p, gpu);
+                } else {
+                    commandList_->SetGraphicsRootDescriptorTable(
+                        params.tableParam + p, gpu);
+                }
             }
         }
         if (params.samplerTableParam != D3D12SetRootParams::kInvalidRootParam

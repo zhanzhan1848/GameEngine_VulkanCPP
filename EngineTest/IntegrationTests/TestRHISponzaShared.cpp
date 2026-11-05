@@ -3911,6 +3911,19 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                                   << " litRatio=" << litRatio
                                   << " meanLum=" << meanLum << std::endl;
                     }
+                    // d3d12-blackfix 探针：读回首 16 字节 hex + 首像素 BGRA。
+                    // 区分"清屏+拷贝落地"（BGRA 首字节 00 00 00 FF，alpha=
+                    // 0xFF——lit 清屏色 {0,0,0,1}）与"读回仍是 memset 0"
+                    // （00 00 00 00——命令列表未执行/拷贝未写）。全平台打
+                    //（Metal/Vulkan 无害），litRatio=0 区分不了这两种情形。
+                    std::cerr << "[PIXEL0] frame " << f << " first16=";
+                    const int probeBytes = int(pxCount * 4) < 16 ? int(pxCount * 4) : 16;
+                    for (int i = 0; i < probeBytes; ++i)
+                        std::cerr << std::hex << std::setw(2) << std::setfill('0')
+                                  << int(mapped[i]) << ' ';
+                    std::cerr << std::dec << "px0 BGRA=(" << int(mapped[0]) << ','
+                              << int(mapped[1]) << ',' << int(mapped[2]) << ','
+                              << int(mapped[3]) << ')' << std::endl;
                     // 轨迹相机全程朝向画廊内部几何，清屏色=黑 → 非黑比例即几何覆盖。
                     if (litRatio < 0.02) {
                         ++blackFrames;
