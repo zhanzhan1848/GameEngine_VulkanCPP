@@ -658,8 +658,12 @@ bool CreateFrameTargets(RHIDeviceBase* device, FrameTargets& ft, u32 w, u32 h,
     BufferDesc rbDesc{};
     rbDesc.size = u64(w) * h * 4;
     rbDesc.type = BufferType::Raw;
-    rbDesc.usage = GPUMemoryUsage::Staging;
-    rbDesc.memoryUsage = GPUMemoryUsage::Staging;
+    // R19-1：读回意图用 Readback 位（GPU 写 → CPU 读）。原 Staging 位在
+    // D3D12 落 UPLOAD 堆（CPU 写/GPU 读），CopyTextureRegion 的 GPU 写目标
+    // 必须在 READBACK 堆——十八测 M1/M2 退出 #849 根因。Vulkan/Metal 侧
+    // Readback 与 Staging 同落 host-visible，行为等价（零回归见 runbook §28-1）。
+    rbDesc.usage = GPUMemoryUsage::Readback;
+    rbDesc.memoryUsage = GPUMemoryUsage::Readback;
     rbDesc.name = "M1Readback";
     ft.readback = device->CreateBuffer(rbDesc);
     if (ft.readback == handles::INVALID_RESOURCE) return false;
@@ -1399,8 +1403,9 @@ bool M6GIInit(RHIDeviceBase* device, M6GIState& s, bool wantD3D12, bool giFull,
 
         BufferDesc rb{};
         rb.type = BufferType::Raw;
-        rb.usage = GPUMemoryUsage::Staging;
-        rb.memoryUsage = GPUMemoryUsage::Staging;
+        // R19-1：同 M1Readback——CopyTextureToBuffer 的 GPU 写目标须 Readback 位。
+        rb.usage = GPUMemoryUsage::Readback;
+        rb.memoryUsage = GPUMemoryUsage::Readback;
         rb.size = 8u * 8u * kM6ReadbackRowTexels * 8u;   // z*y*rowTexels*8B=16KB
         rb.name = "M6GIReadback";
         s.readbackBuf = device->CreateBuffer(rb);
@@ -1700,7 +1705,7 @@ struct M5GpuDrivenState {
     ResourceHandle paramsBuf{handles::INVALID_RESOURCE};    // 128B UBO
     ResourceHandle flagsResetBuf{handles::INVALID_RESOURCE};// 16B UBO 恒 {1,0,0,0}
     ResourceHandle flagsCullBuf{handles::INVALID_RESOURCE}; // 16B UBO 恒 {0,0,0,0}
-    ResourceHandle readbackBuf{handles::INVALID_RESOURCE};  // staging: args+counter
+    ResourceHandle readbackBuf{handles::INVALID_RESOURCE};  // readback: args+counter
     u32 meshCount{0};
     float maxDist{250.0f};
     std::vector<M5InstanceGPU> cpuInst;   // 上传同源 CPU 镜像（谓词复算输入）
@@ -1724,7 +1729,15 @@ bool M5GpuDrivenInit(RHIDeviceBase* device, M5GpuDrivenState& s,
     g_ledger.shaders.insert(s.cs);
 
     DescriptorSetLayoutBinding b[5];
+    // b0 readonly 必须显式声明：M5Cull.comp 的 inst 是 `readonly buffer`
+    //（GLSL 存储限定符），spirv-cross HLSL 链产出 ByteAddressBuffer
+    // t0(space0) = SRV；D3D12 ClassifyBinding 按 readonly 选 SRV/UAV range
+    //——缺省 false 会生成 UAV u0，根签名零 SRV range，Windows 十八测 #882
+    //（CS_ROOT_SIGNATURE_MISMATCH: SRV t0 未绑定）即此。b2/b3 是
+    // writeonly/coherent 写类（u2/u3 UAV），保持缺省。Vulkan/Metal 不消费
+    // readonly（仅 D3D12/Dawn），此位为后端中立修饰。
     b[0] = {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute};  // inst
+    b[0].readonly = true;                                                 // readonly load → t0 SRV
     b[1] = {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute};  // params
     b[2] = {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute};  // args
     b[3] = {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute};  // counter
@@ -1787,15 +1800,24 @@ bool M5GpuDrivenInit(RHIDeviceBase* device, M5GpuDrivenState& s,
     bd.type = BufferType::Indirect;
     bd.usage = GPUMemoryUsage::Static;
     bd.size = u64(s.meshCount) * 20;   // VkDrawIndexedIndirectCommand×N
+    // R19-1：UAV 写目标显式 Storage 位（引擎惯例=GPUDrivenDrawPipeline 的
+    // Indirect|Storage）——D3D12Buffer 据此路由 ALLOW_UNORDERED_ACCESS
+    // （CreateUnorderedAccessView 契约）；Vulkan 侧据此补 STORAGE_BUFFER
+    // usage（原 Indirect 型缺此位 = 基线日志 4 条 pDescriptorWrites
+    // STORAGE_BUFFER validation error 的根因）。
+    bd.bindFlags = static_cast<u32>(BufferUsageFlags::Indirect) |
+                   static_cast<u32>(BufferUsageFlags::Storage);
     bd.name = "M5DrawArgs";
     s.argsBuf = device->CreateBuffer(bd);
     bd.type = BufferType::Raw;
     bd.size = 4;
+    bd.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);  // 同上（UAV 写目标）
     bd.name = "M5VisibleCounter";
     s.counterBuf = device->CreateBuffer(bd);
     bd.type = BufferType::Constant;
     bd.usage = GPUMemoryUsage::Dynamic;
     bd.memoryUsage = GPUMemoryUsage::Dynamic;
+    bd.bindFlags = 0;   // UBO 无 storage 语义（清掉上位残留）
     bd.size = sizeof(M5CullParamsGPU);
     bd.name = "M5CullParams";
     s.paramsBuf = device->CreateBuffer(bd);
@@ -1805,8 +1827,9 @@ bool M5GpuDrivenInit(RHIDeviceBase* device, M5GpuDrivenState& s,
     bd.name = "M5CullFlagsCull";
     s.flagsCullBuf = device->CreateBuffer(bd);
     bd.type = BufferType::Raw;
-    bd.usage = GPUMemoryUsage::Staging;
-    bd.memoryUsage = GPUMemoryUsage::Staging;
+    // R19-1：同 M1Readback——CopyBuffer 的 GPU 写目标须 Readback 位。
+    bd.usage = GPUMemoryUsage::Readback;
+    bd.memoryUsage = GPUMemoryUsage::Readback;
     bd.size = u64(s.meshCount) * 20 + 16;   // args + counter（16B 对齐尾）
     bd.name = "M5Readback";
     s.readbackBuf = device->CreateBuffer(bd);
@@ -1923,6 +1946,20 @@ u32 M5RecordCull(RHIDeviceBase* device, RHICommandBuffer* cmd, M5GpuDrivenState&
     }
 
     // ---- stage0：单线程清零计数器（flags.resetMode=1，setReset）----
+    // R19-1：args/counter 现创建带 UAV 标志（DEFAULT 堆 storage buffer，
+    // CreateUnorderedAccessView 契约）——UAV 标志资源失去 simultaneous-
+    // access 隐式提升，dispatch UAV 写前需显式转入 UnorderedAccess
+    // （tracker 驱动：首帧 COMMON→UAV、后续帧 CopySource→UAV 均合法对；
+    // Vulkan 侧 buffer barrier 跳过=零影响，§4.4 已知债务）。
+    for (ResourceHandle h : {s.argsBuf, s.counterBuf}) {
+        ResourceBarrier rb{};
+        rb.resource = h;
+        rb.beforeState = ResourceState::UnorderedAccess;  // 调用方声明（参考）
+        rb.afterState = ResourceState::UnorderedAccess;
+        rb.subresource = 0xFFFFFFFF;
+        rb.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&rb, 1);
+    }
     cmd->BindComputePipeline(s.pipeline);
     {
         const DescriptorSetHandle sets[] = {s.setReset};
@@ -1978,6 +2015,18 @@ void M5RecordReadback(RHICommandBuffer* cmd, M5GpuDrivenState& s) {
     // InsertBarrier 的 buffer 声明不能替代真实依赖）
     cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
                        AccessFlag::ShaderWrite, AccessFlag::TransferRead);
+    // R19-1：读回拷贝源显式转换（args：INDIRECT_ARGUMENT→COPY_SOURCE、
+    // counter：UAV→COPY_SOURCE）——UAV 标志资源失去隐式提升，tracker 驱动
+    // 显式化（Vulkan buffer barrier 跳过=零影响）。
+    for (ResourceHandle h : {s.argsBuf, s.counterBuf}) {
+        ResourceBarrier rb{};
+        rb.resource = h;
+        rb.beforeState = ResourceState::CopySource;  // 调用方声明（参考）
+        rb.afterState = ResourceState::CopySource;
+        rb.subresource = 0xFFFFFFFF;
+        rb.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&rb, 1);
+    }
     cmd->CopyBuffer(s.argsBuf, s.readbackBuf, 0, 0, u64(s.meshCount) * 20);
     cmd->CopyBuffer(s.counterBuf, s.readbackBuf, 0, u64(s.meshCount) * 20, 4);
     cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
@@ -2143,8 +2192,31 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
         }
     }
 
+    // R19-1 读回侧拷贝布局契约（D3D12 footprint 语义）：Offset 必须 512
+    // 对齐（D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT）、RowPitch 后端按
+    // align(行字节,256) 取（三后端均尊重显式 bufferRowLength：Vulkan
+    // texels / Metal bytesPerRow / D3D12 RowPitch）。统一约定 = 级起点
+    // 512 对齐 + 行距 256 对齐 → 三后端读回内存布局一致（槽位 0/2048/
+    // 3072/3584 与 §28-2.6-2 预登记推演一致；缓冲 3840B ≥ 登记需求
+    // 3588B），拷贝与下方校验段同布局读写。原紧凑偏移 0,256,320,336 违
+    // Offset 512 对齐 = 十八测 #849 同族。
+    u64 mipOff[kMipCount]{};
+    u32 mipRowPitch[kMipCount]{};
+    u64 mipReadbackBytes = 0;
+    {
+        u32 dim = kSize;
+        u64 off = 0;
+        for (u32 level = 0; level < kMipCount; ++level) {
+            mipRowPitch[level] = (dim * 4u + 255u) & ~255u;   // 256 对齐行距
+            mipOff[level] = off;
+            off += u64(mipRowPitch[level]) * dim;             // 高度 × 行距
+            off = (off + 511u) & ~u64(511u);                  // 下一级 512 对齐
+        }
+        mipReadbackBytes = mipOff[kMipCount - 1] +
+                           u64(mipRowPitch[kMipCount - 1]) * (kSize >> (kMipCount - 1));
+    }
     // checker 源（列奇偶：x 偶=白 奇=黑——轴翻转不变设计，上传/读取行序
-    // 约定差异不进入期望值）→ staging 上传 texs[0]
+    // 约定差异不进入期望值），紧密 8×8×4。
     u8 checker[kSize * kSize * 4];
     for (u32 y = 0; y < kSize; ++y)
         for (u32 x = 0; x < kSize; ++x) {
@@ -2153,25 +2225,33 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
             p[0] = p[1] = p[2] = v;
             p[3] = 255;
         }
-    ResourceHandle staging = handles::INVALID_RESOURCE, readback = handles::INVALID_RESOURCE;
-    BufferDesc sb{};
-    sb.type = BufferType::Raw;
-    sb.memoryUsage = GPUMemoryUsage::Dynamic;
-    sb.size = sizeof(checker);
-    sb.name = "M5MipUpload";
-    staging = device->CreateBuffer(sb);
-    sb.type = BufferType::Raw;
-    sb.usage = GPUMemoryUsage::Staging;
-    sb.memoryUsage = GPUMemoryUsage::Staging;
-    sb.size = u64(kSize) * kSize * 4 * kMipCount;   // 4 级读回总量
-    sb.name = "M5MipReadback";
-    readback = device->CreateBuffer(sb);
-    if (staging == handles::INVALID_RESOURCE || readback == handles::INVALID_RESOURCE ||
-        !device->UpdateBufferData(staging, checker, sizeof(checker), 0)) {
-        err = "Mipgen staging";
+    // R19-1 上传侧方案 A（§28-2.6-1 转交宿主）：改走 UpdateTextureRegion
+    // （紧密行数据由后端入环展开——D3D12 环侧 footprint 尺寸+512 对齐已
+    // 由 R19-2 §28-2 修复合规；Vulkan/Metal 各走 updateRegion）。原
+    // CommandBuffer 紧凑 staging 拷贝 = 十八测 #869 INVALIDSRCPLACEMENT
+    // 宿主半边（256B 紧凑源 < required 1824B，PLACED_FOOTPRINT 无法表达
+    // 32B 行距）。零后端特判；Dawn 后端该 API 默认 false → 显式报错。
+    TextureRegionUpdate upRegion{};
+    upRegion.width = kSize;
+    upRegion.height = kSize;
+    upRegion.depth = 1;
+    if (!device->UpdateTextureRegion(texs[0], checker, sizeof(checker), upRegion)) {
+        err = "Mipgen upload (UpdateTextureRegion)";
         return false;
     }
-    g_ledger.buffers.insert(staging);
+    ResourceHandle readback = handles::INVALID_RESOURCE;
+    BufferDesc sb{};
+    // R19-1：同 M1Readback——CopyTextureToBuffer 的 GPU 写目标须 Readback 位。
+    sb.type = BufferType::Raw;
+    sb.usage = GPUMemoryUsage::Readback;
+    sb.memoryUsage = GPUMemoryUsage::Readback;
+    sb.size = mipReadbackBytes;
+    sb.name = "M5MipReadback";
+    readback = device->CreateBuffer(sb);
+    if (readback == handles::INVALID_RESOURCE) {
+        err = "Mipgen readback buffer";
+        return false;
+    }
     g_ledger.buffers.insert(readback);
 
     // 每级静态专属 UBO（init 期一次写定——录制期零宿主写，杜绝同帧多
@@ -2249,11 +2329,9 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
     };
     bool rec = mcmd->Begin();
     if (rec) {
-        BufferTextureCopyRegion up{};
-        up.imageSubresource = {0, 0, 1};
-        up.imageExtent = {kSize, kSize, 1};
-        mcmd->CopyBufferToTexture(staging, texs[0], &up, 1);
-        wholeBarrier(texs[0], ResourceState::ShaderResource);   // CopyDest→SR
+        // R19-1：上传已改 init 期 UpdateTextureRegion（方案 A，见上）——
+        // 录制段起点即 SR 声明（更新路径将纹理留在其 resting 布局）。
+        wholeBarrier(texs[0], ResourceState::ShaderResource);   // 更新后→SR 声明
         u32 srcDim = kSize;
         for (u32 level = 1; level < kMipCount; ++level) {
             wholeBarrier(texs[level], ResourceState::UnorderedAccess);  // →UAV
@@ -2271,16 +2349,18 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
             wholeBarrier(texs[level], ResourceState::ShaderResource);  // UAV→SR
             srcDim = dstDim;
         }
-        // 读回 4 级（1-mip 纹理整资源拷贝：内部 SR→XFER_SRC→SR 自洽）
+        // 读回 4 级（1-mip 纹理整资源拷贝：内部 SR→XFER_SRC→SR 自洽）。
+        // R19-1：bufferOffset=512 对齐级起点 + 显式 bufferRowLength（texels）
+        // = 256 对齐行距——满足 D3D12 footprint Offset/RowPitch 契约，且
+        // Vulkan/Metal 同布局（行距 rowPitch、级间隔 mipOff）。
         u32 dim = kSize;
-        u64 byteOff = 0;
         for (u32 level = 0; level < kMipCount; ++level) {
             BufferTextureCopyRegion dr{};
-            dr.bufferOffset = byteOff;
+            dr.bufferOffset = mipOff[level];
+            dr.bufferRowLength = mipRowPitch[level] / 4;   // RGBA8：4B/texel
             dr.imageSubresource = {0, 0, 1};
             dr.imageExtent = {dim, dim, 1};
             mcmd->CopyTextureToBuffer(texs[level], readback, &dr, 1);
-            byteOff += u64(dim) * dim * 4;
             dim = (dim + 1) / 2;
         }
         mcmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
@@ -2299,7 +2379,6 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
     const u8* got = static_cast<const u8*>(device->MapBuffer(readback));
     if (!got) { err = "Mipgen readback map"; return false; }
     u32 dim = kSize, badTexels = 0;
-    u64 off = 0;
     for (u32 level = 0; level < kMipCount; ++level) {
         for (u32 i = 0; i < dim * dim; ++i) {
             u32 exp[4];
@@ -2310,17 +2389,21 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
             } else {
                 exp[0] = exp[1] = exp[2] = 128u; exp[3] = 255u;
             }
+            // R19-1：按拷贝布局寻址（级起点 512 对齐 + 行距 256 对齐）：
+            // texel = mipOff[level] + row*mipRowPitch[level] + col*4。
+            const u64 texel = mipOff[level] +
+                              (i / dim) * u64(mipRowPitch[level]) +
+                              (i % dim) * 4u;
             for (u32 c = 0; c < 4; ++c)
-                if (got[off + u64(i) * 4 + c] != u8(exp[c])) {
+                if (got[texel + c] != u8(exp[c])) {
                     ++badTexels;
                     if (badTexels <= 8)
                         std::cerr << "[MIPGEN][dbg] level=" << level
                                   << " texel=" << i << " ch=" << c
-                                  << " got=" << int(got[off + u64(i) * 4 + c])
+                                  << " got=" << int(got[texel + c])
                                   << " exp=" << exp[c] << std::endl;
                 }
         }
-        off += u64(dim) * dim * 4;
         dim = (dim + 1) / 2;
     }
     device->UnmapBuffer(readback);
@@ -2335,7 +2418,6 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
         }
         device->DestroyTexture(texs[level]); g_ledger.textures.erase(texs[level]);
     }
-    device->DestroyBuffer(staging); g_ledger.buffers.erase(staging);
     device->DestroyBuffer(readback); g_ledger.buffers.erase(readback);
     device->DestroySampler(sampler); g_ledger.samplers.erase(sampler);
     device->DestroyPipeline(pipeline); g_ledger.pipelines.erase(pipeline);

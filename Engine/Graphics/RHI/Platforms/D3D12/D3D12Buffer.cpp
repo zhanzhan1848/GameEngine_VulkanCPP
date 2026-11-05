@@ -109,7 +109,27 @@ bool D3D12Buffer::Initialize() {
     resDesc.SampleDesc.Count = 1;
     resDesc.SampleDesc.Quality = 0;
     resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    resDesc.Flags = D3D12_RESOURCE_FLAG_NONE;  // buffer 无 RTV/DSV/UAV 限制位
+    // R19-1(c) UAV 路由：DEFAULT 堆上显式 storage 语义的 buffer（bindFlags
+    // 携 ResourceUsage::UnorderedAccess 或 BufferUsageFlags::Storage——引擎
+    // UAV 写目标惯例位，如 GPUDrivenDrawPipeline 的 Indirect|Storage、
+    // NaniteStreamingManager 的 UnorderedAccess、Neural 系读回环对偶位）
+    // 创建带 ALLOW_UNORDERED_ACCESS。D3D12 契约：CreateUnorderedAccessView
+    // 的目标资源必须带此标志，否则 CREATEUNORDEREDACCESSVIEW_INVALIDRESOURCE
+    // 族失败（十九测 M5 argsBuf/counterBuf 在 #882 修后的下一炸点）。
+    // 约束：①UAV 标志与 UPLOAD/READBACK 堆互斥 → 仅 DEFAULT 堆路由；
+    // ②带标志后资源失去 simultaneous-access 隐式提升/衰减——UAV 写前与
+    // 拷贝源读取前的状态转换须由调用方经 StateTracker 显式化（共享宿主
+    // M5 已配套补齐）。Vulkan parity：BufferDescToVkUsage 对同两位映射
+    // VK_BUFFER_USAGE_STORAGE_BUFFER_BIT（VulkanBuffer.cpp L66-79）——同
+    // 输入两后端均产出 storage 能力，语义对齐（R15-1 教训：标志增补必须
+    // 对齐 RHI 契约）。
+    const bool storageSemantic =
+        (bufferDesc_.bindFlags & static_cast<u32>(ResourceUsage::UnorderedAccess)) != 0 ||
+        (bufferDesc_.bindFlags & static_cast<u32>(BufferUsageFlags::Storage)) != 0;
+    resDesc.Flags =
+        (heapType_ == D3D12_HEAP_TYPE_DEFAULT && storageSemantic)
+            ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+            : D3D12_RESOURCE_FLAG_NONE;
 
     // 初始状态按 heap type 规定值（见文件头映射表）。
     const D3D12_RESOURCE_STATES initialState =

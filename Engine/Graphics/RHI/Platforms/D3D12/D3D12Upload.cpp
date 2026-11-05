@@ -27,6 +27,10 @@ D3D12UploadRing::TextureUploadLayout D3D12UploadRing::ComputeRegionLayout(
     const u64 rowBytes = u64(width) * bytesPerPixel;
     const u64 rowPitch = (rowBytes + D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1)
                          & ~u64(D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - 1);  // 256 对齐
+    // baseOffset 直接成为 footprint.Offset——必须是 512
+    // （D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT）倍数；环内纹理 staging 分配
+    // 以 TEXTURE_STAGING_ALIGNMENT 对齐保证（QueueCopyTexture 会用实际
+    // alloc.offset 覆写，同样满足）。
     out.footprint.Offset = baseOffset;
     out.footprint.Footprint.Format = static_cast<DXGI_FORMAT>(dxgiFormat);
     out.footprint.Footprint.Width = width;

@@ -6,6 +6,7 @@
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
 #include <algorithm>
+#include <cassert>
 
 #include "D3D12Abi.h"
 #include "D3D12StateMapping.h"
@@ -103,6 +104,10 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
     }
 
     device_ = device;
+    // R19-4：容量镜像（写入点断言上界；与 shadow/visible 两堆同值——两堆
+    // 创建时均用同一 config 字段，见上方 CreateTypedHeap 调用）。
+    cbvSrvUavCapacity_ = config.cbvSrvUavCapacity;
+    samplerCapacity_ = config.samplerCapacity;
     cbvSrvUavDescriptorSize_ = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     samplerDescriptorSize_ = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
     rtvDescriptorSize_ = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
@@ -235,15 +240,21 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12DescriptorHeapManager::CbvSrvUavGpuHandle(u32 s
 
 // ============================================================================
 // shadow 堆句柄换算 + 双写拷贝（R13/T1；语义见头文件双堆模型）
+// R19-4 断言布防：所有 shadow 写入/拷贝入口 assert 槽位+数量不越容量——
+// 十八测 M3/M4/M6 的 D3D12SDKLayers.dll 内部 0xC0000005 若源于越界描述符
+// 写入（R18-B 容量变更冲突假说族的残余），Debug 断言先崩在我们这一行，
+// 崩溃栈可直接定位（Windows Debug 配置；Release 的 NDEBUG 静默移除）。
 // ============================================================================
 
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12DescriptorHeapManager::CbvSrvUavShadowCpuHandle(u32 slot) const {
+    assert(slot < cbvSrvUavCapacity_);
     D3D12_CPU_DESCRIPTOR_HANDLE h = cbvSrvUavShadowCpuStart_;
     h.ptr += static_cast<SIZE_T>(slot) * cbvSrvUavDescriptorSize_;
     return h;
 }
 
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12DescriptorHeapManager::SamplerShadowCpuHandle(u32 slot) const {
+    assert(slot < samplerCapacity_);
     D3D12_CPU_DESCRIPTOR_HANDLE h = samplerShadowCpuStart_;
     h.ptr += static_cast<SIZE_T>(slot) * samplerDescriptorSize_;
     return h;
@@ -251,6 +262,8 @@ D3D12_CPU_DESCRIPTOR_HANDLE D3D12DescriptorHeapManager::SamplerShadowCpuHandle(u
 
 void D3D12DescriptorHeapManager::CopyCbvSrvUavShadowToVisible(u32 slot, u32 count) {
     if (!device_ || count == 0) return;
+    assert(slot < cbvSrvUavCapacity_);
+    assert(count <= cbvSrvUavCapacity_ - slot);
     D3D12_CPU_DESCRIPTOR_HANDLE src = cbvSrvUavShadowCpuStart_;
     src.ptr += static_cast<SIZE_T>(slot) * cbvSrvUavDescriptorSize_;
     // 目的=visible 堆同槽位（write-only 合法方向）；源=shadow（可读）。
@@ -261,6 +274,8 @@ void D3D12DescriptorHeapManager::CopyCbvSrvUavShadowToVisible(u32 slot, u32 coun
 
 void D3D12DescriptorHeapManager::CopySamplerShadowToVisible(u32 slot, u32 count) {
     if (!device_ || count == 0) return;
+    assert(slot < samplerCapacity_);
+    assert(count <= samplerCapacity_ - slot);
     D3D12_CPU_DESCRIPTOR_HANDLE src = samplerShadowCpuStart_;
     src.ptr += static_cast<SIZE_T>(slot) * samplerDescriptorSize_;
     D3D12_CPU_DESCRIPTOR_HANDLE dst = samplerCpuStart_;

@@ -5,6 +5,7 @@
 
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -119,7 +120,8 @@ bool D3D12Device::initializeImpl() {
         << "[D3D12:init] stage 0 enter (agility_runtime=" << kAgilityRuntime
         << ", debug=" << (desc_.enableDebug ? 1 : 0)
         << ", validation=" << (desc_.enableValidation ? 1 : 0)
-        << ", warp_env=" << (EnvFlag("PRIMAL_D3D12_WARP") ? 1 : 0) << ")" << std::endl;
+        << ", warp_env=" << (EnvFlag("PRIMAL_D3D12_WARP") ? 1 : 0)
+        << ", gbv_env=" << (EnvFlag("PRIMAL_D3D12_GBV") ? 1 : 0) << ")" << std::endl;
     PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 1 debug layer" << std::endl;
     if (!enableDebugLayer()) return false;
     PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 2 adapter selection" << std::endl;
@@ -214,8 +216,18 @@ bool D3D12Device::enableDebugLayer() {
         return false;  // fail-fast：请求了 debug 但拿不到 → 初始化失败
     }
 
-    // GBV：仅显式 enableValidation（开销大）。
-    if (desc_.enableValidation) {
+    // GBV：仅显式 enableValidation 且 PRIMAL_D3D12_GBV=1（R19-4 默认翻转，
+    // 2026-11-05 十八测证据链）。十八测 M3/M4/M6 以 0xC0000005 退出，
+    // first-chance 调试器栈落在 **D3D12SDKLayers.dll 内部**
+    // （SetD3DDebugLayerStartupOptions+0xf2d3e——非引擎代码帧）；同一 exe
+    // 同一 init（宿主对六阶段一律 enableValidation=true → GBV on），仅
+    // RHI_TEST_POST=1 的阶段崩（m1/m2 无 POST 链跑到 #849 读回点；m5 有
+    // POST 但剔除链更早 #882 退出）——GBV 对 post 链 instrument 时
+    // SDKLayers 1.611.2 内部 AV（引擎侧该链输入经 R19-4 静态审查无越界，
+    // 见 runbook §28-4）。处置=GBV 改 opt-in：CPU 调试层（error 检出 +
+    // InfoQueue 断点，#849/#882/#654/#538 全靠它）默认不变；需要 GPU 侧
+    // 验证时显式 PRIMAL_D3D12_GBV=1 复现/定位。
+    if (desc_.enableValidation && EnvFlag("PRIMAL_D3D12_GBV")) {
         if (SUCCEEDED(debug0.As(&debugController_))) {  // ComPtr::As -> QI ID3D12Debug1
             debugController_->SetEnableGPUBasedValidation(TRUE);
             debugController_->SetEnableSynchronizedCommandQueueValidation(TRUE);
@@ -223,6 +235,11 @@ bool D3D12Device::enableDebugLayer() {
             PRIMAL_LOG_STREAM(Warn, "RHI")
                 << "[D3D12Device] ID3D12Debug1 unavailable: GBV off" << std::endl;
         }
+    } else if (desc_.enableValidation) {
+        PRIMAL_LOG_STREAM(Warn, "RHI")
+            << "[D3D12Device] GBV off (default; set PRIMAL_D3D12_GBV=1 to "
+               "force) — 18th-test M3/M4/M6 crashed inside D3D12SDKLayers.dll "
+               "with GBV on (R19-4; see runbook 28-4)" << std::endl;
     }
     return true;
 }
@@ -1144,14 +1161,34 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
     ID3D12Device* native = device_.Get();
     d3d12::D3D12DescriptorHeapManager& heaps = descriptorHeaps_;
 
+    // R19-4 迁移段断言布防（Windows Debug）：旧区段基槽+数量必须在堆容量内
+    //——十八测 SDKLayers 内部 0xC0000005 的容量冲突假说若成立，断言先崩
+    // 在本函数（调用栈直接给出 set 的基槽/数量），而非 D3D12 运行时内部。
+    assert(set->MainCount() == 0
+           || set->BaseSlot() < heaps.CbvSrvUavCapacity());
+    assert(set->MainCount() == 0
+           || set->MainCount() <= heaps.CbvSrvUavCapacity() - set->BaseSlot());
+    assert(set->SamplerCount() == 0
+           || set->SamplerBaseSlot() < heaps.SamplerCapacity());
+    assert(set->SamplerCount() == 0
+           || set->SamplerCount() <= heaps.SamplerCapacity() - set->SamplerBaseSlot());
+
+    // R19-4 半迁移修复：两区段**先全部分配、后统一提交**。原实现主区段
+    // 分配+拷贝+改写 baseSlot_ 后，sampler 区段分配失败即裸 return——set
+    // 已带上新主区段但 ownerSlot_ 未推进，下次调用把主区段再迁移一遍，
+    // 每失败一次多烧一段线性区（内容仍正确，纯浪费+容量侵蚀；R18-B 扩容
+    // 后低概率，但属确定性缺陷）。现：任一分配失败=整次放弃（本帧线性区
+    // 白烧已分配段，随帧槽轮转回收），set 状态零改动。
+    u32 newBase = 0, newSamplerBase = 0;
+    if (set->MainCount() > 0 && !heaps.AllocShaderVisible(set->MainCount(), newBase)) return;
+    if (set->SamplerCount() > 0 && !heaps.AllocSamplerRange(set->SamplerCount(), newSamplerBase)) return;
+
     // 主区段迁移（内容逐描述符拷贝——heap 描述符自包含）。
     // R13/T1：源改 shadow 堆（原实现读 visible 堆作源 = debug-layer
     // #654 COPY_DESCRIPTORS_WRITE_ONLY_DESCRIPTOR，Windows 十二测全部
     // exit 2170 的直接根因）；迁移同时维护镜像不变量（shadow(new) 先收
     // 下旧内容，再 shadow(new)→visible(new) 合法方向下发）。
     if (set->MainCount() > 0) {
-        u32 newBase = 0;
-        if (!heaps.AllocShaderVisible(set->MainCount(), newBase)) return;
         native->CopyDescriptorsSimple(
             set->MainCount(), heaps.CbvSrvUavShadowCpuHandle(newBase),
             heaps.CbvSrvUavShadowCpuHandle(set->BaseSlot()),
@@ -1160,8 +1197,6 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
         set->baseSlot_ = newBase;
     }
     if (set->SamplerCount() > 0) {
-        u32 newSamplerBase = 0;
-        if (!heaps.AllocSamplerRange(set->SamplerCount(), newSamplerBase)) return;
         native->CopyDescriptorsSimple(
             set->SamplerCount(), heaps.SamplerShadowCpuHandle(newSamplerBase),
             heaps.SamplerShadowCpuHandle(set->SamplerBaseSlot()),
@@ -1194,6 +1229,10 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                 d3d12::D3D12Buffer* buffer = GetBuffer(bi.buffer);
                 if (!buffer) continue;
                 const u32 slot = set->BaseSlot() + info.mainOffset + write.dstArrayElement + e;
+                // R19-4 断言布防：write 越出 set 区段/堆容量（dstArrayElement
+                // 或 descriptorCount 超 layout 声明）时崩在此行——堆写入槽位
+                // 无上界检查是本函数既有缺口（写越堆尾=CPU AV 于 D3D12 内部）。
+                assert(slot < descriptorHeaps_.CbvSrvUavCapacity());
                 // R13/T1 双写第一步：Create*View 落 shadow 堆（dst = shadow 槽）。
                 const D3D12_CPU_DESCRIPTOR_HANDLE dst = descriptorHeaps_.CbvSrvUavShadowCpuHandle(slot);
                 switch (info.mainType) {
@@ -1248,6 +1287,7 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                     if (srcSlot == d3d12::D3D12Texture::kInvalidDescriptorSlot) continue;
                     const u32 dstSlot = set->BaseSlot() + info.mainOffset
                                         + write.dstArrayElement + e;
+                    assert(dstSlot < descriptorHeaps_.CbvSrvUavCapacity());  // R19-4 断言布防（同上）
                     // R13/T1 双写：源读纹理持久槽的 shadow 副本（原实现读
                     // visible 堆 = #654），先落 shadow(dst) 再镜像 visible(dst)。
                     native->CopyDescriptorsSimple(
@@ -1261,6 +1301,7 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                     if (!sampler) continue;
                     const u32 dstSlot = set->SamplerBaseSlot() + info.samplerOffset
                                         + write.dstArrayElement + e;
+                    assert(dstSlot < descriptorHeaps_.SamplerCapacity());  // R19-4 断言布防（同上）
                     native->CopyDescriptorsSimple(
                         1, descriptorHeaps_.SamplerShadowCpuHandle(dstSlot),
                         descriptorHeaps_.SamplerShadowCpuHandle(sampler->Slot()),
@@ -1309,10 +1350,18 @@ bool D3D12Device::UploadTextureDataViaRing(ID3D12Resource* texture, ResourceHand
             region.width, region.height, region.depth, 0);
     if (layout.totalBytes == 0 || size < layout.totalBytes) return false;
 
-    d3d12::D3D12UploadRing::Allocation alloc = uploadRing_.Allocate(layout.totalBytes);
+    // 纹理 staging 分配尺寸=footprint 语义（totalBytes 含行距 padding），
+    // 对齐=512（D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT——footprint.Offset
+    // 硬性要求；R19-2 前默认 256，第二笔纹理分配可落 256 奇数倍偏移）。
+    // buffer staging（UploadBufferDataViaRing）维持默认 256 不受影响。
+    d3d12::D3D12UploadRing::Allocation alloc =
+        uploadRing_.Allocate(layout.totalBytes,
+                             d3d12::D3D12UploadRing::TEXTURE_STAGING_ALIGNMENT);
     if (alloc.overflow) {
         uploadRing_.FlushBlocking();
-        alloc = uploadRing_.Allocate(layout.totalBytes);
+        alloc = uploadRing_.Allocate(
+            layout.totalBytes,
+            d3d12::D3D12UploadRing::TEXTURE_STAGING_ALIGNMENT);
         if (alloc.overflow) return false;
     }
     // 紧密行主序源 → footprint 行距布局（逐行拷贝；末行无 padding）。

@@ -316,6 +316,13 @@ public:
 
     bool IsInitialized() const { return device_ != nullptr; }
 
+    // ------------------------------------------------------------------
+    // 容量访问（R19-4 断言布防用：写入/迁移点 assert(slot < capacity)，
+    // 让 Windows Debug 下越界槽位崩在我们代码行而非 D3D12 运行时内部）
+    // ------------------------------------------------------------------
+    u32 CbvSrvUavCapacity() const { return cbvSrvUavCapacity_; }
+    u32 SamplerCapacity() const { return samplerCapacity_; }
+
 private:
     /// 持久槽位 free-list（RTV/DSV/Sampler 共用实现）
     class SlotPool {
@@ -344,6 +351,9 @@ private:
     u32 samplerDescriptorSize_ = 0;
     u32 rtvDescriptorSize_ = 0;
     u32 dsvDescriptorSize_ = 0;
+    // 总容量镜像（R19-4：句柄/拷贝写入点断言上界；Initialize 从 config 落值）
+    u32 cbvSrvUavCapacity_ = 0;
+    u32 samplerCapacity_ = 0;
 
     D3D12_CPU_DESCRIPTOR_HANDLE cbvSrvUavCpuStart_{};
     D3D12_GPU_DESCRIPTOR_HANDLE cbvSrvUavGpuStart_{};
