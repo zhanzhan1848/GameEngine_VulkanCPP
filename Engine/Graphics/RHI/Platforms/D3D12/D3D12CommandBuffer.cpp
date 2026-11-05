@@ -841,8 +841,25 @@ void D3D12CommandBufferImpl::CopyTextureToBuffer(ResourceHandle srcTexture,
         dstLoc.PlacedFootprint.Footprint.RowPitch =
             static_cast<UINT>((rowBytes + 255) & ~u64(255));
 
-        commandList_->CopyTextureRegion(&srcLoc, r.imageOffset.x, r.imageOffset.y,
-                                        r.imageOffset.z, &dstLoc, nullptr);
+        // R18-A：CopyTextureRegion 签名 = (pDst, DstX/Y/Z, pSrc, pSrcBox)，
+        // 第一参是【目标】。原调用 (&srcLoc, imageOffset…, &dstLoc, nullptr)
+        // 把纹理 location 放进 pDst 槽——GPU 实际执行 buffer→texture（纹理
+        // =目标，要求 COPY_DEST），而上方 pre 转换已按读回意图把纹理转进
+        // COPY_SOURCE（纹理=源的语义本身正确）→ 合法 barrier 发出后拷贝
+        // 即被 debug-layer 拦下：Windows 十七测 M1 #538（十六测同签名现象
+        // 同源）。修正实参序：
+        //   pDst = buffer footprint（buffer 目标无纹素坐标，DstX/Y/Z 恒 0，
+        //   缓冲内偏移由 PlacedFootprint.Offset 携带）；
+        //   pSrc = texture 子资源，选区 = 源空间 box（imageOffset..+extent，
+        //   vkCmdCopyImageToBuffer 的 imageOffset/imageExtent 直译）。
+        D3D12_BOX box{};
+        box.left = static_cast<UINT>(r.imageOffset.x);
+        box.top = static_cast<UINT>(r.imageOffset.y);
+        box.front = static_cast<UINT>(r.imageOffset.z);
+        box.right = box.left + r.imageExtent.width;
+        box.bottom = box.top + r.imageExtent.height;
+        box.back = box.front + r.imageExtent.depth;
+        commandList_->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &box);
     }
 
     for (u32 j = 0; j < subs.size(); ++j) {

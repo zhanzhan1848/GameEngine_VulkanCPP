@@ -74,6 +74,39 @@ class D3D12FencePool;
 class D3D12DescriptorHeapManager;
 
 // ============================================================================
+// 描述符堆容量规划（R18-B，2026-11-05 Windows 十七测后）
+//
+// 根因：M1 期初版 Config 默认 sampler 堆总容量 128 / 持久段 32 → 帧槽
+// 线性区 (128-32)/3 = 32/slot。十七测 M2-M6 实测：场景既有 31 + 新增 2
+// = 33 > 32 → AllocSamplerRange/持久槽位耗尽 → 材质描述符（set）创建
+// 失败，M2-M6 全挂。容量从此集中在此处命名常量（此前散在 Config 默认
+// 值里，数字无出处注释）。
+//
+// 真头依据（d3d12.h，Windows SDK；仓库内 vendored 副本对照一致
+// third_party/xatlas/.../dxsdk/include/d3d12.h L861/L857/L859，并与
+// microsoft/DirectX-Headers 官方主线逐字核对）：
+//   #define D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE        ( 2048 )
+//   #define D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1 ( 1000000 )
+//   #define D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2 ( 1000000 )
+// sampler 堆满配 2048（规范上限，无空堆创建语义风险——所有堆容量非零）；
+// CBV/SRV/UAV 主堆现值 16384 距 TIER 上限 1,000,000 尚有 61x 余量，
+// 十七测无该堆耗尽签名 → 按"只提确认会超的"原则本轮不提，登记观察
+// （耗尽签名 = AllocShaderVisible 的 "descriptor capacity exhausted" 日志）。
+//
+// 采样器堆分段：持久段 512（渲染器侧 37 处 CreateSampler 调用点 + 场景
+// 材质采样器，十七测实测 33 即耗尽 → 512 ≈ 15x 余量）；线性区
+// (2048-512)/3 = 512/slot（十七测 32/slot 即耗尽 → 16x 余量）。
+// ============================================================================
+inline constexpr u32 kCbvSrvUavHeapCapacity = 16384;        ///< 主堆总容量（距 TIER 上限 61x，未提——见上）
+inline constexpr u32 kCbvSrvUavPersistentCapacity = 4096;    ///< 纹理 SRV/UAV 持久槽位
+inline constexpr u32 kSamplerHeapCapacity =
+    D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE;              ///< 2048，规范上限满配
+inline constexpr u32 kSamplerPersistentCapacity = 512;       ///< SamplerHandle 对象持久槽位
+inline constexpr u32 kRtvHeapCapacity = 256;                 ///< RTV 非可见堆
+inline constexpr u32 kDsvHeapCapacity = 64;                  ///< DSV 非可见堆
+inline constexpr u32 kDescriptorHeapFrameSlotCount = 3;      ///< = MAX_FRAMES_IN_FLIGHT
+
+// ============================================================================
 // D3D12DescriptorSetLayout — 绑定模型的 set 布局描述（M1 F1-4/F1-5）
 //
 // 持有 RHI 绑定副本 + "set 实例区段内描述符排列"（绑定模型契约 §2/§4：
@@ -195,13 +228,13 @@ public:
     static constexpr u32 kInvalidSlot = 0xFFFFFFFFu;
 
     struct Config {
-        u32 cbvSrvUavCapacity = 16384;        ///< shader-visible 主堆总容量
-        u32 cbvSrvUavPersistentCapacity = 4096;  ///< 其中持久槽位（纹理 SRV/UAV 源）
-        u32 samplerCapacity = 128;            ///< shader-visible sampler 堆总容量
-        u32 samplerPersistentCapacity = 32;   ///< 其中持久槽位数（SamplerHandle 对象）
-        u32 rtvCapacity = 256;                ///< RTV 非可见堆容量
-        u32 dsvCapacity = 64;                 ///< DSV 非可见堆容量
-        u32 frameSlotCount = 3;               ///< 线性分配子区域数（= MAX_FRAMES_IN_FLIGHT）
+        u32 cbvSrvUavCapacity = kCbvSrvUavHeapCapacity;             ///< shader-visible 主堆总容量
+        u32 cbvSrvUavPersistentCapacity = kCbvSrvUavPersistentCapacity;  ///< 其中持久槽位（纹理 SRV/UAV 源）
+        u32 samplerCapacity = kSamplerHeapCapacity;                 ///< shader-visible sampler 堆总容量（2048 规范上限）
+        u32 samplerPersistentCapacity = kSamplerPersistentCapacity; ///< 其中持久槽位数（SamplerHandle 对象）
+        u32 rtvCapacity = kRtvHeapCapacity;                         ///< RTV 非可见堆容量
+        u32 dsvCapacity = kDsvHeapCapacity;                         ///< DSV 非可见堆容量
+        u32 frameSlotCount = kDescriptorHeapFrameSlotCount;         ///< 线性分配子区域数（= MAX_FRAMES_IN_FLIGHT）
     };
 
     D3D12DescriptorHeapManager() = default;

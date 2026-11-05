@@ -19,6 +19,10 @@
  *            编号，同号必然重叠；M0 键空间下后注册方被静默拒绝、其全部
  *            Transition 返回空 op = Windows 十五测 #538 根因链）+ mipgen
  *            逐 mip 序列回归（GenerateMipmaps 发射链的 tracker 语义快照）
+ *          ⑭ R18-A：上传/读出方向契约（上传=GPU dst=texture→COPY_DEST 写
+ *            类逐子资源显式；读出=GPU src=texture→COPY_SOURCE 读类+prev
+ *            回置；IsReadClassState 方向判别位）——CopyTextureRegion 实参
+ *            序反转（纹理误占 pDst 槽）的 #538 回归，tracker 层可编译面
  */
 
 #include "../../TestFramework.h"
@@ -715,6 +719,81 @@ TestResult TestR17FreshCommonScopedReadback() {
     return TestResult::Passed;
 }
 
+// ===== ⑭ R18-A：上传/读出方向契约（CopyTextureRegion 实参序 #538 回归） =====
+// Windows 十七测 M1 #538 根因 = CopyTextureToBuffer 的 CopyTextureRegion
+// 调用把纹理 location 放进 pDst 槽位（D3D12 签名首参=目标）：tracker 按
+// 读回意图把纹理转进 COPY_SOURCE（GPU 语义正确——本意纹理=源），GPU 拷贝
+// 却因实参序反转把纹理当目标（要求 COPY_DEST）→ 合法 barrier 发出后拷贝
+// 即 #538。本用例在可编译于 macOS 的 tracker 层锁定方向契约：
+//   上传方向（GPU dst=texture）→ 目标态 COPY_DEST（写类：COMMON 不提升、
+//   混合起点逐子资源显式 op、after 逐条 COPY_DEST）；
+//   读出方向（GPU src=texture）→ 目标态 COPY_SOURCE（读类；prev 保真回置）；
+//   方向判别位 = IsReadClassState：CopySource 读类 / CopyDest 写类。
+// （CopyTextureRegion 实参序本身在 _WIN32 编译域，macOS 单测不可执行——
+// 该面由 runbook §27-A 方向审计表 + 十八测守门。）
+TestResult TestR18ReadbackUploadDirectionContract() {
+    // 方向判别位先行：状态映射表若把 0x400/0x800 的读/写语义对调，此处先
+    // 于行为断言炸出（CopyDest 从未被既有用例断言过"写类不可提升"）。
+    TEST_ASSERT(IsReadClassState(ResourceState::CopySource), "CopySource is read-class (source)");
+    TEST_ASSERT(!IsReadClassState(ResourceState::CopyDest), "CopyDest is write-class (destination)");
+
+    D3D12StateTracker tracker;
+    // 同号 buffer 在场（R16 根因序延续）+ 4-mip 纹理：sub0 显式 SRV、
+    // sub1..3 COMMON（混合起点 → 上传 ALL 键不可折叠，逐子资源显式 op）。
+    TEST_ASSERT(tracker.RegisterResource(96, false, 1, 1, 1, ResourceState::General),
+                "same-numeric buffer present");
+    TEST_ASSERT(tracker.RegisterResource(96, true, 4, 1, 1, ResourceState::General),
+                "4-mip texture registers");
+    TEST_ASSERT(tracker.Track({96, 0, true}, ResourceState::ShaderResource),
+                "sub0 tracked to SRV (mixed-state setup)");
+
+    // --- 上传方向（CopyBufferToTexture 形态：ALL 键 →COPY_DEST）---
+    // GPU 方向 = buffer(src)→texture(dst)：写类目标无提升路径，COMMON
+    // 子资源也必须显式 barrier——方向反装时必然失配的机制面。
+    auto ops = tracker.Transition({96, kD3D12ResourceBarrierAllSubresources, true},
+                                  ResourceState::CopyDest);
+    TEST_ASSERT(ops.size() == 4, "upload from mixed states: 4 per-sub ops (no ALL fold)");
+    u32 srvBefore = 0;
+    for (u32 i = 0; i < ops.size(); ++i) {
+        TEST_ASSERT(ops[i].kind == D3D12ResourceBarrierOp::Kind::Transition,
+                    "upload op kind=Transition");
+        TEST_ASSERT(ops[i].subresource == i, "upload ops per-sub ascending");
+        TEST_ASSERT(ops[i].stateAfter == kD3D12ResourceState_CopyDest,
+                    "upload op after=COPY_DEST (texture is GPU destination)");
+        const bool beforeOk = ops[i].stateBefore == kD3D12ResourceState_AllShaderResource
+                              || ops[i].stateBefore == kD3D12ResourceState_Common;
+        TEST_ASSERT(beforeOk, "upload op before in {SRV, COMMON}");
+        if (ops[i].stateBefore == kD3D12ResourceState_AllShaderResource) ++srvBefore;
+    }
+    TEST_ASSERT(srvBefore == 1, "exactly sub0 carries SRV before (mixed origin)");
+    TEST_ASSERT(ops[1].stateBefore == kD3D12ResourceState_Common,
+                "COMMON sub gets EXPLICIT write barrier (no promotion path)");
+    for (u32 s = 0; s < 4; ++s) {
+        ResourceState st = ResourceState::Unknown;
+        TEST_ASSERT(tracker.QueryState({96, s, true}, st) && st == ResourceState::CopyDest,
+                    "after upload: every sub = COPY_DEST (dst direction locked)");
+    }
+
+    // --- 读出方向（CopyTextureToBuffer 形态：region sub2 →COPY_SOURCE→回置）---
+    ResourceState pre = ResourceState::Unknown;
+    TEST_ASSERT(tracker.QueryState({96, 2, true}, pre) && pre == ResourceState::CopyDest,
+                "readback pre-state queried = COPY_DEST (prev)");
+    ops = tracker.Transition({96, 2, true}, ResourceState::CopySource);
+    TEST_ASSERT(ops.size() == 1 && ops[0].subresource == 2
+                && ops[0].stateBefore == kD3D12ResourceState_CopyDest
+                && ops[0].stateAfter == kD3D12ResourceState_CopySource,
+                "readback pre: sub2 COPY_DEST->COPY_SOURCE (texture is GPU source)");
+    ops = tracker.Transition({96, 2, true}, pre);
+    TEST_ASSERT(ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_CopySource
+                && ops[0].stateAfter == kD3D12ResourceState_CopyDest,
+                "readback post: COPY_SOURCE->COPY_DEST prev-restore");
+
+    // 同号 buffer 的 COPY 态走 buffer 池（方向契约不串池；buffer 读类提升）。
+    ops = tracker.Transition({96, 0, false}, ResourceState::CopySource);
+    TEST_ASSERT(ops.empty(), "buffer COMMON->COPY_SOURCE promotes in buffer pool");
+    return TestResult::Passed;
+}
+
 void RegisterD3D12StateTrackerTests() {
     auto suite = std::make_shared<TestSuite>("D3D12StateTrackerTests");
     suite->AddTestCase(TestCase("StateMappingTable", TestStateMappingTable));
@@ -732,6 +811,7 @@ void RegisterD3D12StateTrackerTests() {
     suite->AddTestCase(TestCase("R16MipgenSequence", TestR16MipgenSequence));
     suite->AddTestCase(TestCase("R17UploadReadbackAlternation", TestR17UploadReadbackAlternation));
     suite->AddTestCase(TestCase("R17FreshCommonScopedReadback", TestR17FreshCommonScopedReadback));
+    suite->AddTestCase(TestCase("R18ReadbackUploadDirectionContract", TestR18ReadbackUploadDirectionContract));
     TestRunner::RegisterTestSuite(suite);
 }
 

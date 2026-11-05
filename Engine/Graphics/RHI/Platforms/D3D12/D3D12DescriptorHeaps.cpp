@@ -149,6 +149,16 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
     rtvSlots_.Init(config.rtvCapacity);
     dsvSlots_.Init(config.dsvCapacity);
     samplerSlots_.Init(config.samplerPersistentCapacity);
+    // R18-B：容量随初始化落日志——十七测"31+2>32"式耗尽在 Windows 侧
+    // 可直接对账（采样器堆 2048 规范上限满配，见头文件容量规划注）。
+    PRIMAL_LOG_STREAM(Info, "RHI")
+        << "[D3D12DescriptorHeaps] heaps ready: cbvSrvUav=" << config.cbvSrvUavCapacity
+        << " (persistent " << config.cbvSrvUavPersistentCapacity
+        << ", per-slot " << slotCapacity_ << ")"
+        << ", sampler=" << config.samplerCapacity
+        << " (persistent " << config.samplerPersistentCapacity
+        << ", per-slot " << samplerSlotCapacity_ << ")"
+        << ", rtv=" << config.rtvCapacity << ", dsv=" << config.dsvCapacity << std::endl;
     return true;
 }
 
