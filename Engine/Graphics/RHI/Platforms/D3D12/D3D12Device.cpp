@@ -382,7 +382,7 @@ bool D3D12Device::createDeviceAndQueue() {
             // storage 允许层：空过滤（无 deny 项）= ERROR/WARNING 全入存储；
             // 上限 512 防 INFO 类刷爆（每次 drain 后清空，正常轮次远低于限）。
             D3D12_INFO_QUEUE_FILTER allowAll{};
-            (void)infoQueue_->SetStorageFilter(&allowAll);
+            (void)infoQueue_->PushStorageFilter(&allowAll);
             (void)infoQueue_->SetMessageCountLimit(kInfoQueueMessageLimit);
             // break 语义：CORRUPTION/ERROR 同门（默认关）；WARNING 恒不 break。
             const BOOL breakOnError = EnvFlag("PRIMAL_D3D12_BREAK_ON_ERROR") ? TRUE : FALSE;
@@ -870,7 +870,7 @@ ResourceHandle D3D12Device::WrapSwapChainBuffer(RHISwapChain& /*owner*/,
         PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
             << "[D3D12FrameTrace] backbuffer wrap: id-new submitSeq="
             << frameTraceSubmitSeq_ << " frameCount=" << frameCount_
-            << " (" << desc.width << "x" << desc.height << ")" << std::endl;
+            << " (" << desc.size.x << "x" << desc.size.y << ")" << std::endl;
     }
     const u32 id = textureAllocator_.Allocate(*this, desc, buffer);
     d3d12::D3D12Texture* tex = textureAllocator_.Get(id);
