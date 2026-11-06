@@ -483,7 +483,7 @@ static_assert(sizeof(LightShadowDataGPU) == 112, "LightShadowData = 32 + 80");
 // 覆盖 Sponza 场景包围盒的保守盒（中心/半宽/光照侧退距/近平面/远平面）。
 constexpr float kShadowCenter[3] = {0.0f, 5.0f, 10.0f};
 constexpr float kShadowHalfExtent = 40.0f;    // 光空间 XY 半宽（世界单位）
-constexpr float kShadowEyeDistance = 80.0f;   // 沿 -L 退到 eye
+constexpr float kShadowEyeDistance = 80.0f;   // 沿 +L（光源侧）退到 eye
 constexpr float kShadowNear = 20.0f, kShadowFar = 150.0f;
 constexpr u32 kShadowMapSize = 2048;
 
@@ -756,11 +756,17 @@ bool M2ShadowInit(RHIDeviceBase* device, M2ShadowState& s, bool ablationLitAll,
     g_ledger.textures.insert(s.shadowMap);
 
     // ---- 光照 VP / shadowData（静态光 + 静态场景 → 帧常数）----
-    // 近似生产 ComputeCascadeVP 的结构（中心对齐 + 沿 -L 退 eye），
+    // 近似生产 ComputeCascadeVP 的结构（中心对齐 + 从光源侧退距观察），
     // 单级联取保守盒覆盖场景（生产第 4 级 extent=270 的角色）。
+    // 注意方向约定：生产 lightDir=光行进方向故 lightEye=-lightDir*dist；
+    // 此处 L 是 dir_to_light（表面指向光源，与 LightData 同一语义），
+    // 光相机必须在 +L 侧（=中心+L*dist）朝 -L 看，Less 深度测试保留的才是
+    // 离光最近的遮挡面。旧写法 eye=center-L*dist 把相机放在反光侧，
+    // 深度图记录的是离光最远的背面（Sponza 外壳盒），接收端 ref 恒大于
+    // stored → SampleCmp 恒 0 → M2 只有 ambient（2026-11-07 五探针定位）。
     math::v3 L = rhimath::Normalize(math::v3{g_trajDirToLight.x, g_trajDirToLight.y, g_trajDirToLight.z});
     math::v3 center{kShadowCenter[0], kShadowCenter[1], kShadowCenter[2]};
-    math::v3 eye = center - L * kShadowEyeDistance;
+    math::v3 eye = center + L * kShadowEyeDistance;
     math::v3 up = (std::abs(L.y) < 0.99f) ? math::v3{0.0f, 1.0f, 0.0f}
                                           : math::v3{1.0f, 0.0f, 0.0f};
     math::m4x4 lightView = rhimath::CreateLookAtMatrix(eye, center, up);
