@@ -211,9 +211,13 @@ bool D3D12Texture::Initialize() {
         }
 
         u32 dxgi = ToDxgiFormat(texDesc_.format);
-        // 深度模板：资源本体用 TYPELESS 父格式（D3D12 平面资源规则），
-        // 视图（DSV/SRV）分别带具体格式。
-        if (planeCount_ == 2) {
+        // 深度家族：资源本体用 TYPELESS 父格式，视图（DSV/SRV）分别带具体
+        // 格式。双平面是 D3D12 平面资源规则；单平面纯深度在需挂 SRV 时同样
+        // 必须 TYPELESS——typed D32_FLOAT 资源上建 R32_FLOAT SRV 视图不兼容
+        // （SampleCmp 恒 0，M2 阴影≡0 根因）；DSV-only 深度保持 typed 创建。
+        const bool depthSrvCast = isDepthFamily
+            && (texDesc_.usage & TextureUsage::ShaderResource) != TextureUsage::Unknown;
+        if (planeCount_ == 2 || depthSrvCast) {
             dxgi = GetTypelessDxgiFormat(texDesc_.format);
             if (dxgi == kDXGIFormat_Unknown) {
                 PRIMAL_LOG_STREAM(Error, "RHI")

@@ -142,9 +142,9 @@ void D3D12CommandBufferImpl::destroyImpl() {
 void D3D12CommandBufferImpl::ClearBindingMirrors() {
     ++listGeneration_;
     boundGraphicsPipeline_ = nullptr;
-    boundGraphicsLayout_ = nullptr;
+    boundGraphicsLayout_ = handles::INVALID_PIPELINE_LAYOUT;
     boundComputePipeline_ = nullptr;
-    boundComputeLayout_ = nullptr;
+    boundComputeLayout_ = handles::INVALID_PIPELINE_LAYOUT;
     effectivePso_.Invalidate();
     graphicsRootSigSet_.Invalidate();
     computeRootSigSet_.Invalidate();
@@ -516,7 +516,10 @@ void D3D12CommandBufferImpl::SetScissor(const Rect& scissor) {
 void D3D12CommandBufferImpl::ApplyPipelineBind(D3D12Pipeline* pipe) {
     if (pipe->IsCompute()) {
         boundComputePipeline_ = pipe;
-        boundComputeLayout_ = pipe->GetPipelineLayout();
+        // 布局镜像存句柄（pool 扩容搬迁槽位后旧地址悬垂，见成员声明处
+        // 注释）；使用点经 device 现查。自建空布局管线句柄为 INVALID，
+        // 与原实现 GetPipelineLayout()==nullptr 的镜像置空语义一致。
+        boundComputeLayout_ = pipe->GetLayoutHandle();
         if (ID3D12RootSignature* rs = pipe->GetRootSignature()) {
             if (!computeRootSigSet_.Matches(rs, listGeneration_)) {
                 commandList_->SetComputeRootSignature(rs);
@@ -535,7 +538,8 @@ void D3D12CommandBufferImpl::ApplyPipelineBind(D3D12Pipeline* pipe) {
         }
     } else {
         boundGraphicsPipeline_ = pipe;
-        boundGraphicsLayout_ = pipe->GetPipelineLayout();
+        // 同 compute 侧：布局镜像存句柄，使用点现查。
+        boundGraphicsLayout_ = pipe->GetLayoutHandle();
         if (ID3D12RootSignature* rs = pipe->GetRootSignature()) {
             if (!graphicsRootSigSet_.Matches(rs, listGeneration_)) {
                 commandList_->SetGraphicsRootSignature(rs);
@@ -805,8 +809,13 @@ void D3D12CommandBufferImpl::BindDescriptorSets(PipelineBindPoint bindPoint,
     // 单一 boundLayout_——最近绑定是另一类型管线时，Graphics 绑定会拿
     // compute 布局的 tableParam 对 graphics 签名下发 = #708/#709 族的
     // 参数索引错位）。前置自愈：对应槽位缺/错时按镜像补设。
-    const D3D12PipelineLayout* boundLayout = compute ? boundComputeLayout_
-                                                     : boundGraphicsLayout_;
+    // 布局镜像为句柄：pool 扩容搬迁槽位后旧地址悬垂，此处现查取新地址
+    //（句柄失效 = 布局已销毁 → nullptr 走下方"无布局"早退）。
+    const PipelineLayoutHandle boundLayoutHandle = compute ? boundComputeLayout_
+                                                           : boundGraphicsLayout_;
+    const D3D12PipelineLayout* boundLayout =
+        boundLayoutHandle == handles::INVALID_PIPELINE_LAYOUT
+            ? nullptr : dev.GetPipelineLayout(boundLayoutHandle);
     if (!boundLayout && !warnedSetsNoLayout_) {
         warnedSetsNoLayout_ = true;
         PRIMAL_LOG_STREAM(Warn, "RHI")
@@ -894,7 +903,15 @@ void D3D12CommandBufferImpl::PushConstants(PipelineLayoutHandle layout,
     } else {
         compute = boundComputePipeline_ && !boundGraphicsPipeline_;
     }
-    if (!targetLayout) targetLayout = compute ? boundComputeLayout_ : boundGraphicsLayout_;
+    // 回退布局镜像为句柄（pool 扩容搬迁后现查取新地址；句柄失效 → 维持
+    // nullptr 走下方"无可用布局"早退）。
+    if (!targetLayout) {
+        const PipelineLayoutHandle fallback = compute ? boundComputeLayout_
+                                                      : boundGraphicsLayout_;
+        if (fallback != handles::INVALID_PIPELINE_LAYOUT) {
+            targetLayout = dev.GetPipelineLayout(fallback);
+        }
+    }
     if (!targetLayout) {
         if (!warnedPushNoLayout_) {
             warnedPushNoLayout_ = true;
@@ -1524,7 +1541,7 @@ void D3D12CommandBufferImpl::GenerateMipmaps(ResourceHandle texture) {
     // R21-B：槽位镜像经 Set(…, listGeneration_) 记入当前世代（不递增——
     // 本函数不重置命令列表，只是真实下发后的镜像记账）。
     boundGraphicsPipeline_ = nullptr;
-    boundGraphicsLayout_ = nullptr;
+    boundGraphicsLayout_ = handles::INVALID_PIPELINE_LAYOUT;
     graphicsRootSigSet_.Set(dev.GetMipGenerator().GetRootSignature(), listGeneration_);
     effectivePso_.Set(pso, listGeneration_);
     if (BindTraceEnabled()) {

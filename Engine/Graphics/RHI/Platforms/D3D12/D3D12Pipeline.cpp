@@ -574,7 +574,7 @@ D3D12Pipeline::D3D12Pipeline(D3D12Pipeline&& other) noexcept
     : device_(other.device_),
       handle_(other.handle_),
       isCompute_(other.isCompute_),
-      layout_(other.layout_),
+      layoutHandle_(other.layoutHandle_),
       ownsLayout_(other.ownsLayout_),
       emptyRootSignature_(std::move(other.emptyRootSignature_)),
       iaTopology_(other.iaTopology_),
@@ -582,7 +582,7 @@ D3D12Pipeline::D3D12Pipeline(D3D12Pipeline&& other) noexcept
       graphicsDesc_(std::move(other.graphicsDesc_)),
       computeDesc_(std::move(other.computeDesc_)) {
     other.handle_ = handles::INVALID_PIPELINE;
-    other.layout_ = nullptr;
+    other.layoutHandle_ = handles::INVALID_PIPELINE_LAYOUT;
     other.ownsLayout_ = false;
     other.pipeline_.Reset();
 }
@@ -595,7 +595,7 @@ D3D12Pipeline& D3D12Pipeline::operator=(D3D12Pipeline&& other) noexcept {
         // 的引用复制一致——不赋值即正确。
         handle_ = other.handle_;
         isCompute_ = other.isCompute_;
-        layout_ = other.layout_;
+        layoutHandle_ = other.layoutHandle_;
         ownsLayout_ = other.ownsLayout_;
         emptyRootSignature_ = std::move(other.emptyRootSignature_);
         iaTopology_ = other.iaTopology_;
@@ -603,7 +603,7 @@ D3D12Pipeline& D3D12Pipeline::operator=(D3D12Pipeline&& other) noexcept {
         graphicsDesc_ = std::move(other.graphicsDesc_);
         computeDesc_ = std::move(other.computeDesc_);
         other.handle_ = handles::INVALID_PIPELINE;
-        other.layout_ = nullptr;
+        other.layoutHandle_ = handles::INVALID_PIPELINE_LAYOUT;
         other.ownsLayout_ = false;
         other.pipeline_.Reset();
     }
@@ -621,8 +621,10 @@ bool D3D12Pipeline::InitializeGraphics(const GraphicsPipelineDesc& desc) {
     // root signature：优先管线布局句柄；无效则自建空布局（对齐 Vulkan
     // ownedLayout_ fallback 语义）。
     if (desc.layout != handles::INVALID_PIPELINE_LAYOUT) {
-        layout_ = device_.GetPipelineLayout(desc.layout);
-        if (!layout_) {
+        // 存句柄不存指针（pool 槽位扩容会整体搬迁，见成员声明处注释）；
+        // 此处仍即时解析一次做 fail-early 校验，语义与原实现一致。
+        layoutHandle_ = desc.layout;
+        if (!device_.GetPipelineLayout(layoutHandle_)) {
             PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Pipeline] layout handle unresolved" << std::endl;
             return false;
         }
@@ -816,8 +818,9 @@ bool D3D12Pipeline::InitializeCompute(const ComputePipelineDesc& desc) {
     computeDesc_ = desc;
 
     if (desc.layout != handles::INVALID_PIPELINE_LAYOUT) {
-        layout_ = device_.GetPipelineLayout(desc.layout);
-        if (!layout_) {
+        // 同 graphics 侧：存句柄，fail-early 现解析校验。
+        layoutHandle_ = desc.layout;
+        if (!device_.GetPipelineLayout(layoutHandle_)) {
             PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Pipeline] compute layout handle unresolved" << std::endl;
             return false;
         }
@@ -853,15 +856,36 @@ bool D3D12Pipeline::InitializeCompute(const ComputePipelineDesc& desc) {
     return true;
 }
 
+D3D12PipelineLayout* D3D12Pipeline::GetPipelineLayout() const {
+    // 现查 fail-closed：本类只持句柄不落地址（pool 扩容搬迁槽位后旧地址
+    // 悬垂，M3 根因）。句柄无效（自建空布局/未初始化）→ 静默 nullptr
+    //（与原 layout_==nullptr 语义一致）；句柄有效但解析失败（布局已被
+    // 销毁）→ nullptr + Error 显式留痕。
+    if (layoutHandle_ == handles::INVALID_PIPELINE_LAYOUT) return nullptr;
+    if (D3D12PipelineLayout* layout = device_.GetPipelineLayout(layoutHandle_)) {
+        return layout;
+    }
+    PRIMAL_LOG_STREAM(Error, "RHI")
+        << "[D3D12Pipeline] pipeline " << handle_ << " ("
+        << (isCompute_ ? "compute" : "graphics") << ") layout handle "
+        << layoutHandle_ << " unresolved (layout destroyed?) — root table/"
+        << "constants mapping unavailable" << std::endl;
+    return nullptr;
+}
+
 ID3D12RootSignature* D3D12Pipeline::GetRootSignature() const {
-    if (layout_) return layout_->GetRootSignature();
+    // 布局经 GetPipelineLayout() 句柄现查（每次取搬迁后的新地址）；解析
+    // 失败 fail-closed 返回 nullptr（Bind 侧对 null RS 已有 Error 显式）。
+    if (D3D12PipelineLayout* layout = GetPipelineLayout()) {
+        return layout->GetRootSignature();
+    }
     return ownsLayout_ ? emptyRootSignature_.Get() : nullptr;
 }
 
 void D3D12Pipeline::Destroy() {
     pipeline_.Reset();
     emptyRootSignature_.Reset();
-    layout_ = nullptr;
+    layoutHandle_ = handles::INVALID_PIPELINE_LAYOUT;
     ownsLayout_ = false;
 }
 

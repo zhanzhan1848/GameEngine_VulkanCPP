@@ -230,9 +230,13 @@ private:
     //     R21-B：三槽镜像升级为 D3D12BindSlotMirror"指针+世代"——清空与
     //     幂等判定都以 listGeneration_ 为锚，单一函数收口）===
     D3D12Pipeline* boundGraphicsPipeline_ = nullptr;      // 非拥有
-    D3D12PipelineLayout* boundGraphicsLayout_ = nullptr;  // 非拥有
+    // 布局镜像存句柄不存指针：pipeline layout pool 扩容会整体搬迁槽位
+    // （RHIAllocator::Get 返回的地址仅单次调用内有效），bind→draw 之间
+    // 新建布局即可让缓存的 D3D12PipelineLayout* 悬垂——使用点
+    // （BindDescriptorSets / PushConstants 回退）经 device 现查取新地址。
+    PipelineLayoutHandle boundGraphicsLayout_{handles::INVALID_PIPELINE_LAYOUT};
     D3D12Pipeline* boundComputePipeline_ = nullptr;       // 非拥有
-    D3D12PipelineLayout* boundComputeLayout_ = nullptr;   // 非拥有
+    PipelineLayoutHandle boundComputeLayout_{handles::INVALID_PIPELINE_LAYOUT};
     D3D12BindSlotMirror<ID3D12PipelineState*> effectivePso_;    // PSO 槽镜像（gfx/compute 共用）
     D3D12BindSlotMirror<ID3D12RootSignature*> graphicsRootSigSet_;  // graphics 根签名槽镜像
     D3D12BindSlotMirror<ID3D12RootSignature*> computeRootSigSet_;   // compute 根签名槽镜像

@@ -151,7 +151,14 @@ public:
 
     ID3D12PipelineState* GetPso() const { return pipeline_.Get(); }
     ID3D12RootSignature* GetRootSignature() const;
-    D3D12PipelineLayout* GetPipelineLayout() const { return layout_; }
+    /// 布局现查（fail-closed）：每次调用经 device_.GetPipelineLayout(
+    /// layoutHandle_) 解析——pipeline layout pool 扩容会整体搬迁槽位
+    /// （RHIAllocator::Get 返回的地址仅单次调用内有效），本类不缓存
+    /// D3D12PipelineLayout* 裸地址；句柄有效但解析失败（布局已销毁）
+    /// → nullptr + Error 日志。
+    D3D12PipelineLayout* GetPipelineLayout() const;
+    /// 布局句柄直读（不解析、不落地址）——CommandBuffer 绑定镜像存句柄用。
+    PipelineLayoutHandle GetLayoutHandle() const { return layoutHandle_; }
 
     /// BindGraphicsPipeline/BindComputePipeline 时的拓扑设置依据。
     D3D_PRIMITIVE_TOPOLOGY GetIaTopology() const { return iaTopology_; }
@@ -165,8 +172,16 @@ private:
     D3D12Device& device_;
     PipelineHandle handle_{handles::INVALID_PIPELINE};
     bool isCompute_{false};
-    D3D12PipelineLayout* layout_ = nullptr;   ///< desc.layout 解析（非拥有；设备持有）
-    bool ownsLayout_ = false;                 ///< desc.layout 无效时自建空布局
+    /// desc.layout 原句柄（非拥有；设备 pool 持有布局本体）。pool 扩容
+    /// （如第 4 个布局触发 3→6 realloc）会整体搬迁槽位，缓存的
+    /// D3D12PipelineLayout* 裸指针随即悬垂（M3 BindGraphicsPipeline null
+    /// root signature 崩溃根因）——一律存句柄，用时经
+    /// device_.GetPipelineLayout(layoutHandle_) 现查取新地址。
+    PipelineLayoutHandle layoutHandle_{handles::INVALID_PIPELINE_LAYOUT};
+    /// desc.layout 无效时自建空布局。该路径经 BuildRootSignature 直建
+    /// ID3D12RootSignature（不经 device 的 pipeline layout pool，无句柄），
+    /// 生命周期由本类 emptyRootSignature_ ComPtr 自持——保持现状。
+    bool ownsLayout_ = false;
     Microsoft::WRL::ComPtr<ID3D12RootSignature> emptyRootSignature_;  ///< ownsLayout_ 时的空 RS
     D3D12_PRIMITIVE_TOPOLOGY iaTopology_{D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
     Microsoft::WRL::ComPtr<ID3D12PipelineState> pipeline_;
