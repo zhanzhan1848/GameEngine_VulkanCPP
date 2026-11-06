@@ -3359,9 +3359,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     }
                     // Only positive diagonal transforms preserve source pixel ordering.
                     // Every indexed pixel is also revalidated against the actual GPU atlas.
-                    const auto& wm=ref.world.columns;
-                    const bool aligned=wm[0].x>0 && wm[1].y>0 && wm[2].z>0 &&
-                        wm[0].y==0 && wm[0].z==0 && wm[1].x==0 && wm[1].z==0 && wm[2].x==0 && wm[2].y==0;
+                    const auto wm0=math::column(ref.world,0),wm1=math::column(ref.world,1),wm2=math::column(ref.world,2);
+                    const bool aligned=wm0.x>0 && wm1.y>0 && wm2.z>0 &&
+                        wm0.y==0 && wm0.z==0 && wm1.x==0 && wm1.z==0 && wm2.x==0 && wm2.y==0;
                     if(geometry_first_requested_ && aligned && pageRes==res)
                         support.Add(u32(i),res,pageTriangles,pageDepth,pageAlbedo);
                     if(collectBoundaryAtlas && BoundarySamplesForStaticSlot(ref.mesh_slot) && aligned && pageRes==res){
@@ -3389,7 +3389,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     info.center_w[0] = c.center.x; info.center_w[1] = c.center.y;
                     info.center_w[2] = c.center.z; info.center_w[3] = 0.0f;
                     for (u32 k = 0; k < 3; ++k) {
-                        const math::v4& col = ref.world.columns[k];
+                        const math::v4 col = math::column(ref.world, k);
                         float* dst = (k == 0) ? info.mcol0 : (k == 1) ? info.mcol1 : info.mcol2;
                         dst[0] = col.x; dst[1] = col.y; dst[2] = col.z; dst[3] = 0.0f;
                     }

@@ -110,8 +110,8 @@ struct LumenConfig {
     // placed on the box's min corner (RTXGI (N-1)×S convention). Takes
     // precedence over ddgi_probe_count_*; far volume unaffected.
     bool     ddgi_fit_to_bounds = false;
-    math::v3 ddgi_fit_bounds_min{0.0f};
-    math::v3 ddgi_fit_bounds_max{0.0f};
+    math::v3 ddgi_fit_bounds_min = math::splat3(0.0f);
+    math::v3 ddgi_fit_bounds_max = math::splat3(0.0f);
     float    ddgi_fit_margin = 0.0f;   // outward expansion per side (world units), 0 = tight bbox
     // P1-A automation: when the offline SDF source arrives
     // (SetOfflineSDFSource), overwrite the bounds above with the merger
@@ -208,7 +208,7 @@ struct StaticProbeParams {
     u32 grid_dim_y{8};
     u32 grid_dim_z{16};
     float spacing{4.0f};
-    math::v3 origin{0.0f};
+    math::v3 origin = math::splat3(0.0f);
 };
 
 struct ProbeConfidenceData {

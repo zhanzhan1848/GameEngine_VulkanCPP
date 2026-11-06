@@ -46,11 +46,11 @@ static RasterHistory s_RasterHistory[MAX_FRAMES];
 static u64 s_ResetGeneration=0;
 
 static math::m4x4 ClipJitter(math::v2 jitter) {
-    math::m4x4 j{};
-    for (int i=0;i<4;++i) j.columns[i][i]=1.0f;
-    j.columns[3].x=jitter.x;
-    j.columns[3].y=jitter.y;
-    return j;
+    // Identity + jitter translation column（原实现：零矩阵→对角置 1→平移列写 jitter）。
+    return math::make_m4x4(math::v4{1.f, 0.f, 0.f, 0.f},
+                           math::v4{0.f, 1.f, 0.f, 0.f},
+                           math::v4{0.f, 0.f, 1.f, 0.f},
+                           math::v4{jitter.x, jitter.y, 0.f, 1.f});
 }
 static u32 s_TexWidth = 0;                  // dimensions the history textures were
 static u32 s_TexHeight = 0;                 // created with — recreate on resize

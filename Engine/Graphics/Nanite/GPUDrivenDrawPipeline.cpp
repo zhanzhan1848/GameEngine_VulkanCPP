@@ -3857,45 +3857,45 @@ namespace {
     void ExtractFrustumPlanes(const math::m4x4& vp, math::v4 planes[6]) {
         // Left
         planes[0] = math::v4{
-            vp.columns[0][3] + vp.columns[0][0],
-            vp.columns[1][3] + vp.columns[1][0],
-            vp.columns[2][3] + vp.columns[2][0],
-            vp.columns[3][3] + vp.columns[3][0]
+            math::elem(vp, 0, 3) + math::elem(vp, 0, 0),
+            math::elem(vp, 1, 3) + math::elem(vp, 1, 0),
+            math::elem(vp, 2, 3) + math::elem(vp, 2, 0),
+            math::elem(vp, 3, 3) + math::elem(vp, 3, 0)
         };
         // Right
         planes[1] = math::v4{
-            vp.columns[0][3] - vp.columns[0][0],
-            vp.columns[1][3] - vp.columns[1][0],
-            vp.columns[2][3] - vp.columns[2][0],
-            vp.columns[3][3] - vp.columns[3][0]
+            math::elem(vp, 0, 3) - math::elem(vp, 0, 0),
+            math::elem(vp, 1, 3) - math::elem(vp, 1, 0),
+            math::elem(vp, 2, 3) - math::elem(vp, 2, 0),
+            math::elem(vp, 3, 3) - math::elem(vp, 3, 0)
         };
         // Bottom
         planes[2] = math::v4{
-            vp.columns[0][3] + vp.columns[0][1],
-            vp.columns[1][3] + vp.columns[1][1],
-            vp.columns[2][3] + vp.columns[2][1],
-            vp.columns[3][3] + vp.columns[3][1]
+            math::elem(vp, 0, 3) + math::elem(vp, 0, 1),
+            math::elem(vp, 1, 3) + math::elem(vp, 1, 1),
+            math::elem(vp, 2, 3) + math::elem(vp, 2, 1),
+            math::elem(vp, 3, 3) + math::elem(vp, 3, 1)
         };
         // Top
         planes[3] = math::v4{
-            vp.columns[0][3] - vp.columns[0][1],
-            vp.columns[1][3] - vp.columns[1][1],
-            vp.columns[2][3] - vp.columns[2][1],
-            vp.columns[3][3] - vp.columns[3][1]
+            math::elem(vp, 0, 3) - math::elem(vp, 0, 1),
+            math::elem(vp, 1, 3) - math::elem(vp, 1, 1),
+            math::elem(vp, 2, 3) - math::elem(vp, 2, 1),
+            math::elem(vp, 3, 3) - math::elem(vp, 3, 1)
         };
         // Near
         planes[4] = math::v4{
-            vp.columns[0][2],
-            vp.columns[1][2],
-            vp.columns[2][2],
-            vp.columns[3][2]
+            math::elem(vp, 0, 2),
+            math::elem(vp, 1, 2),
+            math::elem(vp, 2, 2),
+            math::elem(vp, 3, 2)
         };
         // Far
         planes[5] = math::v4{
-            vp.columns[0][3] - vp.columns[0][2],
-            vp.columns[1][3] - vp.columns[1][2],
-            vp.columns[2][3] - vp.columns[2][2],
-            vp.columns[3][3] - vp.columns[3][2]
+            math::elem(vp, 0, 3) - math::elem(vp, 0, 2),
+            math::elem(vp, 1, 3) - math::elem(vp, 1, 2),
+            math::elem(vp, 2, 3) - math::elem(vp, 2, 2),
+            math::elem(vp, 3, 3) - math::elem(vp, 3, 2)
         };
 
         // Normalize
@@ -3994,15 +3994,15 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
                 // Uniform-ish scale estimate = max abs component over the 3x3
                 // (same convention as RenderSceneSnapshot's bounds_radius).
                 f32 instScale = std::max({
-                    std::abs(inst.world_matrix.columns[0].x),
-                    std::abs(inst.world_matrix.columns[0].y),
-                    std::abs(inst.world_matrix.columns[0].z),
-                    std::abs(inst.world_matrix.columns[1].x),
-                    std::abs(inst.world_matrix.columns[1].y),
-                    std::abs(inst.world_matrix.columns[1].z),
-                    std::abs(inst.world_matrix.columns[2].x),
-                    std::abs(inst.world_matrix.columns[2].y),
-                    std::abs(inst.world_matrix.columns[2].z) });
+                    std::abs(math::elem(inst.world_matrix, 0, 0)),
+                    std::abs(math::elem(inst.world_matrix, 0, 1)),
+                    std::abs(math::elem(inst.world_matrix, 0, 2)),
+                    std::abs(math::elem(inst.world_matrix, 1, 0)),
+                    std::abs(math::elem(inst.world_matrix, 1, 1)),
+                    std::abs(math::elem(inst.world_matrix, 1, 2)),
+                    std::abs(math::elem(inst.world_matrix, 2, 0)),
+                    std::abs(math::elem(inst.world_matrix, 2, 1)),
+                    std::abs(math::elem(inst.world_matrix, 2, 2)) });
                 if (cullDiag17) {
                     diagMaxScale = std::max(diagMaxScale, instScale);
                     diagMinScale = std::min(diagMinScale, instScale);

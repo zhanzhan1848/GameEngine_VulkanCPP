@@ -461,7 +461,7 @@ bool from_json(const std::string& json_str, particle_preset& preset) {
             if (first != std::string::npos) {
                 num = num.substr(first);
             }
-            result[i] = std::stof(num);
+            math::set_component(result, i, std::stof(num));
             pos = next + 1;
         }
         return result;
@@ -483,7 +483,7 @@ bool from_json(const std::string& json_str, particle_preset& preset) {
             if (first != std::string::npos) {
                 num = num.substr(first);
             }
-            result[i] = std::stof(num);
+            math::set_component(result, i, std::stof(num));
             pos = next + 1;
         }
         return result;
@@ -505,7 +505,7 @@ bool from_json(const std::string& json_str, particle_preset& preset) {
             if (first != std::string::npos) {
                 num = num.substr(first);
             }
-            result[i] = std::stof(num);
+            math::set_component(result, i, std::stof(num));
             pos = next + 1;
         }
         return result;

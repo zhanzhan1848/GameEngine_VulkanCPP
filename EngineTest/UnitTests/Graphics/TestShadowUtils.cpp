@@ -102,8 +102,8 @@ TestResult TestCreateCascadeViews() {
         // Verify Projection is Ortho
         // m[3][3] should be 1 for Ortho usually
         const auto& p = shadowViews[i].GetProjectionMatrix();
-        if(std::abs(p.columns[3][3] - 1.0f) >= 0.001f) {
-            std::cout << "View " << i << " projection not ortho (m33=" << p.columns[3][3] << ")" << std::endl;
+        if(std::abs(primal::math::elem(p, 3, 3) - 1.0f) >= 0.001f) {
+            std::cout << "View " << i << " projection not ortho (m33=" << primal::math::elem(p, 3, 3) << ")" << std::endl;
             return TestResult::Failed;
         }
     }

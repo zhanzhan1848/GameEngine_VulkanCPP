@@ -120,7 +120,7 @@ ray_geometry::SceneBVH buildGeometry(const Config& cfg){
     else quad({-10,-10,-4},{10,-10,-4},{10,10,-4},{-10,10,-4});
     mesh.num_vertices=v.size()/3;mesh.num_indices=indices.size();mesh.index_size=4;mesh.position_buffer.resize(v.size()*4);mesh.index_buffer.resize(indices.size()*4);
     std::memcpy(mesh.position_buffer.data(),v.data(),v.size()*4);std::memcpy(mesh.index_buffer.data(),indices.data(),indices.size()*4);
-    auto blas=ray_geometry::BuildMeshBLAS(mesh);require(bool(blas),"Build real GG fixture BLAS");math::m4x4 m{};m.columns[0]={1,0,0,0};m.columns[1]={0,1,0,0};m.columns[2]={0,0,1,0};m.columns[3]={0,0,0,1};
+    auto blas=ray_geometry::BuildMeshBLAS(mesh);require(bool(blas),"Build real GG fixture BLAS");math::m4x4 m{};math::set_column(m,0,math::v4{1,0,0,0});math::set_column(m,1,math::v4{0,1,0,0});math::set_column(m,2,math::v4{0,0,1,0});math::set_column(m,3,math::v4{0,0,0,1});
     std::array<ray_geometry::InstanceInput,1> input{{{blas,m,324}}};ray_geometry::SceneBVH out;require(out.Build(input),"Build real GG fixture TLAS");
     if(cfg.geometry==Geometry::Malformed)out.top[0].links[2]=0xffffffffu;
     if(cfg.geometry==Geometry::Cycle){out.top[0].links[0]=out.top[0].links[1]=0;out.top[0].links[3]=0;}

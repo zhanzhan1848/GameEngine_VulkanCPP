@@ -347,7 +347,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
     auto vp_equal = [](const math::m4x4& a, const math::m4x4& b) -> bool {
         for (int c = 0; c < 4; ++c)
             for (int r = 0; r < 4; ++r)
-                if (std::abs(a.columns[c][r] - b.columns[c][r]) > 1e-5f) return false;
+                if (std::abs(math::elem(a, c, r) - math::elem(b, c, r)) > 1e-5f) return false;
         return true;
     };
 
@@ -397,8 +397,8 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                 std::fprintf(stderr, "[MATRIX] cascade%u columns:", cascade);
                 for (int c = 0; c < 4; ++c)
                     std::fprintf(stderr, " (%.6f,%.6f,%.6f,%.6f)",
-                                 lightVP.columns[c][0], lightVP.columns[c][1],
-                                 lightVP.columns[c][2], lightVP.columns[c][3]);
+                                 math::elem(lightVP, c, 0), math::elem(lightVP, c, 1),
+                                 math::elem(lightVP, c, 2), math::elem(lightVP, c, 3));
                 std::fprintf(stderr, "\n");
             }
         }
@@ -558,15 +558,15 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                 // TEMP-DIAG: shadow 模块的 proj/view 真值
                 if (std::getenv("PRIMAL_DUMP_MATRIX")) {
                     std::fprintf(stderr, "[SHADOW_V] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
-                                 inputs.view_matrix.columns[0].x, inputs.view_matrix.columns[0].y, inputs.view_matrix.columns[0].z, inputs.view_matrix.columns[0].w,
-                                 inputs.view_matrix.columns[1].x, inputs.view_matrix.columns[1].y, inputs.view_matrix.columns[1].z, inputs.view_matrix.columns[1].w,
-                                 inputs.view_matrix.columns[2].x, inputs.view_matrix.columns[2].y, inputs.view_matrix.columns[2].z, inputs.view_matrix.columns[2].w,
-                                 inputs.view_matrix.columns[3].x, inputs.view_matrix.columns[3].y, inputs.view_matrix.columns[3].z, inputs.view_matrix.columns[3].w);
+                                 math::elem(inputs.view_matrix, 0, 0), math::elem(inputs.view_matrix, 0, 1), math::elem(inputs.view_matrix, 0, 2), math::elem(inputs.view_matrix, 0, 3),
+                                 math::elem(inputs.view_matrix, 1, 0), math::elem(inputs.view_matrix, 1, 1), math::elem(inputs.view_matrix, 1, 2), math::elem(inputs.view_matrix, 1, 3),
+                                 math::elem(inputs.view_matrix, 2, 0), math::elem(inputs.view_matrix, 2, 1), math::elem(inputs.view_matrix, 2, 2), math::elem(inputs.view_matrix, 2, 3),
+                                 math::elem(inputs.view_matrix, 3, 0), math::elem(inputs.view_matrix, 3, 1), math::elem(inputs.view_matrix, 3, 2), math::elem(inputs.view_matrix, 3, 3));
                     std::fprintf(stderr, "[SHADOW_P] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
-                                 inputs.proj_matrix.columns[0].x, inputs.proj_matrix.columns[0].y, inputs.proj_matrix.columns[0].z, inputs.proj_matrix.columns[0].w,
-                                 inputs.proj_matrix.columns[1].x, inputs.proj_matrix.columns[1].y, inputs.proj_matrix.columns[1].z, inputs.proj_matrix.columns[1].w,
-                                 inputs.proj_matrix.columns[2].x, inputs.proj_matrix.columns[2].y, inputs.proj_matrix.columns[2].z, inputs.proj_matrix.columns[2].w,
-                                 inputs.proj_matrix.columns[3].x, inputs.proj_matrix.columns[3].y, inputs.proj_matrix.columns[3].z, inputs.proj_matrix.columns[3].w);
+                                 math::elem(inputs.proj_matrix, 0, 0), math::elem(inputs.proj_matrix, 0, 1), math::elem(inputs.proj_matrix, 0, 2), math::elem(inputs.proj_matrix, 0, 3),
+                                 math::elem(inputs.proj_matrix, 1, 0), math::elem(inputs.proj_matrix, 1, 1), math::elem(inputs.proj_matrix, 1, 2), math::elem(inputs.proj_matrix, 1, 3),
+                                 math::elem(inputs.proj_matrix, 2, 0), math::elem(inputs.proj_matrix, 2, 1), math::elem(inputs.proj_matrix, 2, 2), math::elem(inputs.proj_matrix, 2, 3),
+                                 math::elem(inputs.proj_matrix, 3, 0), math::elem(inputs.proj_matrix, 3, 1), math::elem(inputs.proj_matrix, 3, 2), math::elem(inputs.proj_matrix, 3, 3));
                 }
                 math::v3 L = Normalize(inputs.light_direction);
 
@@ -604,10 +604,10 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                     // TEMP-DIAG: filter UBO 的 invVP 真值
                     if (std::getenv("PRIMAL_DUMP_MATRIX")) {
                         std::fprintf(stderr, "[FILTER_INVP] (%.4f,%.4f,%.4f,%.4f) (%.4f,%.4f,%.4f,%.4f) (%.4f,%.4f,%.4f,%.4f) (%.4f,%.4f,%.4f,%.4f)\n",
-                                     invVP.columns[0].x, invVP.columns[0].y, invVP.columns[0].z, invVP.columns[0].w,
-                                     invVP.columns[1].x, invVP.columns[1].y, invVP.columns[1].z, invVP.columns[1].w,
-                                     invVP.columns[2].x, invVP.columns[2].y, invVP.columns[2].z, invVP.columns[2].w,
-                                     invVP.columns[3].x, invVP.columns[3].y, invVP.columns[3].z, invVP.columns[3].w);
+                                     math::elem(invVP, 0, 0), math::elem(invVP, 0, 1), math::elem(invVP, 0, 2), math::elem(invVP, 0, 3),
+                                     math::elem(invVP, 1, 0), math::elem(invVP, 1, 1), math::elem(invVP, 1, 2), math::elem(invVP, 1, 3),
+                                     math::elem(invVP, 2, 0), math::elem(invVP, 2, 1), math::elem(invVP, 2, 2), math::elem(invVP, 2, 3),
+                                     math::elem(invVP, 3, 0), math::elem(invVP, 3, 1), math::elem(invVP, 3, 2), math::elem(invVP, 3, 3));
                     }
                     for (u32 c = 0; c < 4; ++c) p->shadow_vp[c] = mats[c];
                     p->light_dir = math::v4{L.x, L.y, L.z, 0.0f};

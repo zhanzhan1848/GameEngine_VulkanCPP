@@ -1993,8 +1993,11 @@ void LumenDDGIPass::GetVolumeAABB(math::v3& out_min, math::v3& out_max) const {
         (float)(params_.probe_count_y - 1) * params_.probe_spacing,
         (float)(params_.probe_count_z - 1) * params_.probe_spacing,
     };
-    out_min = probe_origin_ - math::v3{params_.probe_spacing};
-    out_max = probe_origin_ + extent + math::v3{params_.probe_spacing};
+    // 原写法 math::v3{probe_spacing}：Apple simd 的单标量花括号初始化只设 x
+    // （y/z 补 0），不是三轴广播。按"Mac 行为零变化"保留该语义并写明分量；
+    // 若本意是三轴外扩，应改为 math::splat3（会改变 Mac 现有结果，待定）。
+    out_min = probe_origin_ - math::v3{ params_.probe_spacing, 0.0f, 0.0f };
+    out_max = probe_origin_ + extent + math::v3{ params_.probe_spacing, 0.0f, 0.0f };
 }
 
 void LumenDDGIPass::CreateProbeTextures() {
@@ -3160,14 +3163,14 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
                     math::m4x4 invView = rhi::math::Inverse(camera_data.view_matrix);
                     mapped->CameraPositionAndViewWidth = {
-                        invView.columns[3][0], invView.columns[3][1],
-                        invView.columns[3][2], (float)0.0f  // No screen dimensions needed for DDGI
+                        math::elem(invView, 3, 0), math::elem(invView, 3, 1),
+                        math::elem(invView, 3, 2), (float)0.0f  // No screen dimensions needed for DDGI
                     };
 
                     auto& vm = camera_data.view_matrix;
                     mapped->CameraDirectionAndViewHeight = {
-                        -vm.columns[2][0], -vm.columns[2][1],
-                        -vm.columns[2][2], 0.0f
+                        -math::elem(vm, 2, 0), -math::elem(vm, 2, 1),
+                        -math::elem(vm, 2, 2), 0.0f
                     };
 
                     mapped->NumDirectionalLights = 0;
@@ -3505,7 +3508,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 };
                 {
                     math::m4x4 invView = rhi::math::Inverse(camera_data.view_matrix);
-                    cameraPos = { invView.columns[3][0], invView.columns[3][1], invView.columns[3][2] };
+                    cameraPos = { math::elem(invView, 3, 0), math::elem(invView, 3, 1), math::elem(invView, 3, 2) };
                 }
 
                 for (u32 i = 0; i < probeCountTotal; ++i) {

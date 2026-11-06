@@ -40,14 +40,14 @@ bool CollectBakeScene(const RenderScene& renderScene, CollectedBakeScene& out,
         }
 
         // 世界变换拷贝（位置）。约定与渲染一致：M × 列向量
-        //（simd::float4x4，columns[col] 元素 .x/.y/.z——见
-        // RenderSceneSnapshot.cpp:477/499 先例）。
+        //（math::elem(m, col, row) 逐列取分量——见
+        // RenderSceneSnapshot.cpp 提取路径先例）。
         const auto& m = proxy.transform;
         auto transformPoint = [&m](float x, float y, float z) {
             return std::tuple<float, float, float>{
-                m.columns[0].x * x + m.columns[1].x * y + m.columns[2].x * z + m.columns[3].x,
-                m.columns[0].y * x + m.columns[1].y * y + m.columns[2].y * z + m.columns[3].y,
-                m.columns[0].z * x + m.columns[1].z * y + m.columns[2].z * z + m.columns[3].z};
+                math::elem(m, 0, 0) * x + math::elem(m, 1, 0) * y + math::elem(m, 2, 0) * z + math::elem(m, 3, 0),
+                math::elem(m, 0, 1) * x + math::elem(m, 1, 1) * y + math::elem(m, 2, 1) * z + math::elem(m, 3, 1),
+                math::elem(m, 0, 2) * x + math::elem(m, 1, 2) * y + math::elem(m, 2, 2) * z + math::elem(m, 3, 2)};
         };
 
         const auto* positions = reinterpret_cast<const float*>(asset.position_buffer.data());

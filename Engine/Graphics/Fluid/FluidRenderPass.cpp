@@ -374,8 +374,8 @@ FluidOutput FluidRenderPass::AddPass(RenderGraph& graph, const FluidInputs& inpu
                     math::m4x4 vp = inputs.view_matrix * inputs.proj_matrix;
                     math::m4x4 invVp = rhi::math::Inverse(vp);
                     for (int c = 0; c < 4; c++) {
-                        fp.InvViewProj[c] = invVp.columns[c];
-                        fp.ViewProj[c] = vp.columns[c];
+                        fp.InvViewProj[c] = math::column(invVp, c);
+                        fp.ViewProj[c] = math::column(vp, c);
                     }
 
                     fp.FluidParams1 = {config_.particle_radius, config_.splat_scale,

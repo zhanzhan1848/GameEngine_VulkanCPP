@@ -41,8 +41,8 @@ void CreateCascadeViews(
     // Assuming Perspective Projection
     // m[1][1] = 1 / tan(fov/2)
     // aspect = m[1][1] / m[0][0] (if m[0][0] = 1/(aspect*tan(fov/2)))
-    float m11 = mainProj.columns[1][1];
-    float m00 = mainProj.columns[0][0];
+    float m11 = math::elem(mainProj, 1, 1);
+    float m00 = math::elem(mainProj, 0, 0);
     
     // Avoid division by zero
     if (std::abs(m11) < 0.0001f || std::abs(m00) < 0.0001f) {

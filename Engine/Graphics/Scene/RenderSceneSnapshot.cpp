@@ -474,7 +474,7 @@ bool RenderSceneSnapshot::ExtractSceneData(const RenderScene& scene,
             static u32 s_extractLog = 0;
             if (s_extractLog < 8) {
                 ++s_extractLog;
-                const math::v4 t = proxy.transform.columns[3];
+                const math::v4 t = math::column(proxy.transform, 3);
                 PRIMAL_LOG_STREAM(Info, "Render")
                     << "[SnapshotExtract] geom=" << instance.geometry_id
                     << " resource=" << (resource ? "ok" : "null")
@@ -504,9 +504,9 @@ bool RenderSceneSnapshot::ExtractSceneData(const RenderScene& scene,
 
             const math::m4x4& transform = proxy.transform;
             f32 maxScale = std::max({
-                std::abs(transform.columns[0].x), std::abs(transform.columns[0].y), std::abs(transform.columns[0].z),
-                std::abs(transform.columns[1].x), std::abs(transform.columns[1].y), std::abs(transform.columns[1].z),
-                std::abs(transform.columns[2].x), std::abs(transform.columns[2].y), std::abs(transform.columns[2].z)
+                std::abs(math::elem(transform, 0, 0)), std::abs(math::elem(transform, 0, 1)), std::abs(math::elem(transform, 0, 2)),
+                std::abs(math::elem(transform, 1, 0)), std::abs(math::elem(transform, 1, 1)), std::abs(math::elem(transform, 1, 2)),
+                std::abs(math::elem(transform, 2, 0)), std::abs(math::elem(transform, 2, 1)), std::abs(math::elem(transform, 2, 2))
             });
             instance.bounds_radius = maxLocalExtent * maxScale;
 
@@ -615,9 +615,9 @@ bool RenderSceneSnapshot::UpdateInstances(const RenderScene& scene,
 
             const math::m4x4& transform = proxy.transform;
             f32 maxScale = std::max({
-                std::abs(transform.columns[0].x), std::abs(transform.columns[0].y), std::abs(transform.columns[0].z),
-                std::abs(transform.columns[1].x), std::abs(transform.columns[1].y), std::abs(transform.columns[1].z),
-                std::abs(transform.columns[2].x), std::abs(transform.columns[2].y), std::abs(transform.columns[2].z)
+                std::abs(math::elem(transform, 0, 0)), std::abs(math::elem(transform, 0, 1)), std::abs(math::elem(transform, 0, 2)),
+                std::abs(math::elem(transform, 1, 0)), std::abs(math::elem(transform, 1, 1)), std::abs(math::elem(transform, 1, 2)),
+                std::abs(math::elem(transform, 2, 0)), std::abs(math::elem(transform, 2, 1)), std::abs(math::elem(transform, 2, 2))
             });
             instance.bounds_radius = maxLocalExtent * maxScale;
 

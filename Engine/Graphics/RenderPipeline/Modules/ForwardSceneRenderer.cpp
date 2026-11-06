@@ -3133,7 +3133,7 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
     // UBO layout that DeferredLighting.spv expects at bindings 9 and 10.
     if (device_->GetPlatform() == RHIPlatform::Vulkan) {
         math::m4x4 viewInv = Inverse(view_matrix);
-        math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
+        math::v3 cameraDir = math::xyz(math::column(viewInv, 2));
 
         if (auto* frameData = static_cast<rhi::GlobalShaderData*>(lighting_global_mapped_[idx])) {
             frameData->view = view_matrix;

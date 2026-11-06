@@ -398,16 +398,16 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                     // TEMP-DIAG: deferred 的 vp/invVP 真值
                     if (std::getenv("PRIMAL_DUMP_MATRIX")) {
                         std::fprintf(stderr, "[DEF_VP] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
-                                     vp.columns[0].x, vp.columns[0].y, vp.columns[0].z, vp.columns[0].w,
-                                     vp.columns[1].x, vp.columns[1].y, vp.columns[1].z, vp.columns[1].w,
-                                     vp.columns[2].x, vp.columns[2].y, vp.columns[2].z, vp.columns[2].w,
-                                     vp.columns[3].x, vp.columns[3].y, vp.columns[3].z, vp.columns[3].w);
+                                     math::elem(vp, 0, 0), math::elem(vp, 0, 1), math::elem(vp, 0, 2), math::elem(vp, 0, 3),
+                                     math::elem(vp, 1, 0), math::elem(vp, 1, 1), math::elem(vp, 1, 2), math::elem(vp, 1, 3),
+                                     math::elem(vp, 2, 0), math::elem(vp, 2, 1), math::elem(vp, 2, 2), math::elem(vp, 2, 3),
+                                     math::elem(vp, 3, 0), math::elem(vp, 3, 1), math::elem(vp, 3, 2), math::elem(vp, 3, 3));
                         const math::m4x4& iv = vd->invViewProjection;
                         std::fprintf(stderr, "[DEF_INVP] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
-                                     iv.columns[0].x, iv.columns[0].y, iv.columns[0].z, iv.columns[0].w,
-                                     iv.columns[1].x, iv.columns[1].y, iv.columns[1].z, iv.columns[1].w,
-                                     iv.columns[2].x, iv.columns[2].y, iv.columns[2].z, iv.columns[2].w,
-                                     iv.columns[3].x, iv.columns[3].y, iv.columns[3].z, iv.columns[3].w);
+                                     math::elem(iv, 0, 0), math::elem(iv, 0, 1), math::elem(iv, 0, 2), math::elem(iv, 0, 3),
+                                     math::elem(iv, 1, 0), math::elem(iv, 1, 1), math::elem(iv, 1, 2), math::elem(iv, 1, 3),
+                                     math::elem(iv, 2, 0), math::elem(iv, 2, 1), math::elem(iv, 2, 2), math::elem(iv, 2, 3),
+                                     math::elem(iv, 3, 0), math::elem(iv, 3, 1), math::elem(iv, 3, 2), math::elem(iv, 3, 3));
                     }
                     device_->UnmapBuffer(view_cb_[cbIdx]);
                 }
@@ -476,10 +476,10 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                         (void)chk;
                         const math::m4x4& mm = inputs.shadow_matrix0;
                         std::fprintf(stderr, "[SCENE_MAT0] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
-                                     mm.columns[0].x, mm.columns[0].y, mm.columns[0].z, mm.columns[0].w,
-                                     mm.columns[1].x, mm.columns[1].y, mm.columns[1].z, mm.columns[1].w,
-                                     mm.columns[2].x, mm.columns[2].y, mm.columns[2].z, mm.columns[2].w,
-                                     mm.columns[3].x, mm.columns[3].y, mm.columns[3].z, mm.columns[3].w);
+                                     math::elem(mm, 0, 0), math::elem(mm, 0, 1), math::elem(mm, 0, 2), math::elem(mm, 0, 3),
+                                     math::elem(mm, 1, 0), math::elem(mm, 1, 1), math::elem(mm, 1, 2), math::elem(mm, 1, 3),
+                                     math::elem(mm, 2, 0), math::elem(mm, 2, 1), math::elem(mm, 2, 2), math::elem(mm, 2, 3),
+                                     math::elem(mm, 3, 0), math::elem(mm, 3, 1), math::elem(mm, 3, 2), math::elem(mm, 3, 3));
                         std::fprintf(stderr, "[SCENE_MISC] viewPos=(%.2f,%.2f,%.2f) shadowParams.x=%.1f\n",
                                      inputs.camera_position.x, inputs.camera_position.y,
                                      inputs.camera_position.z, inputs.vsm_enabled ? 1.0f : 0.0f);

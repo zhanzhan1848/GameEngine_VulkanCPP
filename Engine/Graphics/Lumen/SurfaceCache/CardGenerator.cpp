@@ -61,7 +61,7 @@ void CardGenerator::RegisterMeshBaked(const rhi::RHICardBakeData& bake, const ma
     info.baked_card_count = 0;
     bool diagonal = true;
     for (u32 k = 0; k < 3; ++k) {
-        const auto& col = world.columns[k];
+        const auto col = math::column(world, k);
         const f32 xyz[3] = {col.x, col.y, col.z};
         for (u32 j = 0; j < 3; ++j)
             diagonal &= std::isfinite(xyz[j]) && (j == k ? std::abs(xyz[j]) > 1e-6f : std::abs(xyz[j]) < 1e-6f);
@@ -80,7 +80,7 @@ void CardGenerator::RegisterMeshBaked(const rhi::RHICardBakeData& bake, const ma
         for (u32 k = 0; k < 3; ++k) {
             // Axis-aligned box under rotation+scale: project each local
             // half-extent through the absolute column entries (column-major).
-            const math::v4& col = world.columns[k];
+            const math::v4 col = math::column(world, k);
             const f32 e = bc.extent[k];
             extent_w[0] += std::abs(col.x) * e;
             extent_w[1] += std::abs(col.y) * e;
@@ -92,7 +92,7 @@ void CardGenerator::RegisterMeshBaked(const rhi::RHICardBakeData& bake, const ma
         card.axis_direction = bc.axis_direction;
         if (diagonal) {
             const u32 a = bc.axis_direction & 0xFFu;
-            const auto& col = world.columns[a];
+            const auto col = math::column(world, a);
             const f32 scale = a == 0u ? col.x : a == 1u ? col.y : col.z;
             if (scale < 0.f) card.axis_direction ^= 1u << 8u;
         }

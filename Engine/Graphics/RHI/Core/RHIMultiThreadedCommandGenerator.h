@@ -57,7 +57,7 @@ struct RenderScene {
      */
     RenderScene() : totalDrawCalls(0), totalVertices(0), totalTriangles(0),
                    boundingSphereRadius(0.0f),
-                   boundingBoxMin(0.0f), boundingBoxMax(0.0f) {}
+                   boundingBoxMin(math::splat3(0.0f)), boundingBoxMax(math::splat3(0.0f)) {}
     
     /**
      * @brief 预分配空间

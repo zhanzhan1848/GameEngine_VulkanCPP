@@ -171,7 +171,7 @@ ray_geometry::SceneBVH scene(bool closed,bool biasSheet=false,u32 extra=0){
     mesh.num_vertices=vertices.size()/3;mesh.num_indices=indices.size();mesh.index_size=4;
     mesh.position_buffer.resize(vertices.size()*4);std::memcpy(mesh.position_buffer.data(),vertices.data(),vertices.size()*4);
     mesh.index_buffer.resize(indices.size()*4);std::memcpy(mesh.index_buffer.data(),indices.data(),indices.size()*4);
-    auto blas=ray_geometry::BuildMeshBLAS(mesh);require(bool(blas),"Build actual mesh BLAS");math::m4x4 identity{};identity.columns[0]={1,0,0,0};identity.columns[1]={0,1,0,0};identity.columns[2]={0,0,1,0};identity.columns[3]={0,0,0,1};
+    auto blas=ray_geometry::BuildMeshBLAS(mesh);require(bool(blas),"Build actual mesh BLAS");math::m4x4 identity{};math::set_column(identity,0,math::v4{1,0,0,0});math::set_column(identity,1,math::v4{0,1,0,0});math::set_column(identity,2,math::v4{0,0,1,0});math::set_column(identity,3,math::v4{0,0,0,1});
     std::array<ray_geometry::InstanceInput,1> in{{{blas,identity,17}}};ray_geometry::SceneBVH out;buildScene(in,out);
     // Independent CPU geometry check establishes the synthetic geometry's role,
     // not a copied VNDF/reflection oracle.
@@ -184,7 +184,7 @@ ray_geometry::SceneBVH stackedScene(bool farFirst){
     std::memcpy(mesh.position_buffer.data(),positions,sizeof(positions));std::memcpy(mesh.index_buffer.data(),indices,sizeof(indices));
     auto blas=ray_geometry::BuildMeshBLAS(mesh);require(bool(blas),"Build stacked plane BLAS");
     // R4: 局部变量避开 near/far 名字（Windows rpcndr.h 空宏）。
-    math::m4x4 nearMat{};nearMat.columns[0]={1,0,0,0};nearMat.columns[1]={0,1,0,0};nearMat.columns[2]={0,0,1,0};nearMat.columns[3]={0,0,.8f,1};auto farMat=nearMat;farMat.columns[3].z=1.3f;
+    math::m4x4 nearMat{};math::set_column(nearMat,0,math::v4{1,0,0,0});math::set_column(nearMat,1,math::v4{0,1,0,0});math::set_column(nearMat,2,math::v4{0,0,1,0});math::set_column(nearMat,3,math::v4{0,0,.8f,1});auto farMat=nearMat;math::set_elem(farMat,3,2,1.3f);
     std::array<ray_geometry::InstanceInput,2> inputs{{{blas,nearMat,18},{blas,farMat,19}}};ray_geometry::SceneBVH out;buildScene(inputs,out);
     require(out.top.size()==3,"Two actual TLAS leaves");
     const u32 left=out.top[0].links[0],right=out.top[0].links[1];

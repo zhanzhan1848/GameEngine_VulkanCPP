@@ -578,8 +578,11 @@ private:
         rhi::handles::INVALID_DESCRIPTOR_SET };
     u32 cascade_update_frame_ = 0;   // frame counter for temporal EMA gating
     // Cascade world extent — covers a larger volume than the DDGI probe grid.
-    math::v3 cascade_origin_{0.0f};
-    math::v3 cascade_extent_{128.0f};  // cubic extent (single scalar for simplicity)
+    math::v3 cascade_origin_ = math::splat3(0.0f);
+    // 原写法 cascade_extent_{128.0f}：Apple simd 单标量花括号只设 x
+    // （=(128,0,0)），与注释"cubic extent"的本意不符。保持 Mac 现有行为；
+    // 若本意是 (128,128,128) 待定。
+    math::v3 cascade_extent_{ 128.0f, 0.0f, 0.0f };  // cubic extent (single scalar for simplicity)
     float cascade_spacing_ = 128.0f / 32.0f;  // = 4.0 world units per cascade texel
     // T3.5: per-frame RadianceCascadeParams upload (80B, triple-buffered;
     // Metal overrides buffer(3) with setBytes at dispatch time).
@@ -620,15 +623,15 @@ private:
     rhi::ResourceHandle ddgi_depth_buffer_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle ddgi_relocated_origins_{ rhi::handles::INVALID_RESOURCE };
     bool ddgi_measured_visibility_ = false; // internal validated DDGI view, mode7 only
-    math::v3 ddgi_fb_origin_{ 0.0f };    math::v3 ddgi_fb_counts_{ 0.0f };
+    math::v3 ddgi_fb_origin_ = math::splat3(0.0f);    math::v3 ddgi_fb_counts_ = math::splat3(0.0f);
     float ddgi_fb_spacing_ = 0.0f;
     bool ddgi_fallback_available_ = false;
 
     // [WRC] A3: 远场消费数据面（SetWRCCacheData 快照）。
     rhi::ResourceHandle wrc_probe_data_{ rhi::handles::INVALID_RESOURCE };
     rhi::ResourceHandle wrc_consume_buffer_{ rhi::handles::INVALID_RESOURCE };
-    math::v3 wrc_origin_{ 0.0f };
-    math::v3 wrc_counts_{ 0.0f };
+    math::v3 wrc_origin_ = math::splat3(0.0f);
+    math::v3 wrc_counts_ = math::splat3(0.0f);
     float wrc_spacing_ = 0.0f;
     bool wrc_available_ = false;
 
@@ -639,8 +642,8 @@ private:
     // Offline high-res SDF override for the far-field trace
     bool has_offline_sdf_ = false;
     rhi::ResourceHandle offline_sdf_texture_{ rhi::handles::INVALID_RESOURCE };
-    math::v3 offline_sdf_origin_{ 0.0f };
-    math::v3 offline_sdf_extent_{ 0.0f };
+    math::v3 offline_sdf_origin_ = math::splat3(0.0f);
+    math::v3 offline_sdf_extent_ = math::splat3(0.0f);
     u32 offline_sdf_resolution_ = 0;
 
     // X2/A3 时域策略枚举存储（EMA = 现有 temporal accumulation，行为不变）

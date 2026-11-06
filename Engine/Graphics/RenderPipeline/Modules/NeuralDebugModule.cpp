@@ -228,7 +228,7 @@ bool NeuralDebugModule::Initialize(RHIDeviceBase* device, u32 render_width, u32 
             std::memset(cb, 0, sizeof(NeuralDebugCB));
             cb->enc = {float(levels), 2.0f, float(log2t), float(table_count)};
             for (u32 l = 0; l < levels && l < 16; ++l)
-                cb->level_res[l >> 2][l & 3] = float(net.level_res[l]);
+                math::set_component(cb->level_res[l >> 2], l & 3, float(net.level_res[l]));
             for (u32 k = 0; k < net.layers.size() && k < neural::kMaxLayers; ++k) {
                 const neural::LayerDesc& d = net.layers[k];
                 cb->layers[k] = {float(d.in_dim), float(d.out_dim),

@@ -1158,7 +1158,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                             ? 0u : inputs.frame_index + 1u;
                     cb->probe_counts = math::v4{(float)params.probe_count_x, (float)params.probe_count_y, (float)params.probe_count_z,
                         glossy_source_audit_enabled_ ? static_cast<float>(auditFrameStamp) : 9.0f};
-                    cb->camera_pos = math::v4{invView.columns[3][0], invView.columns[3][1], invView.columns[3][2], ddgi->UsesMeasuredVisibility() ? 7.0f : 1.0f};
+                    cb->camera_pos = math::make_v4(math::xyz(math::column(invView, 3)), ddgi->UsesMeasuredVisibility() ? 7.0f : 1.0f);
                     // T6.3 sub-A: probe_vis 数据面——GIDebug() 热调旋钮进 CB，
                     // shader binding 6 第三 vec4（offset 112）。Off（默认）时
                     // x=0，gather 输出零变化。

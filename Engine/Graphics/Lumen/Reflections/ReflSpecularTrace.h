@@ -61,11 +61,13 @@ public:
         WRCCacheView wrc{};
         // 离线 SDF 优先，GlobalSDF 运行时级联回退（AddPass 内解析）。
         rhi::ResourceHandle offline_sdf{rhi::handles::INVALID_RESOURCE};
-        math::v3 offline_sdf_origin{0.0f};
-        math::v3 offline_sdf_extent{0.0f};
+        math::v3 offline_sdf_origin = math::splat3(0.0f);
+        math::v3 offline_sdf_extent = math::splat3(0.0f);
         u32 offline_sdf_resolution{0};
         bool signed_sdf{false};
-        math::v3 sky_color{0.15f};
+        // 原写法 sky_color{0.15f}：Apple simd 单标量花括号只设 x（=(0.15,0,0)），
+        // 不是灰色广播。保持 Mac 现有行为；若本意是 (0.15,0.15,0.15) 待定。
+        math::v3 sky_color{ 0.15f, 0.0f, 0.0f };
         f32 sky_tier{0.15f};
         f32 ray_max_distance{50.0f};
         bool probe_mode{false};   ///< PRIMAL_REFL_PROBE=1（R4 档）

@@ -301,6 +301,21 @@ set_target_properties(UnitD3D12DescriptorSlotPolicy PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 
+# DirectXMath 改造阶段 3：数学后端对比单测（642829c9 可移植分支冻结参考 vs
+# 当前后端公共 API）。UnitD3D12 前缀沿用"平台中立核、全平台编译运行"惯例
+# （Windows CI -R "UnitD3D12|..." 与本地 -R Unit 均可选中）；链接 Engine。
+add_executable(UnitD3D12MathDirectX Math/TestMathDirectXParity.cpp)
+target_include_directories(UnitD3D12MathDirectX PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(UnitD3D12MathDirectX PRIVATE Engine)
+add_test(NAME UnitD3D12MathDirectX COMMAND UnitD3D12MathDirectX)
+set_target_properties(UnitD3D12MathDirectX PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
 # Vulkan RHI 后端设备测试 — 仅在 ENABLE_VULKAN 时编入 Vulkan 代码路径。
 # ENABLE_VULKAN 未定义时此 TU 仍可编译（main 返回 0），但不会连接 Vulkan SDK。
 if(ENABLE_VULKAN)

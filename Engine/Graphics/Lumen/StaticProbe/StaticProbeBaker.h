@@ -10,7 +10,9 @@ struct ProbeBakingScene {
     u32 vertex_count{0};
     u32 index_count{0};
     math::v3 light_direction{0.0f, -1.0f, 0.0f};
-    math::v3 light_color{1.0f};
+    // 原写法 light_color{1.0f}：Apple simd 单标量花括号只设 x（=(1,0,0)），
+    // 不是白光广播。保持 Mac 现有行为；若本意是 (1,1,1) 待定。
+    math::v3 light_color{ 1.0f, 0.0f, 0.0f };
     float light_intensity{1.0f};
     math::v3 sky_color{0.5f, 0.7f, 1.0f};
     math::v3 albedo{0.5f, 0.5f, 0.5f};  // TODO: per-vertex albedo from RHIMeshAsset

@@ -27,8 +27,8 @@ int main() {
           "experimental SAH preserves triangle payload and digest");
     auto badExperimental=*blas; badExperimental.nodes[0].links[2]=99;
     check(!ray_geometry::BuildExperimentalSAHMesh(badExperimental),"experimental SAH rejects invalid leaf");
-    auto matrix=[](float x,float y,float z){math::m4x4 m{};m.columns[0]={x,0,0,0};m.columns[1]={0,y,0,0};m.columns[2]={0,0,z,0};m.columns[3]={0,0,0,1};return m;};
-    auto world=matrix(1,1,1),nearWorld=matrix(-2,3,.25);world.columns[3].z=5;nearWorld.columns[3].z=2;
+    auto matrix=[](float x,float y,float z){math::m4x4 m{};math::set_column(m,0,math::v4{x,0,0,0});math::set_column(m,1,math::v4{0,y,0,0});math::set_column(m,2,math::v4{0,0,z,0});math::set_column(m,3,math::v4{0,0,0,1});return m;};
+    auto world=matrix(1,1,1),nearWorld=matrix(-2,3,.25);math::set_elem(world,3,2,5);math::set_elem(nearWorld,3,2,2);
     std::vector<ray_geometry::InstanceInput> in{{blas,world,10},{blas,nearWorld,22}};
     ray_geometry::SceneBVH scene;check(scene.Build(in),"scene build");
     check(scene.triangles.size()==1 && scene.bottom.size()==blas->nodes.size(),"shared BLAS");
@@ -296,7 +296,7 @@ int main() {
     check(ray_geometry::Trace(diskScene,o,d,.05,50,hit)==1 && hit.instance_id==22 && hit.geometry_digest==blas->geometry_digest,"loaded two-level nearest and identity");
     check(ray_geometry::LoadOrBuildSceneBVH(in,dir,diskScene,&loaded)&&!loaded,"cold scene cache builds");
     check(ray_geometry::LoadOrBuildSceneBVH(in,dir,diskScene,&loaded)&&loaded,"warm scene cache loads");
-    auto changed=in;changed[0].world.columns[3].z=6;
+    auto changed=in;math::set_elem(changed[0].world,3,2,6);
     check(ray_geometry::SceneSourceDigest(changed)!=source && !ray_geometry::LoadSceneBVH(sceneFile,ray_geometry::SceneSourceDigest(changed),diskScene),"transform invalidates stored TLAS");
     changed=in;changed[0].instance_id=11;
     check(ray_geometry::SceneSourceDigest(changed)!=source,"instance reassignment invalidates TLAS");
@@ -308,7 +308,7 @@ int main() {
     check(!ray_geometry::SaveMeshBLAS(dir/"cycle.blas",invalid),"cycle rejected");
     std::filesystem::remove_all(dir);
     // Rotate local Z onto world X, add shear and non-uniform scale.
-    auto rotated=matrix(1,1,1);rotated.columns[0]={0,0,-2,0};rotated.columns[1]={.3f,3,0,0};rotated.columns[2]={.25f,0,0,0};rotated.columns[3]={4,0,0,1};
+    auto rotated=matrix(1,1,1);math::set_column(rotated,0,math::v4{0,0,-2,0});math::set_column(rotated,1,math::v4{.3f,3,0,0});math::set_column(rotated,2,math::v4{.25f,0,0,0});math::set_column(rotated,3,math::v4{4,0,0,1});
     in={{blas,rotated,7}};check(scene.Build(in),"rotated sheared scene");
     float dx[]={1,0,0};check(ray_geometry::Trace(scene,o,dx,.05,50,hit)==1 && std::abs(hit.t-4)<1e-6,"inverse ray preserves t");
     auto singular=matrix(0,1,1);in.push_back({blas,singular,8});

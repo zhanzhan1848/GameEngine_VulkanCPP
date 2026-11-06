@@ -74,20 +74,20 @@ static math::m4x4 LightmapUvPassViewProjection(const math::m4x4& proj, const mat
         return 1.0f - 1e-3f;
     }();
     // 列主主序：clip.z = Σ columns[i].z × v[i]，缩放 z 行即缩放 clip.z。
-    vp.columns[0].z *= zScale;
-    vp.columns[1].z *= zScale;
-    vp.columns[2].z *= zScale;
-    vp.columns[3].z *= zScale;
+    math::set_elem(vp, 0, 2, math::elem(vp, 0, 2) * zScale);
+    math::set_elem(vp, 1, 2, math::elem(vp, 1, 2) * zScale);
+    math::set_elem(vp, 2, 2, math::elem(vp, 2, 2) * zScale);
+    math::set_elem(vp, 3, 2, math::elem(vp, 3, 2) * zScale);
     // Y 翻转（2026-10-20 镜像定罪修复）：实测 uv_rt 与 GBuffer 互为垂直
     // 镜像（UVMIRROR：direct MAD 0.047 vs mirrored 0.0024，深度对图目视
     // 定案）——主链光栅化朝向与 GBuffer 存储相差一个 Y。UV pre-pass 以
     // clip.y 取反对齐：深度测试与颜色写入同时归位（cull=None，绕序翻转
     // 无副作用）。PRIMAL_LIGHTMAP_NOYFLIP=1 可关闭作 A/B。
     if (!std::getenv("PRIMAL_LIGHTMAP_NOYFLIP")) {
-        vp.columns[0].y = -vp.columns[0].y;
-        vp.columns[1].y = -vp.columns[1].y;
-        vp.columns[2].y = -vp.columns[2].y;
-        vp.columns[3].y = -vp.columns[3].y;
+        math::set_elem(vp, 0, 1, -math::elem(vp, 0, 1));
+        math::set_elem(vp, 1, 1, -math::elem(vp, 1, 1));
+        math::set_elem(vp, 2, 1, -math::elem(vp, 2, 1));
+        math::set_elem(vp, 3, 1, -math::elem(vp, 3, 1));
     }
     return vp;
 }
@@ -229,14 +229,14 @@ static void LogSunContractOnce(const RenderPipelineSettings& settings,
                  tone.force_passthrough ? "true" : "false",
                  tone.contrast, tone.saturation, tone.vignette, tone.key,
                  tone.bloom_intensity,
-                 view.columns[0].x, view.columns[0].y, view.columns[0].z, view.columns[0].w,
-                 view.columns[1].x, view.columns[1].y, view.columns[1].z, view.columns[1].w,
-                 view.columns[2].x, view.columns[2].y, view.columns[2].z, view.columns[2].w,
-                 view.columns[3].x, view.columns[3].y, view.columns[3].z, view.columns[3].w,
-                 proj.columns[0].x, proj.columns[0].y, proj.columns[0].z, proj.columns[0].w,
-                 proj.columns[1].x, proj.columns[1].y, proj.columns[1].z, proj.columns[1].w,
-                 proj.columns[2].x, proj.columns[2].y, proj.columns[2].z, proj.columns[2].w,
-                 proj.columns[3].x, proj.columns[3].y, proj.columns[3].z, proj.columns[3].w,
+                 math::elem(view, 0, 0), math::elem(view, 0, 1), math::elem(view, 0, 2), math::elem(view, 0, 3),
+                 math::elem(view, 1, 0), math::elem(view, 1, 1), math::elem(view, 1, 2), math::elem(view, 1, 3),
+                 math::elem(view, 2, 0), math::elem(view, 2, 1), math::elem(view, 2, 2), math::elem(view, 2, 3),
+                 math::elem(view, 3, 0), math::elem(view, 3, 1), math::elem(view, 3, 2), math::elem(view, 3, 3),
+                 math::elem(proj, 0, 0), math::elem(proj, 0, 1), math::elem(proj, 0, 2), math::elem(proj, 0, 3),
+                 math::elem(proj, 1, 0), math::elem(proj, 1, 1), math::elem(proj, 1, 2), math::elem(proj, 1, 3),
+                 math::elem(proj, 2, 0), math::elem(proj, 2, 1), math::elem(proj, 2, 2), math::elem(proj, 2, 3),
+                 math::elem(proj, 3, 0), math::elem(proj, 3, 1), math::elem(proj, 3, 2), math::elem(proj, 3, 3),
                  s.render_w, s.render_h,
                  s.shadow_map_resolution, s.shadow_cascades,
                  s.shadow_extents[0], s.shadow_extents[1], s.shadow_extents[2], s.shadow_extents[3],
@@ -338,9 +338,9 @@ static u32 ComputeSceneHash(const RenderScene& scene) {
     for (const auto& p : proxies) {
         mix((u32)p.meshId);
         mix((u32)p.entityId);
-        mixFloat(p.transform.columns[3].x);
-        mixFloat(p.transform.columns[3].y);
-        mixFloat(p.transform.columns[3].z);
+        mixFloat(math::elem(p.transform, 3, 0));
+        mixFloat(math::elem(p.transform, 3, 1));
+        mixFloat(math::elem(p.transform, 3, 2));
     }
     return h ? h : 1u;
 }
@@ -1898,18 +1898,18 @@ bool StandardRenderPipeline::PrepareBakeScene(baking::CollectedBakeScene& collec
         auto& pos = collected.ownedPositions.emplace_back();
         pos.resize((size_t)asset.num_vertices * 3);
         for (u32 v = 0; v < asset.num_vertices; ++v) {
-            pos[v * 3 + 0] = src[v * 3 + 0] * ov.second.columns[0].x +
-                             src[v * 3 + 1] * ov.second.columns[1].x +
-                             src[v * 3 + 2] * ov.second.columns[2].x +
-                             ov.second.columns[3].x;
-            pos[v * 3 + 1] = src[v * 3 + 0] * ov.second.columns[0].y +
-                             src[v * 3 + 1] * ov.second.columns[1].y +
-                             src[v * 3 + 2] * ov.second.columns[2].y +
-                             ov.second.columns[3].y;
-            pos[v * 3 + 2] = src[v * 3 + 0] * ov.second.columns[0].z +
-                             src[v * 3 + 1] * ov.second.columns[1].z +
-                             src[v * 3 + 2] * ov.second.columns[2].z +
-                             ov.second.columns[3].z;
+            pos[v * 3 + 0] = src[v * 3 + 0] * math::elem(ov.second, 0, 0) +
+                             src[v * 3 + 1] * math::elem(ov.second, 1, 0) +
+                             src[v * 3 + 2] * math::elem(ov.second, 2, 0) +
+                             math::elem(ov.second, 3, 0);
+            pos[v * 3 + 1] = src[v * 3 + 0] * math::elem(ov.second, 0, 1) +
+                             src[v * 3 + 1] * math::elem(ov.second, 1, 1) +
+                             src[v * 3 + 2] * math::elem(ov.second, 2, 1) +
+                             math::elem(ov.second, 3, 1);
+            pos[v * 3 + 2] = src[v * 3 + 0] * math::elem(ov.second, 0, 2) +
+                             src[v * 3 + 1] * math::elem(ov.second, 1, 2) +
+                             src[v * 3 + 2] * math::elem(ov.second, 2, 2) +
+                             math::elem(ov.second, 3, 2);
         }
         auto& uv = collected.ownedUvs.emplace_back();
         uv.assign(reinterpret_cast<const float*>(asset.lightmap_uv_buffer.data()),
@@ -2601,12 +2601,12 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
         const math::v3 off = neural_capture_module_->GetTakeCameraOffset();
         if (off.x != 0.0f || off.y != 0.0f || off.z != 0.0f) {
             // view' = T(-off)·view：平移列 -= R·off（R 的列即 view 前 3 列）。
-            const v4& c0 = view_matrix_.columns[0];
-            const v4& c1 = view_matrix_.columns[1];
-            const v4& c2 = view_matrix_.columns[2];
-            view_matrix_.columns[3].x -= c0.x * off.x + c1.x * off.y + c2.x * off.z;
-            view_matrix_.columns[3].y -= c0.y * off.x + c1.y * off.y + c2.y * off.z;
-            view_matrix_.columns[3].z -= c0.z * off.x + c1.z * off.y + c2.z * off.z;
+            const v4 c0 = math::column(view_matrix_, 0);
+            const v4 c1 = math::column(view_matrix_, 1);
+            const v4 c2 = math::column(view_matrix_, 2);
+            math::set_elem(view_matrix_, 3, 0, math::elem(view_matrix_, 3, 0) - (c0.x * off.x + c1.x * off.y + c2.x * off.z));
+            math::set_elem(view_matrix_, 3, 1, math::elem(view_matrix_, 3, 1) - (c0.y * off.x + c1.y * off.y + c2.y * off.z));
+            math::set_elem(view_matrix_, 3, 2, math::elem(view_matrix_, 3, 2) - (c0.z * off.x + c1.z * off.y + c2.z * off.z));
             camera_position_.x += off.x;
             camera_position_.y += off.y;
             camera_position_.z += off.z;
@@ -2629,8 +2629,8 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
         const m4x4& b = view_matrix_;
         float maxDelta = 0.0f;
         for (u32 c = 0; c < 4; ++c) {
-            const v4& ca = a.columns[c];
-            const v4& cb = b.columns[c];
+            const v4 ca = math::column(a, c);
+            const v4 cb = math::column(b, c);
             maxDelta = std::max(maxDelta, std::abs(ca.x - cb.x));
             maxDelta = std::max(maxDelta, std::abs(ca.y - cb.y));
             maxDelta = std::max(maxDelta, std::abs(ca.z - cb.z));
@@ -2649,11 +2649,11 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
 
     static u32 viewDiag = 0;
     if (viewDiag < 3) {
-        PRIMAL_LOG_STREAM(Info, "Render") << "[Diag] View: col0=(" << view_matrix_.columns[0][0] << "," << view_matrix_.columns[0][1] << "," << view_matrix_.columns[0][2] << ")"
-                  << " col1=(" << view_matrix_.columns[1][0] << "," << view_matrix_.columns[1][1] << "," << view_matrix_.columns[1][2] << ")"
-                  << " col2=(" << view_matrix_.columns[2][0] << "," << view_matrix_.columns[2][1] << "," << view_matrix_.columns[2][2] << ")"
-                  << " col3=(" << view_matrix_.columns[3][0] << "," << view_matrix_.columns[3][1] << "," << view_matrix_.columns[3][2] << ")"
-                  << " Proj11=" << proj_matrix_.columns[1][1] << " Proj22=" << proj_matrix_.columns[2][2]
+        PRIMAL_LOG_STREAM(Info, "Render") << "[Diag] View: col0=(" << math::elem(view_matrix_, 0, 0) << "," << math::elem(view_matrix_, 0, 1) << "," << math::elem(view_matrix_, 0, 2) << ")"
+                  << " col1=(" << math::elem(view_matrix_, 1, 0) << "," << math::elem(view_matrix_, 1, 1) << "," << math::elem(view_matrix_, 1, 2) << ")"
+                  << " col2=(" << math::elem(view_matrix_, 2, 0) << "," << math::elem(view_matrix_, 2, 1) << "," << math::elem(view_matrix_, 2, 2) << ")"
+                  << " col3=(" << math::elem(view_matrix_, 3, 0) << "," << math::elem(view_matrix_, 3, 1) << "," << math::elem(view_matrix_, 3, 2) << ")"
+                  << " Proj11=" << math::elem(proj_matrix_, 1, 1) << " Proj22=" << math::elem(proj_matrix_, 2, 2)
                   << std::endl;
         viewDiag++;
     }
@@ -2661,7 +2661,7 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
     // Extract camera position from inverse view matrix (column 3, xyz)
     {
         math::m4x4 invView = Inverse(view_matrix_);
-        camera_position_ = math::v3{invView.columns[3][0], invView.columns[3][1], invView.columns[3][2]};
+        camera_position_ = math::xyz(math::column(invView, 3));
     }
 
     // Update scene snapshot
@@ -2865,7 +2865,7 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                                 const math::m4x4& w = inst.world_matrix;
                                 f32 we[3] = {0.f, 0.f, 0.f};
                                 for (u32 k = 0; k < 3; ++k) {
-                                    const math::v4& col = w.columns[k];
+                                    const math::v4 col = math::column(w, k);
                                     const f32 e = (k == 0) ? ext.x : (k == 1) ? ext.y : ext.z;
                                     we[0] += std::abs(col.x) * e;
                                     we[1] += std::abs(col.y) * e;
@@ -2958,7 +2958,7 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                                 const math::m4x4& w = inst.world_matrix;
                                 f32 we[3] = {0.f, 0.f, 0.f};
                                 for (u32 k = 0; k < 3; ++k) {
-                                    const math::v4& col = w.columns[k];
+                                    const math::v4 col = math::column(w, k);
                                     const f32 e = (k == 0) ? ext.x : (k == 1) ? ext.y : ext.z;
                                     we[0] += std::abs(col.x) * e;
                                     we[1] += std::abs(col.y) * e;
@@ -3028,7 +3028,7 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                 const math::m4x4& w = inst.world_matrix;
                 f32 we[3] = {0.f, 0.f, 0.f};
                 for (u32 k = 0; k < 3; ++k) {
-                    const math::v4& col = w.columns[k];
+                    const math::v4 col = math::column(w, k);
                     const f32 e = (k == 0) ? ext.x : (k == 1) ? ext.y : ext.z;
                     we[0] += std::abs(col.x) * e;
                     we[1] += std::abs(col.y) * e;
@@ -3074,9 +3074,9 @@ void StandardRenderPipeline::UpdatePerFrame(RenderScene& scene, RenderView& view
                     // Normal-matrix rows = columns of inv_world: for
                     // column-major M, n_world = (M₃ₓ₃⁻¹)ᵀ n_local, applied as
                     // Σ_j inv.columns[j] * g_j — exactly the shader's row form.
-                    slots[s].normal_matrix[0] = slots[s].inv_world.columns[0];
-                    slots[s].normal_matrix[1] = slots[s].inv_world.columns[1];
-                    slots[s].normal_matrix[2] = slots[s].inv_world.columns[2];
+                    slots[s].normal_matrix[0] = math::column(slots[s].inv_world, 0);
+                    slots[s].normal_matrix[1] = math::column(slots[s].inv_world, 1);
+                    slots[s].normal_matrix[2] = math::column(slots[s].inv_world, 2);
 
                     const f32* bmin = mesh->GetBoundsMin();
                     const f32* bmax = mesh->GetBoundsMax();
@@ -5070,7 +5070,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
                 const float xs[4] = {x, y, z, 1.0f};
                 for (int rr = 0; rr < 4; ++rr) out[rr] = 0.0f;
                 for (int cc = 0; cc < 4; ++cc)
-                    for (int rr = 0; rr < 4; ++rr) out[rr] += invVP.columns[cc][rr] * xs[cc];
+                    for (int rr = 0; rr < 4; ++rr) out[rr] += math::elem(invVP, cc, rr) * xs[cc];
             };
             float n0[4], n1[4];
             xform(0.4727f * 2.0f - 1.0f, 1.0f - 2.0f * 0.9167f, 0.0f, n0);
@@ -6904,7 +6904,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 const float xs[4] = {x, y, z, 1.0f};
                 for (int rr = 0; rr < 4; ++rr) out[rr] = 0.0f;
                 for (int cc = 0; cc < 4; ++cc)
-                    for (int rr = 0; rr < 4; ++rr) out[rr] += invVP.columns[cc][rr] * xs[cc];
+                    for (int rr = 0; rr < 4; ++rr) out[rr] += math::elem(invVP, cc, rr) * xs[cc];
             };
             float n0[4], n1[4];
             xform(0.4727f * 2.0f - 1.0f, 1.0f - 2.0f * 0.9167f, 0.0f, n0);

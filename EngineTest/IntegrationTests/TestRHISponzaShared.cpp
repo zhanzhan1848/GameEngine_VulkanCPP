@@ -1662,8 +1662,8 @@ std::array<math::v4, 6> M5ExtractFrustumPlanes(const math::m4x4& vp) {
     // N=row3+row2 F=row3-row2；归一化=4 分量长度（镜像 GPUCullingPipeline
     // mkPlane 惯例）。GPU 只做点积 → 约定差异零风险。
     auto row = [&vp](int i) {
-        return math::v4{vp.columns[0][i], vp.columns[1][i], vp.columns[2][i],
-                        vp.columns[3][i]};
+        return math::v4{math::elem(vp, 0, i), math::elem(vp, 1, i),
+                        math::elem(vp, 2, i), math::elem(vp, 3, i)};
     };
     const math::v4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
     auto mk = [](const math::v4& a, float sign, const math::v4& b) {
@@ -3388,7 +3388,7 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                     // vd.viewProjection（含 M5 视锥平面提取）与 M4
                     // invViewProjection 均消费此取反后的同一 proj。
                     for (int c = 0; c < 4; ++c)
-                        proj.columns[c][1] = -proj.columns[c][1];
+                        math::set_elem(proj, c, 1, -math::elem(proj, c, 1));
                     ViewDataGPU vd{};
                     vd.viewProjection = proj * view;
                     vd.cameraPos = math::v4{cam.position.x, cam.position.y,

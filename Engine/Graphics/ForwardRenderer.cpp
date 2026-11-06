@@ -1134,10 +1134,10 @@ void ForwardRenderer::RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
         
         float nx = N.x; float ny = N.y; float nz = N.z;
         rhi::math::m4x4 reflectionMat;
-        reflectionMat.columns[0] = {1.0f - 2.0f*nx*nx, -2.0f*ny*nx, -2.0f*nz*nx, 0.0f};
-        reflectionMat.columns[1] = {-2.0f*nx*ny, 1.0f - 2.0f*ny*ny, -2.0f*nz*ny, 0.0f};
-        reflectionMat.columns[2] = {-2.0f*nx*nz, -2.0f*ny*nz, 1.0f - 2.0f*nz*nz, 0.0f};
-        reflectionMat.columns[3] = {-2.0f*nx*d, -2.0f*ny*d, -2.0f*nz*d, 1.0f};
+        rhi::math::set_column(reflectionMat, 0, rhi::math::v4{1.0f - 2.0f*nx*nx, -2.0f*ny*nx, -2.0f*nz*nx, 0.0f});
+        rhi::math::set_column(reflectionMat, 1, rhi::math::v4{-2.0f*nx*ny, 1.0f - 2.0f*ny*ny, -2.0f*nz*ny, 0.0f});
+        rhi::math::set_column(reflectionMat, 2, rhi::math::v4{-2.0f*nx*nz, -2.0f*ny*nz, 1.0f - 2.0f*nz*nz, 0.0f});
+        rhi::math::set_column(reflectionMat, 3, rhi::math::v4{-2.0f*nx*d, -2.0f*ny*d, -2.0f*nz*d, 1.0f});
 
         rhi::math::m4x4 mainViewMat = mainView.GetViewMatrix();
         rhi::math::m4x4 reflectionViewMat = mainViewMat * reflectionMat;
@@ -1242,8 +1242,8 @@ void ForwardRenderer::RenderReflections(rhi::RHICommandBuffer* cmdBuffer,
              data->viewProjection = reflectionView.GetViewProjectionMatrix();
              
              rhi::math::m4x4 viewInv = rhi::math::Inverse(data->view);
-             rhi::math::v3 cameraPos = {viewInv.columns[3][0], viewInv.columns[3][1], viewInv.columns[3][2]};
-             rhi::math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
+             rhi::math::v3 cameraPos = {rhi::math::elem(viewInv, 3, 0), rhi::math::elem(viewInv, 3, 1), rhi::math::elem(viewInv, 3, 2)};
+             rhi::math::v3 cameraDir = {rhi::math::elem(viewInv, 2, 0), rhi::math::elem(viewInv, 2, 1), rhi::math::elem(viewInv, 2, 2)};
              data->cameraPositionAndViewWidth = {cameraPos.x, cameraPos.y, cameraPos.z, 1024.0f};
              data->cameraDirectionAndViewHeight = {cameraDir.x, cameraDir.y, cameraDir.z, 1024.0f};
         }
@@ -1343,8 +1343,8 @@ void ForwardRenderer::RenderDawnShadowPass(rhi::RHICommandBuffer* cmdBuffer,
     rhi::math::v4 centerLS = lightView * rhi::math::v4{center.x, center.y, center.z, 1.0f};
     float snappedX = roundf(centerLS.x / texelSize) * texelSize;
     float snappedY = roundf(centerLS.y / texelSize) * texelSize;
-    lightView.columns[3][0] += (snappedX - centerLS.x);
-    lightView.columns[3][1] += (snappedY - centerLS.y);
+    rhi::math::set_elem(lightView, 3, 0, rhi::math::elem(lightView, 3, 0) + (snappedX - centerLS.x));
+    rhi::math::set_elem(lightView, 3, 1, rhi::math::elem(lightView, 3, 1) + (snappedY - centerLS.y));
 
     // Z bounds from frustum (only depth range varies)
     float minZ = 1e9f, maxZ = -1e9f;
@@ -1766,8 +1766,8 @@ void ForwardRenderer::RenderDawnDeferredLighting(rhi::RHICommandBuffer* cmdBuffe
         frameData->previousViewProjection = prevViewProjection_;
 
         rhi::math::m4x4 viewInv = rhi::math::Inverse(view.GetViewMatrix());
-        rhi::math::v3 cameraPos = {viewInv.columns[3][0], viewInv.columns[3][1], viewInv.columns[3][2]};
-        rhi::math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
+        rhi::math::v3 cameraPos = {rhi::math::elem(viewInv, 3, 0), rhi::math::elem(viewInv, 3, 1), rhi::math::elem(viewInv, 3, 2)};
+        rhi::math::v3 cameraDir = {rhi::math::elem(viewInv, 2, 0), rhi::math::elem(viewInv, 2, 1), rhi::math::elem(viewInv, 2, 2)};
         frameData->deltaTime = deltaTime_;
         frameData->frameCount = static_cast<float>(frameNumber_);
         frameData->renderMode = dawnRenderMode_;
@@ -1917,8 +1917,8 @@ void ForwardRenderer::RenderDawnMeshletDeferredLighting(rhi::RHICommandBuffer* c
         frameData->invViewProjection = rhi::math::Inverse(view.GetViewProjectionMatrix());
 
         rhi::math::m4x4 viewInv = rhi::math::Inverse(view.GetViewMatrix());
-        rhi::math::v3 cameraPos = {viewInv.columns[3][0], viewInv.columns[3][1], viewInv.columns[3][2]};
-        rhi::math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
+        rhi::math::v3 cameraPos = {rhi::math::elem(viewInv, 3, 0), rhi::math::elem(viewInv, 3, 1), rhi::math::elem(viewInv, 3, 2)};
+        rhi::math::v3 cameraDir = {rhi::math::elem(viewInv, 2, 0), rhi::math::elem(viewInv, 2, 1), rhi::math::elem(viewInv, 2, 2)};
         frameData->deltaTime = deltaTime_;
         frameData->frameCount = static_cast<float>(frameNumber_);
         frameData->renderMode = dawnRenderMode_;
@@ -2372,8 +2372,8 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
         frameData->previousViewProjection = prevViewProjection_;
 
         rhi::math::m4x4 viewInv = rhi::math::Inverse(view.GetViewMatrix());
-        rhi::math::v3 cameraPos = {viewInv.columns[3][0], viewInv.columns[3][1], viewInv.columns[3][2]};
-        rhi::math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
+        rhi::math::v3 cameraPos = {rhi::math::elem(viewInv, 3, 0), rhi::math::elem(viewInv, 3, 1), rhi::math::elem(viewInv, 3, 2)};
+        rhi::math::v3 cameraDir = {rhi::math::elem(viewInv, 2, 0), rhi::math::elem(viewInv, 2, 1), rhi::math::elem(viewInv, 2, 2)};
         frameData->deltaTime = deltaTime_;
         frameData->frameCount = static_cast<float>(frameNumber_);
         frameData->renderMode = dawnRenderMode_;
@@ -2414,7 +2414,7 @@ void ForwardRenderer::Render(rhi::RHICommandBuffer* cmdBuffer,
     }
 
     rhi::math::m4x4 viewInv = rhi::math::Inverse(view.GetViewMatrix());
-    rhi::math::v3 cameraPos = {viewInv.columns[3][0], viewInv.columns[3][1], viewInv.columns[3][2]};
+    rhi::math::v3 cameraPos = {rhi::math::elem(viewInv, 3, 0), rhi::math::elem(viewInv, 3, 1), rhi::math::elem(viewInv, 3, 2)};
 
     // Sort Opaque (Front-to-Back)
     std::sort(opaqueProxies.begin(), opaqueProxies.end(), [&](const RenderProxy* a, const RenderProxy* b) {

@@ -688,14 +688,14 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
 
                     math::m4x4 invView = rhi::math::Inverse(camera_data.view_matrix);
                     mapped->CameraPositionAndViewWidth = {
-                        invView.columns[3][0], invView.columns[3][1],
-                        invView.columns[3][2], (float)render_width_
+                        math::elem(invView, 3, 0), math::elem(invView, 3, 1),
+                        math::elem(invView, 3, 2), (float)render_width_
                     };
 
                     auto& vm = camera_data.view_matrix;
                     mapped->CameraDirectionAndViewHeight = {
-                        -vm.columns[2][0], -vm.columns[2][1],
-                        -vm.columns[2][2], (float)render_height_
+                        -math::elem(vm, 2, 0), -math::elem(vm, 2, 1),
+                        -math::elem(vm, 2, 2), (float)render_height_
                     };
 
                     mapped->NumDirectionalLights = 0;

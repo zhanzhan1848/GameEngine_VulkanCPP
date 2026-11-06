@@ -77,10 +77,10 @@ struct DeviceFixture {
 m4x4 make_identity_m4x4() {
     m4x4 r{};
     std::memset(&r, 0, sizeof(r));
-    r.columns[0][0] = 1.0f;
-    r.columns[1][1] = 1.0f;
-    r.columns[2][2] = 1.0f;
-    r.columns[3][3] = 1.0f;
+    set_elem(r, 0, 0, 1.0f);
+    set_elem(r, 1, 1, 1.0f);
+    set_elem(r, 2, 2, 1.0f);
+    set_elem(r, 3, 3, 1.0f);
     return r;
 }
 
@@ -136,7 +136,7 @@ TestResult TestForwardRendererIntegration_Smoke() {
     // 4. Build a minimal view: identity-ish camera looking at origin.
     RenderView view;
     m4x4 viewMat = make_identity_m4x4();
-    viewMat.columns[3][2] = 5.0f;  // pull camera back along +Z
+    set_elem(viewMat, 3, 2, 5.0f);  // pull camera back along +Z
     view.SetViewMatrix(viewMat);
 
     // Perspective projection (irrelevant for empty scene, but required by view).
@@ -146,11 +146,11 @@ TestResult TestForwardRendererIntegration_Smoke() {
     float f = 1.0f / std::tan(fov * 0.5f);
     m4x4 proj{};
     std::memset(&proj, 0, sizeof(proj));
-    proj.columns[0][0] = f / aspect;
-    proj.columns[1][1] = f;
-    proj.columns[2][2] = 50.0f / (0.1f - 100.0f);   // [0,1] depth range
-    proj.columns[2][3] = 1.0f;
-    proj.columns[3][2] = -(0.1f * 100.0f) / (0.1f - 100.0f);
+    set_elem(proj, 0, 0, f / aspect);
+    set_elem(proj, 1, 1, f);
+    set_elem(proj, 2, 2, 50.0f / (0.1f - 100.0f));   // [0,1] depth range
+    set_elem(proj, 2, 3, 1.0f);
+    set_elem(proj, 3, 2, -(0.1f * 100.0f) / (0.1f - 100.0f));
     view.SetProjectionMatrix(proj);
     view.Cull(scene);
 
@@ -293,7 +293,7 @@ TestResult TestForwardRendererIntegration_FrameTiming() {
 
     RenderView view;
     m4x4 viewMat = make_identity_m4x4();
-    viewMat.columns[3][2] = 5.0f;
+    set_elem(viewMat, 3, 2, 5.0f);
     view.SetViewMatrix(viewMat);
     constexpr float pi = 3.14159265358979323846f;
     float fov = 60.0f * (pi / 180.0f);
@@ -301,11 +301,11 @@ TestResult TestForwardRendererIntegration_FrameTiming() {
     float f = 1.0f / std::tan(fov * 0.5f);
     m4x4 proj{};
     std::memset(&proj, 0, sizeof(proj));
-    proj.columns[0][0] = f / aspect;
-    proj.columns[1][1] = f;
-    proj.columns[2][2] = 50.0f / (0.1f - 100.0f);
-    proj.columns[2][3] = 1.0f;
-    proj.columns[3][2] = -(0.1f * 100.0f) / (0.1f - 100.0f);
+    set_elem(proj, 0, 0, f / aspect);
+    set_elem(proj, 1, 1, f);
+    set_elem(proj, 2, 2, 50.0f / (0.1f - 100.0f));
+    set_elem(proj, 2, 3, 1.0f);
+    set_elem(proj, 3, 2, -(0.1f * 100.0f) / (0.1f - 100.0f));
     view.SetProjectionMatrix(proj);
     view.Cull(scene);
 

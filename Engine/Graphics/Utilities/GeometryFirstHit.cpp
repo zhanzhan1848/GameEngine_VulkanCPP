@@ -37,12 +37,12 @@ bool SceneBVH::Build(std::span<const InstanceInput> inputs) {
         if(!in.mesh || in.mesh->nodes.empty() || in.mesh->triangles.empty()) { *this={}; return false; }
         double w[3][4];
         for(u32 r=0;r<3;++r) for(u32 c=0;c<4;++c) {
-            const float* col=reinterpret_cast<const float*>(&in.world.columns[c]);
-            if(!finite(col[r])) { *this={}; return false; } w[r][c]=col[r];
+            const float v=math::elem(in.world,c,r);
+            if(!finite(v)) { *this={}; return false; } w[r][c]=v;
         }
         for(u32 c=0;c<4;++c) {
-            const float* col=reinterpret_cast<const float*>(&in.world.columns[c]);
-            if(!finite(col[3]) || col[3]!=(c==3?1.f:0.f)) { *this={}; return false; }
+            const float v=math::elem(in.world,c,3);
+            if(!finite(v) || v!=(c==3?1.f:0.f)) { *this={}; return false; }
         }
         const double det=w[0][0]*(w[1][1]*w[2][2]-w[1][2]*w[2][1])-
             w[0][1]*(w[1][0]*w[2][2]-w[1][2]*w[2][0])+w[0][2]*(w[1][0]*w[2][1]-w[1][1]*w[2][0]);

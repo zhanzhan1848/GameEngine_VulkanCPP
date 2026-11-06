@@ -123,45 +123,45 @@ struct Frustum {
 
         // Left: clip.x + clip.w >= 0 → (row0 + row3)
         planes[0] = math::v4{
-            vp.columns[0][0] + vp.columns[0][3],
-            vp.columns[1][0] + vp.columns[1][3],
-            vp.columns[2][0] + vp.columns[2][3],
-            vp.columns[3][0] + vp.columns[3][3]
+            math::elem(vp, 0, 0) + math::elem(vp, 0, 3),
+            math::elem(vp, 1, 0) + math::elem(vp, 1, 3),
+            math::elem(vp, 2, 0) + math::elem(vp, 2, 3),
+            math::elem(vp, 3, 0) + math::elem(vp, 3, 3)
         };
         // Right: clip.w - clip.x >= 0 → (row3 - row0)
         planes[1] = math::v4{
-            vp.columns[0][3] - vp.columns[0][0],
-            vp.columns[1][3] - vp.columns[1][0],
-            vp.columns[2][3] - vp.columns[2][0],
-            vp.columns[3][3] - vp.columns[3][0]
+            math::elem(vp, 0, 3) - math::elem(vp, 0, 0),
+            math::elem(vp, 1, 3) - math::elem(vp, 1, 0),
+            math::elem(vp, 2, 3) - math::elem(vp, 2, 0),
+            math::elem(vp, 3, 3) - math::elem(vp, 3, 0)
         };
         // Top: clip.w - clip.y >= 0 → (row3 - row1)
         planes[2] = math::v4{
-            vp.columns[0][3] - vp.columns[0][1],
-            vp.columns[1][3] - vp.columns[1][1],
-            vp.columns[2][3] - vp.columns[2][1],
-            vp.columns[3][3] - vp.columns[3][1]
+            math::elem(vp, 0, 3) - math::elem(vp, 0, 1),
+            math::elem(vp, 1, 3) - math::elem(vp, 1, 1),
+            math::elem(vp, 2, 3) - math::elem(vp, 2, 1),
+            math::elem(vp, 3, 3) - math::elem(vp, 3, 1)
         };
         // Bottom: clip.y + clip.w >= 0 → (row1 + row3)
         planes[3] = math::v4{
-            vp.columns[0][1] + vp.columns[0][3],
-            vp.columns[1][1] + vp.columns[1][3],
-            vp.columns[2][1] + vp.columns[2][3],
-            vp.columns[3][1] + vp.columns[3][3]
+            math::elem(vp, 0, 1) + math::elem(vp, 0, 3),
+            math::elem(vp, 1, 1) + math::elem(vp, 1, 3),
+            math::elem(vp, 2, 1) + math::elem(vp, 2, 3),
+            math::elem(vp, 3, 1) + math::elem(vp, 3, 3)
         };
         // Near: Metal/Dawn [0,1] depth — clip.z >= 0 → row2
         planes[4] = math::v4{
-            vp.columns[0][2],
-            vp.columns[1][2],
-            vp.columns[2][2],
-            vp.columns[3][2]
+            math::elem(vp, 0, 2),
+            math::elem(vp, 1, 2),
+            math::elem(vp, 2, 2),
+            math::elem(vp, 3, 2)
         };
         // Far: clip.w - clip.z >= 0 → (row3 - row2)
         planes[5] = math::v4{
-            vp.columns[0][3] - vp.columns[0][2],
-            vp.columns[1][3] - vp.columns[1][2],
-            vp.columns[2][3] - vp.columns[2][2],
-            vp.columns[3][3] - vp.columns[3][2]
+            math::elem(vp, 0, 3) - math::elem(vp, 0, 2),
+            math::elem(vp, 1, 3) - math::elem(vp, 1, 2),
+            math::elem(vp, 2, 3) - math::elem(vp, 2, 2),
+            math::elem(vp, 3, 3) - math::elem(vp, 3, 2)
         };
         
         // 归一化平面方程

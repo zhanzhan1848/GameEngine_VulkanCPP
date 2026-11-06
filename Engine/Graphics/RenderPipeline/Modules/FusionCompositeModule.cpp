@@ -425,7 +425,7 @@ void GiLadderXform(const math::m4x4& m, float x, float y, float z, float out[4])
     for (int rr = 0; rr < 4; ++rr) out[rr] = 0.0f;
     for (int cc = 0; cc < 4; ++cc)
         for (int rr = 0; rr < 4; ++rr)
-            out[rr] += m.columns[cc][rr] * xs[cc];
+            out[rr] += math::elem(m, cc, rr) * xs[cc];
 }
 
 void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,

@@ -199,7 +199,7 @@ ray_geometry::SceneBVH buildGeometry(const Config& cfg){
     if(cfg.scaled)for(size_t i=0;i<v.size();i+=3){v[i]/=2.f;v[i+1]/=.5f;v[i+2]/=3.f;}
     mesh.num_vertices=v.size()/3;mesh.num_indices=indices.size();mesh.index_size=4;mesh.position_buffer.resize(v.size()*4);mesh.index_buffer.resize(indices.size()*4);
     std::memcpy(mesh.position_buffer.data(),v.data(),v.size()*4);std::memcpy(mesh.index_buffer.data(),indices.data(),indices.size()*4);
-    auto blas=ray_geometry::BuildMeshBLAS(mesh);require(bool(blas),"Build real GG fixture BLAS");math::m4x4 m{};m.columns[0]={1,0,0,0};m.columns[1]={0,1,0,0};m.columns[2]={0,0,1,0};m.columns[3]={0,0,0,1};if(cfg.scaled){m.columns[0].x=2.f;m.columns[1].y=.5f;m.columns[2].z=3.f;}
+    auto blas=ray_geometry::BuildMeshBLAS(mesh);require(bool(blas),"Build real GG fixture BLAS");math::m4x4 m{};math::set_column(m,0,math::v4{1,0,0,0});math::set_column(m,1,math::v4{0,1,0,0});math::set_column(m,2,math::v4{0,0,1,0});math::set_column(m,3,math::v4{0,0,0,1});if(cfg.scaled){math::set_elem(m,0,0,2.f);math::set_elem(m,1,1,.5f);math::set_elem(m,2,2,3.f);}
     std::array<ray_geometry::InstanceInput,1> input{{{blas,m,324}}};ray_geometry::SceneBVH out;require(out.Build(input),"Build real GG fixture TLAS");
 #ifdef GG_CONNECTION_EQUIVALENCE
     if(cfg.geometry==Geometry::HitThenInvalid||cfg.geometry==Geometry::InvalidThenHit){

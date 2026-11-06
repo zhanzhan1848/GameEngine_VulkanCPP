@@ -701,9 +701,9 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     if (execute_call_count_ <= 3) {
         PRIMAL_LOG_STREAM(Info, "Render")
             << "[GPUCulling] camPos=(" << cameraPos.x << "," << cameraPos.y << ","
-            << cameraPos.z << ") VP00=" << viewProjection.columns[0][0]
-            << " VP32=" << viewProjection.columns[3][2]
-            << " far-ish VP23=" << viewProjection.columns[2][3] << std::endl;
+            << cameraPos.z << ") VP00=" << math::elem(viewProjection, 0, 0)
+            << " VP32=" << math::elem(viewProjection, 3, 2)
+            << " far-ish VP23=" << math::elem(viewProjection, 2, 3) << std::endl;
     }
 
     // current_frame_resource_ is already set at the beginning of Execute()
@@ -797,9 +797,9 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                             << " resource=" << (resource ? "ok" : "null")
                             << " gpu_mesh=" << ((resource && resource->gpu_mesh) ? "ok" : "null")
                             << " bounds=" << ((bmin && bmax) ? "ok" : "null")
-                            << " center=(" << instanceData[i].world_matrix.columns[3].x << ","
-                            << instanceData[i].world_matrix.columns[3].y << ","
-                            << instanceData[i].world_matrix.columns[3].z << ")" << std::endl;
+                            << " center=(" << math::elem(instanceData[i].world_matrix, 3, 0) << ","
+                            << math::elem(instanceData[i].world_matrix, 3, 1) << ","
+                            << math::elem(instanceData[i].world_matrix, 3, 2) << ")" << std::endl;
                     }
 
                     if (resource && resource->gpu_mesh) {
@@ -837,15 +837,15 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
                             }
 
                             // Scale radius by the maximum scale factor from the transform matrix
-                            math::v3 col0{instanceData[i].world_matrix.columns[0].x,
-                                            instanceData[i].world_matrix.columns[0].y,
-                                            instanceData[i].world_matrix.columns[0].z};
-                            math::v3 col1{instanceData[i].world_matrix.columns[1].x,
-                                            instanceData[i].world_matrix.columns[1].y,
-                                            instanceData[i].world_matrix.columns[1].z};
-                            math::v3 col2{instanceData[i].world_matrix.columns[2].x,
-                                            instanceData[i].world_matrix.columns[2].y,
-                                            instanceData[i].world_matrix.columns[2].z};
+                            math::v3 col0{math::elem(instanceData[i].world_matrix, 0, 0),
+                                            math::elem(instanceData[i].world_matrix, 0, 1),
+                                            math::elem(instanceData[i].world_matrix, 0, 2)};
+                            math::v3 col1{math::elem(instanceData[i].world_matrix, 1, 0),
+                                            math::elem(instanceData[i].world_matrix, 1, 1),
+                                            math::elem(instanceData[i].world_matrix, 1, 2)};
+                            math::v3 col2{math::elem(instanceData[i].world_matrix, 2, 0),
+                                            math::elem(instanceData[i].world_matrix, 2, 1),
+                                            math::elem(instanceData[i].world_matrix, 2, 2)};
                             float scale0 = std::sqrt(col0.x * col0.x + col0.y * col0.y + col0.z * col0.z);
                             float scale1 = std::sqrt(col1.x * col1.x + col1.y * col1.y + col1.z * col1.z);
                             float scale2 = std::sqrt(col2.x * col2.x + col2.y * col2.y + col2.z * col2.z);
@@ -1017,8 +1017,8 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
     if (callCount <= 2) {
         const auto& insts = snapshot.GetInstanceData();
         auto mkPlane = [&viewProjection](int row, float sign) {
-            const math::v4& c3 = viewProjection.columns[3];
-            const math::v4& cr = viewProjection.columns[row];
+            const math::v4 c3 = math::column(viewProjection, 3);
+            const math::v4 cr = math::column(viewProjection, row);
             math::v4 p{c3.x + sign * cr.x, c3.y + sign * cr.y,
                        c3.z + sign * cr.z, c3.w + sign * cr.w};
             const float len = std::sqrt(p.x*p.x + p.y*p.y + p.z*p.z + p.w*p.w);
@@ -1027,8 +1027,8 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
         };
         // 与 UpdateCullingConstants 相同的投影实测法（列主序索引同上）
         auto clipDepthP = [&projectionMatrix](float z) {
-            const float zc = projectionMatrix.columns[2].z * z + projectionMatrix.columns[3].z;
-            const float wc = projectionMatrix.columns[2].w * z + projectionMatrix.columns[3].w;
+            const float zc = math::elem(projectionMatrix, 2, 2) * z + math::elem(projectionMatrix, 3, 2);
+            const float wc = math::elem(projectionMatrix, 2, 3) * z + math::elem(projectionMatrix, 3, 3);
             return (wc > 1e-6f) ? (zc / wc) : -1.0f;
         };
         const float dPlus = clipDepthP(1.0f), dMinus = clipDepthP(-1.0f);
@@ -1625,9 +1625,9 @@ math::v3 GPUCullingPipeline::extract_camera_position(const math::m4x4& view_matr
     // Simply invert the view matrix to get the camera position
     math::m4x4 inv_view = rhi::math::Inverse(view_matrix);
     math::v3 camera_pos;
-    camera_pos.x = inv_view.columns[3][0];
-    camera_pos.y = inv_view.columns[3][1];
-    camera_pos.z = inv_view.columns[3][2];
+    camera_pos.x = math::elem(inv_view, 3, 0);
+    camera_pos.y = math::elem(inv_view, 3, 1);
+    camera_pos.z = math::elem(inv_view, 3, 2);
     return camera_pos;
 }
 
@@ -1962,11 +1962,11 @@ bool GPUCullingPipeline::UpdateCullingDescriptorSet(const RenderSceneSnapshot& s
     // 测试壳 CreateLookAtMatrix 为 -Z forward（RH）。旧 P22*P23 同号/异号
     // 启发式在编辑器投影上判错（实得 -1 而 view 实测 +Z forward）。
     {
-        // 列主序 m[col][row]：P22=columns[2].z、P23=columns[3].z、
-        // P32=columns[2].w、P33=columns[3].w（勿混用 columns[2].w=P32）。
+        // 列主序 m[col][row]：P22=elem(m,2,2)、P23=elem(m,3,2)、
+        // P32=elem(m,2,3)、P33=elem(m,3,3)（勿混用 elem(m,2,3)=P32）。
         auto clipDepth = [&projection_matrix](float z) {
-            const float zc = projection_matrix.columns[2].z * z + projection_matrix.columns[3].z;
-            const float wc = projection_matrix.columns[2].w * z + projection_matrix.columns[3].w;
+            const float zc = math::elem(projection_matrix, 2, 2) * z + math::elem(projection_matrix, 3, 2);
+            const float wc = math::elem(projection_matrix, 2, 3) * z + math::elem(projection_matrix, 3, 3);
             return (wc > 1e-6f) ? (zc / wc) : -1.0f;
         };
         const float dPlus = clipDepth(1.0f);

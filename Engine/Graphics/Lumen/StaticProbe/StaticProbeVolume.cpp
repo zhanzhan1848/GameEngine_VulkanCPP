@@ -31,8 +31,8 @@ bool StaticProbeVolume::Initialize(rhi::RHIDeviceBase* device, const StaticProbe
     const u32 totalProbes = ProbeCount();
 
     // Allocate CPU-side data vectors
-    irradiance_data_.resize(totalProbes * 9, math::v3{0.0f});
-    sky_sh_data_.resize(totalProbes * 9, math::v3{0.0f});
+    irradiance_data_.resize(totalProbes * 9, math::splat3(0.0f));
+    sky_sh_data_.resize(totalProbes * 9, math::splat3(0.0f));
     depth_mean_data_.resize(totalProbes * 64, 0.0f);
     depth_var_data_.resize(totalProbes * 64, 0.0f);
     sky_factor_data_.resize(totalProbes, 0.0f);
@@ -355,11 +355,11 @@ void StaticProbeVolume::FillWithSkySeed(const math::v3& sky_color, float ray_max
     for (u32 p = 0; p < pc; ++p) {
         irradiance_data_[p * 9 + 0] = sh0;
         for (u32 i = 1; i < 9; ++i) {
-            irradiance_data_[p * 9 + i] = math::v3{0.0f};
+            irradiance_data_[p * 9 + i] = math::splat3(0.0f);
         }
         sky_sh_data_[p * 9 + 0] = sh0;
         for (u32 i = 1; i < 9; ++i) {
-            sky_sh_data_[p * 9 + i] = math::v3{0.0f};
+            sky_sh_data_[p * 9 + i] = math::splat3(0.0f);
         }
     }
 
@@ -374,7 +374,7 @@ void StaticProbeVolume::FillWithSkySeed(const math::v3& sky_color, float ray_max
 
     // Global sky SH (9 coeffs) — L0 only
     for (u32 i = 0; i < 9; ++i) {
-        sky_sh_[i] = (i == 0) ? sh0 : math::v3{0.0f};
+        sky_sh_[i] = (i == 0) ? sh0 : math::splat3(0.0f);
     }
 
     is_loaded_ = true;

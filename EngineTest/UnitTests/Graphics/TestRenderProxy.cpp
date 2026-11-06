@@ -85,9 +85,9 @@ TestResult TestRenderProxyUpdateTransform() {
     proxy.UpdateTransform(newTransform);
     
     // Check if translation component matches
-    TEST_ASSERT(proxy.transform.columns[3][0] == 10.f, "Transform X mismatch");
-    TEST_ASSERT(proxy.transform.columns[3][1] == 20.f, "Transform Y mismatch");
-    TEST_ASSERT(proxy.transform.columns[3][2] == 30.f, "Transform Z mismatch");
+    TEST_ASSERT(math::elem(proxy.transform, 3, 0) == 10.f, "Transform X mismatch");
+    TEST_ASSERT(math::elem(proxy.transform, 3, 1) == 20.f, "Transform Y mismatch");
+    TEST_ASSERT(math::elem(proxy.transform, 3, 2) == 30.f, "Transform Z mismatch");
     
     return TestResult::Passed;
 }
@@ -139,20 +139,20 @@ TestResult TestRenderProxyAABB() {
         // Manually construct identity-like matrix
         math::m4x4 scale;
         memset(&scale, 0, sizeof(scale));
-        scale.columns[0][0] = 2.f;
-        scale.columns[1][1] = 2.f;
-        scale.columns[2][2] = 2.f;
-        scale.columns[3][3] = 1.f;
+        math::set_elem(scale, 0, 0, 2.f);
+        math::set_elem(scale, 1, 1, 2.f);
+        math::set_elem(scale, 2, 2, 2.f);
+        math::set_elem(scale, 3, 3, 1.f);
         
         // math::m4x4 translation = math::CreateTranslationMatrix(math::v3{10.f, 0.f, 0.f});
         
         // Construct combined matrix manually
         math::m4x4 combined;
         memset(&combined, 0, sizeof(combined));
-        combined.columns[0][0] = 2.f;
-        combined.columns[1][1] = 2.f;
-        combined.columns[2][2] = 2.f;
-        combined.columns[3] = math::v4{10.f, 0.f, 0.f, 1.f};
+        math::set_elem(combined, 0, 0, 2.f);
+        math::set_elem(combined, 1, 1, 2.f);
+        math::set_elem(combined, 2, 2, 2.f);
+        math::set_column(combined, 3, math::v4{10.f, 0.f, 0.f, 1.f});
 
         proxy.UpdateTransform(combined);
         

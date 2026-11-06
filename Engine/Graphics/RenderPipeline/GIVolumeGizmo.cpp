@@ -13,15 +13,15 @@ namespace primal::graphics {
 namespace gi_gizmo {
 
 // ============================================================================
-// 内部数学（跨平台：Apple simd 与便携结构体共用 .x/.y/.z + columns 访问）
+// 内部数学（跨平台：三后端共用 .x/.y/.z 成员 + math::column/elem 列访问）
 // ============================================================================
 
 namespace {
 
 inline math::v4 TransformVec4(const math::m4x4& m, const math::v4& v) {
-    // m.columns[c] = 第 c 列；result = sum_c m.columns[c] * v[c]
-    return m.columns[0] * v.x + m.columns[1] * v.y +
-           m.columns[2] * v.z + m.columns[3] * v.w;
+    // math::column(m, c) = 第 c 列；result = sum_c column_c * v[c]
+    return math::column(m, 0) * v.x + math::column(m, 1) * v.y +
+           math::column(m, 2) * v.z + math::column(m, 3) * v.w;
 }
 
 inline f32 Dot3(const math::v3& a, const math::v3& b) {
