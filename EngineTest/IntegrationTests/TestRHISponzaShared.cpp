@@ -3490,6 +3490,7 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                         cmd->BindDescriptorSets(PipelineBindPoint::Graphics,
                                                 shadow.depthLayout, 0, 1,
                                                 &shadow.depthSet, 0, nullptr);
+                        u32 shadowPassDraws = 0;
                         for (const auto& e : meshes) {
                             M2ShadowPush sp{};
                             sp.model = rhimath::MatrixIdentity();
@@ -3497,8 +3498,20 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                                                ShaderStage::Vertex, 0,
                                                sizeof(sp), &sp);
                             e.mesh->Draw(cmd, 1, 0, 0);
+                            ++shadowPassDraws;
                         }
                         cmd->EndRenderPass();
+                        // 诊断：首帧阴影 depth pass 录制事实回显（draw 发出数/
+                        // 清深值/分辨率——对照 M2ShadowSampler 回显惯例）。
+                        if (f == 0) {
+                            std::ostringstream cd;   // 局部流：不改 std::cout 浮点格式态
+                            cd << std::fixed << std::setprecision(1)
+                               << srd.depthAttachment.clearValue.depth;
+                            std::cout << "[RHI_SHARED] M2ShadowPass frame=" << f
+                                      << " draws=" << shadowPassDraws
+                                      << " clearDepth=" << cd.str()
+                                      << " size=" << kShadowMapSize << std::endl;
+                        }
                         // 深度写→采样（F2-2 转换规则；D3D12 侧 StateTracker
                         // DEPTH_WRITE→SRV 单测锁定，Vulkan 侧 layout 转换
                         // 本调用即验证点——错误布局会被 validation 拦截）。
@@ -3509,7 +3522,7 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                         smToSRV.subresource = 0xFFFFFFFF;
                         smToSRV.queueFamily = 0xFFFFFFFF;
                         cmd->InsertBarrier(&smToSRV, 1);
-                        // RHI_SHADOW_DUMP=1：首帧读回 shadow map（D32→staging
+                        // RHI_SHADOW_DUMP=1：首帧读回 shadow map（D32→readback
                         // 缓冲→PGM 归一化深度图）——阴影贴图内容裁决证据。
                         const bool wantDump = f == 0 &&
                             std::getenv("RHI_SHADOW_DUMP") &&
@@ -3518,8 +3531,10 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                             BufferDesc ddb{};
                             ddb.size = u64(kShadowMapSize) * kShadowMapSize * 4;
                             ddb.type = BufferType::Raw;
-                            ddb.usage = GPUMemoryUsage::Staging;
-                            ddb.memoryUsage = GPUMemoryUsage::Staging;
+                            // R19-1：同 M1Readback——CopyTextureToBuffer 的
+                            // GPU 写目标须 Readback 位（dump 四处漏改复记）。
+                            ddb.usage = GPUMemoryUsage::Readback;
+                            ddb.memoryUsage = GPUMemoryUsage::Readback;
                             ddb.name = "M2ShadowDump";
                             shadowDumpBuf = device->CreateBuffer(ddb);
                             g_ledger.buffers.insert(shadowDumpBuf);
@@ -3621,8 +3636,10 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                                     BufferDesc ddb{};
                                     ddb.size = u64(curW) * curH * 4;
                                     ddb.type = BufferType::Raw;
-                                    ddb.usage = GPUMemoryUsage::Staging;
-                                    ddb.memoryUsage = GPUMemoryUsage::Staging;
+                                    // R19-1：同 M1Readback——CopyTextureToBuffer 的
+                                    // GPU 写目标须 Readback 位（dump 四处漏改复记）。
+                                    ddb.usage = GPUMemoryUsage::Readback;
+                                    ddb.memoryUsage = GPUMemoryUsage::Readback;
                                     ddb.name = "M4GBufferDump";
                                     gbDumpBufs[i] = device->CreateBuffer(ddb);
                                     g_ledger.buffers.insert(gbDumpBufs[i]);
@@ -3669,8 +3686,10 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                                     BufferDesc ddb{};
                                     ddb.size = u64(curW) * curH * 4;  // R32F
                                     ddb.type = BufferType::Raw;
-                                    ddb.usage = GPUMemoryUsage::Staging;
-                                    ddb.memoryUsage = GPUMemoryUsage::Staging;
+                                    // R19-1：同 M1Readback——CopyTextureToBuffer 的
+                                    // GPU 写目标须 Readback 位（dump 四处漏改复记）。
+                                    ddb.usage = GPUMemoryUsage::Readback;
+                                    ddb.memoryUsage = GPUMemoryUsage::Readback;
                                     ddb.name = "M4DepthDump";
                                     gbDumpBufs[3] = device->CreateBuffer(ddb);
                                     g_ledger.buffers.insert(gbDumpBufs[3]);
@@ -3816,8 +3835,10 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                             BufferDesc hdb{};
                             hdb.size = u64(curW) * curH * 8;   // RGBA16F=8B/px
                             hdb.type = BufferType::Raw;
-                            hdb.usage = GPUMemoryUsage::Staging;
-                            hdb.memoryUsage = GPUMemoryUsage::Staging;
+                            // R19-1：同 M1Readback——CopyTextureToBuffer 的
+                            // GPU 写目标须 Readback 位（dump 四处漏改复记）。
+                            hdb.usage = GPUMemoryUsage::Readback;
+                            hdb.memoryUsage = GPUMemoryUsage::Readback;
                             hdb.name = "M3HdrDump";
                             hdrDumpBuf = device->CreateBuffer(hdb);
                             g_ledger.buffers.insert(hdrDumpBuf);

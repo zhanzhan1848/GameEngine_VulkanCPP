@@ -6,6 +6,7 @@
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
 #include <cstring>
+#include <string>
 
 #include "D3D12DescriptorHeaps.h"
 #include "D3D12Device.h"
@@ -112,6 +113,30 @@ u32 DepthSrvFormat(DataFormat format) {
         case DataFormat::D32_Float_S8X24_UInt: return kDXGIFormat_R32_Float_X8X24_Typeless;  // 21
         case DataFormat::D24_UNorm_S8_UInt:    return kDXGIFormat_R24_UNorm_X8_Typeless;     // 46
         default:                               return kDXGIFormat_Unknown;
+    }
+}
+
+/// DXGI 格式可读名（仅诊断日志用；覆盖 D3D12Abi.h 深度/TYPELESS 邻域，
+/// 未收录值返回 nullptr，调用方回退打印数值）。沿 D3D12Pipeline.cpp
+/// VisibilityName 的诊断辅助惯例。
+const char* DxgiFormatName(u32 dxgiFormat) {
+    switch (dxgiFormat) {
+        case kDXGIFormat_Unknown:               return "UNKNOWN";
+        case kDXGIFormat_R32G8X24_Typeless:     return "R32G8X24_TYPELESS";
+        case kDXGIFormat_D32_Float_S8X24_UInt:  return "D32_FLOAT_S8X24_UINT";
+        case kDXGIFormat_R32_Float_X8X24_Typeless: return "R32_FLOAT_X8X24_TYPELESS";
+        case kDXGIFormat_X32_Typeless_G8X24_UInt: return "X32_TYPELESS_G8X24_UINT";
+        case kDXGIFormat_R32_Typeless:          return "R32_TYPELESS";
+        case kDXGIFormat_D32_Float:             return "D32_FLOAT";
+        case kDXGIFormat_R32_Float:             return "R32_FLOAT";
+        case kDXGIFormat_R24G8_Typeless:        return "R24G8_TYPELESS";
+        case kDXGIFormat_D24_UNorm_S8_UInt:     return "D24_UNORM_S8_UINT";
+        case kDXGIFormat_R24_UNorm_X8_Typeless: return "R24_UNORM_X8_TYPELESS";
+        case kDXGIFormat_X24_Typeless_G8_UInt:  return "X24_TYPELESS_G8_UINT";
+        case kDXGIFormat_R16_Typeless:          return "R16_TYPELESS";
+        case kDXGIFormat_D16_UNorm:             return "D16_UNORM";
+        case kDXGIFormat_R16_UNorm:             return "R16_UNORM";
+        default:                                return nullptr;
     }
 }
 
@@ -478,6 +503,24 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
                                           heaps.CbvSrvUavShadowCpuHandle(uavSlot_));
         // R13/T1 双写（同 SRV：shadow 落点 + 镜像，拷贝源语义见 SRV 注释）。
         heaps.CopyCbvSrvUavShadowToVisible(uavSlot_);
+    }
+
+    // 诊断回显（D3D12 黑屏排障）：深度家族 + SRV 纹理在资源与视图均创建
+    // 完成后回显三者实际格式（Windows 阴影采样证据链；预期如 M2ShadowMap
+    // resource DXGI=R32_TYPELESS DSV=D32_FLOAT SRV=R32_FLOAT）。资源格式从
+    // 现存 ID3D12Resource 读回（不重推导），DSV/SRV 与上方视图 desc 同源
+    // 同值；无 DSV 时打 none。只读回显，不触碰创建逻辑。
+    if (!viewMode_ && isDepthFamily
+        && (texDesc_.usage & TextureUsage::ShaderResource) != TextureUsage::Unknown) {
+        auto fmtName = [](u32 dxgi) -> std::string {
+            const char* n = DxgiFormatName(dxgi);
+            return n ? std::string(n) : std::to_string(dxgi);
+        };
+        PRIMAL_LOG_STREAM(Info, "RHI")
+            << "[D3D12Texture] " << texDesc_.name << " resource DXGI="
+            << fmtName(static_cast<u32>(GetNativeDesc().Format))
+            << " DSV=" << (wantDsv ? fmtName(dxgiFull) : std::string("none"))
+            << " SRV=" << fmtName(DepthSrvFormat(texDesc_.format)) << std::endl;
     }
     return true;
 }

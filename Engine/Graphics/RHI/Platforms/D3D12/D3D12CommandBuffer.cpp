@@ -1236,6 +1236,21 @@ void D3D12CommandBufferImpl::CopyTextureToBuffer(ResourceHandle srcTexture,
     D3D12Texture* tex = dev.GetTexture(srcTexture);
     D3D12Buffer* buf = dev.GetBuffer(dstBuffer);
     if (!tex || !buf) return;
+    // R19-1 护栏：GPU 拷贝写目标须落 READBACK 堆。Staging/Dynamic 缓冲落
+    // UPLOAD 堆（D3D12Buffer 构造期映射），UPLOAD 堆资源恒 GENERIC_READ、
+    // 不可转出，作 CopyTextureRegion 写目标非法——Windows 实测该形态下
+    // dump 帧彩色输出清零（avg-luma=0、exit=1）且 dump 缓冲读回全 0
+    //（harness 四处 dump 漏改，已同步改 Readback）。改为显性 Error 并跳过
+    // 本次拷贝（接口为 void，Error 日志即失败信号）；其他拷贝路径不变。
+    if (buf->GetHeapType() == D3D12_HEAP_TYPE_UPLOAD) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12CommandBuffer] CopyTextureToBuffer dst buffer '"
+            << buf->GetBufferDesc().name << "' is on the UPLOAD heap - GPU copy"
+               " destination requires GPUMemoryUsage::Readback (READBACK heap);"
+               " skipping copy"
+            << std::endl;
+        return;
+    }
     UpdateStats(CommandType::CopyTextureToBuffer);
 
     // R17-A：pre/post 状态转换按 region 的线性子资源索引作用域化，post
