@@ -69,12 +69,22 @@ SHADER_LIST = [
     # compute mipmap tool shader (3-binding set0, M7 F7-3 early delivery).
     "Forward/M5Cull.comp",
     "Forward/M5Mipmap.comp",
-    # D3D12 M6 F6-2/F6-3: probe-grid GI characterization compute pair.
-    # Bake: writeonly rgba16f image3D (typed UAV store) + BakeParams UBO.
+    # D3D12 M6 F6-2/F6-3: probe-grid GI temporal accumulation compute.
     # Accum: readonly image3D (typed UAV load) + sampler3D history pair +
     # writeonly image3D out + flags UBO (EMA / history-zero reset).
-    "Forward/M6ProbeBake.comp",
     "Forward/M6ProbeAccum.comp",
+    # D3D12 M6 GI rebuild: direct-only deferred light FS (MRT×2 direct +
+    # direct-diffuse, b0-b7 identical to M4DeferredLight so the host reuses
+    # the M4 light set; replaces M4DeferredLight in GI mode) + SH-L1 probe
+    # inject compute (replaces the analytic M6ProbeBake; reads
+    # directDiffuse/depth/normal/material + InjectParams UBO 144B + writes
+    # rgba16f image3D (8,8,24)) + independent indirect resolve FS (SH probe
+    # 3D sampling → albedo·E_h) + single direct+indirect composite FS
+    # (texelFetch pair). Vertex stages reuse M3Post.vert bytes.
+    "Forward/M6DeferredDirect.frag",
+    "Forward/M6ProbeInject.comp",
+    "Forward/M6GIResolve.frag",
+    "Forward/M6Composite.frag",
 ]
 
 PROFILE_OF_STAGE = {"vert": "vs_6_0", "frag": "ps_6_0", "comp": "cs_6_0"}

@@ -1,6 +1,6 @@
 {
   "manifest_version": 1,
-  "generated_utc": "2026-11-02T23:13:01.637366+00:00",
+  "generated_utc": "2026-11-07T07:13:55.594167+00:00",
   "generator": "scripts/build_d3d12_shaders.py",
   "chain": "glslang->SPIR-V->spirv-cross(HLSL sm60)->dxc",
   "tools": {
@@ -131,17 +131,6 @@
       "cso_sha256": "af8f68fdf1807da22c550802a8845a762e85ad4bc6e04701ec6b5777f3469c45"
     },
     {
-      "source": "Forward/M6ProbeBake.comp",
-      "source_sha256": "cc5cd531f609964ed5483655870a6ae34344a2e32412d88baaec16113b9bc43a",
-      "chain": "glslang->spirv->spirv-cross->dxc",
-      "profile": "cs_6_0",
-      "entry": "main",
-      "hlsl": "Forward/M6ProbeBake.comp.hlsl",
-      "hlsl_sha256": "56447859de6e935479e58a5f21189afac86c9e354a3dd1ecd3d072a963c49147",
-      "cso": "Forward/M6ProbeBake.comp.cso",
-      "cso_sha256": "c1c802bc4a200f75202f98753aea28b490c9e6f07ac7a2abd2e062a054fa167d"
-    },
-    {
       "source": "Forward/M6ProbeAccum.comp",
       "source_sha256": "336879834c08f5ab0c976f037b29ed11c35c45a5ad11d99e0a8154086a216ecf",
       "chain": "glslang->spirv->spirv-cross->dxc",
@@ -151,6 +140,50 @@
       "hlsl_sha256": "298d8a0c62a6483bf102234a98dd37d12cb310d11d3f8bc4976aadc1e0343700",
       "cso": "Forward/M6ProbeAccum.comp.cso",
       "cso_sha256": "d5e2c2c697dd6d1c128bc252a82c7f1c6bfcd2c4eb8f25fe839b3b7ea327a630"
+    },
+    {
+      "source": "Forward/M6DeferredDirect.frag",
+      "source_sha256": "1ebe44ec4eb90319c5e828eaaa98226373bc78da74a93cb21bbadead6a2115e4",
+      "chain": "glslang->spirv->spirv-cross->dxc",
+      "profile": "ps_6_0",
+      "entry": "main",
+      "hlsl": "Forward/M6DeferredDirect.frag.hlsl",
+      "hlsl_sha256": "f3d9950b75e733db15c19557d87ab61f6b362becd2b634d998acdd6669b1e938",
+      "cso": "Forward/M6DeferredDirect.frag.cso",
+      "cso_sha256": "967a3ad0ad268ee1325dfb6093e6e905b9fad90bca32569634a68b0018c9d824"
+    },
+    {
+      "source": "Forward/M6ProbeInject.comp",
+      "source_sha256": "c040a94778647070bbe86406ecbc5036e3ed4544b3f0519479024dd003e2bdcb",
+      "chain": "glslang->spirv->spirv-cross->dxc",
+      "profile": "cs_6_0",
+      "entry": "main",
+      "hlsl": "Forward/M6ProbeInject.comp.hlsl",
+      "hlsl_sha256": "f14d300ba5a0fb1d95ecc1caf909b8039597e51e7871aef0d909c057b9970cb2",
+      "cso": "Forward/M6ProbeInject.comp.cso",
+      "cso_sha256": "c27df1f58edab8aa95086b014009dd764545f1af7c601d811d0a2c1f3d06efd4"
+    },
+    {
+      "source": "Forward/M6GIResolve.frag",
+      "source_sha256": "12187e5b103521ecbfb70c7d4e93f07186904cb8c221e3be8eb320af90189e1f",
+      "chain": "glslang->spirv->spirv-cross->dxc",
+      "profile": "ps_6_0",
+      "entry": "main",
+      "hlsl": "Forward/M6GIResolve.frag.hlsl",
+      "hlsl_sha256": "94297bb8463d7f9bf72e3b59a55028232eb9a0d65a0a6bd61c9b5a53e5090289",
+      "cso": "Forward/M6GIResolve.frag.cso",
+      "cso_sha256": "4409c593a12dcd95e947653cf509cb520230c857037122f1001bc6f6c0a8a46f"
+    },
+    {
+      "source": "Forward/M6Composite.frag",
+      "source_sha256": "124e6bbe1862a8e1fa03f92ee17d66648e6af96da6b44c39ca4b53dc8c6c8eb2",
+      "chain": "glslang->spirv->spirv-cross->dxc",
+      "profile": "ps_6_0",
+      "entry": "main",
+      "hlsl": "Forward/M6Composite.frag.hlsl",
+      "hlsl_sha256": "d30c6d622fe8ece4b05e559dd3420a21071d8f671ddd959a0770af32529347c0",
+      "cso": "Forward/M6Composite.frag.cso",
+      "cso_sha256": "ca236c395f857f2b4f4d73546e7868dd1ac00c42d1d87a5abef9a96f5aeabca7"
     }
   ]
 }

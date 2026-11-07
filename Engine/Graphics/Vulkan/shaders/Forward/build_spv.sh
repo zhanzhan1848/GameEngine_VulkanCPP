@@ -64,11 +64,20 @@ declare -a SHADERS=(
     # D3D12 M4 F4-3: deferred full-screen light FS (vertex stage reuses
     # M3Post.vert bytes — no separate M4 vert file).
     "M4DeferredLight      frag"
-    # D3D12 M6 F6-2: probe-grid GI characterization compute pair (entry
-    # main; writeonly image3D bake / EMA accum with typed UAV load + 3D SRV
-    # history). Single-source GLSL also feeding the D3D12 chain.
-    "M6ProbeBake          comp"
+    # D3D12 M6 F6-2: probe-grid GI temporal accumulation compute (EMA over
+    # the inject-produced SH grid; typed UAV load + 3D SRV history).
+    # Single-source GLSL also feeding the D3D12 chain.
     "M6ProbeAccum         comp"
+    # D3D12 M6 GI rebuild: direct-only deferred light FS (MRT direct +
+    # direct-diffuse; replaces M4DeferredLight in GI mode) + SH-L1 probe
+    # inject compute (replaces the analytic M6ProbeBake) + independent
+    # indirect resolve FS + single direct+indirect composite FS. Vertex
+    # stages reuse M3Post.vert bytes. Single-source GLSL also feeding the
+    # D3D12 chain.
+    "M6DeferredDirect     frag"
+    "M6ProbeInject        comp"
+    "M6GIResolve          frag"
+    "M6Composite          frag"
 )
 
 for entry in "${SHADERS[@]}"; do

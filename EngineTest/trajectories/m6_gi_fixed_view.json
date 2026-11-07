@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "name": "m6_gi_fixed_view",
+  "scene": {
+    "asset": "EngineTest/assets/Sponza.model",
+    "asset_sha256": "b0c1f2d5e583508aab922c6e4c2c38cf2a564f952709f45827ac10d4c4757390",
+    "config": {
+      "env": {
+        "RHI_TEST_PLATFORM": "vulkan",
+        "RHI_TEST_SHADOWS": "1",
+        "RHI_TEST_POST": "1",
+        "RHI_TEST_DEFERRED": "1",
+        "RHI_TEST_GI": "1",
+        "RHI_TEST_GPUDRIVEN": "0",
+        "RHI_TEST_FRAMES": "120",
+        "RHI_CAPTURE_FRAMES": "0,29,59,89,119",
+        "RHI_RESIZE_FRAME": "-1"
+      }
+    }
+  },
+  "camera": {
+    "start": {
+      "position": [0.0, 5.0, 0.0],
+      "pitch_deg": -19.0,
+      "yaw_deg": -90.0,
+      "roll_deg": 0.0
+    },
+    "keyframes": [
+      {"time": 0.0, "position": [0.0, 5.0, 0.0], "lookAt": [-10.0, 1.5, 0.0], "fov_deg": 60.0},
+      {"time": 4.0, "position": [0.0, 5.0, 0.0], "lookAt": [-10.0, 1.5, 0.0], "fov_deg": 60.0}
+    ],
+    "interpolation": "linear",
+    "coordinate_system": "right-handed Y-up; this Sponza.model atrium long axis is X (eye (0,5,0) looking -X into the courtyard)",
+    "coverage_notes": "M6 GI comparable fixed view (coordinator evidence fixed-camera semantics): two identical keyframes -> static camera for all 120 frames, static light (no light keyframes) -> the only GI history reset is frame 0 and the EMA converges monotonically (1-0.9^(f+1)). Sun behind/above the camera (dir_to_light [0.85,1.4,0.35]) so camera-facing +X faces are lit and column shadows fall into the visible courtyard. Run GI=1 and GI=0 with identical env to compare direct+indirect vs the M4 ambient path. RHI_RESIZE_FRAME=-1 is required to disable the harness default mid-run resize (frames/2 when unset): strtoul('-1') wraps to the 0xFFFFFFFF no-resize sentinel (config line prints resize=off)."
+  },
+  "timing": {
+    "timestep": 0.0166667,
+    "total_frames": 120,
+    "warmup_frames": 30
+  },
+  "render": {
+    "resolution": [1280, 720],
+    "exposure": 1.0,
+    "postprocess": {"bloom": "off", "tone_mapping": "aces_fixed_ev"},
+    "post": {"exposure": 2.0, "curve": "ACESFit(2.51,0.03,2.43,0.59,0.14)", "encoding": "linear_to_bgra8_unorm_single_point"},
+    "random_seed": 0,
+    "light": {
+      "kind": "directional",
+      "dir_to_light": [0.85, 1.4, 0.35],
+      "intensity": 2.2,
+      "color": [1.0, 0.98, 0.92],
+      "keyframe_semantics": "static (no light keyframes); dir_to_light = direction FROM surface TOWARD light (engine/shader convention)"
+    },
+    "shadow": {
+      "cascades": 1,
+      "map_size": 2048,
+      "filter": "pcf3x3_comparison_sampler",
+      "comparison_func": "LessEqual",
+      "ortho_half_extent": 40.0,
+      "near": 20.0,
+      "far": 150.0
+    },
+    "gi": {
+      "kind": "single-bounce screen-space direct-light injection into an SH-L1 probe grid (NOT full physical scene GI: no visibility term in transport, only camera-visible pixels act as emitters, no emissive/sky/IBL)",
+      "input": "M6DeferredDirect MRT2 RGBA16F: direct = lightColor*(diffuse+specular)*shadow (a=ndl); direct_diffuse = lightColor*albedo*ndl*shadow (a=shadow) = the only GI input; fully shadowed surfaces exactly 0",
+      "probe_grid": "8x8x8 probes; SH-L1 Texture3D RGBA16F (8,8,24) ping-pong; slab s (0..2) = channel R,G,B; texel (i,j,s*8+k) = (c00, c1-1, c10, c11)",
+      "world_box": "union of all drawable mesh local AABBs expanded by 0.5 m; cell = (max-min)/8; normalBias = 0.25*min(cell)",
+      "accumulation": "EMA hist*0.9 + new*0.1; reset (history zeroed) at frame 0 only (static light)",
+      "consumption": "M6GIResolve independent indirect = albedo * E_h(N); M6Composite final = direct + indirect exactly once, before post",
+      "readback": "[GI_MEAN] (mean of 0.282095*c00 per channel over 512 probes) every 5 frames + final; comparison recipe adds RHI_GI_DUMP=1 RHI_GI_EXPORT_FRAMES=0,89,119 (raw float exports giexp_f<N>_<buffer>.bin + giexp_f<N>.json)"
+    },
+    "gbuffer": {
+      "targets": 3,
+      "formats": ["RGBA8_UNorm", "RG16_Float", "RGBA8_UNorm"],
+      "normal_encoding": "world_xy_direct_rg16f_z_sign_in_material_alpha",
+      "depth": "D32_Float",
+      "light_pass": "GI on: M6DeferredDirect (direct-only MRT2) -> inject -> accum -> resolve -> composite; GI off: M4DeferredLight (ambient 0.15*albedo + direct)"
+    }
+  },
+  "manifest_requirements": {
+    "build_git_sha": "regenerate-at-capture-time",
+    "shader_spirv_sha256": "regenerate-at-capture-time",
+    "engine_binary_path": "Darwin/Debug/TestRHISponzaShared (DebugVulkan build tree)"
+  }
+}

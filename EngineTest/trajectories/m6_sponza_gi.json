@@ -39,7 +39,7 @@
     ],
     "interpolation": "linear",
     "coordinate_system": "right-handed Y-up, +Z forward into Sponza main axis (test-local)",
-    "coverage_notes": "F6-5/F6-7 四段覆盖（相机同 m4 轨迹——材质/阴影/纵深构图复用）：0.0-1.4s 柱列近景特写+跨材质推移（GI ambient 于 albedo 上调制——材质差异可见性段）；1.4-2.6s 画廊纵深静止段（帧 84-155，GI 重置/收敛主观测窗：1.5s 光强 2.2→0.85 触发历史重置（帧 90 [GI_MEAN] 跳落），90-131 EMA 阶梯收敛（每 5 帧 [GI_MEAN] 单调趋近），2.2s 0.85→2.2 恢复重置（帧 132）+ 132-179 二次收敛；2.6-4.0s 侧移+回归锚点段（收敛后稳定帧组合证据，resize 段 120-130 叠加其中）。帧 0 初始 reset=history 未定义（首帧语义）。"
+    "coverage_notes": "F6-5/F6-7 四段覆盖（相机同 m4 轨迹——材质/阴影/纵深构图复用）：0.0-1.4s 柱列近景特写+跨材质推移；1.4-2.6s 画廊纵深静止段（帧 84-155：1.5s 光强 2.2→0.85 = 帧 90 GI 历史重置，2.2s 0.85→2.2 = 帧 132 重置）；2.6-4.0s 侧移+回归锚点段（resize 段 120-130 叠加其中）。帧 0 初始 reset=history 未定义（首帧语义）。M6 direct-input 链（GI 模式：直射-only 输入 M6DeferredDirect → SH-L1 屏幕空间注入 → EMA → 独立间接 albedo*E_h → direct+indirect 恰一次合成，无 ambient）下注意：本轨迹光向 dir_to_light [-0.9,1.5,-0.8] 在整条相机路径上直到约帧 230 都照不到任何相机可见表面（导出帧 89/119/131：可见几何 100% 处于完全阴影；同帧 GI=0 的 M4 输出也只剩 0.15*albedo ambient）——直射-only 语义下帧 0-225 合法全黑（无直射 ⇒ 无 GI 发射体 ⇒ 间接恰为 0；[GI_MEAN] 帧 0-225 恰为 0，帧 230 起非零），帧 90/132 的重置照常记录但跳变幅度为 0。本轨迹保留为 GI 结构回归（重置/resize/账本/导出）；GI 视觉与数值验证用固定视角轨迹 m6_gi_fixed_view.json（光在相机后上方）。"
   },
   "timing": {
     "timestep": 0.0166667,
@@ -62,7 +62,7 @@
         {"time": 1.5, "intensity": 0.85},
         {"time": 2.2, "intensity": 2.2}
       ],
-      "keyframe_semantics": "step (latest keyframe with time<=t; shadow cascade VP NOT re-derived on dir changes — M4 documented boundary). M6: intensity step frames (90/132) double as GIHistoryValidity reset events (history zeroed; [GI_MEAN] jump + EMA re-convergence)"
+      "keyframe_semantics": "step (latest keyframe with time<=t; shadow cascade VP NOT re-derived on dir changes — M4 documented boundary). M6: intensity step frames (90/132) double as GIHistoryValidity reset events (history zeroed + EMA re-convergence; on this trajectory the direct-only GI input is 0 until ~frame 230, so the reset jump is 0 here — see coverage_notes; the fixed-view step run shows the non-zero jump)"
     },
     "shadow": {
       "cascades": 1,
@@ -74,22 +74,23 @@
       "far": 150.0
     },
     "gi": {
-      "kind": "GICharacterization (analytic sky + directional flood bake; NOT physical scene GI)",
-      "probe_grid": "8x8x8 RGBA16F Texture3D ping-pong",
-      "world_box_min": [-40.0, -10.0, -30.0],
-      "world_box_max": [40.0, 30.0, 50.0],
-      "accumulation": "EMA hist*0.9 + new*0.1 (fixed weights; production DDGI temporal-weight family)",
+      "kind": "single-bounce screen-space direct-light injection into an SH-L1 probe grid (NOT full physical scene GI: no visibility term in transport, only camera-visible pixels act as emitters, no emissive/sky/IBL)",
+      "input": "M6DeferredDirect (replaces M4DeferredLight in GI mode) MRT2 RGBA16F: direct = lightColor*(diffuse+specular)*shadow (a=ndl); direct_diffuse = lightColor*albedo*ndl*shadow (a=shadow) = the only GI input; direct-only linear HDR, fully shadowed surfaces exactly 0 (no ambient constant, no previous GI, no IBL)",
+      "injection": "M6ProbeInject.comp: 1 workgroup (64 threads) per probe, dispatch 8x8x8; screen samples on an 8 px stride; each sample is a Lambert emitter L_j = direct_diffuse.rgb; c_lm += L_j * dOmega_j * Y_lm(w_j), dOmega_j = area*cos/(r^2 + area/pi)",
+      "probe_grid": "8x8x8 probes; SH-L1 Texture3D RGBA16F (8,8,24) ping-pong; slab s (0..2) = channel R,G,B; texel (i,j,s*8+k) = (c00, c1-1, c10, c11)",
+      "world_box": "union of all drawable mesh local AABBs (model = identity, same source as M5) expanded by 0.5 m on every side; cell = (max-min)/8; normalBias = 0.25*min(cell); logged once as [GI] grid box",
+      "accumulation": "EMA hist*0.9 + new*0.1 (M6ProbeAccum.comp unchanged; fixed weights; production DDGI temporal-weight family)",
       "history_reset": "light-event (intensity/color/dir step) or first frame -> history zeroed (SC tile clear precedent)",
-      "consumption": "deferred light ambient += albedo * tri-linear(sampler3D grid) * giScale",
-      "readback": "[GI_MEAN] every 5 frames + reset frames + final; middle-slice PPM per ladder frame (RHI_GI_DUMP=1)",
-      "bake_determinism": "uint PCG hash + IEEE analytic; no time-varying terms (light params are the only step inputs)"
+      "consumption": "M6GIResolve: independent indirect buffer = albedo * E_h(N), E_h = 0.282095*c00 + 0.325735*(c1-1*n.y + c10*n.z + c11*n.x), clamped >= 0, no GI intensity knob; M6Composite: final = direct + indirect exactly once, before post",
+      "readback": "[GI_MEAN] = mean over 512 probes of 0.282095*c00 per channel, every 5 frames + reset frames + final; middle-slice (z=4) isotropic PPM per ladder frame (RHI_GI_DUMP=1); optional raw float exports via RHI_GI_EXPORT_FRAMES (e.g. 89,119,131,239) -> giexp_f<N>_<buffer>.bin + giexp_f<N>.json",
+      "determinism": "no time-varying terms; camera pose, light params (step keyframes) and the frame-level reset flag are the only inputs"
     },
     "gbuffer": {
       "targets": 3,
       "formats": ["RGBA8_UNorm", "RG16_Float", "RGBA8_UNorm"],
       "normal_encoding": "world_xy_direct_rg16f_z_sign_in_material_alpha",
       "depth": "D32_Float",
-      "light_pass": "fullscreen_triangle_invvp_reconstruct_blinnphong_pcf3x3_same_source_as_forward_plus_gi_ambient_b8b9b10"
+      "light_pass": "GI on: fullscreen M6DeferredDirect (invVP depth reconstruct, Blinn-Phong + PCF3x3 same-source as forward, no ambient; MRT2 RGBA16F direct / direct_diffuse) -> M6ProbeInject (SH-L1) -> M6ProbeAccum (EMA) -> M6GIResolve (independent indirect = albedo*E_h) -> M6Composite (direct + indirect once, before post); GI off: M4DeferredLight (same direct term + 0.15*albedo ambient; b8-b10 bound to a black 1x1x1 placeholder with giScale 0)"
     }
   },
   "manifest_requirements": {
