@@ -123,6 +123,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -199,6 +200,288 @@ std::vector<u8> ReadFileRel(const std::string& rel) {
     }
     return bytes;
 }
+
+// ======================= D3D12 cso SHA 门禁（错位护盾，2026-11-08） =======
+// 背景：M6 D3D12 shader 组（cso/hlsl + manifest）是未提交工作产物，
+// Windows 树曾拿到中间迭代 cso → M6Composite 管线创建 E_INVALIDARG
+// (0x80070057) 且无任何先兆。本门禁在 CreateShader 前对 cso 字节做
+// SHA-256 校验，期望值取自 EngineTest/shaders/D3D12/manifest.json 的
+// cso_sha256（生成链单一事实源）。仅 wantD3D12 路径调用——Vulkan 分支
+// 零新读盘、零行为变化。路径前缀照抄 loadShader 调用点拼写
+//（"EngineTest/shaders/D3D12/"——磁盘目录大小写以两端文件系统实际
+// 解析为准，macOS/Windows 均大小写不敏感，已实测解析）。
+namespace sha_gate {
+
+// 纯函数 SHA-256（FIPS 180-4；仓库内无现成可复用实现——Engine/ 仅有
+// CMake 侧 file(SHA256) 与注释字符串，故 harness 内自带最小实现，
+// 无新依赖）。正确性已与 shasum -a 256 对真实 cso 文件核对（同码文本
+// 独立编译验证 + 本机树 cso/manifest 自洽实测）。
+struct Sha256Digest {
+    u32 h[8];
+};
+
+inline u32 Rotr(u32 x, u32 n) { return (x >> n) | (x << (32 - n)); }
+
+inline void Sha256Block(const u32* const k, Sha256Digest& st, const u8* p) {
+    u32 w[64];
+    for (int i = 0; i < 16; ++i)
+        w[i] = (u32(p[i * 4]) << 24) | (u32(p[i * 4 + 1]) << 16) |
+               (u32(p[i * 4 + 2]) << 8) | u32(p[i * 4 + 3]);
+    for (int i = 16; i < 64; ++i) {
+        const u32 s0 = Rotr(w[i - 15], 7) ^ Rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        const u32 s1 = Rotr(w[i - 2], 17) ^ Rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    u32 a = st.h[0], b = st.h[1], c = st.h[2], d = st.h[3];
+    u32 e = st.h[4], f = st.h[5], g = st.h[6], h = st.h[7];
+    for (int i = 0; i < 64; ++i) {
+        const u32 S1 = Rotr(e, 6) ^ Rotr(e, 11) ^ Rotr(e, 25);
+        const u32 ch = (e & f) ^ (~e & g);
+        const u32 t1 = h + S1 + ch + k[i] + w[i];
+        const u32 S0 = Rotr(a, 2) ^ Rotr(a, 13) ^ Rotr(a, 22);
+        const u32 maj = (a & b) ^ (a & c) ^ (b & c);
+        const u32 t2 = S0 + maj;
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+    }
+    st.h[0] += a; st.h[1] += b; st.h[2] += c; st.h[3] += d;
+    st.h[4] += e; st.h[5] += f; st.h[6] += g; st.h[7] += h;
+}
+
+inline Sha256Digest Sha256(const u8* data, size_t len) {
+    static const u32 k[64] = {
+        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu,
+        0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u, 0xd807aa98u, 0x12835b01u,
+        0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u,
+        0xc19bf174u, 0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+        0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau, 0x983e5152u,
+        0xa831c66du, 0xb00327c8u, 0xbf597fc7u, 0xc6e00bf3u, 0xd5a79147u,
+        0x06ca6351u, 0x14292967u, 0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu,
+        0x53380d13u, 0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u, 0xd192e819u,
+        0xd6990624u, 0xf40e3585u, 0x106aa070u, 0x19a4c116u, 0x1e376c08u,
+        0x2748774cu, 0x34b0bcb5u, 0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu,
+        0x682e6ff3u, 0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+        0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u};
+    Sha256Digest st{{0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+                     0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u}};
+    const size_t total = len;
+    size_t off = 0;
+    while (off + 64 <= total) {
+        Sha256Block(k, st, data + off);
+        off += 64;
+    }
+    // 尾块 + padding（0x80 + 0 填充 + 8 字节大端 bit 长度）。
+    u8 tail[128];
+    const size_t rem = total - off;
+    for (size_t i = 0; i < rem; ++i) tail[i] = data[off + i];
+    tail[rem] = 0x80;
+    size_t padded = (rem + 1 + 8 <= 64) ? 64 : 128;
+    for (size_t i = rem + 1; i < padded; ++i) tail[i] = 0;
+    const u64 bits = u64(total) * 8;
+    for (int i = 0; i < 8; ++i)
+        tail[padded - 1 - i] = u8((bits >> (8 * i)) & 0xFF);
+    Sha256Block(k, st, tail);
+    if (padded == 128) Sha256Block(k, st, tail + 64);
+    return st;
+}
+
+inline std::string ToHex32(const u32* h) {
+    static const char* hex = "0123456789abcdef";
+    std::string s;
+    s.reserve(64);
+    for (int i = 0; i < 8; ++i)
+        for (int shift = 28; shift >= 0; shift -= 4)
+            s += hex[(h[i] >> shift) & 0xF];
+    return s;
+}
+
+// ---- manifest 解析（固定形状最小扫描，非通用 JSON）----
+// manifest.shaders[] 每条目：{... "cso": "Forward/X.cso",
+// "cso_sha256": "<hex64>" ...}。按花括号对象配对两键，键序无关；
+// 仅扫描 "shaders" 数组区间。条目数与配对数一致才接受。
+struct Manifest {
+    bool ok{false};
+    std::string error;
+    std::unordered_map<std::string, std::string> csoToSha;
+};
+
+inline bool ExtractJsonString(const std::string& text, size_t from,
+                              std::string& out, size_t& after) {
+    if (from >= text.size() || text[from] != '"') return false;
+    const size_t start = from + 1;
+    size_t i = start;
+    while (i < text.size() && text[i] != '"') {
+        if (text[i] == '\\') ++i;   // 跳过转义（本 manifest 无转义，防御）
+        ++i;
+    }
+    if (i >= text.size()) return false;
+    out = text.substr(start, i - start);
+    after = i + 1;
+    return true;
+}
+
+// 在 [from,to) 内找 "key": "value"（key 为精确引号串），返回 value。
+inline bool FindKeyValue(const std::string& text, size_t from, size_t to,
+                         const std::string& key, std::string& value,
+                         size_t& after) {
+    const std::string pat = "\"" + key + "\"";
+    size_t pos = from;
+    while (true) {
+        const size_t hit = text.find(pat, pos);
+        if (hit == std::string::npos || hit + pat.size() > to) return false;
+        size_t i = hit + pat.size();
+        while (i < to && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
+                          text[i] == '\r'))
+            ++i;
+        if (i < to && text[i] == ':') ++i;
+        else { pos = hit + 1; continue; }
+        while (i < to && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
+                          text[i] == '\r'))
+            ++i;
+        if (ExtractJsonString(text, i, value, after)) return true;
+        pos = hit + 1;
+    }
+}
+
+inline Manifest ParseManifest(const std::vector<u8>& bytes) {
+    Manifest m;
+    const std::string text(reinterpret_cast<const char*>(bytes.data()),
+                           bytes.size());
+    // "shaders" 数组区间：键 → 下一个 '[' → 匹配的 ']'（不嵌套数组）。
+    const size_t shadersKey = text.find("\"shaders\"");
+    if (shadersKey == std::string::npos) {
+        m.error = "no \"shaders\" array";
+        return m;
+    }
+    const size_t arrStart = text.find('[', shadersKey);
+    if (arrStart == std::string::npos) {
+        m.error = "shaders array '[' not found";
+        return m;
+    }
+    size_t depth = 0;
+    size_t arrEnd = std::string::npos;
+    for (size_t i = arrStart; i < text.size(); ++i) {
+        if (text[i] == '[') ++depth;
+        else if (text[i] == ']') {
+            --depth;
+            if (depth == 0) { arrEnd = i; break; }
+        }
+    }
+    if (arrEnd == std::string::npos) {
+        m.error = "shaders array ']' not found";
+        return m;
+    }
+    // 逐对象 {..} 扫描（花括号配对），每对象提取 cso / cso_sha256。
+    size_t i = arrStart + 1;
+    size_t objCount = 0, pairCount = 0;
+    while (i < arrEnd) {
+        if (text[i] != '{') { ++i; continue; }
+        size_t objDepth = 0;
+        size_t objEnd = std::string::npos;
+        for (size_t j = i; j < arrEnd; ++j) {
+            if (text[j] == '{') ++objDepth;
+            else if (text[j] == '}') {
+                --objDepth;
+                if (objDepth == 0) { objEnd = j; break; }
+            }
+        }
+        if (objEnd == std::string::npos) {
+            m.error = "unbalanced object braces in shaders[]";
+            return m;
+        }
+        ++objCount;
+        std::string cso, sha;
+        size_t dummy = 0;
+        const bool gotCso =
+            FindKeyValue(text, i, objEnd, "cso", cso, dummy);
+        const bool gotSha =
+            FindKeyValue(text, i, objEnd, "cso_sha256", sha, dummy);
+        if (gotCso && gotSha && sha.size() == 64) {
+            m.csoToSha[cso] = sha;
+            ++pairCount;
+        }
+        i = objEnd + 1;
+    }
+    if (objCount == 0) {
+        m.error = "shaders array has no entries";
+        return m;
+    }
+    if (pairCount != objCount) {
+        m.error = "incomplete entries: " + std::to_string(pairCount) + "/" +
+                  std::to_string(objCount) + " objects carry cso+cso_sha256";
+        return m;
+    }
+    m.ok = true;
+    return m;
+}
+
+// 门禁主体：校验单次 cso 装载。失败时 Fail 一次并带齐修复信息；
+// 成功时 stdout 一行 [SHADER_GATE]（机器输出走 stdout，日志纪律）。
+// 返回 false = 门禁未过（调用方应中止装载）。
+inline const char* kGatePrefix = "EngineTest/shaders/D3D12/";
+
+inline bool GateD3D12Cso(const char* rel, const std::vector<u8>& bytes,
+                         const char* tag) {
+    // manifest 惰性加载 + 进程内缓存（一次解析，静态局部）。
+    static const Manifest manifest = [] {
+        const std::vector<u8> mb =
+            ReadFileRel("EngineTest/shaders/D3D12/manifest.json");
+        if (mb.empty()) {
+            Manifest bad;
+            bad.error = "manifest.json unreadable (missing or empty)";
+            return bad;
+        }
+        return ParseManifest(mb);
+    }();
+    const std::string path(rel);
+    if (path.rfind(kGatePrefix, 0) != 0) {
+        Fail(std::string("[SHADER_GATE] ") + tag +
+             " unexpected path form (expected prefix " + kGatePrefix +
+             "): " + path + " — gate cannot key into manifest");
+        return false;
+    }
+    const std::string key = path.substr(std::strlen(kGatePrefix));
+    if (!manifest.ok) {
+        Fail(std::string("[SHADER_GATE] ") + tag +
+             " manifest unusable: " + manifest.error +
+             " (manifest.json is the single source of truth for cso sha256; "
+             "sync the whole tree or rerun python3 scripts/build_d3d12_shaders.py "
+             "and ship manifest+cso together)");
+        return false;
+    }
+    const auto it = manifest.csoToSha.find(key);
+    if (it == manifest.csoToSha.end()) {
+        Fail(std::string("[SHADER_GATE] ") + tag + " manifest has no entry for " +
+             key + " (loaded " + path +
+             ") — stale harness vs newer manifest, or renamed shader; sync "
+             "tree or rerun python3 scripts/build_d3d12_shaders.py");
+        return false;
+    }
+    const std::string& want = it->second;
+    if (bytes.empty()) {
+        Fail(std::string("[SHADER_GATE] ") + tag + " cso missing on disk: " +
+             path + " expected sha256(manifest)=" + want +
+             " actual=missing — sync the whole tree or rerun python3 "
+             "scripts/build_d3d12_shaders.py and ship manifest+cso together");
+        return false;
+    }
+    const Sha256Digest d = Sha256(bytes.data(), bytes.size());
+    const std::string got = ToHex32(d.h);
+    if (got != want) {
+        Fail(std::string("[SHADER_GATE] ") + tag + " cso sha256 MISMATCH: " +
+             path + " expected(manifest)=" + want + " actual=" + got +
+             " — stale/intermediate cso reached this tree (typical symptom: "
+             "CreateGraphicsPipeline E_INVALIDARG 0x80070057 with no prior "
+             "hint); sync the whole tree or rerun python3 "
+             "scripts/build_d3d12_shaders.py, then ship manifest+cso together");
+        return false;
+    }
+    std::cout << "[SHADER_GATE] " << path << " cso sha256 ok" << std::endl;
+    return true;
+}
+
+}   // namespace sha_gate
 
 // ======================= 泄漏计数账本（F1-12 sanity） =======================
 // 只登记宿主自建/自毁的 RHI 资源；RenderMesh 内部顶点/索引缓冲经
@@ -1447,6 +1730,12 @@ bool M6GIInit(RHIDeviceBase* device, M6GIState& s, bool wantD3D12, bool giFull,
                           ShaderHandle& out, const char* tag) -> bool {
         const char* rel = wantD3D12 ? d3d12Rel : vkRel;
         std::vector<u8> bytes = ReadFileRel(rel);
+        // D3D12 分支 SHA 门禁（错位 cso → E_INVALIDARG 护盾；空字节也走，
+        // 以便 missing 场景带期望 SHA 报错。Vulkan 分支不进此块——零影响）。
+        if (wantD3D12 && !sha_gate::GateD3D12Cso(rel, bytes, tag)) {
+            err = std::string(tag) + " cso sha256 gate";
+            return false;
+        }
         if (bytes.empty()) { err = std::string(tag) + " bytes missing (" + rel + ")"; return false; }
         out = device->CreateShader(bytes.data(), bytes.size(), stage, "main");
         if (out == handles::INVALID_SHADER) { err = std::string(tag) + " CreateShader"; return false; }
@@ -1634,6 +1923,11 @@ bool M6GIInit(RHIDeviceBase* device, M6GIState& s, bool wantD3D12, bool giFull,
             ? "EngineTest/shaders/D3D12/Forward/M6ProbeAccum.comp.cso"
             : "Engine/Graphics/Vulkan/shaders/Forward/M6ProbeAccum.comp.spv";
         std::vector<u8> cb = ReadFileRel(rel);
+        // 同 loadShader 的 D3D12 SHA 门禁（accum 链不走 lambda，独立装载）。
+        if (wantD3D12 && !sha_gate::GateD3D12Cso(rel, cb, "M6ProbeAccum")) {
+            err = "M6ProbeAccum cso sha256 gate";
+            return false;
+        }
         if (cb.empty()) { err = std::string("M6ProbeAccum bytes missing (") + rel + ")"; return false; }
         s.accumCs = device->CreateShader(cb.data(), cb.size(), ShaderStage::Compute, "main");
         if (s.accumCs == handles::INVALID_SHADER) { err = "M6ProbeAccum CreateShader"; return false; }

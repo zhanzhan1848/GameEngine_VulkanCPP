@@ -169,6 +169,24 @@ public:
     const GraphicsPipelineDesc& GetGraphicsDesc() const { return graphicsDesc_; }
 
 private:
+    /// PSO 创建失败路径诊断（仅 Create*PipelineState FAILED 分支调用，
+    /// 成功路径零开销）：一次聚合输出失败 hr + pso 关键面（root signature
+    /// null 性与句柄现查对照 / 五级字节码指针非空性与长度 / RT-DSV-拓扑-
+    /// 光栅化-深度-混合-输入布局-采样-杂项全字段）+ InfoQueue
+    /// [storedBefore, now) 窗口非破坏性排水——debug layer 对 0x80070057
+    /// 必有具体违规消息，是决定性证据。窗口基线在 Create 调用前采集；
+    /// 只读 GetMessage，不清存储、不动设备侧 drain 周期的计数基线
+    ///（D3D12Device::DrainInfoQueueMessages 为 private 且 drain 后清空，
+    /// 不可复用——见 D3D12Pipeline.cpp 实现处注释）。
+    void DumpGraphicsPsoFailureDiag(HRESULT hr,
+                                    const D3D12_GRAPHICS_PIPELINE_STATE_DESC& pso,
+                                    ID3D12InfoQueue* infoQueue,
+                                    u64 storedBefore) const;
+    void DumpComputePsoFailureDiag(HRESULT hr,
+                                   const D3D12_COMPUTE_PIPELINE_STATE_DESC& pso,
+                                   ID3D12InfoQueue* infoQueue,
+                                   u64 storedBefore) const;
+
     D3D12Device& device_;
     PipelineHandle handle_{handles::INVALID_PIPELINE};
     bool isCompute_{false};

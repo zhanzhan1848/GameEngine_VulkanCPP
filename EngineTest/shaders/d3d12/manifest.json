@@ -1,6 +1,6 @@
 {
   "manifest_version": 1,
-  "generated_utc": "2026-11-07T07:13:55.594167+00:00",
+  "generated_utc": "2026-11-07T17:16:29.752139+00:00",
   "generator": "scripts/build_d3d12_shaders.py",
   "chain": "glslang->SPIR-V->spirv-cross(HLSL sm60)->dxc",
   "tools": {
@@ -176,14 +176,14 @@
     },
     {
       "source": "Forward/M6Composite.frag",
-      "source_sha256": "124e6bbe1862a8e1fa03f92ee17d66648e6af96da6b44c39ca4b53dc8c6c8eb2",
+      "source_sha256": "63f1e37cc3680744b03bad3c4c85ab6621ffc71fc7dad76ffe99721012b473f0",
       "chain": "glslang->spirv->spirv-cross->dxc",
       "profile": "ps_6_0",
       "entry": "main",
       "hlsl": "Forward/M6Composite.frag.hlsl",
-      "hlsl_sha256": "d30c6d622fe8ece4b05e559dd3420a21071d8f671ddd959a0770af32529347c0",
+      "hlsl_sha256": "f8184b659fcf26a81c393417c8188ba9098df6b0a5580a9ded5690a3b8959d0e",
       "cso": "Forward/M6Composite.frag.cso",
-      "cso_sha256": "ca236c395f857f2b4f4d73546e7868dd1ac00c42d1d87a5abef9a96f5aeabca7"
+      "cso_sha256": "da80a4e6a9af820ba2f8da889d4ea643fc3da8036bae18b39adf21c8b22dd48f"
     }
   ]
 }

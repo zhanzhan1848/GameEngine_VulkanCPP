@@ -6,7 +6,9 @@
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
+#include <string>
 
 #include "D3D12DescriptorHeaps.h"
 #include "D3D12Device.h"
@@ -167,6 +169,117 @@ const char* RangeTypeName(D3D12_DESCRIPTOR_RANGE_TYPE t) {
         case D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER: return "SAMPLER";
         default:                                  return "?";
     }
+}
+
+} // namespace
+
+// ============================================================================
+// PSO 创建失败路径诊断（Windows M6Composite E_INVALIDARG 一击取证）
+// ============================================================================
+//
+// 为什么不经 D3D12Device::DrainInfoQueueMessages 复用排水：该函数 private
+//（本类非 friend）且 drain 后 ClearStoredMessages 清空存储——会把后续帧
+// 上下文冲掉。本处形态：Create*PipelineState 调用前 QI InfoQueue 采窗口
+// 基线（storedBefore），失败时按 [storedBefore, now) 只读 GetMessage 逐条
+// 取 ERROR/WARNING（INFO 计数不打），不清存储、不动任何计数基线——设备
+// 侧既有 drain 周期（beginFrame/pre+post-execute）看到的存储内容与
+// denied/discarded 差分完全不受影响。debug layer 关闭 / PRIMAL_D3D12_
+// VALIDATION=0 时 QI 失败，输出 "unavailable" 行本身也是判读证据（该失败
+// 无 debug-layer 消息可取，E_INVALIDARG 来自 core runtime）。
+namespace {
+
+/// 诊断聚合字符串里的指针形态："0x…" 或 "(null)"（非空性是判读面）。
+std::string PtrText(const void* p) {
+    if (!p) return std::string("(null)");
+    char text[32];
+    std::snprintf(text, sizeof(text), "0x%llX",
+                  static_cast<unsigned long long>(
+                      reinterpret_cast<uintptr_t>(p)));
+    return std::string(text);
+}
+
+/// 单条验证消息文本截断上限（对齐 D3D12Device.cpp kInfoQueueTextLimit）。
+constexpr size_t kPsoDiagTextLimit = 400;
+/// 窗口内逐条打印的消息条数上限（超出只计数，防刷屏；debug layer 对
+/// 单次 Create* 失败典型产 1-5 条）。
+constexpr u64 kPsoDiagMessageLimit = 16;
+
+/// 把 InfoQueue 窗口 [storedBefore, now) 的 ERROR/CORRUPTION/WARNING 消息
+/// 追加进聚合诊断串（非破坏性：只读，不清存储）。
+void AppendInfoQueueWindow(std::string& diag, ID3D12InfoQueue* infoQueue,
+                           u64 storedBefore) {
+    if (!infoQueue) {
+        diag += "\n  infoqueue: unavailable (ID3D12InfoQueue QI failed — "
+                "debug layer off / PRIMAL_D3D12_VALIDATION=0) — no "
+                "debug-layer messages for this failure";
+        return;
+    }
+    const u64 stored = infoQueue->GetNumStoredMessages();
+    // ClearStoredMessages 会把计数归零；并发 drain（理论上单线程创建路径
+    // 不出现）导致 stored < storedBefore 时按 0 起窗，防下溢。
+    const u64 first = storedBefore <= stored ? storedBefore : 0;
+    diag += "\n  infoqueue: window=[" +
+            std::to_string(static_cast<unsigned long long>(first)) + "," +
+            std::to_string(static_cast<unsigned long long>(stored)) +
+            ") (storage preserved; device drain cycle untouched)";
+    u64 printed = 0, infoSkipped = 0, moreSkipped = 0;
+    for (u64 i = first; i < stored; ++i) {
+        SIZE_T size = 0;
+        if (FAILED(infoQueue->GetMessage(i, nullptr, &size)) || size == 0) {
+            ++moreSkipped;
+            continue;
+        }
+        std::string buffer(size, '\0');
+        if (FAILED(infoQueue->GetMessage(
+                i, reinterpret_cast<D3D12_MESSAGE*>(buffer.data()), &size))) {
+            ++moreSkipped;
+            continue;
+        }
+        const auto* msg = reinterpret_cast<const D3D12_MESSAGE*>(buffer.data());
+        if (!msg) {
+            ++moreSkipped;
+            continue;
+        }
+        if (msg->Severity == D3D12_MESSAGE_SEVERITY_INFO) {
+            ++infoSkipped;
+            continue;
+        }
+        if (printed >= kPsoDiagMessageLimit) {
+            ++moreSkipped;
+            continue;
+        }
+        // 文本截断：按 NUL 实长取 min(实长, 上限)，与设备 drain 同法。
+        size_t len = 0;
+        if (msg->pDescription) {
+            const void* nul =
+                std::memchr(msg->pDescription, '\0', msg->DescriptionByteLength);
+            len = nul ? static_cast<size_t>(
+                            static_cast<const char*>(nul) -
+                            static_cast<const char*>(msg->pDescription))
+                      : msg->DescriptionByteLength;
+        }
+        const bool truncated = len > kPsoDiagTextLimit;
+        const size_t emitLen = truncated ? kPsoDiagTextLimit : len;
+        const char* severity =
+            msg->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION ? "CORRUPTION"
+            : msg->Severity == D3D12_MESSAGE_SEVERITY_WARNING ? "WARNING"
+                                                              : "ERROR";
+        diag += "\n  infoqueue[" +
+                std::to_string(static_cast<unsigned long long>(i)) + "] id=" +
+                std::to_string(static_cast<unsigned long>(msg->ID)) +
+                " severity=" + severity + ": ";
+        diag.append(msg->pDescription ? static_cast<const char*>(msg->pDescription)
+                                      : "",
+                    emitLen);
+        if (truncated) diag += " ...(truncated)";
+        ++printed;
+    }
+    diag += "\n  infoqueue: window summary printed=" +
+            std::to_string(static_cast<unsigned long long>(printed)) +
+            " infoSkipped=" +
+            std::to_string(static_cast<unsigned long long>(infoSkipped)) +
+            " moreSkipped=" +
+            std::to_string(static_cast<unsigned long long>(moreSkipped));
 }
 
 } // namespace
@@ -801,11 +914,17 @@ bool D3D12Pipeline::InitializeGraphics(const GraphicsPipelineDesc& desc) {
     pso.CachedPSO = {};
     pso.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
 
+    // 失败诊断预埋（成功路径开销 = 一次 QI + 一次计数读）：InfoQueue 窗口
+    // 基线在 Create 调用前采集——失败时只排水本调用新增的消息（见
+    // DumpGraphicsPsoFailureDiag），不清设备侧存储。
+    Microsoft::WRL::ComPtr<ID3D12InfoQueue> diagInfoQueue;
+    u64 diagStoredBefore = 0;
+    if (SUCCEEDED(native->QueryInterface(IID_PPV_ARGS(&diagInfoQueue))))
+        diagStoredBefore = diagInfoQueue->GetNumStoredMessages();
+
     HRESULT hr = native->CreateGraphicsPipelineState(&pso, IID_PPV_ARGS(&pipeline_));
     if (FAILED(hr)) {
-        PRIMAL_LOG_STREAM(Error, "RHI")
-            << "[D3D12Pipeline] CreateGraphicsPipelineState failed hr=0x" << std::hex
-            << static_cast<unsigned long>(hr) << std::dec << std::endl;
+        DumpGraphicsPsoFailureDiag(hr, pso, diagInfoQueue.Get(), diagStoredBefore);
         return false;
     }
     return true;
@@ -846,14 +965,228 @@ bool D3D12Pipeline::InitializeCompute(const ComputePipelineDesc& desc) {
     // 指针；官方头 L2600/2609）——nullptr 赋值 C2679。置零空缓存=语义相同。
     pso.CachedPSO = {};
     pso.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+
+    // 失败诊断预埋（同 graphics 侧：窗口基线 + 失败时非破坏性排水）。
+    Microsoft::WRL::ComPtr<ID3D12InfoQueue> diagInfoQueue;
+    u64 diagStoredBefore = 0;
+    if (SUCCEEDED(native->QueryInterface(IID_PPV_ARGS(&diagInfoQueue))))
+        diagStoredBefore = diagInfoQueue->GetNumStoredMessages();
+
     HRESULT hr = native->CreateComputePipelineState(&pso, IID_PPV_ARGS(&pipeline_));
     if (FAILED(hr)) {
-        PRIMAL_LOG_STREAM(Error, "RHI")
-            << "[D3D12Pipeline] CreateComputePipelineState failed hr=0x" << std::hex
-            << static_cast<unsigned long>(hr) << std::dec << std::endl;
+        DumpComputePsoFailureDiag(hr, pso, diagInfoQueue.Get(), diagStoredBefore);
         return false;
     }
     return true;
+}
+
+// ---- PSO 创建失败路径诊断（声明处契约见 D3D12Pipeline.h；聚合一次输出，
+// 判读面覆盖 E_INVALIDARG 的全部常见根因：null root signature / 字节码
+// 空 / RT 格式非法 / 深度-混合-输入布局组合违规——最后由 InfoQueue 窗口
+// 给出 debug layer 的具体违规消息）。----
+void D3D12Pipeline::DumpGraphicsPsoFailureDiag(
+    HRESULT hr, const D3D12_GRAPHICS_PIPELINE_STATE_DESC& pso,
+    ID3D12InfoQueue* infoQueue, u64 storedBefore) const {
+    std::string diag;
+    {
+        char head[128];
+        std::snprintf(head, sizeof(head),
+                      "[D3D12Pipeline] CreateGraphicsPipelineState failed "
+                      "hr=0x%08lX — PSO failure diagnostic:",
+                      static_cast<unsigned long>(hr));
+        diag += head;
+    }
+
+    // root signature 面：pso 交给 API 的指针 + 句柄现查对照。null
+    // pRootSignature 即 E_INVALIDARG 直接根因（布局句柄失效/被销毁时
+    // GetRootSignature() 现查回 null，pso 构造期已捕获该值）。
+    D3D12PipelineLayout* resolvedLayout = GetPipelineLayout();
+    ID3D12RootSignature* resolvedRootSig =
+        resolvedLayout ? resolvedLayout->GetRootSignature()
+                       : (ownsLayout_ ? emptyRootSignature_.Get() : nullptr);
+    diag += "\n  rs: pso.pRootSignature=" + PtrText(pso.pRootSignature) +
+            " resolvedLayout=" + PtrText(resolvedLayout) +
+            " resolvedRootSignature=" + PtrText(resolvedRootSig) +
+            " ownsEmptyLayout=" + (ownsLayout_ ? "true" : "false") +
+            " layoutHandle=" +
+            std::to_string(static_cast<unsigned long long>(layoutHandle_)) +
+            " desc.layout=" +
+            std::to_string(static_cast<unsigned long long>(graphicsDesc_.layout));
+
+    // 字节码面：五级阶段指针非空性 + 长度（desc 侧句柄一并给出，与设备
+    // shader pool 日志对账用；GS/HS/DS 未接时为零初始化 (null)/0）。
+    diag += "\n  bytecode: VS h=" +
+            std::to_string(static_cast<unsigned long long>(graphicsDesc_.vertexShader)) +
+            " ptr=" + PtrText(pso.VS.pShaderBytecode) +
+            " len=" + std::to_string(static_cast<unsigned long long>(pso.VS.BytecodeLength));
+    diag += " | PS h=" +
+            std::to_string(static_cast<unsigned long long>(graphicsDesc_.pixelShader)) +
+            " ptr=" + PtrText(pso.PS.pShaderBytecode) +
+            " len=" + std::to_string(static_cast<unsigned long long>(pso.PS.BytecodeLength));
+    diag += " | GS ptr=" + PtrText(pso.GS.pShaderBytecode) +
+            " len=" + std::to_string(static_cast<unsigned long long>(pso.GS.BytecodeLength));
+    diag += " | HS ptr=" + PtrText(pso.HS.pShaderBytecode) +
+            " len=" + std::to_string(static_cast<unsigned long long>(pso.HS.BytecodeLength));
+    diag += " | DS ptr=" + PtrText(pso.DS.pShaderBytecode) +
+            " len=" + std::to_string(static_cast<unsigned long long>(pso.DS.BytecodeLength));
+
+    // 输出合并器 / 拓扑 / 采样面。
+    {
+        char line[192];
+        std::snprintf(line, sizeof(line),
+                      "\n  om: NumRenderTargets=%u DSVFormat=0x%X "
+                      "PrimitiveTopologyType=%d SampleDesc=%u/%u SampleMask=0x%X",
+                      static_cast<unsigned>(pso.NumRenderTargets),
+                      static_cast<unsigned>(pso.DSVFormat),
+                      static_cast<int>(pso.PrimitiveTopologyType),
+                      static_cast<unsigned>(pso.SampleDesc.Count),
+                      static_cast<unsigned>(pso.SampleDesc.Quality),
+                      static_cast<unsigned>(pso.SampleMask));
+        diag += line;
+    }
+    diag += " RTVFormats[0.." +
+            std::to_string(static_cast<unsigned long long>(pso.NumRenderTargets)) +
+            ")=";
+    for (UINT i = 0;
+         i < pso.NumRenderTargets && i < D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT;
+         ++i) {
+        char fmt[32];
+        std::snprintf(fmt, sizeof(fmt), "%s[%u]=0x%X", i ? "," : "",
+                      static_cast<unsigned>(i),
+                      static_cast<unsigned>(pso.RTVFormats[i]));
+        diag += fmt;
+    }
+
+    // 光栅化面。
+    {
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "\n  raster: FillMode=%d CullMode=%d FrontCounterClockwise=%d "
+                      "DepthBias=%d DepthBiasClamp=%g SlopeScaledDepthBias=%g "
+                      "DepthClipEnable=%d MultisampleEnable=%d "
+                      "AntialiasedLineEnable=%d ForcedSampleCount=%u "
+                      "ConservativeRaster=%d",
+                      static_cast<int>(pso.RasterizerState.FillMode),
+                      static_cast<int>(pso.RasterizerState.CullMode),
+                      static_cast<int>(pso.RasterizerState.FrontCounterClockwise),
+                      static_cast<int>(pso.RasterizerState.DepthBias),
+                      static_cast<double>(pso.RasterizerState.DepthBiasClamp),
+                      static_cast<double>(pso.RasterizerState.SlopeScaledDepthBias),
+                      static_cast<int>(pso.RasterizerState.DepthClipEnable),
+                      static_cast<int>(pso.RasterizerState.MultisampleEnable),
+                      static_cast<int>(pso.RasterizerState.AntialiasedLineEnable),
+                      static_cast<unsigned>(pso.RasterizerState.ForcedSampleCount),
+                      static_cast<int>(pso.RasterizerState.ConservativeRaster));
+        diag += line;
+    }
+
+    // 深度模板面。
+    {
+        char line[192];
+        std::snprintf(line, sizeof(line),
+                      "\n  depth-stencil: DepthEnable=%d DepthWriteMask=%d "
+                      "DepthFunc=%d StencilEnable=%d ReadMask=0x%X WriteMask=0x%X",
+                      static_cast<int>(pso.DepthStencilState.DepthEnable),
+                      static_cast<int>(pso.DepthStencilState.DepthWriteMask),
+                      static_cast<int>(pso.DepthStencilState.DepthFunc),
+                      static_cast<int>(pso.DepthStencilState.StencilEnable),
+                      static_cast<unsigned>(pso.DepthStencilState.StencilReadMask),
+                      static_cast<unsigned>(pso.DepthStencilState.StencilWriteMask));
+        diag += line;
+    }
+
+    // 混合面（IndependentBlendEnable=FALSE 时仅 RT0 生效，其余条目忽略；
+    // 本类构造期 8 槽写同值，RT0 即全量代表）。
+    {
+        char line[288];
+        std::snprintf(line, sizeof(line),
+                      "\n  blend: AlphaToCoverageEnable=%d "
+                      "IndependentBlendEnable=%d RT0(BlendEnable=%d SrcBlend=%d "
+                      "DestBlend=%d BlendOp=%d SrcBlendAlpha=%d "
+                      "DestBlendAlpha=%d BlendOpAlpha=%d LogicOpEnable=%d "
+                      "WriteMask=0x%X)",
+                      static_cast<int>(pso.BlendState.AlphaToCoverageEnable),
+                      static_cast<int>(pso.BlendState.IndependentBlendEnable),
+                      static_cast<int>(pso.BlendState.RenderTarget[0].BlendEnable),
+                      static_cast<int>(pso.BlendState.RenderTarget[0].SrcBlend),
+                      static_cast<int>(pso.BlendState.RenderTarget[0].DestBlend),
+                      static_cast<int>(pso.BlendState.RenderTarget[0].BlendOp),
+                      static_cast<int>(pso.BlendState.RenderTarget[0].SrcBlendAlpha),
+                      static_cast<int>(pso.BlendState.RenderTarget[0].DestBlendAlpha),
+                      static_cast<int>(pso.BlendState.RenderTarget[0].BlendOpAlpha),
+                      static_cast<int>(pso.BlendState.RenderTarget[0].LogicOpEnable),
+                      static_cast<unsigned>(pso.BlendState.RenderTarget[0].RenderTargetWriteMask));
+        diag += line;
+    }
+
+    // 输入装配 / 杂项面。
+    diag += "\n  input: NumElements=" +
+            std::to_string(static_cast<unsigned long long>(pso.InputLayout.NumElements)) +
+            " ptr=" + PtrText(pso.InputLayout.pInputElementDescs);
+    {
+        char line[160];
+        std::snprintf(line, sizeof(line),
+                      "\n  misc: IBStripCutValue=%d NodeMask=%u Flags=0x%X "
+                      "CachedPSO(blob=%s size=%llu) StreamOutput.rasterizedStream=%d",
+                      static_cast<int>(pso.IBStripCutValue),
+                      static_cast<unsigned>(pso.NodeMask),
+                      static_cast<unsigned>(pso.Flags),
+                      PtrText(pso.CachedPSO.pCachedBlob).c_str(),
+                      static_cast<unsigned long long>(pso.CachedPSO.CachedBlobSizeInBytes),
+                      static_cast<int>(pso.StreamOutput.RasterizedStream));
+        diag += line;
+    }
+
+    // 决定性证据：debug layer 对本次调用的具体违规消息。
+    AppendInfoQueueWindow(diag, infoQueue, storedBefore);
+
+    PRIMAL_LOG_STREAM(Error, "RHI") << diag << std::endl;
+    // 崩溃不丢：对齐 D3D12Device::DrainInfoQueueMessages 的收尾 flush——
+    // 若层内后续异常先于进程退出发生，本块必已在盘上。
+    std::fflush(stderr);
+}
+
+void D3D12Pipeline::DumpComputePsoFailureDiag(
+    HRESULT hr, const D3D12_COMPUTE_PIPELINE_STATE_DESC& pso,
+    ID3D12InfoQueue* infoQueue, u64 storedBefore) const {
+    std::string diag;
+    {
+        char head[128];
+        std::snprintf(head, sizeof(head),
+                      "[D3D12Pipeline] CreateComputePipelineState failed "
+                      "hr=0x%08lX — PSO failure diagnostic:",
+                      static_cast<unsigned long>(hr));
+        diag += head;
+    }
+    D3D12PipelineLayout* resolvedLayout = GetPipelineLayout();
+    ID3D12RootSignature* resolvedRootSig =
+        resolvedLayout ? resolvedLayout->GetRootSignature()
+                       : (ownsLayout_ ? emptyRootSignature_.Get() : nullptr);
+    diag += "\n  rs: pso.pRootSignature=" + PtrText(pso.pRootSignature) +
+            " resolvedLayout=" + PtrText(resolvedLayout) +
+            " resolvedRootSignature=" + PtrText(resolvedRootSig) +
+            " ownsEmptyLayout=" + (ownsLayout_ ? "true" : "false") +
+            " layoutHandle=" +
+            std::to_string(static_cast<unsigned long long>(layoutHandle_)) +
+            " desc.layout=" +
+            std::to_string(static_cast<unsigned long long>(computeDesc_.layout));
+    diag += "\n  bytecode: CS h=" +
+            std::to_string(static_cast<unsigned long long>(computeDesc_.computeShader)) +
+            " ptr=" + PtrText(pso.CS.pShaderBytecode) +
+            " len=" + std::to_string(static_cast<unsigned long long>(pso.CS.BytecodeLength));
+    {
+        char line[160];
+        std::snprintf(line, sizeof(line),
+                      "\n  misc: NodeMask=%u Flags=0x%X CachedPSO(blob=%s size=%llu)",
+                      static_cast<unsigned>(pso.NodeMask),
+                      static_cast<unsigned>(pso.Flags),
+                      PtrText(pso.CachedPSO.pCachedBlob).c_str(),
+                      static_cast<unsigned long long>(pso.CachedPSO.CachedBlobSizeInBytes));
+        diag += line;
+    }
+    AppendInfoQueueWindow(diag, infoQueue, storedBefore);
+    PRIMAL_LOG_STREAM(Error, "RHI") << diag << std::endl;
+    std::fflush(stderr);
 }
 
 D3D12PipelineLayout* D3D12Pipeline::GetPipelineLayout() const {

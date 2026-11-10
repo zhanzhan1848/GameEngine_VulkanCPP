@@ -16,6 +16,15 @@
 // 纹素，与上游两 pass 同一像素坐标系——全屏三角形恒等 UV 映射保证
 // 三个 pass 纹素一一对应，无重采样）。
 //
+// D3D12 签名对齐契约（勿删 inUV）：本 pass 算法不需要 UV，但顶点阶段
+// 复用 M3Post.vert（输出 TEXCOORD0@r0 + SV_Position@r1），而 D3D12
+// PSO 创建按"语义+寄存器号"逐项对齐 stage 签名（debug layer
+// #660 SHADER_LINKAGE_REGISTERINDEX）——不声明 inUV 时 PS 的
+// SV_Position 落 r0 ≠ VS 的 r1，CreateGraphicsPipelineState 直接
+// E_INVALIDARG（Vulkan 侧按名字链接，无此约束，故只在 D3D12 爆）。
+// 声明并消费 inUV 保住签名形状；`+ inUV * 0.0` 对有限值逐位恒等
+// （IEEE：x+0.0 不变号，gl_FragCoord 恒正），Vulkan 输出逐位不变。
+//
 // 绑定布局（set0 单 set；反射契约冻结）：
 //   set 0 binding 0 = giDirect（texture2D = ft.giDirect RGBA16F，P2 RT0）
 //   set 0 binding 1 = giIndirect（texture2D = ft.giIndirect RGBA16F，P5 RT）
@@ -25,10 +34,12 @@
 layout(set = 0, binding = 0) uniform texture2D giDirect;
 layout(set = 0, binding = 1) uniform texture2D giIndirect;
 
+layout(location = 0) in vec2 inUV;   // 见上方 D3D12 签名对齐契约
+
 layout(location = 0) out vec4 outColor;
 
 void main() {
-    ivec2 t = ivec2(gl_FragCoord.xy);
+    ivec2 t = ivec2(gl_FragCoord.xy + inUV * 0.0);
     outColor = vec4(texelFetch(giDirect, t, 0).rgb
                   + texelFetch(giIndirect, t, 0).rgb, 1.0);
 }
