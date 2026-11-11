@@ -272,6 +272,13 @@ EnvironmentVisibilityOutputs EnvironmentVisibilityModule::AddPasses(RenderGraph&
     constants.dimensions[2]=(target_width_+1)/2;constants.dimensions[3]=(target_height_+1)/2;
     constants.target[0]=target_width_;constants.target[1]=target_height_;
     constants.target[2]=inputs.temporal_accumulation?1u:0u;
+    // Resolve blending (weighted qualified-neighbour average instead of
+    // nearest-only). Opt-in until validated against the reported banding.
+    static const bool s_blendResolve = [] {
+        const char* e = std::getenv("PRIMAL_ENV_VIS_BLEND");
+        return e && std::strcmp(e, "1") == 0;
+    }();
+    constants.target[3]=s_blendResolve?1u:0u;
     constants.prev_view_projection=inputs.prev_view_projection;
     constants.policy[0]=ready?1u:0u;constants.policy[1]=inputs.legacy_unoccluded?1u:0u;constants.policy[3]=inputs.frame_index;
     constants.parameters={.002f,.02f,.95f,.05f};

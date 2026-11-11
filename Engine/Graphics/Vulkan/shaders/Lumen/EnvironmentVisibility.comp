@@ -316,12 +316,31 @@ void main() {
     // own an output pixel. Early return before this barrier would deadlock.
     barrier();
     if(any(greaterThanEqual(pixel,ivec2(cb.target.xy))))return;
-    Receiver target;if(!receiver(pixel,target)){imageStore(outputVisibility,pixel,vec4(0,0,1,0));return;}
+    // receiver()/pointAt() take GBuffer SOURCE texel coordinates
+    // (texelFetch(depthTexture,pixel) normalised by dimensions.xy). The resolve
+    // runs on the target grid, which is 2*divisor*render_scale times coarser, so
+    // the target receiver must be mapped back to its source texel first. When
+    // target == source this is exactly the identity, which is why the coupled
+    // configuration never needed it; without it every gather gate fails and
+    // every pixel falls through to a full-scene mirrorFallback ray traced from
+    // the wrong surface - visible as IBL speckle on dark glossy surfaces.
+    ivec2 targetSource=clamp(ivec2((vec2(pixel)+.5)/vec2(cb.target.xy)*vec2(cb.dimensions.xy)),
+                             ivec2(0),ivec2(cb.dimensions.xy)-ivec2(1));
+    Receiver target;if(!receiver(targetSource,target)){imageStore(outputVisibility,pixel,vec4(0,0,1,0));return;}
     float best=3.402823466e38;vec4 result=vec4(0);bool found=false;
+    // target.w bit0: weighted blend of every qualified neighbour instead of
+    // nearest-only. Nearest selection makes the scalar piecewise constant on a
+    // trace grid that is (2*divisor*render_scale)x coarser than the GBuffer, so
+    // any per-source flip between "environment visible" and "occluded" turns
+    // whole blocks of shading on/off - visible as bands of IBL colour on dark
+    // glossy surfaces. Blending keeps the same samples but removes the step.
+    const bool blendQualified=(cb.target.w&1u)!=0u;
+    vec4 accum=vec4(0);float accumWeight=0.;
     ivec2 base=max((pixel-ivec2(1))/2,ivec2(0));
     for(int y=0;y<=1;++y)for(int x=0;x<=1;++x) {
         ivec2 h=base+ivec2(x,y);if(any(lessThan(h,ivec2(0)))||any(greaterThanEqual(h,ivec2(cb.dimensions.zw))))continue;
         ivec2 cachePixel=h-cacheOrigin;
+        if(any(lessThan(cachePixel,ivec2(0)))||any(greaterThanEqual(cachePixel,ivec2(6))))continue;
         uint cacheIndex=uint(cachePixel.y*6+cachePixel.x);
         if(sourceReceiverValid[cacheIndex]==0u)continue;
         Receiver source=sourceReceiverCache[cacheIndex];
@@ -335,7 +354,12 @@ void main() {
         vec4 value=texelFetch(halfVisibility,h,0);
         if(any(isnan(value))||any(isinf(value))||value.a<.5)continue;
         if(key<best){best=key;result=value;found=true;}
+        if(blendQualified){float w=1./(1e-3+key);accum+=value*w;accumWeight+=w;}
     }
+    if(blendQualified&&found&&accumWeight>0.)result=accum/accumWeight;
+    // Trace-pixel fallback was measured to add 1.16 ms with no change to the
+    // reported speckle (same number of rays, different origin), so the target
+    // receiver is kept.
     imageStore(outputVisibility,pixel,found?result:mirrorFallback(target));
 #else
     if(any(greaterThanEqual(pixel,ivec2(cb.dimensions.zw))))return;
