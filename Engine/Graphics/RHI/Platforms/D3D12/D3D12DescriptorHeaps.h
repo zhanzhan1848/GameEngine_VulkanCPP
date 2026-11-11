@@ -170,6 +170,12 @@ private:
 // 由"区段迁移"闭合：绑定期发现区段属旧帧槽纪元（该槽区域即将/已被轮转
 // 回收）→ 在当前槽重分配并 CopyDescriptorsSimple 迁移内容。帧内每帧重写
 // （RenderGraph 路径）则迁移不触发（当前槽即属主槽）。
+//
+// R22-S1：sampler 表区段改为内容级共享 + 懒物化——创建时不再预分配
+// （此时无写入内容）；首个 sampler 写入时按"内容处方"（表长 + 每表项
+// sampler 持久槽）解析：同内容 set 共享同一段（每内容每槽一次），处方
+// 与 (slot, epoch) 时效语义见 SamplerTableSharingPolicy 类注。主堆
+// （CBV/SRV/UAV）区段行为不变。
 // ============================================================================
 class D3D12DescriptorSet : public RHIDescriptorSet {
     friend class primal::graphics::rhi::D3D12Device;
@@ -185,16 +191,26 @@ public:
     bool Initialize() override;
 
     /// 主堆区段基槽 + sampler 区段基槽（kInvalidSlot = 无该区段）。
+    /// R22-S1：sampler 基槽是"最近一次解析的快照"——共享区段随内容条目
+    /// 迁移，快照在每次 EnsureSetRegionCurrent/写入解析后刷新；只在解析
+    /// 与使用之间的窗口内有效（单线程渲染，窗口内无帧槽推进）。
     u32 BaseSlot() const { return baseSlot_; }
     u32 SamplerBaseSlot() const { return samplerBaseSlot_; }
 
     /// 区段属主槽 + 分配纪元（R21-C：两者都与当前帧槽/纪元一致才免迁移
     /// ——只比槽号的旧判定在"set 隔一整个槽周期未被触碰后同槽回归"时
     /// 会放行已被 BeginFrame 回收的陈旧区段 → 区段重叠互踩）。
+    /// R22-S1：该戳对 sampler 区段只辖"私有（未注册共享）"形态；共享
+    /// 区段时效由共享条目自身的 (slot, epoch) 决定。
     u32 OwnerSlot() const { return ownerSlot_; }
     u64 OwnerEpoch() const { return ownerEpoch_; }
     u32 MainCount() const { return mainCount_; }
     u32 SamplerCount() const { return samplerCount_; }
+
+    /// R22-S1：sampler 表内容处方（每表项 = 写入的 sampler 持久槽，
+    /// kUnwritten = 未写）。共享身份与重建处方（详见策略类注）。
+    const u32* SamplerSrcSlots() const { return samplerSrcSlots_.data(); }
+    bool SamplerRegionShared() const { return samplerRegionShared_; }
 
 protected:
     void destroyImpl() override;
@@ -210,6 +226,13 @@ private:
     u64 ownerEpoch_ = 0;               ///< R21C：分配时槽纪元戳
     u32 mainCount_ = 0;
     u32 samplerCount_ = 0;
+    bool samplerRegionShared_ = false; ///< R22-S1：sampler 区段是否共享条目管辖
+    /// R22-S1：内容处方（kUnwritten = 未写）。访问纪律：本对象住在
+    /// RHIAllocator/utl::free_list 池里，池扩容对不可移动类型走 realloc
+    /// **位搬迁**（utl::vector::reserve）——只允许 assign()/data() 这类不
+    /// 持"自迭代器"的访问（MSVC Debug 迭代器调试代理的 _Mycont 回指在
+    /// 位搬迁后失效；begin()/end()/range-for/erase 会经它解引用旧地址）。
+    std::vector<u32> samplerSrcSlots_;
 };
 
 // ============================================================================
@@ -318,7 +341,36 @@ public:
 
     /// sampler 堆的帧槽线性区段（set 实例的 sampler 表需要连续槽位；
     /// 区段复用随帧槽整体回收，同 CBV/SRV/UAV 主堆的护栏判定）。
+    /// R22-S1 起 set 实例的 sampler 表不再按 set 各占一段——内容级共享
+    ///（见下），本接口保留给私有区段迁移路径。
     bool AllocSamplerRange(u32 count, u32& outBaseSlot);
+
+    // ------------------------------------------------------------------
+    // R22-S1：sampler 表内容级共享（策略/生命周期语义见
+    // SamplerTableSharingPolicy 类注——平台中立，macOS 单测同源）。
+    // 帧槽轮转后共享条目过期：按条目 srcSlots 处方在当前槽"每内容每槽
+    // 一次"物化重建（谁发现过期谁重建，后来者直接命中）。
+    // ------------------------------------------------------------------
+    /// 按内容处方在当前帧槽物化一段 sampler 区间：线性分配 + 对每个已写
+    /// 表项逐项双写（R13/T1：sampler 持久槽 shadow → 区间 shadow → 区间
+    /// visible）。未写项保持未定义（与"未写入绑定的采样器未定义"语义
+    /// 一致），不作拷贝源。共享区间只经本函数写入（每内容每槽一次）。
+    bool MaterializeSamplerRange(const u32* srcSlots, u32 count, u32& outBaseSlot);
+
+    /// SamplerHandle 持久槽释放时的共享条目 purge（防 free-list 复用后
+    /// 按处方重建拷错源；FreeSampler 内部已调用，外部勿重复）。
+    void PurgeSamplerSharingForPersistentSlot(u32 slot) {
+        samplerSharing_.PurgeSlotsReferencing(slot);
+    }
+
+    SamplerTableSharingPolicy& SamplerSharing() { return samplerSharing_; }
+
+    /// R22-S1 诊断：唯一 sampler 内容数、当前槽活跃共享区间数、每槽
+    /// sampler 线性区高水位、主堆（CBV/SRV/UAV）每槽高水位。
+    void LogSamplerSharingStats(const char* when);
+
+    /// 共享条目表容量（满表 = 新内容降级私有区间，不失败）。
+    static constexpr u32 kSamplerSharingMaxEntries = 256;
 
     // ------------------------------------------------------------------
     // 命令列表绑定（SetDescriptorHeaps 用；每帧/每列表一次）
@@ -403,6 +455,7 @@ private:
     u32 samplerPersistentCapacity_ = 0;
     u32 samplerLinearBase_ = 0;
     DescriptorFrameSlotPolicy samplerLinear_; ///< sampler 堆线性区（同上）
+    SamplerTableSharingPolicy samplerSharing_; ///< R22-S1：sampler 表内容级共享记账
     std::vector<u64> perSlotGuardTarget_;  ///< 各槽上次提交护拦（复用判定）
 
     SlotPool cbvSrvUavPersistentSlots_;

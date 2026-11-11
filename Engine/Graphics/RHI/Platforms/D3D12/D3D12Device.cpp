@@ -691,6 +691,14 @@ void D3D12Device::beginFrameImpl() {
     // 帧槽推进：staging 环 + 描述符槽轮转（复用判定 = fence 完成值）。
     uploadRing_.BeginFrame();
     descriptorHeaps_.BeginFrame(currentFrameIndex_, fencePool_);
+    // R22-S1：首个 BeginFrame = init 期结算点（宿主资源加载在帧循环之前
+    // 完成——此处的唯一 sampler 内容数/高水位即 init 阶段总账）。无
+    // BeginFrame 宿主（M 系列测试 harness 形态）不经过本行，init 证据
+    // 由逐新内容日志 + Shutdown 统计补齐（见 LogSamplerSharingStats）。
+    if (!loggedInitSamplerStats_) {
+        loggedInitSamplerStats_ = true;
+        descriptorHeaps_.LogSamplerSharingStats("first beginFrame (init phase)");
+    }
     // R21-C：帧序号推进 + 逐帧埋点（详情行在 DescriptorHeaps::BeginFrame）。
     ++frameTraceBeginFrameSeq_;
     if (FrameTraceEnabled()) {
@@ -1419,7 +1427,15 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
         && set->OwnerEpoch() == descriptorHeaps_.SlotEpoch(currentFrameIndex_)) {
         return;  // 同槽同纪元——区段仍有效
     }
-    // R21-C 埋点：迁移前旧戳先留底（新戳落定后旧值不可再读）。
+    // R22-S1：该早退对共享 sampler 区段同样安全——共享条目与 set 戳在写
+    // 入/解析路径上同帧落值（锁步；写路径物化不推 set 戳，但物化只发生在
+    // set 戳已然同帧的窗口内，详见 ResolveSamplerRegionForWrite 注）。
+    //
+    // R22-S1 结构变化：主堆区段照旧按 set 戳整体迁移；sampler 区段分两路
+    // ——共享区段（内容条目管辖）走 ResolveSharedSamplerRegion 按条目自身
+    // 的 (slot, epoch) 解析/重建，私有区段（未注册共享，如条目表满降级或
+    // 未写入内容的既有形态）保留原拷贝迁移。R19-4"先全部分配、后统一
+    // 提交"语义保留：任一分配/解析失败 = 整次放弃，set 时效戳零改动。
     const u32 oldBase = set->BaseSlot();
     const u32 oldOwnerSlot = set->OwnerSlot();
     const u64 oldOwnerEpoch = set->OwnerEpoch();
@@ -1429,31 +1445,39 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
     // R19-4 迁移段断言布防（Windows Debug）：旧区段基槽+数量必须在堆容量内
     //——十八测 SDKLayers 内部 0xC0000005 的容量冲突假说若成立，断言先崩
     // 在本函数（调用栈直接给出 set 的基槽/数量），而非 D3D12 运行时内部。
+    // R22-S1：sampler 区段懒物化后可能尚未有区间（kInvalidSlot）——断言
+    // 仅在已有区间时上界检查。
     assert(set->MainCount() == 0
            || set->BaseSlot() < heaps.CbvSrvUavCapacity());
     assert(set->MainCount() == 0
            || set->MainCount() <= heaps.CbvSrvUavCapacity() - set->BaseSlot());
     assert(set->SamplerCount() == 0
+           || set->SamplerBaseSlot() == d3d12::D3D12DescriptorHeapManager::kInvalidSlot
            || set->SamplerBaseSlot() < heaps.SamplerCapacity());
-    assert(set->SamplerCount() == 0
+    assert(set->SamplerBaseSlot() == d3d12::D3D12DescriptorHeapManager::kInvalidSlot
            || set->SamplerCount() <= heaps.SamplerCapacity() - set->SamplerBaseSlot());
 
-    // R19-4 半迁移修复：两区段**先全部分配、后统一提交**。原实现主区段
-    // 分配+拷贝+改写 baseSlot_ 后，sampler 区段分配失败即裸 return——set
-    // 已带上新主区段但 ownerSlot_ 未推进，下次调用把主区段再迁移一遍，
-    // 每失败一次多烧一段线性区（内容仍正确，纯浪费+容量侵蚀；R18-B 扩容
-    // 后低概率，但属确定性缺陷）。现：任一分配失败=整次放弃（本帧线性区
-    // 白烧已分配段，随帧槽轮转回收），set 状态零改动。
+    // R19-4 半迁移修复语义（先分配后提交）：
+    //   - 主区段：AllocShaderVisible 先行（失败 = 整次放弃）；
+    //   - sampler 私有区段：AllocSamplerRange 先行（失败 = 整次放弃）；
+    //   - sampler 共享区段：无先行分配（ResolveSharedSamplerRegion 内部
+    //     物化时分配；失败同样整次放弃——set 戳不动，下次重试）。
     u32 newBase = 0, newSamplerBase = 0;
-    if (set->MainCount() > 0 && !heaps.AllocShaderVisible(set->MainCount(), newBase)) return;
-    if (set->SamplerCount() > 0 && !heaps.AllocSamplerRange(set->SamplerCount(), newSamplerBase)) return;
+    const bool migrateMain = set->MainCount() > 0;
+    const bool samplerBaseValid = set->SamplerCount() > 0
+        && set->SamplerBaseSlot() != d3d12::D3D12DescriptorHeapManager::kInvalidSlot;
+    const bool resolveSharedSampler = samplerBaseValid && set->SamplerRegionShared();
+    const bool migratePrivateSampler = samplerBaseValid && !set->SamplerRegionShared();
+    if (migrateMain && !heaps.AllocShaderVisible(set->MainCount(), newBase)) return;
+    if (migratePrivateSampler
+        && !heaps.AllocSamplerRange(set->SamplerCount(), newSamplerBase)) return;
 
     // 主区段迁移（内容逐描述符拷贝——heap 描述符自包含）。
     // R13/T1：源改 shadow 堆（原实现读 visible 堆作源 = debug-layer
     // #654 COPY_DESCRIPTORS_WRITE_ONLY_DESCRIPTOR，Windows 十二测全部
     // exit 2170 的直接根因）；迁移同时维护镜像不变量（shadow(new) 先收
     // 下旧内容，再 shadow(new)→visible(new) 合法方向下发）。
-    if (set->MainCount() > 0) {
+    if (migrateMain) {
         native->CopyDescriptorsSimple(
             set->MainCount(), heaps.CbvSrvUavShadowCpuHandle(newBase),
             heaps.CbvSrvUavShadowCpuHandle(set->BaseSlot()),
@@ -1461,7 +1485,10 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
         heaps.CopyCbvSrvUavShadowToVisible(newBase, set->MainCount());
         set->baseSlot_ = newBase;
     }
-    if (set->SamplerCount() > 0) {
+    bool samplerResolved = true;
+    if (resolveSharedSampler) {
+        samplerResolved = ResolveSharedSamplerRegion(set);
+    } else if (migratePrivateSampler) {
         native->CopyDescriptorsSimple(
             set->SamplerCount(), heaps.SamplerShadowCpuHandle(newSamplerBase),
             heaps.SamplerShadowCpuHandle(set->SamplerBaseSlot()),
@@ -1469,8 +1496,9 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
         heaps.CopySamplerShadowToVisible(newSamplerBase, set->SamplerCount());
         set->samplerBaseSlot_ = newSamplerBase;
     }
+    if (!samplerResolved) return;  // 共享解析失败：戳不推进（下次重试；主区段新段白烧随槽回收）
     set->ownerSlot_ = currentFrameIndex_;
-    set->ownerEpoch_ = heaps.SlotEpoch(currentFrameIndex_);  // R21C：新分配戳
+    set->ownerEpoch_ = descriptorHeaps_.SlotEpoch(currentFrameIndex_);  // R21C：新分配戳
     ++frameTraceMigrations_;
     if (FrameTraceEnabled()) {
         PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
@@ -1479,9 +1507,137 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
             << " -> newBase=" << set->BaseSlot()
             << " count=" << set->MainCount()
             << " samplerBase=" << set->SamplerBaseSlot()
+            << " samplerShared=" << (resolveSharedSampler ? 1 : 0)
             << " newOwner=(" << set->OwnerSlot() << "," << set->OwnerEpoch()
             << ")" << std::endl;
     }
+}
+
+bool D3D12Device::ResolveSharedSamplerRegion(d3d12::D3D12DescriptorSet* set) {
+    using d3d12::SamplerTableSharingPolicy;
+    d3d12::D3D12DescriptorHeapManager& heaps = descriptorHeaps_;
+    d3d12::SamplerTableSharingPolicy& sharing = heaps.SamplerSharing();
+    const u32 count = set->SamplerCount();
+    const u32 slot = currentFrameIndex_;
+    const u64 epoch = heaps.SlotEpoch(slot);
+    const u64 key = d3d12::HashSamplerTable(set->SamplerSrcSlots(), count);
+    const u32 hit = sharing.FindActive(key, slot, epoch, set->SamplerSrcSlots(), count);
+    if (hit != SamplerTableSharingPolicy::kInvalidIndex) {
+        set->samplerBaseSlot_ = sharing.EntryBaseSlot(hit);  // 刷新快照（条目可能已被重建到新基槽）
+        return true;
+    }
+    const u32 stale = sharing.FindByKey(key, set->SamplerSrcSlots(), count);
+    if (stale == SamplerTableSharingPolicy::kInvalidIndex) {
+        // 条目缺失：仅可能是 sampler 持久槽 purge（SamplerHandle 销毁，见
+        // FreeSampler）。不按处方重建——处方引用的持久槽可能已复用为不同
+        // 采样器；维持快照并告警（引用已销毁 sampler 的 set 属 Vulkan 同款
+        // UB：spec 禁止销毁仍被 descriptor set 引用的 sampler）。
+        // 告警一次性：轮转宿主里受影响的 set 每帧都会走到这里。
+        if (!warnedSharedSamplerRegionMissing_) {
+            warnedSharedSamplerRegionMissing_ = true;
+            PRIMAL_LOG_STREAM(Warn, "RHI")
+                << "[D3D12Device] shared sampler region missing for set prescription "
+                   "(sampler destroyed while sets still reference it?); keeping last "
+                   "resolved range (warned once)" << std::endl;
+        }
+        return true;  // 快照可用（本槽未被回收前内容未变）；不阻塞绑定
+    }
+    u32 base = 0;
+    if (!heaps.MaterializeSamplerRange(set->SamplerSrcSlots(), count, base)) {
+        return false;  // 耗尽日志已打；set 戳不推进，下次重试
+    }
+    sharing.Activate(stale, base, slot, epoch);
+    set->samplerBaseSlot_ = base;
+    return true;
+}
+
+u32 D3D12Device::ResolveSamplerRegionForWrite(d3d12::D3D12DescriptorSet* set,
+                                              const WriteDescriptorSet* writes,
+                                              u32 writeCount, u32 currentWrite) {
+    using d3d12::SamplerTableSharingPolicy;
+    d3d12::D3D12DescriptorHeapManager& heaps = descriptorHeaps_;
+    d3d12::SamplerTableSharingPolicy& sharing = heaps.SamplerSharing();
+    const u32 count = set->SamplerCount();
+    if (count == 0 || !writes) return d3d12::D3D12DescriptorHeapManager::kInvalidSlot;
+
+    // prescan：终态处方 = 当前处方 + 本调用内该 set 的全部 sampler 写入
+    //（含当前 write，前向窗口到调用尾；同 set 更早 write 的效果已在当前
+    // 处方里）。终态一次解析，跳过中间内容状态——宿主"binding 分多次
+    // Update 写入"时不会为中间态各占一段。同调用内逐 write 重复解析收敛
+    // 同一终态 → 同一基槽（幂等，无需跨 write 缓存）。
+    utl::vector<u32> finalSrc(set->SamplerSrcSlots(), set->SamplerSrcSlots() + count);
+    d3d12::D3D12DescriptorSetLayout* layout = GetDescriptorSetLayout(set->GetLayout());
+    if (!layout) return d3d12::D3D12DescriptorHeapManager::kInvalidSlot;
+    for (u32 scan = currentWrite; scan < writeCount; ++scan) {
+        const WriteDescriptorSet& pending = writes[scan];
+        if (pending.dstSet != writes[currentWrite].dstSet) continue;
+        d3d12::D3D12DescriptorSetLayout::BindingClass pendingInfo;
+        if (!layout->QueryBinding(pending.dstBinding, pendingInfo)
+            || !pendingInfo.hasSampler || !pending.imageInfo) {
+            continue;
+        }
+        // 以下跳过条件逐条镜像 updateDescriptorSetsImpl 的逐项分支次序
+        //（buffer 路径优先于 image 路径；Combined 绑定的纹理无效 = 整项
+        // 跳过，其 sampler 亦不写）——prescan 与"原逐项写入会落下的内容"
+        // 必须逐位一致，终态处方才是该 set 真实的 sampler 表内容。
+        if (pendingInfo.hasMain && pending.bufferInfo) continue;
+        for (u32 item = 0; item < pending.descriptorCount; ++item) {
+            const DescriptorImageInfo& pendingImage = pending.imageInfo[item];
+            if (pendingInfo.hasMain) {
+                d3d12::D3D12Texture* texture = GetTexture(pendingImage.imageView);
+                if (!texture) continue;
+                const u32 srcSlot = pendingInfo.mainType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+                    ? texture->UavSlot() : texture->SrvSlot();
+                if (srcSlot == d3d12::D3D12Texture::kInvalidDescriptorSlot) continue;
+            }
+            d3d12::D3D12Sampler* sampler = GetSampler(pendingImage.sampler);
+            if (!sampler) continue;
+            const u32 idx = pendingInfo.samplerOffset + pending.dstArrayElement + item;
+            // R19-4 断言布防延伸：写入项越出 sampler 表长（dstArrayElement/
+            // descriptorCount 超 layout 声明）。共享区间下越界 = 踩到相邻
+            // 内容的区间——Release 也必须拒绝（原实现此处只有堆容量断言）。
+            assert(idx < count);
+            if (idx >= count) continue;
+            finalSrc[idx] = sampler->Slot();
+        }
+    }
+
+    const u32 slot = currentFrameIndex_;
+    const u64 epoch = heaps.SlotEpoch(slot);
+    const u64 key = d3d12::HashSamplerTable(finalSrc.data(), count);
+    const u32 hit = sharing.FindActive(key, slot, epoch, finalSrc.data(), count);
+    if (hit != SamplerTableSharingPolicy::kInvalidIndex) {
+        // 内容已在本槽物化：直接共享——区间内容即终态处方，本 set 零写入。
+        set->samplerRegionShared_ = true;
+        set->samplerBaseSlot_ = sharing.EntryBaseSlot(hit);
+        set->samplerSrcSlots_.assign(finalSrc.data(), finalSrc.data() + count);
+        return set->samplerBaseSlot_;
+    }
+    u32 base = 0;
+    if (!heaps.MaterializeSamplerRange(finalSrc.data(), count, base)) {
+        // 耗尽日志已打。set 的处方/快照零改动（本次写入未生效，同原实现
+        // 对无效项的静默跳过口径；调用方跳过该 write 的 sampler 项）。
+        return d3d12::D3D12DescriptorHeapManager::kInvalidSlot;
+    }
+    const u32 stale = sharing.FindByKey(key, finalSrc.data(), count);
+    if (stale != SamplerTableSharingPolicy::kInvalidIndex) {
+        sharing.Activate(stale, base, slot, epoch);   // 过期条目复活（重建落位）
+        set->samplerRegionShared_ = true;
+    } else {
+        const bool registered =
+            sharing.Register(key, base, slot, epoch, finalSrc.data(), count)
+                != SamplerTableSharingPolicy::kInvalidIndex;
+        // 表满降级：私有区间（内容正确，仅不共享；随 set 戳拷贝迁移）。
+        set->samplerRegionShared_ = registered;
+        if (registered) {
+            // R22-S1 诊断（有界：每唯一内容一行）：新内容物化证据——init 期
+            // 的内容数与共享效果从日志直接可数。
+            heaps.LogSamplerSharingStats("new unique sampler content");
+        }
+    }
+    set->samplerBaseSlot_ = base;
+    set->samplerSrcSlots_.assign(finalSrc.data(), finalSrc.data() + count);
+    return base;
 }
 
 void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorSet* writes) {
@@ -1498,6 +1654,17 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
 
         d3d12::D3D12DescriptorSetLayout::BindingClass info;
         if (!layout->QueryBinding(write.dstBinding, info)) continue;
+
+        // R22-S1：sampler 写入的区间解析（内容级共享——每内容每槽一段）。
+        // 以"本调用内该 set 全部 sampler 写入应用后的终态处方"解析：命中
+        // 既有共享区间即复用，否则在当前槽物化一段并注册。触发条件与下方
+        // 逐项分支的可达条件严格一致（buffer 路径优先——hasMain 且带
+        // bufferInfo 的 write 不会落到 sampler 项）。解析失败（线性区耗尽，
+        // 已留日志）= 本 write 的 sampler 项跳过。
+        u32 samplerRangeBase = d3d12::D3D12DescriptorHeapManager::kInvalidSlot;
+        if (info.hasSampler && write.imageInfo && !(info.hasMain && write.bufferInfo)) {
+            samplerRangeBase = ResolveSamplerRegionForWrite(set, writes, writeCount, w);
+        }
 
             for (u32 e = 0; e < write.descriptorCount; ++e) {
                 // --- 主段（CBV/SRV/UAV）---
@@ -1586,16 +1753,13 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                     descriptorHeaps_.CopyCbvSrvUavShadowToVisible(dstSlot);
                 }
                 if (info.hasSampler) {
-                    d3d12::D3D12Sampler* sampler = GetSampler(ii.sampler);
-                    if (!sampler) continue;
-                    const u32 dstSlot = set->SamplerBaseSlot() + info.samplerOffset
-                                        + write.dstArrayElement + e;
-                    assert(dstSlot < descriptorHeaps_.SamplerCapacity());  // R19-4 断言布防（同上）
-                    native->CopyDescriptorsSimple(
-                        1, descriptorHeaps_.SamplerShadowCpuHandle(dstSlot),
-                        descriptorHeaps_.SamplerShadowCpuHandle(sampler->Slot()),
-                        D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-                    descriptorHeaps_.CopySamplerShadowToVisible(dstSlot);
+                    // R22-S1：无逐项动作——sampler 区间内容已由写入级解析
+                    // 保证（MaterializeSamplerRange 按终态处方一次物化，或
+                    // 命中既有共享区间；共享区段只被物化写一次，杜绝逐项
+                    // 写入踩共享段）。处方也在解析时落定
+                    //（ResolveSamplerRegionForWrite），本分支保留仅为显式
+                    // 标注 CombinedImageSampler 的 sampler 半边归属。
+                    (void)samplerRangeBase;
                 }
             }
         }

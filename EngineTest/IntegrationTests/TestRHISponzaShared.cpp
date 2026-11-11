@@ -541,6 +541,8 @@ struct Trajectory {
     u32 version{0};
     std::string name;
     std::string assetPath;
+    // scene.asset_sha256（hex64；声明值，供资产门禁校验。空 = 未声明）
+    std::string assetSha256;
     double dt{1.0 / 60.0};
     u32 totalFrames{240};
     u32 warmupFrames{30};
@@ -572,6 +574,10 @@ bool ParseTrajectory(const pfxjson::value& root, Trajectory& t, std::string& err
     if (!scene || !scene->is_object()) { err = "scene missing"; return false; }
     if (auto* a = scene->find("asset")) t.assetPath = a->as_string();
     if (t.assetPath.empty()) { err = "scene.asset empty"; return false; }
+    // 资产 SHA 声明（键名沿本解析器 snake_case 实际风格，与轨迹文件
+    // "asset_sha256" 一致；非字符串/缺失保持空，由资产门禁硬失败）
+    if (auto* s = scene->find("asset_sha256"); s && s->is_string())
+        t.assetSha256 = s->as_string();
 
     const pfxjson::value* timing = root.find("timing");
     if (!timing || !timing->is_object()) { err = "timing missing"; return false; }
@@ -678,6 +684,78 @@ bool ParseTrajectory(const pfxjson::value& root, Trajectory& t, std::string& err
         if (auto* f = k->find("fov_deg")) kf.fovDeg = f->as_number();
         t.keyframes.push_back(kf);
     }
+    return true;
+}
+
+// ======================= 资产 SHA 门禁（防静默错资产，2026-11-10） =======
+// 背景：轨迹 JSON 声明 scene.asset_sha256，但 harness 此前从不校验——
+// Windows 集成轮次曾静默使用错误 Sponza.model（SHA 302DC6DA…，25
+// meshes，非索引）而非声明的 b0c1f2d5…（393 meshes），视觉对比整体
+// 错位且无任何先兆。本门禁在 main 轨迹装载后、任何设备/纹理/网格
+// 资源创建之前校验磁盘资产与声明 SHA（大小写无关）：声明缺失、资产
+// 读不出、SHA 不匹配一律非零码（2，配置错误惯例）终止，绝不带错
+// 资产继续渲染。SHA 复用 sha_gate 最小实现（cso 门禁同源，正确性已
+// 与 shasum -a 256 核对）；资产 ~7.5MB 一次性读入内存计算，不流式。
+bool VerifyTrajectoryAssetSha(const Trajectory& t, const std::string& trajRel) {
+    auto diag = [&]() {
+        std::cerr << "[ASSET_GATE] trajectory=" << trajRel
+                  << " scene.asset=" << t.assetPath << std::endl;
+    };
+    // 声明归一化到小写 hex（手工 A-F→a-f，不引入 <cctype>）。
+    std::string declared = t.assetSha256;
+    for (char& c : declared)
+        if (c >= 'A' && c <= 'F') c = char(c + ('a' - 'A'));
+    const auto isHex64 = [](const std::string& s) {
+        if (s.size() != 64) return false;
+        for (char c : s)
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        return true;
+    };
+    // 1) 声明字段必须存在且为 64 位 hex——防静默错跑的硬门禁，不放宽。
+    if (declared.empty()) {
+        diag();
+        std::cerr << "[ASSET_GATE] FAIL: trajectory does not declare "
+                     "scene.asset_sha256 — refusing to run. Fix: add "
+                     "\"asset_sha256\": \"<hex64>\" to the scene object."
+                  << std::endl;
+        return false;
+    }
+    if (!isHex64(declared)) {
+        diag();
+        std::cerr << "[ASSET_GATE] FAIL: scene.asset_sha256 is not 64 hex "
+                     "digits (got '" << t.assetSha256 << "') — refusing to run."
+                  << std::endl;
+        return false;
+    }
+    // 2) 资产文件必须可读（与场景加载处同款 ReadFileRel 路径解析）。
+    const std::vector<u8> bytes = ReadFileRel(t.assetPath);
+    if (bytes.empty()) {
+        diag();
+        std::cerr << "[ASSET_GATE] FAIL: cannot read asset file: "
+                  << t.assetPath << " (not found / unreadable / empty)"
+                  << std::endl;
+        return false;
+    }
+    // 3) 实测 SHA 与声明比较（大小写无关：实测恒小写，声明已归一）。
+    const std::string actual =
+        sha_gate::ToHex32(sha_gate::Sha256(bytes.data(), bytes.size()).h);
+    if (actual != declared) {
+        diag();
+        std::cerr << "[ASSET_GATE] FAIL: asset sha256 MISMATCH — refusing to "
+                     "render with wrong asset." << std::endl;
+        std::cerr << "[ASSET_GATE]   declared (trajectory): " << declared
+                  << std::endl;
+        std::cerr << "[ASSET_GATE]   actual   (on disk)   : " << actual
+                  << std::endl;
+        std::cerr << "[ASSET_GATE]   actual file size     : " << bytes.size()
+                  << " bytes (resolved: " << FindFileRel(t.assetPath) << ")"
+                  << std::endl;
+        std::cerr << "[ASSET_GATE]   Fix: place the declared asset (sha256 "
+                  << declared << ") at " << t.assetPath << std::endl;
+        return false;
+    }
+    std::cout << "[ASSET_GATE] " << t.assetPath << " sha256 ok ("
+              << declared << ", " << bytes.size() << " bytes)" << std::endl;
     return true;
 }
 
@@ -3841,6 +3919,17 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
 
     // ---- Sponza 场景加载（同源资产 + 逐 mesh albedo）----
     std::vector<MeshEntry> meshes;
+    // 纹理按来源去重（2026-11-11，主堆墙解锁）：键 = 解析后的纹理文件路径
+    //（来源身份）；fallback 白纹理键 = 空串。创建参数恒同证明：
+    // CreateTextureFromPixels 的全部 desc 字段是 (w,h) 的函数（mipLevels
+    // 由 max(w,h) 推导；format/usage/memoryUsage/name 固定），像素数据 =
+    // stbi 强制 4 通道解码同一文件——同路径 ⇒ 同文件 ⇒ 同 (w,h) ⇒ 同参数
+    // 同内容；本宿主无 sRGB/预乘等可变创建标志。命中即复用句柄，免解码/
+    // 上传/mipgen；mipgen 对每张唯一纹理仍跑全 mip 链。每 mesh 的 material/
+    // lit set 主段 SRV 仍各自写入（指向共享纹理，描述符内容与逐 mesh 建纹
+    // 理时逐位相同）。销毁：句柄由本表统一持有，退出时每唯一纹理销毁一次
+    //（逐 mesh 销毁=对共享句柄重复销毁，禁止）。
+    std::unordered_map<std::string, ResourceHandle> albedoBySource;
     primal::utl::vector<SceneDataMeshInfo> sceneInfos;
     if (ok) {
         std::vector<u8> modelBytes = ReadFileRel(traj.assetPath);
@@ -3877,7 +3966,10 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
             assetBase = slash == std::string::npos ? "" : assetBase.substr(0, slash + 1);
 
             static const unsigned char kWhite1x1[4] = {255, 255, 255, 255};
-            u32 texLoaded = 0, texFallback = 0, meshSkipped = 0;
+            // texLoaded = 唯一来源文件数（去重后）；texMeshRefs = 拿到真实
+            // 纹理的 mesh 数（去重前与 texLoaded 同值）；texFallback = 回退
+            // 白纹理的 mesh 数（口径不变）。
+            u32 texLoaded = 0, texMeshRefs = 0, texFallback = 0, meshSkipped = 0;
             for (auto& info : sceneInfos) {
                 if (!info.mesh || !info.mesh->IsValid()) {
                     ++meshSkipped;
@@ -3889,18 +3981,38 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                 unsigned char* pixels = nullptr;
                 std::string texPath =
                     ResolveTexturePath(assetBase, info.diffuseTexturePath);
-                if (!texPath.empty())
-                    pixels = stbi_load(texPath.c_str(), &tw, &th, nullptr, 4);
-                if (pixels && tw > 0 && th > 0) {
-                    e.albedoTex = CreateTextureFromPixels(device, loadCmd, pixels,
-                                                          u32(tw), u32(th));
-                    stbi_image_free(pixels);
-                    ++texLoaded;
+                // 去重命中：同来源已建纹理 → 复用句柄（免解码/上传/mipgen）。
+                const auto cached = texPath.empty() ? albedoBySource.end()
+                                                    : albedoBySource.find(texPath);
+                if (cached != albedoBySource.end()) {
+                    e.albedoTex = cached->second;
+                    ++texMeshRefs;
                 } else {
-                    if (pixels) stbi_image_free(pixels);
-                    e.albedoTex = CreateTextureFromPixels(device, loadCmd,
-                                                          kWhite1x1, 1, 1);
-                    ++texFallback;
+                    if (!texPath.empty())
+                        pixels = stbi_load(texPath.c_str(), &tw, &th, nullptr, 4);
+                    if (pixels && tw > 0 && th > 0) {
+                        e.albedoTex = CreateTextureFromPixels(device, loadCmd, pixels,
+                                                              u32(tw), u32(th));
+                        stbi_image_free(pixels);
+                        if (e.albedoTex != handles::INVALID_RESOURCE) {
+                            albedoBySource.emplace(texPath, e.albedoTex);
+                            ++texMeshRefs;
+                        }
+                        ++texLoaded;
+                    } else {
+                        if (pixels) stbi_image_free(pixels);
+                        // fallback 白纹理同样只建一张（键 = 空串，参数固定）。
+                        const auto white = albedoBySource.find(std::string());
+                        if (white != albedoBySource.end()) {
+                            e.albedoTex = white->second;
+                        } else {
+                            e.albedoTex = CreateTextureFromPixels(device, loadCmd,
+                                                                  kWhite1x1, 1, 1);
+                            if (e.albedoTex != handles::INVALID_RESOURCE)
+                                albedoBySource.emplace(std::string(), e.albedoTex);
+                        }
+                        ++texFallback;
+                    }
                 }
                 if (e.albedoTex == handles::INVALID_RESOURCE) {
                     Fail("albedo texture for mesh " + info.name);
@@ -3912,8 +4024,8 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                 e.materialSet = device->CreateDescriptorSet(msd);
                 if (e.materialSet == handles::INVALID_RESOURCE) {
                     Fail("material set for mesh " + info.name);
-                    device->DestroyTexture(e.albedoTex);
-                    g_ledger.textures.erase(e.albedoTex);
+                    // albedo 纹理由 albedoBySource 统一持有（可能已被先前
+                    // mesh 共享）——不在此销毁，退出清理段每唯一纹理销毁一次。
                     ok = false;
                     break;
                 }
@@ -3939,8 +4051,7 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                     e.litMaterialSet = device->CreateDescriptorSet(lmsd);
                     if (e.litMaterialSet == handles::INVALID_DESCRIPTOR_SET) {
                         Fail("lit material set for mesh " + info.name);
-                        device->DestroyTexture(e.albedoTex);
-                        g_ledger.textures.erase(e.albedoTex);
+                        // 同上：共享纹理不在失败分支销毁（albedoBySource 持有）。
                         ok = false;
                         break;
                     }
@@ -3992,6 +4103,15 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                           << " fallback(1x1 white); drawable meshes="
                           << meshes.size()
                           << (meshSkipped ? " (skipped " + std::to_string(meshSkipped) + ")"
+                                          : "")
+                          << std::endl;
+                // 去重统计（2026-11-11）：texLoaded 语义已从"每 mesh 一次
+                // 加载"变为"唯一来源文件数"——Windows 主堆核算据此对账。
+                std::cout << "[RHI_SHARED] texture dedup: " << texLoaded
+                          << " unique source files serve " << texMeshRefs
+                          << " mesh refs"
+                          << (texFallback ? (" (+1 shared fallback texture for "
+                                             + std::to_string(texFallback) + " mesh)")
                                           : "")
                           << std::endl;
             }
@@ -5468,10 +5588,8 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
             device->DestroyDescriptorSet(e.materialSet);
             g_ledger.sets.erase(e.materialSet);
         }
-        if (e.albedoTex != handles::INVALID_RESOURCE) {
-            device->DestroyTexture(e.albedoTex);
-            g_ledger.textures.erase(e.albedoTex);
-        }
+        // albedo 纹理按来源去重后由 albedoBySource 统一持有——先销完全部
+        // 引用它的 set，再逐唯一纹理销毁一次（逐 mesh 销毁=重复销毁）。
         if (e.mesh) {
             e.mesh->Destroy(device);
             delete e.mesh;
@@ -5479,6 +5597,13 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
         }
     }
     meshes.clear();
+    for (auto& sourceTex : albedoBySource) {
+        if (sourceTex.second != handles::INVALID_RESOURCE) {
+            device->DestroyTexture(sourceTex.second);
+            g_ledger.textures.erase(sourceTex.second);
+        }
+    }
+    albedoBySource.clear();
     for (auto& info : sceneInfos) {
         if (info.ownsMeshContentResource &&
             info.meshEntityId != primal::id::invalid_id)
@@ -5606,6 +5731,9 @@ int main() {
             return 2;
         }
     }
+    // 资产 SHA 门禁（main 最早处）：设备创建/纹理/网格加载之前硬校验，
+    // 失败按配置错误惯例 exit 2，绝不带错资产进渲染。
+    if (!VerifyTrajectoryAssetSha(cfg.traj, trajRel)) return 2;
     std::cout << "[RHI_SHARED] trajectory=" << cfg.traj.name
               << " asset=" << cfg.traj.assetPath
               << " dt=" << cfg.traj.dt

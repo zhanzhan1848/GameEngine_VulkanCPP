@@ -280,6 +280,20 @@ bool VulkanCommandBuffer::submitImpl(u32 /*waitFlags*/) {
     si.signalSemaphoreCount = 0;
     si.pSignalSemaphores = nullptr;
 
+    // Fence 生命周期修复（VUID-vkQueueSubmit-fence-00063）：基类状态机允许
+    // Executed → Begin → End → Submit 直接复用同一 cmd buffer 而不经 Reset()
+    // （RHICommand.h Begin 接受 Executed 态），而 submitFence_ 此前只在
+    // resetImpl 里 reset——该复用路径上它停留在上一次提交留下的 SIGNALED
+    // 态，构成违规重复提交；且随后 WaitForCompletion 对已 signaled 的 fence
+    // 立即返回，不再真正等待本次提交（场景加载期逐纹理上传即此序列）。
+    // 与 VulkanDevice::submitImpl 内部 fence 分支同一语义：提交前 reset。
+    // 此处 fence 必不 pending——到达 RecordingEnded 的前驱只有 Reset（已
+    // reset）或 Executed（已等到完成）；对未 signaled 的 fence，vkResetFences
+    // 按 spec 为 no-op。
+    if (submitFence_ != VK_NULL_HANDLE) {
+        vkResetFences(vk.GetNativeDevice(), 1, &submitFence_);
+    }
+
     VkResult res = vkQueueSubmit(queue, 1, &si, submitFence_);
     if (res != VK_SUCCESS) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkQueueSubmit failed: " << res << std::endl;

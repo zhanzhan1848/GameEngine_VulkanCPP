@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdlib>  // R21-C：FrameTraceEnabled 的 std::getenv
+#include <string>   // R22-S1：LogSamplerSharingStats 的逐槽高水位拼接
 
 #include "D3D12Abi.h"
 #include "D3D12StateMapping.h"
@@ -150,6 +151,8 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
     samplerLinear_.Init(samplerLinearBase_,
                         (config.samplerCapacity - samplerLinearBase_) / frameSlotCount_,
                         frameSlotCount_);
+    // R22-S1：sampler 表内容级共享记账（策略见 D3D12DescriptorSlotPolicy.h）。
+    samplerSharing_.Init(kSamplerSharingMaxEntries);
 
     cbvSrvUavPersistentSlots_.Init(config.cbvSrvUavPersistentCapacity);
     rtvSlots_.Init(config.rtvCapacity);
@@ -169,6 +172,9 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
 }
 
 void D3D12DescriptorHeapManager::Shutdown() {
+    // R22-S1：关机统计（对无 BeginFrame 的宿主——M 系列测试 harness 的
+    // 实测形态，帧槽静止、bump 单调——本行是唯一的全周期高水位总账）。
+    if (device_) LogSamplerSharingStats("shutdown");
     device_ = nullptr;
     cbvSrvUavHeap_.Reset();
     samplerHeap_.Reset();
@@ -325,7 +331,15 @@ D3D12_CPU_DESCRIPTOR_HANDLE D3D12DescriptorHeapManager::DsvCpuHandle(u32 slot) c
 }
 
 u32 D3D12DescriptorHeapManager::AllocSampler() { return samplerSlots_.Alloc(); }
-void D3D12DescriptorHeapManager::FreeSampler(u32 slot) { samplerSlots_.Free(slot); }
+void D3D12DescriptorHeapManager::FreeSampler(u32 slot) {
+    // R22-S1：先 purge 引用该持久槽的共享条目——槽位回收进 free-list 后可被
+    // 新 sampler 复用；处方若仍指向它，后续按处方重建会拷到别人的描述符
+    // （引用已销毁 sampler 的 set 属 Vulkan 同款 UB：spec 禁止销毁仍被
+    // descriptor set 引用的 sampler——purge 让"UB"停留在不可解析，而不是
+    // 静默拷错内容）。
+    if (slot != kInvalidSlot) PurgeSamplerSharingForPersistentSlot(slot);
+    samplerSlots_.Free(slot);
+}
 D3D12_CPU_DESCRIPTOR_HANDLE D3D12DescriptorHeapManager::SamplerCpuHandle(u32 slot) const {
     D3D12_CPU_DESCRIPTOR_HANDLE h = samplerCpuStart_;
     h.ptr += static_cast<SIZE_T>(slot) * samplerDescriptorSize_;
@@ -348,6 +362,62 @@ bool D3D12DescriptorHeapManager::AllocSamplerRange(u32 count, u32& outBaseSlot) 
         return false;
     }
     return true;
+}
+
+bool D3D12DescriptorHeapManager::MaterializeSamplerRange(const u32* srcSlots,
+                                                         u32 count,
+                                                         u32& outBaseSlot) {
+    // R22-S1：内容处方的"每内容每槽一次"物化（语义见策略类注）。分配失败
+    // 的日志沿用 AllocSamplerRange 的耗尽签名（补 unique 上下文）。
+    if (!srcSlots || count == 0) return false;
+    if (!samplerLinear_.Alloc(count, outBaseSlot)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12DescriptorHeaps] frame slot " << currentSlot_
+            << " sampler range capacity exhausted (bump=" << samplerLinear_.Bump()
+            << " need=" << count << " capacity=" << samplerLinear_.SlotCapacity()
+            << "; unique sampler contents exceed per-slot capacity)" << std::endl;
+        return false;
+    }
+    assert(outBaseSlot < samplerCapacity_);
+    assert(count <= samplerCapacity_ - outBaseSlot);
+    // 内容物化：逐项双写（R13/T1）——源读 sampler 持久槽的 shadow 副本，先
+    // 落区间 shadow 再镜像 visible 同槽。只处理已写项：未写项的 shadow/
+    // visible 均保持区间原样（未定义描述符——与"未写入绑定的采样器未定义"
+    // 语义一致），且不把未初始化的 shadow 槽当拷贝源（与原逐项写入路径
+    // 相同的 debug-layer 暴露面：原路径也只对已写项做 shadow→visible）。
+    for (u32 i = 0; i < count; ++i) {
+        if (srcSlots[i] == SamplerTableSharingPolicy::kUnwritten) continue;
+        assert(srcSlots[i] < samplerPersistentCapacity_);
+        device_->CopyDescriptorsSimple(
+            1, SamplerShadowCpuHandle(outBaseSlot + i),
+            SamplerShadowCpuHandle(srcSlots[i]),
+            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        CopySamplerShadowToVisible(outBaseSlot + i);
+    }
+    return true;
+}
+
+void D3D12DescriptorHeapManager::LogSamplerSharingStats(const char* when) {
+    // R22-S1 init 诊断（任务要求保留并补充）：唯一 sampler 内容数、当前槽
+    // 活跃共享区间数、每槽 sampler 线性区高水位、主堆每槽高水位——耗尽
+    // 类问题的第一手对账数据。逐槽高水位按 frameSlotCount_ 展开。
+    std::string samplerHighWater, mainHighWater;
+    for (u32 s = 0; s < frameSlotCount_; ++s) {
+        if (s != 0) { samplerHighWater += ", "; mainHighWater += ", "; }
+        samplerHighWater += std::to_string(samplerLinear_.HighWaterFor(s));
+        mainHighWater += std::to_string(mainLinear_.HighWaterFor(s));
+    }
+    PRIMAL_LOG_STREAM(Info, "RHI")
+        << "[D3D12DescriptorHeaps] sampler sharing stats ("
+        << (when ? when : "?") << "): uniqueSamplerContents="
+        << samplerSharing_.UniqueKeyCount()
+        << " activeSharedRanges(slot " << currentSlot_ << ")="
+        << samplerSharing_.ActiveEntryCount(currentSlot_,
+                                            samplerLinear_.SlotEpoch(currentSlot_))
+        << " samplerHighWaterPerSlot=[" << samplerHighWater << "]/"
+        << samplerLinear_.SlotCapacity()
+        << " mainHighWaterPerSlot=[" << mainHighWater << "]/"
+        << mainLinear_.SlotCapacity() << std::endl;
 }
 
 // ============================================================================
@@ -496,9 +566,16 @@ bool D3D12DescriptorSet::Initialize() {
         }
     }
     if (samplerCount_ > 0) {
-        if (!heaps.AllocSamplerRange(samplerCount_, samplerBaseSlot_)) {
-            return false;
-        }
+        // R22-S1：sampler 区段懒物化——创建时尚无写入内容，这里只建内容
+        // 处方（全"未写"）；区间在首个 sampler 写入时按内容解析（共享/
+        // 物化，D3D12Device::ResolveSamplerRegionForWrite）。原实现创建期
+        // 即 AllocSamplerRange(samplerCount_)：init 期所有 set 落 slot 0，
+        // 393-mesh 声明 Sponza 的 ~170 组 material set(1)/lit set(2) 加上
+        // init 预置 set 共 512 个 sampler 描述符恰好打满每槽 512 → 第
+        // 171 组 material set 创建失败（b115034 实测 "bump=512 need=1"）。
+        // 内容共享后 init 消耗 = O(唯一 sampler 内容数)。
+        samplerSrcSlots_.assign(samplerCount_, SamplerTableSharingPolicy::kUnwritten);
+        samplerRegionShared_ = false;
     }
     // R21-C：分配戳 = (帧槽, 纪元) 双键——EnsureSetRegionCurrent 的时效
     // 判定依据（只比槽号的旧判定会放行隔周期回归的陈旧区段）。
@@ -508,8 +585,9 @@ bool D3D12DescriptorSet::Initialize() {
 }
 
 void D3D12DescriptorSet::destroyImpl() {
-    // 主堆区段与 sampler 线性区段均随帧槽轮转整体回收——无逐槽释放动作
-    // （持久 sampler 对象槽位由 D3D12Sampler 自管）。
+    // 主堆区段与 sampler 线性区段（私有或共享）均随帧槽轮转整体回收——
+    // 无逐槽释放动作（持久 sampler 对象槽位由 D3D12Sampler 自管；共享
+    // 条目按内容存续，不随单个 set 析构撤除——R22-S1）。
 }
 
 // ============================================================================

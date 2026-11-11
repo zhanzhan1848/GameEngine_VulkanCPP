@@ -253,7 +253,24 @@ private:
 
     /// set 区段迁移（长寿命 set 的跨帧复用护栏）：set 区段属主槽 != 当前
     /// 帧槽 → 当前槽重分配 + CopyDescriptorsSimple 迁移内容 + 更新属主。
+    /// R22-S1：只迁移主堆区段与"私有"sampler 区段；共享 sampler 区段改由
+    /// ResolveSharedSamplerRegion 按内容条目自身的 (slot, epoch) 解析。
     void EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set);
+
+    /// R22-S1：写入路径的 sampler 区段解析——prescan 本调用内该 set 的全部
+    /// sampler 写入得到终态处方，命中共享区间直接复用；miss 则在当前槽按
+    /// 处方物化一段并注册（每内容每槽一次）。返回区间基槽（失败 =
+    /// kInvalidSlot，已留日志）。幂等：同调用内逐 write 重复解析收敛同基槽。
+    u32 ResolveSamplerRegionForWrite(d3d12::D3D12DescriptorSet* set,
+                                     const WriteDescriptorSet* writes,
+                                     u32 writeCount, u32 currentWrite);
+
+    /// R22-S1：绑定期共享 sampler 区段解析（EnsureSetRegionCurrent 内调）：
+    /// 条目当前有效 → 刷新快照；过期 → 按条目处方物化重建并 Activate
+    /// （谁发现过期谁重建，每内容每槽一次）；条目缺失（sampler 持久槽被
+    /// purge）→ 告警并维持快照（引用已销毁 sampler = Vulkan 同款 UB）。
+    /// 返回 false = 解析失败（耗尽/条目缺失），调用方不得推进 set 时效戳。
+    bool ResolveSharedSamplerRegion(d3d12::D3D12DescriptorSet* set);
 
     Microsoft::WRL::ComPtr<ID3D12Debug1> debugController_;
     Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue_;
@@ -306,6 +323,11 @@ private:
     u64 frameTraceMigrations_ = 0;     ///< 两次提交之间的 set 区段迁移次数
     u64 frameTraceSetCreates_ = 0;     ///< 两次提交之间的 set 创建次数
     bool frameTraceWarnedNoBeginFrame_ = false;  ///< 无 BeginFrame 宿主一次性告警
+    /// R22-S1：首次 BeginFrame 时打一次 sampler 共享 init 统计（无
+    /// BeginFrame 宿主依赖 Shutdown 侧统计与逐新内容日志，见实现注）。
+    bool loggedInitSamplerStats_ = false;
+    /// R22-S1：共享 sampler 条目缺失（set 引用已销毁 sampler）一次性告警。
+    bool warnedSharedSamplerRegionMissing_ = false;
 
     // --- M5 F5-2/F5-3 ---
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndirectSignature_;
