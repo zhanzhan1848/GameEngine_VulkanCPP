@@ -3182,6 +3182,14 @@ void TestVulkanSponzaRenderGraph::Run() {
                   << " gpu_spgi_ms=" << value("ScreenProbeGI")
                   << " gpu_sc_ms=" << value("LumenSurfaceCache") << " gpu_pass_total_ms=" << (t.empty() ? -1.0 : total)
                   << " gpu_attribution=query_recording_not_cpu_frame" << std::endl;
+        // Opt-in full map (diagnostic only): the fixed line above names the six
+        // historically-hottest passes; the whole map is needed whenever the
+        // active workload changes which pass dominates.
+        static const bool timingAll = [] { const char* e=std::getenv("PRIMAL_FRAME_TIMING_ALL");return e&&std::strcmp(e,"1")==0; }();
+        if (timingAll && frameCount_ >= 20 && (frameCount_ % 4) == 0) {
+            for (const auto& [name, ms] : t)
+                std::cout << "[PASS_TIME] frame=" << frameCount_ << " name=" << name << " ms=" << ms << std::endl;
+        }
     }
 #ifdef PRIMAL_RC_INTEGRATION_TEST
     // Separate opt-in executable only. Checked completion precedes all shared
