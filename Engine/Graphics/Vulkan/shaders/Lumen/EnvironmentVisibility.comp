@@ -17,11 +17,30 @@ layout(set=0,binding=5) uniform texture2D halfVisibility;
 layout(set=0,binding=4,std140) uniform VisibilityCB {
     mat4 inverseViewProjection;
     vec4 camera; // xyz position, w actual original clip/NDC jitter.x
-    uvec4 dimensions; // full.xy, half.zw
+    uvec4 dimensions; // source.xy (GBuffer texel size), trace.zw
     uvec4 policy; // scene ready, legacy bit0 / jitter invalid bit31, jitter.y bits, frame
     vec4 parameters; // geometry bias, plane qualification, Ng cosine, rough diff
+    uvec4 target; // resolve/target.xy; z bit0 = temporal single-ray, trace size is ceil(target/2)
+    mat4 prevViewProjection; // unjittered previous-frame proj*view, history reprojection
 } cb;
 #include "GeometryFirstHit.glsl"
+// The GI pixel budget is a function of the logical viewport, not of the render
+// target: render_scale is a raster supersampling knob, and letting it multiply
+// the per-pixel GI rays spends four times the frame on redundant rays.
+// dimensions.xy stays the GBuffer (source) texel size so pointAt/receiver keep
+// working in source texels, dimensions.zw is the trace grid and target.xy is
+// the resolve output. At the historical 2x ratio this mapping is exactly the
+// old `pixel*2+1` block centre.
+ivec2 traceToSource(ivec2 tracePixel) {
+    ivec2 sourceSize=ivec2(cb.dimensions.xy);
+    ivec2 traceSize=ivec2(cb.dimensions.zw);
+    // Integer block ratio. When trace is exactly ceil(source/2) this reduces to
+    // the historical `pixel*2+1` texel (including its odd-size clamp), so the
+    // coupled configuration keeps bit-identical sampling; a decoupled grid uses
+    // the centre of its source footprint instead of a float-projected texel.
+    ivec2 ratio=max(ivec2(1),(sourceSize+traceSize-ivec2(1))/traceSize);
+    return min(tracePixel*ratio+ratio/2,sourceSize-ivec2(1));
+}
 bool finite3(vec3 v){return !any(isnan(v))&&!any(isinf(v));}
 bool finite1(float v){return !isnan(v)&&!isinf(v);}
 uint hash32(uint x){x^=x>>16u;x*=0x7feb352du;x^=x>>15u;x*=0x846ca68bu;return x^(x>>16u);}
@@ -199,7 +218,7 @@ vec3 sampleVisibleGGX(vec3 view,float alpha,vec2 xi) {
     vec3 nh=a*t1+b*t2+sqrt(max(0.,1.-a*a-b*b))*vh;
     return normalize(vec3(alpha*nh.xy,max(0.,nh.z)));
 }
-vec4 traceLobe(Receiver r,ivec2 pixel) {
+vec4 traceLobe(Receiver r,ivec2 pixel,uint firstRay,uint rayCount) {
     if(cb.policy.y==1u)return vec4(1,0,1,1); // explicit legacy A/B only
     if(cb.policy.x!=1u)return vec4(0,0,1,1);
     vec3 t=normalize(cross(abs(r.ns.z)<.999?vec3(0,0,1):vec3(1,0,0),r.ns));
@@ -211,7 +230,7 @@ vec4 traceLobe(Receiver r,ivec2 pixel) {
     vec2 rotation=random2(seed);
 #if defined(ENV_VIS_PAIR) && !defined(ENV_VIS_RESOLVE)
     bool pendingActive[2]=bool[2](false,false);uvec3 directionBits[2];uint weightBits[2];
-    for(uint i=0u;i<count;++i) {
+    for(uint i=firstRay;i<count && i<firstRay+rayCount;++i) {
         uint lane=i&1u;pendingActive[lane]=false;vec3 localL;float weight=1.;bool valid=true;
         if(count==1u)localL=vec3(-v.xy,v.z);
         else {
@@ -222,7 +241,7 @@ vec4 traceLobe(Receiver r,ivec2 pixel) {
         }
         if(valid){vec3 worldL=normalize(t*localL.x+b*localL.y+r.ns*localL.z);
             directionBits[lane]=floatBitsToUint(worldL);weightBits[lane]=floatBitsToUint(weight);pendingActive[lane]=true;}
-        if(count==1u || lane==1u){
+        if(count==1u || lane==1u || i+1u>=firstRay+rayCount){
             int outcome[2]=int[2](0,0);bool needs[2]=bool[2](false,false);vec3 origins[2],dirs[2];float fars[2];
             uint lanes=count==1u?1u:2u;
             for(uint k=0u;k<lanes;++k)if(pendingActive[k]){dirs[k]=uintBitsToFloat(directionBits[k]);
@@ -238,7 +257,7 @@ vec4 traceLobe(Receiver r,ivec2 pixel) {
         }
     }
 #else
-    for(uint i=0u;i<count;++i) {
+    for(uint i=firstRay;i<count && i<firstRay+rayCount;++i) {
         vec3 localL;float weight=1.;
         if(count==1u)localL=vec3(-v.xy,v.z);
         else {
@@ -287,7 +306,7 @@ void main() {
             all(lessThan(halfPixel,ivec2(cb.dimensions.zw)));
         Receiver cached;
         if(valid) {
-            ivec2 samplePixel=min(halfPixel*2+ivec2(1),ivec2(cb.dimensions.xy)-1);
+            ivec2 samplePixel=traceToSource(halfPixel);
             valid=receiver(samplePixel,cached);
         }
         if(valid)sourceReceiverCache[lane]=cached;
@@ -296,7 +315,7 @@ void main() {
     // Every lane participates, including dispatch-edge lanes which do not
     // own an output pixel. Early return before this barrier would deadlock.
     barrier();
-    if(any(greaterThanEqual(pixel,ivec2(cb.dimensions.xy))))return;
+    if(any(greaterThanEqual(pixel,ivec2(cb.target.xy))))return;
     Receiver target;if(!receiver(pixel,target)){imageStore(outputVisibility,pixel,vec4(0,0,1,0));return;}
     float best=3.402823466e38;vec4 result=vec4(0);bool found=false;
     ivec2 base=max((pixel-ivec2(1))/2,ivec2(0));
@@ -320,7 +339,34 @@ void main() {
     imageStore(outputVisibility,pixel,found?result:mirrorFallback(target));
 #else
     if(any(greaterThanEqual(pixel,ivec2(cb.dimensions.zw))))return;
-    ivec2 source=min(pixel*2+ivec2(1),ivec2(cb.dimensions.xy)-1);
-    Receiver r;imageStore(outputVisibility,pixel,receiver(source,r)?traceLobe(r,source):vec4(0,0,1,0));
+    ivec2 source=traceToSource(pixel);
+    Receiver r;
+    if(!receiver(source,r)){imageStore(outputVisibility,pixel,vec4(0,0,1,0));return;}
+    // Temporal single-ray mode (opt-in per dispatch): one stratum per frame,
+    // accumulated over the 3-slot ring. Off by default so every existing
+    // contract test keeps the deterministic four-sample output byte-identical.
+    if((cb.target.z&1u)==0u){imageStore(outputVisibility,pixel,traceLobe(r,source,0u,4u));return;}
+    vec4 current=traceLobe(r,source,cb.policy.w&3u,1u);
+    vec4 result=current;
+    // Warm up for a full ring before trusting history, and reject every sample
+    // whose reprojected source texel does not resolve to the same world point
+    // (disocclusion, camera cut, moving occluder).
+    if(cb.policy.w>=4u) {
+        vec4 clip=cb.prevViewProjection*vec4(r.p,1.);
+        if(finite1(clip.w)&&clip.w>1e-6) {
+            vec2 ndc=clip.xy/clip.w;
+            vec2 uv=vec2(ndc.x*.5+.5,.5-ndc.y*.5);
+            ivec2 hp=ivec2(uv*vec2(cb.dimensions.zw));
+            if(all(greaterThanEqual(hp,ivec2(0)))&&all(lessThan(hp,ivec2(cb.dimensions.zw)))) {
+                vec4 history=texelFetch(halfVisibility,hp,0);
+                Receiver hr;
+                bool compatible=history.a>=.5&&finite3(history.rgb)&&finite1(history.r)&&
+                    receiver(traceToSource(hp),hr)&&
+                    distance(hr.p,r.p)<=max(cb.parameters.x,length(cb.camera.xyz-r.p)*.02);
+                if(compatible)result=mix(history,current,.25);
+            }
+        }
+    }
+    imageStore(outputVisibility,pixel,result);
 #endif
 }

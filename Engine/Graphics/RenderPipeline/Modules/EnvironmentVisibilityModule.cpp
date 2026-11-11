@@ -23,13 +23,17 @@ namespace {
 struct VisibilityCB {
     math::m4x4 inverse_view_projection;
     math::v4 camera;
-    u32 dimensions[4];
+    u32 dimensions[4]; // source.xy (GBuffer texel size), trace.zw
     u32 policy[4];
     math::v4 parameters;
+    u32 target[4];     // resolve/target.xy; z bit0 = temporal single-ray
+    math::m4x4 prev_view_projection;
 };
-static_assert(sizeof(VisibilityCB)==128);
+static_assert(sizeof(VisibilityCB)==208);
 static_assert(offsetof(VisibilityCB, camera)==64);
 static_assert(offsetof(VisibilityCB, policy)==96);
+static_assert(offsetof(VisibilityCB, target)==128);
+static_assert(offsetof(VisibilityCB, prev_view_projection)==144);
 TextureDesc VisibilityTexture(u32 w,u32 h) {
     TextureDesc d{};d.type=TextureType::Texture2D;d.size={w,h,1};
     d.format=DataFormat::RGBA16_Float;
@@ -99,10 +103,10 @@ bool EnvironmentVisibilityModule::UploadOwnGeometry(u32 frame) {
         << " source_digest=" << experimental_source_digest_ << " bytes=" << sizes[0] << "," << sizes[1] << "," << sizes[2] << "," << sizes[3];
     return ok;
 }
-bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle trace,ShaderHandle resolve,u32 w,u32 h) {
-    if(!device||device->GetPlatform()!=RHIPlatform::Vulkan||!w||!h||trace==handles::INVALID_SHADER||resolve==handles::INVALID_SHADER)return false;
+bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle trace,ShaderHandle resolve,u32 w,u32 h,u32 targetW,u32 targetH) {
+    if(!device||device->GetPlatform()!=RHIPlatform::Vulkan||!w||!h||!targetW||!targetH||trace==handles::INVALID_SHADER||resolve==handles::INVALID_SHADER)return false;
     if(device_)Shutdown();
-    device_=device;width_=w;height_=h;
+    device_=device;width_=w;height_=h;target_width_=targetW;target_height_=targetH;
     const char* frameAudit=std::getenv("PRIMAL_PAIR_FRAME_AUDIT");frame_audit_enabled_=frameAudit && std::strcmp(frameAudit,"1")==0;
     for(auto& serial:experimental_consumed_serials_)serial=0;
     DescriptorSetLayoutBinding bindings[10]={
@@ -169,9 +173,12 @@ bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle 
         }
         PRIMAL_LOG_STREAM(Info,"Render") << "[ENV_TRACE_WORKGROUP] startup=1 requested=" << workgroup_requested_ << " valid=" << workgroupValid << " pipeline_ready=" << (workgroup_pipeline_!=handles::INVALID_PIPELINE) << std::endl;
     }
+    // Outputs follow the GI target grid (logical-viewport derived); the trace
+    // grid is its half. Consumers sample these by normalised uv, so the size is
+    // independent of the raster render target.
     for(u32 i=0;i<3;++i) {
-        half_[i]=device_->CreateTexture(VisibilityTexture((w+1)/2,(h+1)/2));
-        full_[i]=device_->CreateTexture(VisibilityTexture(w,h));
+        half_[i]=device_->CreateTexture(VisibilityTexture((targetW+1)/2,(targetH+1)/2));
+        full_[i]=device_->CreateTexture(VisibilityTexture(targetW,targetH));
         if(half_[i]==handles::INVALID_RESOURCE||full_[i]==handles::INVALID_RESOURCE){Shutdown();return false;}
     }
     BufferDesc dummy{};dummy.size=64;dummy.type=BufferType::Structured;
@@ -187,7 +194,8 @@ bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle 
     auto* failedMap=unsupported_cb_!=handles::INVALID_RESOURCE?device_->MapBuffer(unsupported_cb_):nullptr;
     if(!failedMap){Shutdown();return false;}
     VisibilityCB unsupported{};unsupported.dimensions[0]=width_;unsupported.dimensions[1]=height_;
-    unsupported.dimensions[2]=(width_+1)/2;unsupported.dimensions[3]=(height_+1)/2;
+    unsupported.dimensions[2]=(target_width_+1)/2;unsupported.dimensions[3]=(target_height_+1)/2;
+    unsupported.target[0]=target_width_;unsupported.target[1]=target_height_;
     unsupported.policy[1]=0x80000000u;
     std::memcpy(failedMap,&unsupported,sizeof(unsupported));device_->UnmapBuffer(unsupported_cb_);
     if(!IsInitialized()){Shutdown();return false;}return true;
@@ -260,7 +268,11 @@ EnvironmentVisibilityOutputs EnvironmentVisibilityModule::AddPasses(RenderGraph&
     }
     VisibilityCB constants{};constants.inverse_view_projection=inputs.inverse_view_projection;
     constants.camera={inputs.camera_position.x,inputs.camera_position.y,inputs.camera_position.z,0};
-    constants.dimensions[0]=width_;constants.dimensions[1]=height_;constants.dimensions[2]=(width_+1)/2;constants.dimensions[3]=(height_+1)/2;
+    constants.dimensions[0]=width_;constants.dimensions[1]=height_;
+    constants.dimensions[2]=(target_width_+1)/2;constants.dimensions[3]=(target_height_+1)/2;
+    constants.target[0]=target_width_;constants.target[1]=target_height_;
+    constants.target[2]=inputs.temporal_accumulation?1u:0u;
+    constants.prev_view_projection=inputs.prev_view_projection;
     constants.policy[0]=ready?1u:0u;constants.policy[1]=inputs.legacy_unoccluded?1u:0u;constants.policy[3]=inputs.frame_index;
     constants.parameters={.002f,.02f,.95f,.05f};
     bool hybridReady=false;
@@ -271,15 +283,21 @@ EnvironmentVisibilityOutputs EnvironmentVisibilityModule::AddPasses(RenderGraph&
     }
     const u64 hybridFrameSerial=hybridReady?hybrid_serial_[slot]:0;
     rendergraph::RGResourceHandle hybridRG{};if(hybridReady){BufferDesc d{};d.type=BufferType::Structured;d.size=environment_hybrid::kFieldBytes;hybridRG=graph.ImportBuffer("EnvironmentVisibility_Field",hybrid_buffers_[slot],d);}
-    const auto half=graph.ImportTexture("EnvironmentVisibility_Half",half_[slot],VisibilityTexture((width_+1)/2,(height_+1)/2));
-    const auto full=graph.ImportTexture("EnvironmentVisibility_Full",full_[slot],VisibilityTexture(width_,height_));
+    const auto half=graph.ImportTexture("EnvironmentVisibility_Half",half_[slot],VisibilityTexture((target_width_+1)/2,(target_height_+1)/2));
+    // Temporal history is the previous ring slot. It is imported (not bound
+    // raw) so the graph emits the required UNDEFINED -> SHADER_READ transition
+    // on first use and the tracked UAV -> SHADER_READ transition afterwards;
+    // binding it without that transition is an invalid layout at submit time.
+    const auto history=graph.ImportTexture("EnvironmentVisibility_History",half_[(slot+2)%3],VisibilityTexture((target_width_+1)/2,(target_height_+1)/2));
+    const auto full=graph.ImportTexture("EnvironmentVisibility_Full",full_[slot],VisibilityTexture(target_width_,target_height_));
     struct PassData { RGResourceHandle output; };
     for(u32 phase=0;phase<2;++phase) {
         const auto& pass=graph.AddPass<PassData>(phase?"EnvironmentVisibility.Resolve":"EnvironmentVisibility.Trace",RGPassType::Compute,RGPassCategory::Lighting,
-            [inputs,half,full,phase,hybridRG](PassData& data,RenderGraphBuilder& b) {
+            [inputs,half,full,history,phase,hybridRG](PassData& data,RenderGraphBuilder& b) {
                 for(auto h:{inputs.depth_rg,inputs.normal_rg,inputs.orm_rg})if(h.IsValid())b.Read(h);
                 for(auto h:inputs.geometry_rg)if(h.IsValid())b.Read(h);
                 if(phase)b.Read(half);
+                if(!phase)b.Read(history);
                 if(!phase && hybridRG.IsValid())b.Read(hybridRG);
                 data.output=b.Write(phase?full:half,ResourceState::UnorderedAccess);
             },
@@ -312,7 +330,7 @@ EnvironmentVisibilityOutputs EnvironmentVisibilityModule::AddPasses(RenderGraph&
                 const bool useHybrid=phase==0 && hybridReady && hybridFrameSerial && hybrid_serial_[slot]==hybridFrameSerial && device_->FrameSlotCompletions().CanReuse(slot,0) && device_->FrameSlotCompletions().Serial(slot)==hybridFrameSerial && inputs.hybrid_still_current && inputs.hybrid_still_current() && actual.policy[0]==1u && !(actual.policy[1]&0x80000000u) && parameterBuffer==cb_[phase][slot] && !inputs.legacy_unoccluded;
                 const auto selectedSet=useHybrid?hybrid_sets_[slot]:sets_[phase][slot];
                 DescriptorImageInfo images[5]{};DescriptorBufferInfo buffers[6]{};WriteDescriptorSet writes[11]{};
-                const ResourceHandle tex[5]={inputs.depth,inputs.normal,inputs.orm,phase?full_[slot]:half_[slot],phase?half_[slot]:inputs.orm};
+                const ResourceHandle tex[5]={inputs.depth,inputs.normal,inputs.orm,phase?full_[slot]:half_[slot],phase?half_[slot]:half_[(slot+2)%3]};
                 const u32 bindings[5]={0,1,2,3,5};
                 for(u32 i=0;i<5;++i) {
                     images[i].imageView=tex[i];images[i].sampler=handles::INVALID_SAMPLER;
@@ -388,7 +406,7 @@ EnvironmentVisibilityOutputs EnvironmentVisibilityModule::AddPasses(RenderGraph&
 #endif
                 cmd->BindComputePipeline(useHybrid?hybrid_pipeline_:(usePair?pair_pipeline_:(useWorkgroup?workgroup_pipeline_:pipelines_[phase])));
                 const DescriptorSetHandle sets[]={selectedSet};cmd->BindDescriptorSets(PipelineBindPoint::Compute,useHybrid?hybrid_layout_:layout_,0,1,sets,0,nullptr);
-                const u32 w=phase?width_:(width_+1)/2,h=phase?height_:(height_+1)/2;
+                const u32 w=phase?target_width_:(target_width_+1)/2,h=phase?target_height_:(target_height_+1)/2;
                 const u32 localY=useWorkgroup?4u:8u,gx=workgroup_experiment::Groups(w,8),gy=workgroup_experiment::Groups(h,localY);
                 cmd->Dispatch(gx,gy,1);
                 if(!phase){hybrid_receipt_.requested=hybrid_env_requested_;hybrid_receipt_.qualified=useHybrid;hybrid_receipt_.actual=useHybrid;hybrid_receipt_.dispatched=true;hybrid_receipt_.slot=slot;hybrid_receipt_.shader=useHybrid?hybrid_shader_hash_:(usePair?pair_shader_hash_:(useWorkgroup?frame_audit_workgroup_hash_:frame_audit_trace_hash_));if(useHybrid){hybrid_receipt_.field_hash=environment_hybrid::kFieldFNV;hybrid_receipt_.field_buffer=hybrid_buffers_[slot];hybrid_receipt_.frame_completion=hybridFrameSerial;hybrid_receipt_.binding=inputs.hybrid_binding;}}

@@ -34,6 +34,10 @@ struct EnvironmentVisibilityInputs {
     // Inverse of the UNJITTERED projection*view. Raster applies this original
     // pre-Vulkan-Y-flip clip/NDC offset; reconstruct NDC minus that offset.
     math::m4x4 inverse_view_projection{};
+    // Unjittered previous-frame proj*view, used only by the opt-in temporal
+    // single-ray mode to reproject accumulated visibility.
+    math::m4x4 prev_view_projection{};
+    bool temporal_accumulation = false;
     math::v2 raster_jitter_ndc{0.0f,0.0f};
     bool raster_jitter_valid = true; // explicit zero-jitter is valid
     // Evaluated after the canonical GBuffer producer, never at graph build.
@@ -65,8 +69,13 @@ public:
     bool SetExperimentalGeometryScene(std::span<const ray_geometry::InstanceInput> instances,
                                       u64 source_digest, u64 scene_epoch);
     bool HasExperimentalGeometryScene(u64 source_digest, u64 scene_epoch) const;
+    // source_width/height are the GBuffer texel size (render target); the
+    // target_* pair is the resolve output size, which is derived from the
+    // logical viewport so a raster-only render_scale does not multiply the GI
+    // ray budget. Trace runs at ceil(target/2) and is upsampled by the resolve.
     bool Initialize(rhi::RHIDeviceBase* device, rhi::ShaderHandle trace_shader,
-                    rhi::ShaderHandle resolve_shader, u32 width, u32 height);
+                    rhi::ShaderHandle resolve_shader, u32 source_width, u32 source_height,
+                    u32 target_width, u32 target_height);
     void Shutdown();
     EnvironmentVisibilityOutputs AddPasses(rendergraph::RenderGraph& graph,
                                            const EnvironmentVisibilityInputs& inputs);
@@ -111,7 +120,8 @@ private:
     u64 experimental_consumed_serials_[3]{};
     GeometrySlot own_geometry_[3]{};
     rhi::RHIDeviceBase* device_ = nullptr;
-    u32 width_ = 0, height_ = 0;
+    u32 width_ = 0, height_ = 0;             // GBuffer source size
+    u32 target_width_ = 0, target_height_ = 0; // resolve output size
     rhi::PipelineHandle pipelines_[2]{rhi::handles::INVALID_PIPELINE, rhi::handles::INVALID_PIPELINE};
     rhi::PipelineLayoutHandle layout_{rhi::handles::INVALID_PIPELINE_LAYOUT};
     rhi::DescriptorSetLayoutHandle set_layout_{rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT};

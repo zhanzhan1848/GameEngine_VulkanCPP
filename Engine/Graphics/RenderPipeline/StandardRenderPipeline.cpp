@@ -996,9 +996,40 @@ void StandardRenderPipeline::SetPassEnabled(RenderPassID pass, bool enabled) {
     }
 }
 
+// GI visibility 的像素预算是逻辑视口的函数，不是渲染目标的函数。
+// render_scale（High/Ultra 预设 = 2.0）是光栅超采样旋钮；让它同时乘以每像素
+// GI 射线的数量，会把 74% 的帧时间花在四倍冗余的射线上（实测 2560x1440 下
+// EnvTrace 71.9ms、1280x720 下 19.8ms，射线数与像素数同比例）。
+// 因此 trace/resolve 的网格按 logical/divisor 出图，消费端
+// （FusionComposite.frag:87 以 inUv 采样）与分辨率无关。
+// PRIMAL_GI_VIS_DIVISOR：1..8，默认 2。
+static u32 EnvironmentVisibilityTargetDivisor() {
+    static const u32 divisor = [] {
+        if (const char* e = std::getenv("PRIMAL_GI_VIS_DIVISOR")) {
+            const long v = std::atol(e);
+            if (v >= 1 && v <= 8) return static_cast<u32>(v);
+        }
+        return 2u;
+    }();
+    return divisor;
+}
+
+// Phase B：env-vis 由 4 射线/像素/帧改为 1 射线 + 4 帧时域累积。
+// 历史直接取 3 槽环里的 half_[(slot+2)%3]（上一帧的输出），按上一帧
+// unjittered proj*view 重投影并用「重投影源纹素是否解出同一世界点」拒绝
+// 失配（遮挡变化/切镜）。PRIMAL_ENV_VIS_TEMPORAL=0 可回退到 4 射线基线。
+static bool EnvironmentVisibilityTemporal() {
+    static const bool enabled = [] {
+        const char* e = std::getenv("PRIMAL_ENV_VIS_TEMPORAL");
+        return !(e && std::strcmp(e, "0") == 0);
+    }();
+    return enabled;
+}
+
 static bool EnvironmentVisibilityRequested(rhi::RHIDeviceBase* device) {
     const char* value=std::getenv("PRIMAL_IBL_VISIBILITY");
-    return device && device->GetPlatform()==rhi::RHIPlatform::Vulkan &&
+    return device && (device->GetPlatform()==rhi::RHIPlatform::Vulkan ||
+                      device->GetPlatform()==rhi::RHIPlatform::D3D12) &&
         !(value && std::strcmp(value,"0")==0);
 }
 
@@ -1088,7 +1119,22 @@ EnvironmentVisibilityOutputs StandardRenderPipeline::AddEnvironmentVisibility(
             environment_geometry_digest_=digest;
         }
     }
-    inputs.inverse_view_projection=rhi::math::Inverse(proj_matrix_*view_matrix_);
+    // Previous-frame unjittered proj*view for temporal history reprojection.
+    // Updated at most once per frame so a second render path in the same frame
+    // cannot consume its own matrix as history.
+    const math::m4x4 viewProjection=proj_matrix_*view_matrix_;
+    const math::m4x4 previousViewProjection =
+        (environment_visibility_vp_frame_ != frameCount_) ? environment_visibility_prev_view_projection_
+                                                         : viewProjection;
+    if(environment_visibility_vp_frame_ != frameCount_) {
+        environment_visibility_prev_view_projection_=viewProjection;
+        environment_visibility_vp_frame_=frameCount_;
+    }
+    inputs.prev_view_projection=previousViewProjection;
+    // The explicit legacy A/B mode pins the lobe to unoccluded; accumulating
+    // that against real history would leak occluded samples into it.
+    inputs.temporal_accumulation=EnvironmentVisibilityTemporal() && !inputs.legacy_unoccluded;
+    inputs.inverse_view_projection=rhi::math::Inverse(viewProjection);
     inputs.raster_jitter_provider=[&gpuDraw,frame=static_cast<u32>(frameCount_)](rhi::math::v2& jitter){return gpuDraw.GetLastRasterJitterNDC(frame,jitter);};
     inputs.camera_position=camera_position_;inputs.current_buffer_index=slot;inputs.frame_index=static_cast<u32>(frameCount_);
     return environment_visibility_module_->AddPasses(graph,inputs);
@@ -1615,12 +1661,25 @@ void StandardRenderPipeline::InitializeSubsystems() {
     if(EnvironmentVisibilityRequested(device_)) {
         environment_visibility_module_=std::make_unique<EnvironmentVisibilityModule>();
         environment_geometry_digest_=0;
-        auto traceCode=SelfLoadShaderSource("Lumen/EnvironmentVisibility_trace.comp",rhi::RHIPlatform::Vulkan,ShaderStage::Compute,"");
-        auto resolveCode=SelfLoadShaderSource("Lumen/EnvironmentVisibility_resolve.comp",rhi::RHIPlatform::Vulkan,ShaderStage::Compute,"");
+        // 平台参数取设备实平台：Vulkan 读 spv、D3D12 读 .cso 镜像（入口均
+        // 为 "main"——该 spv 的 OpEntryPoint 就是 main，cso 由包装统一为 main）。
+        auto traceCode=SelfLoadShaderSource("Lumen/EnvironmentVisibility_trace.comp",device_->GetPlatform(),ShaderStage::Compute,"");
+        auto resolveCode=SelfLoadShaderSource("Lumen/EnvironmentVisibility_resolve.comp",device_->GetPlatform(),ShaderStage::Compute,"");
         ShaderHandle trace=traceCode.empty()?handles::INVALID_SHADER:device_->CreateShader(traceCode.data(),traceCode.size(),ShaderStage::Compute,"main");
         ShaderHandle resolve=resolveCode.empty()?handles::INVALID_SHADER:device_->CreateShader(resolveCode.data(),resolveCode.size(),ShaderStage::Compute,"main");
-        if(!environment_visibility_module_->Initialize(device_,trace,resolve,render_width_,render_height_))
+        // 目标网格按逻辑视口派生（logical 未就绪时退回渲染分辨率）。
+        const u32 logicalW = logical_width_ ? logical_width_ : render_width_;
+        const u32 logicalH = logical_height_ ? logical_height_ : render_height_;
+        const u32 visibilityDivisor = EnvironmentVisibilityTargetDivisor();
+        const u32 visibilityW = std::max(1u, logicalW / visibilityDivisor);
+        const u32 visibilityH = std::max(1u, logicalH / visibilityDivisor);
+        if(!environment_visibility_module_->Initialize(device_,trace,resolve,render_width_,render_height_,visibilityW,visibilityH))
             PRIMAL_LOG_STREAM(Error,"Render") << "[EnvironmentVisibility] unavailable; environment contribution remains unsupported";
+        else
+            PRIMAL_LOG_STREAM(Info,"Render") << "[EnvironmentVisibility] source=" << render_width_ << "x" << render_height_
+                << " target=" << visibilityW << "x" << visibilityH
+                << " trace=" << (visibilityW+1)/2 << "x" << (visibilityH+1)/2
+                << " divisor=" << visibilityDivisor << " policy=logical_viewport_derived";
         if(const char* audit=std::getenv("PRIMAL_PAIR_FRAME_AUDIT");audit && std::strcmp(audit,"1")==0 && trace!=handles::INVALID_SHADER){u64 hash=14695981039346656037ull;for(u8 byte:traceCode){hash^=byte;hash*=1099511628211ull;}environment_visibility_module_->SetFrameAuditTraceHash(hash);}
         environment_visibility_shaders_[0]=trace;environment_visibility_shaders_[1]=resolve;
     }
@@ -2425,7 +2484,27 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     if (settings_.quality.enable_screen_probes) {
         screen_probe_pass_ = std::make_unique<lumen::ScreenProbeGIPass>();
         lumen::ScreenProbeParams probeParams{};
-        probeParams.downsample_factor = config.screen_probes_spacing;
+        // Probe spacing is a SCREEN-SPACE quality metric, so it must be measured
+        // in logical pixels, not render pixels. render_scale is a raster
+        // supersampling knob (High/Ultra = 2.0); feeding it the raw spacing made
+        // the probe grid scale with the supersample factor (320x180 probes
+        // instead of 160x90 at 720p logical) and cost 19.1ms of a 110ms frame.
+        // The place kernel multiplies the grid index by this spacing in render
+        // texels, so scaling it here keeps placement covering the full screen
+        // while restoring the 1280x720-tuned probe density.
+        // PRIMAL_SPGI_SPACING_MODE=render restores the pre-2026-11-11 behaviour
+        // (spacing counted in render pixels, so render_scale multiplied the
+        // probe grid). Default 'logical' keeps the screen-space metric.
+        static const bool s_spgiRenderSpacing = [] {
+            const char* e = std::getenv("PRIMAL_SPGI_SPACING_MODE");
+            return e && std::strcmp(e, "render") == 0;
+        }();
+        probeParams.downsample_factor = s_spgiRenderSpacing ? config.screen_probes_spacing : [&] {
+            const u32 logical = logical_width_ ? logical_width_ : render_width_;
+            const u64 spaced = static_cast<u64>(render_width_) * config.screen_probes_spacing;
+            const u64 spacing = std::max<u64>(1, (spaced + logical - 1) / logical);
+            return static_cast<u32>(std::min<u64>(spacing, 64));
+        }();
         probeParams.rays_per_probe = config.screen_probes_rays;
         // T8.13 60FPS: env override — SPGI trace is the top GPU pass (12.6ms);
         // 64→32 rays halves it (F2 importance + spatial filter + denoise

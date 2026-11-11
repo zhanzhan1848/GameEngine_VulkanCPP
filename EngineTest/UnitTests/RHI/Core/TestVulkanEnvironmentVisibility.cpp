@@ -33,8 +33,8 @@ float half(u16 h){
     if(exp==0){if(!mant)return std::bit_cast<float>(sign);int e=-14;while(!(mant&1024)){mant<<=1;--e;}return std::bit_cast<float>(sign|(u32(e+127)<<23)|((mant&1023)<<13));}
     return std::bit_cast<float>(sign|((exp+112)<<23)|(mant<<13));
 }
-struct CB {float invVP[16];float camera[4];u32 dimensions[4];u32 policy[4];float parameters[4];};
-static_assert(sizeof(CB)==128&&offsetof(CB,camera)==64&&offsetof(CB,dimensions)==80&&offsetof(CB,policy)==96&&offsetof(CB,parameters)==112);
+struct CB {float invVP[16];float camera[4];u32 dimensions[4];u32 policy[4];float parameters[4];u32 target[4];float prevVP[16];};
+static_assert(sizeof(CB)==208&&offsetof(CB,camera)==64&&offsetof(CB,dimensions)==80&&offsetof(CB,policy)==96&&offsetof(CB,parameters)==112&&offsetof(CB,target)==128&&offsetof(CB,prevVP)==144);
 struct Pixel {float r,g,b,a;};
 #if defined(ENV_VIS_WG32_TEST) || defined(ENV_VIS_PAIR_TEST)
 struct ShaderIdentity {u64 hash=14695981039346656037ull;u32 x=0,y=0,z=0;};
@@ -209,6 +209,7 @@ std::pair<std::vector<Pixel>,std::vector<Pixel>> runCase(const char* name,bool c
     if(variant==Variant::Cycle){geometry.top[0].links[0]=geometry.top[0].links[1]=0;geometry.top[0].links[3]=0;}
     CB cb{};cb.invVP[0]=.04f;cb.invVP[5]=.04f;cb.invVP[10]=1;cb.invVP[15]=1;cb.camera[2]=3;
     cb.dimensions[0]=W;cb.dimensions[1]=H;cb.dimensions[2]=HW;cb.dimensions[3]=HH;
+    cb.target[0]=W;cb.target[1]=H;cb.target[2]=0;cb.target[3]=0;
     cb.policy[0]=(variant==Variant::NotReady||variant==Variant::UnknownFallback)?0:1;
     if(variant==Variant::JitterPlane||variant==Variant::JitterThinHit||variant==Variant::InvalidProvider){cb.camera[3]=.125f;cb.policy[2]=std::bit_cast<u32>(-.125f);}
     if(variant==Variant::InvalidProvider)cb.policy[1]=0x80000000u;

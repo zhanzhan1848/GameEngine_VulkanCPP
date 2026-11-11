@@ -754,6 +754,9 @@ private:
     std::unique_ptr<DeferredLightingModule> deferred_module_;
     std::unique_ptr<EnvironmentVisibilityModule> environment_visibility_module_;
     u64 environment_geometry_digest_=0;
+    // Previous-frame unjittered proj*view for env-vis temporal reprojection.
+    rhi::math::m4x4 environment_visibility_prev_view_projection_{};
+    u32 environment_visibility_vp_frame_=~0u;
     rhi::ShaderHandle environment_visibility_shaders_[2]{rhi::handles::INVALID_SHADER,rhi::handles::INVALID_SHADER};
     EnvironmentVisibilityOutputs AddEnvironmentVisibility(rendergraph::RenderGraph&, nanite::GPUDrivenDrawPipeline&, u32, rendergraph::RGResourceHandle={}, rendergraph::RGResourceHandle={}, rendergraph::RGResourceHandle={});
     std::unique_ptr<FinalBlitModule> final_blit_module_;
