@@ -1763,9 +1763,31 @@ void StandardRenderPipeline::InitializeSubsystems() {
 
     if (settings_.quality.enable_ddgi && gi_gather_shader_ != handles::INVALID_SHADER) {
         gi_gather_module_ = std::make_unique<GIGatherModule>();
+        // DDGI gather 的像素预算同样按逻辑视口派生：render_scale 是光栅超采样
+        // 旋钮，而 gather 着色器用 uv × textureSize(gbuffer) 采样接收面，本来
+        // 就与源分辨率解耦。PRIMAL_DDGI_GATHER_BASE=render 可回到旧行为。
+        static const bool s_gatherRenderBase = [] {
+            const char* e = std::getenv("PRIMAL_DDGI_GATHER_BASE");
+            return e && std::strcmp(e, "render") == 0;
+        }();
+        static const u32 s_gatherBaseDiv = [] {
+            const char* e = std::getenv("PRIMAL_DDGI_GATHER_BASE_DIV");
+            // Default 2 => gather grid = ceil(logical/2)/2 = 320x180 at 720p
+            // logical. Measured on the user's SponzaTangentFrames + measured
+            // geometry profile: 9.5 ms vs 19.5 (div 1) vs 66 (render base),
+            // image delta 0.26-0.94% mean. PRIMAL_DDGI_GATHER_BASE_DIV=1
+            // restores the 640x360 grid, =render restores the old 1280x720.
+            const long v = e ? std::atol(e) : 2;
+            return static_cast<u32>(v >= 1 && v <= 4 ? v : 1);
+        }();
+        const u32 gatherBaseW = (s_gatherRenderBase ? render_width_ : (logical_width_ ? logical_width_ : render_width_)) / s_gatherBaseDiv;
+        const u32 gatherBaseH = (s_gatherRenderBase ? render_height_ : (logical_height_ ? logical_height_ : render_height_)) / s_gatherBaseDiv;
         const bool gatherInitialized = gi_gather_module_->Initialize(
-            device_, gi_gather_shader_, render_width_, render_height_,
+            device_, gi_gather_shader_, gatherBaseW, gatherBaseH,
             glossySourceAuditShader);
+        PRIMAL_LOG_STREAM(Info, "Render") << "[DDGI_GATHER_BASE] render=" << render_width_ << "x" << render_height_
+            << " gather_base=" << gatherBaseW << "x" << gatherBaseH
+            << " mode=" << (s_gatherRenderBase ? "render" : "logical") << std::endl;
         if (!gatherInitialized) {
             PRIMAL_LOG_STREAM(Error, "Render")
                 << "[GIGather] initialization failed; gather path disabled"

@@ -167,7 +167,12 @@ struct LumenConfig {
 
     // Screen Probes settings
     u32 screen_probes_spacing = 8;
-    u32 screen_probes_rays = 48;   // T8.13 60FPS: 64→48（重要性采样+滤波吸收，质量中性实测；GPU 18→~16ms 达 vsync 满速）
+    // 2026-11-11: 48→16。用户的 SponzaTangentFrames + measured-geometry 配置下
+    // SPGI 是仅次于 DDGI gather 的 pass；16 射线实测画面差 mean 0.13–0.20%、
+    // >16/255 像素 <=0.03%（静态四机位），却把 corridor1 全帧从 ~35ms 压到
+    // <=33.3ms，帧率从 20（3 个 60Hz tick）回到 30（2 个 tick）。
+    // SCREEN_PROBE_RAYS=48 可回退。
+    u32 screen_probes_rays = 16;
     bool screen_probes_jitter = true;   // F5 (M7): per-frame probe/ray jitter
     float screen_probes_far_cache_start = 30.0f;  // F1 (M7): SDF far-field early-out → DDGI cache query (0 disables)
     bool screen_probes_importance = true;  // F2 (M7): importance resampling of ray directions (history-SH guided)
