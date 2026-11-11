@@ -171,7 +171,9 @@ bool HZBSystem::CreateHZBComputePipeline() {
     const bool isVulkan = (platform == rhi::RHIPlatform::Vulkan);
     // Dawn + Vulkan share the same DSL/descriptor semantics (separate depth/color
     // sampled image types). Metal uses a single SampledImage for both.
-    const bool isCrossPlatform = isDawn || isVulkan;
+    // D3D12 与 Vulkan 同形（flat 绑定 + spirv-cross HLSL 同一契约）。
+    const bool isCrossPlatform = isDawn || isVulkan ||
+        (platform == rhi::RHIPlatform::D3D12);
 
     if (isCrossPlatform) {
         // ---- Dawn/Vulkan path: split copy + mip into separate layouts ----
@@ -256,7 +258,9 @@ bool HZBSystem::CreateHZBComputePipeline() {
             file.seekg(0, std::ios::beg);
             // Dawn/WGSL needs a null terminator (WGPU_STRLEN). Vulkan/SPIR-V takes
             // exact byte count (VulkanShader rejects if size % 4 != 0).
-            size_t pad = (platform == rhi::RHIPlatform::Vulkan) ? 0 : 1;
+            // D3D12/DXIL 同样取精确字节（DXBC 容器）。
+            size_t pad = (platform == rhi::RHIPlatform::Vulkan ||
+                          platform == rhi::RHIPlatform::D3D12) ? 0 : 1;
             std::vector<u8> bytecode(static_cast<size_t>(size) + pad, 0);
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
                 PRIMAL_LOG_STREAM(Error, "Render") << "[HZBSystem] Failed to read shader: " << openedPath << std::endl;
@@ -498,12 +502,15 @@ bool HZBSystem::GenerateHZBOnGPU(rhi::RHICommandBuffer* cmd_buffer, rhi::Resourc
     std::vector<rhi::DescriptorSetHandle> temporaryDescriptorSets;
 
     const bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
-                         device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                         device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                         device_->GetPlatform() == rhi::RHIPlatform::D3D12);
     // Vulkan requires explicit per-mip layout transitions (UNDEFINED → GENERAL for
     // StorageImage write, GENERAL → SHADER_READ_ONLY for next iteration's source).
     // Dawn's InsertBarrier is a no-op (WebGPU tracks internally). Metal's path
     // reuses the single descriptor layout and doesn't reach this branch.
-    const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    // D3D12 与 Vulkan 同形：per-mip 显式屏障交由 D3D12 状态跟踪器翻译。
+    const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                           device_->GetPlatform() == rhi::RHIPlatform::D3D12);
     // P0.1:池槽位有效性检查——0 是全局 UBO set 的合法句柄,不可复用。
     auto isValidSet = [](rhi::DescriptorSetHandle h) {
         return h != rhi::handles::INVALID_DESCRIPTOR_SET &&

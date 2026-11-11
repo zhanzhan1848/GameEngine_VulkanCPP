@@ -1238,7 +1238,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
     {
         const auto platform = device_->GetPlatform();
         const bool useFlatBindings = (platform == rhi::RHIPlatform::Dawn ||
-                                      platform == rhi::RHIPlatform::Vulkan);
+                                      platform == rhi::RHIPlatform::Vulkan ||
+                                      platform == rhi::RHIPlatform::D3D12);
         if (useFlatBindings) {
             // Dawn/Vulkan: sequential engine bindings 0..9 matching WGSL
             // (no texture/buffer collision -> no silent remap)
@@ -1334,7 +1335,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         // depthBindings[4] (depth_output) stays read_write.
         depthBindings[6].readonly = true;
         depthBindings[7].readonly = true;
-        DescriptorSetLayoutDesc layoutDesc{device_->GetPlatform() == RHIPlatform::Vulkan ?
+        DescriptorSetLayoutDesc layoutDesc{(device_->GetPlatform() == RHIPlatform::Vulkan ||
+                                            device_->GetPlatform() == RHIPlatform::D3D12) ?
             (depth_provenance_enabled_?9u:7u) : 6u, depthBindings};
         depth_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
@@ -1343,7 +1345,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
     // Apple Silicon stable: only 4 texture3D reads per thread, no Surface Cache buffer mixing.
     // Vulkan: hand-written GLSL split-pass (DDGITraceSDF.comp) with FLAT bindings.
     // Dawn: no split-pass entry — pipeline stays INVALID (unified entry only).
-    const bool isVulkanPlatform = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    const bool isVulkanPlatform = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                                   device_->GetPlatform() == rhi::RHIPlatform::D3D12);
     const bool skipSplitPass = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
     if (isVulkanPlatform) {
         // Flat bindings — no texture/buffer namespace overlap.
@@ -1658,7 +1661,10 @@ void LumenDDGIPass::CreatePipelines() {
     //   Vulkan:  hand-written GLSL ports in separate files (DDGITraceSDF.comp /
     //            DDGITraceFinalize.comp → .comp.spv). Entry names identical.
     //   Dawn:    no split-pass entry — unified ddgi_trace_rays only.
-    const bool isVulkanPlatform = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+    // D3D12 与 Vulkan 同形：split-pass cso 镜像（DDGITraceSDF.comp.cso /
+    // DDGITraceFinalize.comp.cso），flat binding 布局一致。
+    const bool isVulkanPlatform = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                                   device_->GetPlatform() == rhi::RHIPlatform::D3D12);
     const bool isMetalOrVkSplit = (device_->GetPlatform() == rhi::RHIPlatform::Metal) || isVulkanPlatform;
     ShaderHandle sdfTraceShader = handles::INVALID_SHADER;
     ShaderHandle finalizeShader = handles::INVALID_SHADER;
@@ -4259,7 +4265,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 // at binding 9 for Mode 11); Metal uses overlap (textures 0..3 +
                 // buffers 0..6 with SC bindings 5/6).
                 bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
-                               device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                               device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                               device_->GetPlatform() == rhi::RHIPlatform::D3D12);
                 DescriptorData traceParams[11];
                 u32 traceParamCount = 0;
                 if (isDawn) {
@@ -4452,7 +4459,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     {8, DescriptorType::StorageBuffer, depth_provenance_buffers_[outIdx]},
                 };
                 UpdateDescriptorSet(device_, depth_ds_[frameIdx], depthParams,
-                    device_->GetPlatform() == RHIPlatform::Vulkan ? (depth_provenance_enabled_?9u:7u) : 6u);
+                    (device_->GetPlatform() == RHIPlatform::Vulkan ||
+                     device_->GetPlatform() == RHIPlatform::D3D12) ? (depth_provenance_enabled_?9u:7u) : 6u);
 
                 if (!historyProbes.empty()) {
                     historySlice("DDGI.History.PreDepth","origin",relocated_origins_,16);

@@ -112,11 +112,14 @@ namespace {
 #endif
         }
 
-        if (platform == rhi::RHIPlatform::Vulkan) {
+        if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
             // T4.6.5 part 35.3: CWD-relative first (works when shaders are
             // bundled next to the test binary), then worktree source root.
             // The previous single fallback resolved to the MAIN repo
             // (feat/wfc-pcg branch) which has stale .spv files.
+            // D3D12 与 Vulkan 同形：GetNaniteShaderPath 按 platform 解析到
+            // EngineTest/shaders/d3d12/Nanite/<name>.cso（入口恒 "main"，
+            // 后端忽略 entry 名）。
             const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
             std::vector<std::string> candidates;
             candidates.push_back(relPath);
@@ -1120,7 +1123,9 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             // Build a 4-binding DSL (clusters/config/bins/bin_counter) on Vulkan
             // to match ClusterBinning.comp.
             rhi::PipelineLayoutHandle binningLayout = rhi::handles::INVALID_PIPELINE_LAYOUT;
-            const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+            // D3D12 与 Vulkan 同形：root signature 同样要求显式声明 flat 绑定。
+            const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                                   device_->GetPlatform() == rhi::RHIPlatform::D3D12);
             if (isVulkan) {
                 rhi::DescriptorSetLayoutBinding binningBindings[4]{};
                 binningBindings[0].binding = 0;
@@ -3621,7 +3626,8 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
     // uniformly via SampledImage.
     {
         bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
-                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                   device_->GetPlatform() == rhi::RHIPlatform::D3D12);
         rhi::DescriptorSetLayoutBinding blitBindings[3];
         blitBindings[0].binding = 0;
         blitBindings[0].descriptorType = isDawn ? rhi::DescriptorType::SampledDepthImage
@@ -4383,7 +4389,8 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
     rhi::DescriptorBufferInfo resInfo{ frame.blit_resolution_cb[cascade_index], 0, 8 };
 
     bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
-                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                   device_->GetPlatform() == rhi::RHIPlatform::D3D12);
     rhi::DescriptorType srcType = isDawn ? rhi::DescriptorType::SampledDepthImage
                                          : rhi::DescriptorType::SampledImage;
 
@@ -5318,7 +5325,8 @@ bool GPUDrivenDrawPipeline::ExecuteGBufferDepthBlit(rhi::RHICommandBuffer* cmd_b
     rhi::DescriptorBufferInfo resInfo{ gbuffer_depth_blit_cb_, 0, 8 };
 
     bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
-                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                   device_->GetPlatform() == rhi::RHIPlatform::D3D12);
     rhi::DescriptorType srcType = isDawn ? rhi::DescriptorType::SampledDepthImage
                                          : rhi::DescriptorType::SampledImage;
 

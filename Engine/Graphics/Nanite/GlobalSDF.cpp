@@ -478,10 +478,11 @@ static std::vector<u8> LoadShaderSource(const char* name, rhi::RHIDeviceBase* de
         }
         return std::vector<u8>(src.begin(), src.end());
     }
-    if (platform == rhi::RHIPlatform::Vulkan) {
+    if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
         // T4.6.5 part 35.3: CWD-relative first (bundled next to test binary),
         // then worktree source root. Previous single fallback hit the MAIN
         // repo (feat/wfc-pcg) with stale .spv files.
+        // D3D12 与 Vulkan 同形：.cso 镜像（GetNaniteShaderPath 按 platform 分派）。
         const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, name);
         std::vector<std::string> candidates;
         candidates.push_back(relPath);
@@ -593,7 +594,8 @@ bool GlobalSDF::InitVoxelization(const SDFVoxelizationResources& resources) {
     //        (Metal has separate texture/buffer namespaces — indices can overlap)
     // WebGPU/Vulkan: single namespace — texture + UBO + 6 SSBOs use bindings 0..7
     bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
-                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                   device_->GetPlatform() == rhi::RHIPlatform::D3D12);
     if (isDawn) {
         // WebGPU/WGSL bindings — see GlobalSDFVoxelization.wgsl header comment.
         // F2 (2026-07-13): storage texture is R32Float 3D (was RGBA16Float 2D).
@@ -921,7 +923,8 @@ void GlobalSDF::DispatchVoxelization(rhi::RHICommandBuffer* cmd, u32 cascade_ind
 
     // Update descriptor set
     bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
-                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                   device_->GetPlatform() == rhi::RHIPlatform::D3D12);
     {
         if (isDawn) {
             // WebGPU/WGSL bindings: 0=texture, 1=UBO, 2-7=SSBOs (matches WGSL header).

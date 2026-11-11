@@ -998,7 +998,8 @@ void StandardRenderPipeline::SetPassEnabled(RenderPassID pass, bool enabled) {
 
 static bool EnvironmentVisibilityRequested(rhi::RHIDeviceBase* device) {
     const char* value=std::getenv("PRIMAL_IBL_VISIBILITY");
-    return device && device->GetPlatform()==rhi::RHIPlatform::Vulkan &&
+    return device && (device->GetPlatform()==rhi::RHIPlatform::Vulkan ||
+                      device->GetPlatform()==rhi::RHIPlatform::D3D12) &&
         !(value && std::strcmp(value,"0")==0);
 }
 
@@ -1344,10 +1345,18 @@ static void SelfLoadInlineIncludes(std::string& source, const std::string& dir,
 
 static std::vector<u8> SelfLoadShaderSource(const char* file, rhi::RHIPlatform platform,
                                             ShaderStage stage, const char* metalDir) {
-    if (platform == rhi::RHIPlatform::Vulkan) {
-        const char* suffix = (stage == ShaderStage::Vertex) ? ".vert.spv"
-                           : (stage == ShaderStage::Pixel) ? ".frag.spv" : ".spv";
-        std::string rel = std::string("Engine/Graphics/Vulkan/shaders/") + file + suffix;
+    if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
+        // Vulkan: SPIR-V from the engine shader tree. D3D12: DXIL .cso
+        // mirroring the same relative path (build_d3d12_shaders.py layout);
+        // spirv-cross rewrites every entry point to "main" so the cso is
+        // consumed with the same one-file-per-stage shape as the spv.
+        const bool d3d12 = (platform == rhi::RHIPlatform::D3D12);
+        const char* suffix = (stage == ShaderStage::Vertex) ? (d3d12 ? ".vert.cso" : ".vert.spv")
+                           : (stage == ShaderStage::Pixel) ? (d3d12 ? ".frag.cso" : ".frag.spv")
+                           : (d3d12 ? ".cso" : ".spv");
+        std::string rel = d3d12
+            ? std::string("EngineTest/shaders/d3d12/") + file + suffix
+            : std::string("Engine/Graphics/Vulkan/shaders/") + file + suffix;
         std::string path = SelfLoadResolve(rel);
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f.is_open()) return {};
@@ -1355,7 +1364,7 @@ static std::vector<u8> SelfLoadShaderSource(const char* file, rhi::RHIPlatform p
         f.seekg(0);
         std::vector<u8> bytes(static_cast<size_t>(size));
         if (!f.read(reinterpret_cast<char*>(bytes.data()), size)) return {};
-        return bytes;  // SPIR-V，entry "main"
+        return bytes;  // SPIR-V / DXIL，entry "main"
     }
     // Metal：MSL 源 + include 内联。目录由装配表给（DeferredLighting 系在
     // EngineTest/shaders/——与测试壳同源的完整版；Lumen compute 在引擎
@@ -1404,8 +1413,11 @@ void StandardRenderPipeline::SelfLoadPipelineShaders() {
         // FusionIndirect=fusion_indirect 等）——十测 Windows 上 sc_card_radiance/
         // sc_probe_irradiance 自加载建计算管线时报 "No entrypoint found named
         // `main`"（72 条）。入口名随装配表逐行传入。
-        out = device_->CreateShader(bytes.data(), bytes.size(), stage,
-                                    metal ? metalEntry : vulkanEntry);
+        // D3D12: cso 由 spirv-cross 包装，入口恒为 "main"（D3D12Shader 忽略
+        // entryPoint 参数并按 main 消费）；Vulkan spv 保持功能入口名。
+        const char* entry = metal ? metalEntry
+                        : (platform == rhi::RHIPlatform::D3D12) ? "main" : vulkanEntry;
+        out = device_->CreateShader(bytes.data(), bytes.size(), stage, entry);
         if (out == handles::INVALID_SHADER) {
             PRIMAL_LOG_STREAM(Error, "Render")
                 << "[Pipeline] CreateShader failed: " << metalFile << " / " << metalEntry
@@ -1432,7 +1444,9 @@ void StandardRenderPipeline::SelfLoadPipelineShaders() {
              "ddgi_card_radiance_avg", ShaderStage::Compute, sc_card_radiance_shader_);
         load("Lumen/DDGIProbeIrradianceFromCards.comp", "DDGIProbeIrradianceFromCards.metal", "Lumen/",
              "ddgi_probe_irradiance_from_cards", ShaderStage::Compute, sc_probe_irradiance_shader_);
-    } else if (platform == rhi::RHIPlatform::Vulkan) {
+    } else if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
+        // D3D12 走与 Vulkan 相同的装配表（flat binding 同形）；差异只在
+        // SelfLoadShaderSource 的字节来源（.cso 镜像）与入口名（恒 "main"）。
         load("Forward/DeferredLighting", nullptr, nullptr, "deferred_vs", ShaderStage::Vertex, deferred_vs_);
         load("Forward/DeferredLighting", nullptr, nullptr, "deferred_ps", ShaderStage::Pixel, deferred_ps_);
         load("Forward/Blit", nullptr, nullptr, "blit_vs", ShaderStage::Vertex, blit_vs_);
@@ -1624,8 +1638,10 @@ void StandardRenderPipeline::InitializeSubsystems() {
     if(EnvironmentVisibilityRequested(device_)) {
         environment_visibility_module_=std::make_unique<EnvironmentVisibilityModule>();
         environment_geometry_digest_=0;
-        auto traceCode=SelfLoadShaderSource("Lumen/EnvironmentVisibility_trace.comp",rhi::RHIPlatform::Vulkan,ShaderStage::Compute,"");
-        auto resolveCode=SelfLoadShaderSource("Lumen/EnvironmentVisibility_resolve.comp",rhi::RHIPlatform::Vulkan,ShaderStage::Compute,"");
+        // 平台参数取设备实平台：Vulkan 读 spv、D3D12 读 .cso 镜像（入口均
+        // 为 "main"——该 spv 的 OpEntryPoint 就是 main，cso 由包装统一为 main）。
+        auto traceCode=SelfLoadShaderSource("Lumen/EnvironmentVisibility_trace.comp",device_->GetPlatform(),ShaderStage::Compute,"");
+        auto resolveCode=SelfLoadShaderSource("Lumen/EnvironmentVisibility_resolve.comp",device_->GetPlatform(),ShaderStage::Compute,"");
         ShaderHandle trace=traceCode.empty()?handles::INVALID_SHADER:device_->CreateShader(traceCode.data(),traceCode.size(),ShaderStage::Compute,"main");
         ShaderHandle resolve=resolveCode.empty()?handles::INVALID_SHADER:device_->CreateShader(resolveCode.data(),resolveCode.size(),ShaderStage::Compute,"main");
         if(!environment_visibility_module_->Initialize(device_,trace,resolve,render_width_,render_height_))
@@ -1734,8 +1750,10 @@ void StandardRenderPipeline::InitializeSubsystems() {
 
     // Vulkan also needs the HDR display composite when all GI features are off:
     // its deferred MRT keeps environment reflection separate from direct radiance.
+    // D3D12 与 Vulkan 同形（MRT2 deferred → fusion 合成同样必需）。
     if (settings_.quality.enable_ssgi || settings_.quality.enable_ddgi ||
-        device_->GetPlatform() == RHIPlatform::Vulkan) {
+        device_->GetPlatform() == RHIPlatform::Vulkan ||
+        device_->GetPlatform() == RHIPlatform::D3D12) {
         fusion_module_ = std::make_unique<FusionCompositeModule>();
         fusion_module_->Initialize(device_, fusion_indirect_ps_, blit_vs_,
                                    fusion_composite_ps_, render_width_, render_height_);
@@ -2282,7 +2300,8 @@ void StandardRenderPipeline::InitializeLumenPasses() {
     // ========================================================================
     wrc_volume_count_ = 0;
     const bool wrcPlatformOk = device_ == nullptr ||
-        device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+        device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+        device_->GetPlatform() == rhi::RHIPlatform::D3D12;
     const bool wrcTierDefault = config.quality == lumen::LumenQualityPreset::High ||
                                 config.quality == lumen::LumenQualityPreset::Ultra ||
                                 config.quality == lumen::LumenQualityPreset::UltraRT;
@@ -3653,7 +3672,9 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
     // SurfaceCachePass 里的手工 GBuffer no-op barrier（本阶段删除）。
     // ======================================================================
     // env 回滚开关（Phase 5b 二分用）：PRIMAL_GBUFFER_RG=0 → 旧 per-site 导入。
-    const bool gbufferInRG = device_ && device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+    const bool gbufferInRG = device_ &&
+                             (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                              device_->GetPlatform() == rhi::RHIPlatform::D3D12) &&
                              [](const char* e) { return !(e && e[0] == '0'); }(std::getenv("PRIMAL_GBUFFER_RG"));
     RGResourceHandle gbufferDepthRG{}, gbufferAlbedoRG{}, gbufferNormalRG{}, gbufferOrmRG{};
     if (gbufferInRG) {
@@ -4406,7 +4427,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
             prevColor = fused;
             camData.radiance_is_previous_frame = true;
         }
-        if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+        if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+            device_->GetPlatform() == rhi::RHIPlatform::D3D12) {
             camData.screen_depth = gbufferInRG ? gbufferDepthRG : graph.ImportResource("DDGI_CurrentScreenDepth", gpuDraw.GetGBufferDepthSampleable());
             if (camData.radiance_is_previous_frame) {
                 if (depth_history_ && !camera_cut_this_frame_) {
@@ -4918,7 +4940,8 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         // then (or when history is invalid) AddTAAPass keeps the velocity path.
         PostProcess::TAADepthInputs taaDepth;
         PostProcess::TAADepthInputs* taaDepthPtr = nullptr;
-        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        if (device_->GetPlatform() == RHIPlatform::Vulkan ||
+            device_->GetPlatform() == RHIPlatform::D3D12) {
             taaDepth.require_raster_jitter = true;
             taaDepth.currDepth = gpuDraw.GetGBufferDepthSampleable();
             taaDepth.current_depth_rg = gbufferDepthRG.IsValid() ? gbufferDepthRG :
@@ -6176,7 +6199,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 prevColor = fused;
                 camData.radiance_is_previous_frame = true;
             }
-            if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+            if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                device_->GetPlatform() == rhi::RHIPlatform::D3D12) {
                 camData.screen_depth = graph.ImportResource("DDGI_CurrentScreenDepth", gpuDraw.GetGBufferDepthSampleable());
                 if (camData.radiance_is_previous_frame) {
                     if (depth_history_ && !camera_cut_this_frame_) {
@@ -6754,7 +6778,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             // Depth reprojection inputs — same gating as BuildRenderGraph.
             PostProcess::TAADepthInputs taaDepthRWCB;
             PostProcess::TAADepthInputs* taaDepthRWCBPtr = nullptr;
-            if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+            if (device_->GetPlatform() == RHIPlatform::Vulkan ||
+                device_->GetPlatform() == RHIPlatform::D3D12) {
                 taaDepthRWCB.require_raster_jitter = true;
                 taaDepthRWCB.currDepth = gpuDraw.GetGBufferDepthSampleable();
                 taaDepthRWCB.current_depth_rg = gbufferDepthRG.IsValid() ? gbufferDepthRG :

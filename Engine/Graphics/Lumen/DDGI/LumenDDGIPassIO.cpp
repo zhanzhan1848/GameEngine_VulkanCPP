@@ -119,13 +119,17 @@ std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIDeviceBase* d
         return std::vector<u8>(src.begin(), src.end());
     }
 
-    if (platform == rhi::RHIPlatform::Vulkan) {
+    if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
         // Phase 2 Vulkan Lumen port: load precompiled SPIR-V from
         // Engine/Graphics/Vulkan/shaders/Lumen/<name>.comp.spv (hand-written
         // GLSL compiled by build_spv.sh). Uses .comp.spv to distinguish from
         // the broken naga WGSL .spv products (spvUnsafeArray MoltenVK issue).
+        // D3D12: DXIL .cso 镜像（EngineTest/shaders/d3d12/Lumen/<name>.comp.cso，
+        // 入口恒 "main"），与 spv 同一相对路径形态。
+        const std::string suffix =
+            (platform == rhi::RHIPlatform::D3D12) ? ".comp.cso" : ".comp.spv";
         const std::string relPath =
-            utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + ".comp.spv";
+            utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + suffix;
         const std::vector<std::string> candidates = {
             relPath,
             utils::ShaderRegistry::ResolveShaderPath(relPath),

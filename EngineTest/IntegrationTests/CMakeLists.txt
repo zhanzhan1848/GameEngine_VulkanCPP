@@ -355,7 +355,14 @@ if(APPLE)
     )
     setup_test_target(TestVulkanSponzaRenderGraph)
     # Diagnostic-only live-SC 2..256-ray witness. Never overwrites production modules.
-    find_program(SC_BOUND_WITNESS_GLSLANG NAMES glslangValidator REQUIRED)
+    # R3 agent T (Windows 构建面): REQUIRED → 探测式——无 glslangValidator 的
+    # 机器 configure 不再硬失败。工具缺失时跳过两个 custom_command/target/
+    # add_dependencies；编译宏以空串定义（SCBoundGeometryWitness.inl 无条件
+    # 引用宏名，无定义即语法错误；空串使 LoadSpvBytes("") 空字节 → 运行期
+    # if(spv.empty()) return false 优雅失败＝同等的"诊断可缺"语义）。工具
+    # 存在时（Apple/装了 glslang 的 Windows）行为与旧 REQUIRED 版逐项一致。
+    find_program(SC_BOUND_WITNESS_GLSLANG NAMES glslangValidator)
+    if(SC_BOUND_WITNESS_GLSLANG)
     set(SC_BOUND_WITNESS_SPV ${CMAKE_BINARY_DIR}/Tests/SCBoundGeometryWitness.comp.spv)
     add_custom_command(OUTPUT ${SC_BOUND_WITNESS_SPV}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/Tests
@@ -373,6 +380,11 @@ if(APPLE)
     add_custom_target(SCBoundGeometryWitnessShader DEPENDS ${SC_BOUND_WITNESS_SPV} ${SC_BOUND_WITNESS_REPLACE_SPV})
     add_dependencies(TestVulkanSponzaRenderGraph SCBoundGeometryWitnessShader)
     target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE SC_BOUND_GEOMETRY_WITNESS_SPV="${SC_BOUND_WITNESS_SPV}" SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV="${SC_BOUND_WITNESS_REPLACE_SPV}")
+    else()
+    message(STATUS "glslangValidator not found - SCBoundGeometryWitness diagnostic shaders skipped (macros defined empty)")
+    add_custom_target(SCBoundGeometryWitnessShader)
+    target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE SC_BOUND_GEOMETRY_WITNESS_SPV="" SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV="")
+    endif()
 
     target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE "TEST_VULKAN_SPONZA_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1")
     endif() # ENABLE_VULKAN gate for TestVulkanSponzaRenderGraph
@@ -1063,6 +1075,60 @@ if(ENABLE_VULKAN)
         TIMEOUT 300 LABELS "Vulkan;RHI;D3D12M1"
         ENVIRONMENT "RHI_TEST_FRAMES=3;RHI_CAPTURE_DIR=/tmp/d3d12_m1_evidence/ctest_smoke_frames")
 endif() # ENABLE_VULKAN gate for TestRHISponzaShared (platform-agnostic)
+
+# 10e. TestVulkanSponzaRenderGraph Windows 注册（R3 agent T，2026-11-11）：
+# 生产 RenderGraph 参照程序（RHI_TEST_PLATFORM=vulkan|d3d12 参数化）的
+# Windows 侧入口——同一份 Main.cpp + TestVulkanSponzaRenderGraph.cpp（cpp 内
+# Apple 专属 AppKit/NS:: 已 __APPLE__ 守卫）。与 Apple 块（:348 起）的差异：
+#   ① 源表不含 MacKeyboard.mm/InputMac.mm——两者只服务 Main.cpp 的 Apple
+#     分支（monitorKeyboardInput），WinMain 分支不引用；引擎级键盘输入由
+#     Engine 目标按平台编译（Engine/Input/InputWin32.cpp）。SPGI_CAM_LOCK
+#     固定相机验证跑法无键鼠需求。
+#   ② SCBoundGeometryWitness 见证 shader：glslangValidator 存在时构建真实
+#     spv（与 Apple 同款两 command + target）；缺失时宏空串定义（.inl 无条件
+#     引用宏名，运行期 LoadSpvBytes("") 优雅失败）。
+#   ③ freshness gate（build_spv.sh 为 sh 脚本）不挂；着色器束 POST_BUILD
+#     与 Apple 同款（相对路径 walk-up 的稳健供给）。
+if(WIN32 AND ENABLE_VULKAN)
+    find_program(SC_BOUND_WITNESS_GLSLANG_WIN NAMES glslangValidator)
+    set(TVSRG_WIN_SC_DEFS "SC_BOUND_GEOMETRY_WITNESS_SPV=\"\"" "SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV=\"\"")
+    if(SC_BOUND_WITNESS_GLSLANG_WIN)
+        set(SC_BOUND_WITNESS_SPV_WIN ${CMAKE_BINARY_DIR}/Tests/SCBoundGeometryWitness.comp.spv)
+        add_custom_command(OUTPUT ${SC_BOUND_WITNESS_SPV_WIN}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/Tests
+            COMMAND ${SC_BOUND_WITNESS_GLSLANG_WIN} -V -I${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen
+                ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp -o ${SC_BOUND_WITNESS_SPV_WIN}
+            DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl VERBATIM)
+        set(SC_BOUND_WITNESS_REPLACE_SPV_WIN ${CMAKE_BINARY_DIR}/Tests/SCBoundGeometryWitnessReplace.comp.spv)
+        add_custom_command(OUTPUT ${SC_BOUND_WITNESS_REPLACE_SPV_WIN}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/Tests
+            COMMAND ${SC_BOUND_WITNESS_GLSLANG_WIN} -V -DDDGI_GEOMETRY_REPLACE -I${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen
+                ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp -o ${SC_BOUND_WITNESS_REPLACE_SPV_WIN}
+            DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl VERBATIM)
+        add_custom_target(SCBoundGeometryWitnessShaderWin DEPENDS ${SC_BOUND_WITNESS_SPV_WIN} ${SC_BOUND_WITNESS_REPLACE_SPV_WIN})
+        set(TVSRG_WIN_SC_DEFS "SC_BOUND_GEOMETRY_WITNESS_SPV=\"${SC_BOUND_WITNESS_SPV_WIN}\"" "SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV=\"${SC_BOUND_WITNESS_REPLACE_SPV_WIN}\"")
+    else()
+        message(STATUS "glslangValidator not found - SCBoundGeometryWitness diagnostic shaders skipped on Windows (macros defined empty)")
+    endif()
+    add_executable(TestVulkanSponzaRenderGraph
+        "Main.cpp"
+        "TestVulkanSponzaRenderGraph.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestVulkanSponzaRenderGraph)
+    target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE
+        "TEST_VULKAN_SPONZA_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1" ${TVSRG_WIN_SC_DEFS})
+    if(TARGET SCBoundGeometryWitnessShaderWin)
+        add_dependencies(TestVulkanSponzaRenderGraph SCBoundGeometryWitnessShaderWin)
+    endif()
+    add_custom_command(TARGET TestVulkanSponzaRenderGraph POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
+        $<TARGET_FILE_DIR:TestVulkanSponzaRenderGraph>/Engine/Graphics/Vulkan/shaders
+    )
+endif() # WIN32 AND ENABLE_VULKAN gate for TestVulkanSponzaRenderGraph (Windows)
 
 else()
     message(STATUS "Integration tests skipped: ContentTools disabled (BUILD_CONTENT_TOOLS=OFF)")

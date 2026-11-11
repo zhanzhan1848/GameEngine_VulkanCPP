@@ -94,7 +94,10 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     // 15 bindings: 6 textures + 9 buffers.
     // Metal: overlapping texture/buffer namespaces (idiomatic Metal).
     // Vulkan: flat 0..14 (depth as SampledDepthImage) — matches GLSL shader.
-    const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan;
+    // D3D12 与 Vulkan 同形（flat 0..14 + .cso 镜像）；下方变体门只扩平台因子、
+    // env 因子保持（变体 cso 缺失时 CreateShader 失败 → 模块 fail-closed）。
+    const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan ||
+                      device->GetPlatform() == RHIPlatform::D3D12;
     const char* glossyAuditEnv = std::getenv("DDGI_GLOSSY_SOURCE_AUDIT");
     const bool glossyAuditRequested = isVk && glossyAuditEnv &&
         glossyAuditEnv[0] == '1' && glossyAuditEnv[1] == '\0';
@@ -1352,7 +1355,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             // Texture bindings (6: depth/normal/output/history/orm/specular)
             WriteDescriptorSet texWrites[6] = {};
             DescriptorImageInfo imgInfos[6];
-            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan ||
+                              device_->GetPlatform() == RHIPlatform::D3D12;
             const u32 ormBinding = isVk ? 13u : 4u;
             const u32 specBinding = isVk ? 14u : 5u;
             {

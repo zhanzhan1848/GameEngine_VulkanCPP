@@ -294,6 +294,14 @@ namespace {
             }
         }
 #endif
+        // D3D12 与 Vulkan 同形：走平台中立 RHI 查询（D3D12Device 已实现），
+        // 避免落入 512x512 默认值警告档。
+        if (platform == RHIPlatform::D3D12) {
+            u32 w = 0, h = 0;
+            if (device->GetTextureSize(texture, w, h)) {
+                return {w, h};
+            }
+        }
 
         PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] WARNING: Could not get texture size, using default 512x512" << std::endl;
         return {512, 512};

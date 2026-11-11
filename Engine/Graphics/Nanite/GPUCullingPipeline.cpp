@@ -75,7 +75,8 @@ namespace {
 #endif
         }
 
-        if (platform == rhi::RHIPlatform::Vulkan) {
+        if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
+            // D3D12 与 Vulkan 同形：.cso 镜像（GetNaniteShaderPath 按 platform 分派）。
             // T4.6.5 part 35.3: lookup order matters. The previous single
             // fallback resolved to /Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/
             // which is the MAIN repo (feat/wfc-pcg branch) — its stale .spv

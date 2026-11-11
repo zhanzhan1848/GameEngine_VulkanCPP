@@ -158,9 +158,14 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
     outputDesc.memoryUsage = GPUMemoryUsage::Static;
     for (int i = 0; i < 3; ++i) {
         output_textures_[i] = device->CreateTexture(outputDesc);
-        if (device->GetPlatform() == RHIPlatform::Vulkan)
+        // MRT2 EnvironmentSpecular 附件：Vulkan/D3D12 同形（deferred frag 的
+        // location 1 输出走同一 20-binding flat set；Metal 无此附件）。
+        if (device->GetPlatform() == RHIPlatform::Vulkan ||
+            device->GetPlatform() == RHIPlatform::D3D12)
             environment_textures_[i] = device->CreateTexture(outputDesc);
-        if (device->GetPlatform() == RHIPlatform::Vulkan && environment_textures_[i] == handles::INVALID_RESOURCE) {
+        if ((device->GetPlatform() == RHIPlatform::Vulkan ||
+             device->GetPlatform() == RHIPlatform::D3D12) &&
+            environment_textures_[i] == handles::INVALID_RESOURCE) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[DeferredLighting] Environment attachment allocation failed" << std::endl;
             Shutdown();
             return false;
@@ -216,7 +221,8 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
     fallback_tex_ = device->CreateTexture(fallbackDesc);
 
     if (fallback_tex_ != handles::INVALID_RESOURCE &&
-        device->GetPlatform() == RHIPlatform::Vulkan) {
+        (device->GetPlatform() == RHIPlatform::Vulkan ||
+         device->GetPlatform() == RHIPlatform::D3D12)) {
         u8 white_pixel[4] = { 255, 255, 255, 255 };
         BufferDesc staging{};
         staging.size = 4;
@@ -269,7 +275,8 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         pd.pixelShader = pixel_shader;
         pd.renderTargetFormats[0] = DataFormat::RGBA16_Float;
         pd.renderTargetCount = 1;
-        if (device->GetPlatform() == RHIPlatform::Vulkan) {
+        if (device->GetPlatform() == RHIPlatform::Vulkan ||
+            device->GetPlatform() == RHIPlatform::D3D12) {
             pd.renderTargetFormats[1] = DataFormat::RGBA16_Float;
             pd.renderTargetCount = 2;
         }

@@ -123,9 +123,17 @@ std::string IBLPrecomputer::LoadShaderSource(const std::string& filename) {
 ShaderHandle IBLPrecomputer::CreateComputeShader(const std::string& filename, const char* entryPoint) {
     auto platform = device_->GetPlatform();
 
-    if (platform == rhi::RHIPlatform::Vulkan) {
+    if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
         // SPIR-V path: load precompiled .spv bytes.
+        // D3D12: .cso 镜像（入口恒 "main"，后端忽略 entry 名）。
         utl::vector<std::string> searchPaths;
+        if (platform == rhi::RHIPlatform::D3D12) {
+            searchPaths.push_back("EngineTest/shaders/d3d12/");
+            searchPaths.push_back("../EngineTest/shaders/d3d12/");
+            searchPaths.push_back("../../EngineTest/shaders/d3d12/");
+            searchPaths.push_back("../../../EngineTest/shaders/d3d12/");
+            searchPaths.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/shaders/d3d12/");
+        }
         searchPaths.push_back("Engine/Graphics/Vulkan/shaders/");
         searchPaths.push_back("../Engine/Graphics/Vulkan/shaders/");
         searchPaths.push_back("../../Engine/Graphics/Vulkan/shaders/");
@@ -264,8 +272,11 @@ bool IBLPrecomputer::CreatePipelines() {
 
     // 3. Create Shaders
     auto platform = device_->GetPlatform();
-    const bool isVulkan = (platform == rhi::RHIPlatform::Vulkan);
-    const char* ext = isVulkan ? ".spv" : ".metal";
+    const bool isVulkan = (platform == rhi::RHIPlatform::Vulkan ||
+                            platform == rhi::RHIPlatform::D3D12);
+    // D3D12 与 Vulkan 同形：naga 家族 cs_main 入口的 DXIL 镜像（.cso）。
+    const char* ext = (platform == rhi::RHIPlatform::D3D12) ? ".cso"
+                    : (isVulkan ? ".spv" : ".metal");
     // SPIR-V preserves the WGSL entry-point name (naga does not rewrite to
     // "main"). WGSL convention: cs_main for compute.
     const char* irradianceEntry = isVulkan ? "cs_main" : "CS_IrradianceConvolution";

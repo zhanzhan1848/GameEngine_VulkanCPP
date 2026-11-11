@@ -56,8 +56,12 @@
 // [R6] 自包含：PRIMAL_LOG_STREAM 不再依赖传递包含（形态与 TestModularPipeline.cpp 一致）。
 #include "Engine/Common/CoreLogStream.h"
 
+// R3 (Windows 构建面, agent T): AppKit 仅 Apple——RenderTestFramework.h 已按
+// __APPLE__ 提供双平台 runner，此处 include 对应收紧；Apple 预处理结果不变。
+#if defined(__APPLE__)
 #define NS_PRIVATE_IMPLEMENTATION
 #include <AppKit/AppKit.hpp>
+#endif
 
 #include <iostream>
 #include <cstring>
@@ -125,7 +129,10 @@ ResourceHandle CreateTextureFromData(RHIDeviceBase* device, int w, int h,
     }
 
     CommandBufferHandle cmd = device->CreateCommandBuffer(CommandQueueType::Graphics);
-    VulkanCommandBuffer* vcmd = static_cast<VulkanDevice*>(device)->GetCommandBuffer(cmd);
+    // R3 (D3D12): 基类多态命令缓冲——全局 CommandBufferManager 注册表
+    // （各后端 CreateCommandBuffer 均注册；VulkanDevice::GetCommandBuffer
+    // 返回同一对象，后续调用全为基类虚函数，虚表分派不变）。
+    RHICommandBuffer* vcmd = rhi::GetCommandBuffer(cmd);
     vcmd->Reset();
     vcmd->Begin();
     BufferTextureCopyRegion region{};
@@ -211,6 +218,40 @@ std::vector<u8> LoadSpvBytes(const char* relpath) {
         bytes = tryPath(prefix + relpath);
     }
     return bytes;
+}
+
+// R3 (D3D12 视觉对齐第三轮, agent T): shader 字节的平台化装载。Vulkan →
+// 现行 .spv 相对路径逐字节不变（原 LoadSpvBytes 直通）；D3D12 → 同相对
+// 布局但 base 换 EngineTest/shaders/d3d12/、尾缀 .spv→.cso
+// （.vert.spv→.vert.cso / .frag.spv→.frag.cso / .comp.spv→.comp.cso 与
+// 尾缀替换等价——stage 名保留在文件名里；build_d3d12_shaders.py 产物目录）。
+static std::string MapShaderPathForD3D12(const std::string& relpath) {
+    static const char kVulkanBase[] = "Engine/Graphics/Vulkan/shaders/";
+    static const char kD3D12Base[] = "EngineTest/shaders/d3d12/";
+    std::string mapped;
+    if (relpath.rfind(kVulkanBase, 0) == 0)
+        mapped = kD3D12Base + relpath.substr(sizeof(kVulkanBase) - 1);
+    else if (relpath.rfind("Assets/Shaders/", 0) == 0)
+        mapped = kD3D12Base + relpath.substr(sizeof("Assets/Shaders/") - 1);
+    else
+        mapped = relpath;
+    if (mapped.size() > 4 && mapped.compare(mapped.size() - 4, 4, ".spv") == 0) {
+        mapped.resize(mapped.size() - 4);
+        mapped += ".cso";
+    }
+    return mapped;
+}
+
+static std::vector<u8> LoadPlatformShaderBytes(const char* relpath, RHIPlatform platform) {
+    if (platform != RHIPlatform::D3D12) return LoadSpvBytes(relpath);
+    return LoadSpvBytes(MapShaderPathForD3D12(relpath).c_str());
+}
+
+// R3: CreateShader 入口名——Vulkan 用现值（功能名 spv 的真实 OpEntryPoint，
+// 如 "fusion_indirect"/"ddgi_gi_gather"）；D3D12 恒 "main"
+// （build_d3d12_shaders.py 以 main() 包装功能入口产出 .cso）。
+static const char* TvsrgShaderEntry(const char* vulkanEntry, RHIPlatform platform) {
+    return platform == RHIPlatform::D3D12 ? "main" : vulkanEntry;
 }
 
 #include "SCSurfaceSelfTest.inl"
@@ -339,6 +380,39 @@ bool TestVulkanSponzaRenderGraph::InitializeDevice() {
     desc.enableValidation = true;
     desc.enableDebug = true;
 
+    // R3 (D3D12 视觉对齐, agent T): RHI_TEST_PLATFORM 参数化（先例
+    // TestRHISponzaShared.cpp）。缺省/显式 "vulkan" → 下面 VulkanDevice 现行
+    // 路径零改动；"d3d12" → rhi::CreateRHIDevice 工厂（Windows+ENABLE_D3D12
+    // 构建返回 D3D12Device；其余平台按 M0 F0-1 契约返回 nullptr）。
+    const char* platformEnv = std::getenv("RHI_TEST_PLATFORM");
+    if (platformEnv && std::strcmp(platformEnv, "vulkan") != 0 &&
+        std::strcmp(platformEnv, "d3d12") != 0) {
+        std::cerr << "[Part30.4] RHI_TEST_PLATFORM must be vulkan|d3d12, got '"
+                  << platformEnv << "'" << std::endl;
+        return false;
+    }
+    if (platformEnv && std::strcmp(platformEnv, "d3d12") == 0) {
+        desc.platform = RHIPlatform::D3D12;
+        // 工厂内部完成 Initialize + g_deviceManager 注册（勿重复注册）。
+        RHIDeviceBase* d3d12Device = CreateRHIDevice(desc);
+        if (!d3d12Device) {
+            std::cerr << "[Part30.4] D3D12 device unavailable: CreateRHIDevice "
+                         "returned nullptr — non-Windows / ENABLE_D3D12=OFF "
+                         "build, or Windows device init failed (check Agility "
+                         "SDK install and D3D12 debug layer). Exiting."
+                      << std::endl;
+            return false;
+        }
+        std::cerr << "[Part30.4] D3D12 device: "
+                  << d3d12Device->GetDeviceInfo().deviceName << std::endl;
+        device_ = d3d12Device;
+        // 所有权进现有 deviceOwnership_（基类 unique_ptr 多态析构）；工厂
+        // 生命周期（Shutdown+delete+g_deviceManager 注销）在 Shutdown() 尾部
+        // 按平台分派（Vulkan 维持原 unique_ptr 默认删除零改动）。
+        deviceOwnership_.reset(d3d12Device);
+        return true;
+    }
+
     auto vulkanDevice = std::make_unique<VulkanDevice>(desc);
     if (!vulkanDevice->Initialize()) {
         std::cerr << "[Part30.4] VulkanDevice::Initialize failed" << std::endl;
@@ -397,7 +471,12 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
 
     // SPIR-V loader: try project-root path first (matches UnitTests cwd),
     // then walk up from the binary's cwd (Darwin/Debug) until found.
-    auto loadSpv = [](const char* relpath) -> std::vector<u8> {
+    // R3 (D3D12): 同一探测序作用在平台映射后的路径上——Vulkan 原样 .spv
+    // （逐字节不变）；D3D12 → EngineTest/shaders/d3d12/**.cso。
+    const RHIPlatform shaderPlatform = device_->GetPlatform();
+    auto loadSpv = [shaderPlatform](const char* relpath) -> std::vector<u8> {
+        const std::string rel = shaderPlatform == RHIPlatform::D3D12
+            ? MapShaderPathForD3D12(relpath) : std::string(relpath);
         auto tryPath = [](const std::string& p) -> std::vector<u8> {
             std::ifstream f(p, std::ios::binary | std::ios::ate);
             if (!f) return {};
@@ -407,12 +486,12 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
             f.read(reinterpret_cast<char*>(bytes.data()), sz);
             return bytes;
         };
-        std::vector<u8> bytes = tryPath(relpath);
+        std::vector<u8> bytes = tryPath(rel);
         if (!bytes.empty()) return bytes;
         for (int i = 1; i <= 6 && bytes.empty(); ++i) {
             std::string prefix;
             for (int j = 0; j < i; ++j) prefix += "../";
-            bytes = tryPath(prefix + relpath);
+            bytes = tryPath(prefix + rel);
         }
         return bytes;
     };
@@ -446,17 +525,21 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
     }
 
     ShaderHandle deferredVs = device_->CreateShader(
-        deferredVsBytes.data(), deferredVsBytes.size(), ShaderStage::Vertex, "main");
+        deferredVsBytes.data(), deferredVsBytes.size(), ShaderStage::Vertex,
+        TvsrgShaderEntry("main", shaderPlatform));
     ShaderHandle deferredFs = device_->CreateShader(
-        deferredFsBytes.data(), deferredFsBytes.size(), ShaderStage::Pixel, "main");
+        deferredFsBytes.data(), deferredFsBytes.size(), ShaderStage::Pixel,
+        TvsrgShaderEntry("main", shaderPlatform));
     ShaderHandle blitVs = device_->CreateShader(
-        blitVsBytes.data(), blitVsBytes.size(), ShaderStage::Vertex, "main");
+        blitVsBytes.data(), blitVsBytes.size(), ShaderStage::Vertex,
+        TvsrgShaderEntry("main", shaderPlatform));
     ShaderHandle blitFs = device_->CreateShader(
-        blitFsBytes.data(), blitFsBytes.size(), ShaderStage::Pixel, "main");
+        blitFsBytes.data(), blitFsBytes.size(), ShaderStage::Pixel,
+        TvsrgShaderEntry("main", shaderPlatform));
     ShaderHandle shadowFilter = shadowFilterBytes.empty() ? handles::INVALID_SHADER
         : device_->CreateShader(
             shadowFilterBytes.data(), shadowFilterBytes.size(),
-            ShaderStage::Compute, "main");
+            ShaderStage::Compute, TvsrgShaderEntry("main", shaderPlatform));
 
     StandardRenderPipeline::ShaderHandles handles;
     handles.deferred_vs = deferredVs;
@@ -492,13 +575,16 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
     }
     if (!fusionIndirectBytes.empty())
         handles.fusion_indirect_ps = device_->CreateShader(
-            fusionIndirectBytes.data(), fusionIndirectBytes.size(), ShaderStage::Pixel, "fusion_indirect");
+            fusionIndirectBytes.data(), fusionIndirectBytes.size(), ShaderStage::Pixel,
+            TvsrgShaderEntry("fusion_indirect", shaderPlatform));
     if (!fusionCompositeBytes.empty())
         handles.fusion_composite_ps = device_->CreateShader(
-            fusionCompositeBytes.data(), fusionCompositeBytes.size(), ShaderStage::Pixel, "fusion_composite");
+            fusionCompositeBytes.data(), fusionCompositeBytes.size(), ShaderStage::Pixel,
+            TvsrgShaderEntry("fusion_composite", shaderPlatform));
     if (!giGatherBytes.empty())
         handles.gi_gather = device_->CreateShader(
-            giGatherBytes.data(), giGatherBytes.size(), ShaderStage::Compute, "ddgi_gi_gather");
+            giGatherBytes.data(), giGatherBytes.size(), ShaderStage::Compute,
+            TvsrgShaderEntry("ddgi_gi_gather", shaderPlatform));
 
     // SC→DDGI integration (card radiance avg → probe irradiance projection).
     // Without these the SCDDGIIntegrationModule pipelines stay INVALID and its
@@ -509,27 +595,30 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
     if (!scCardRadianceBytes.empty())
         handles.sc_card_radiance = device_->CreateShader(
             scCardRadianceBytes.data(), scCardRadianceBytes.size(),
-            ShaderStage::Compute, "ddgi_card_radiance_avg");
+            ShaderStage::Compute, TvsrgShaderEntry("ddgi_card_radiance_avg", shaderPlatform));
     if (!scProbeIrradianceBytes.empty())
         handles.sc_probe_irradiance = device_->CreateShader(
             scProbeIrradianceBytes.data(), scProbeIrradianceBytes.size(),
-            ShaderStage::Compute, "ddgi_probe_irradiance_from_cards");
+            ShaderStage::Compute, TvsrgShaderEntry("ddgi_probe_irradiance_from_cards", shaderPlatform));
 
     // SDF visualization fullscreen shader (toggled at runtime via F6).
     auto sdfVizBytes = loadSpv("Engine/Graphics/Vulkan/shaders/Debug/SDFVisualization.frag.spv");
     if (!sdfVizBytes.empty())
         handles.sdf_viz_ps = device_->CreateShader(
-            sdfVizBytes.data(), sdfVizBytes.size(), ShaderStage::Pixel, "main");
+            sdfVizBytes.data(), sdfVizBytes.size(), ShaderStage::Pixel,
+            TvsrgShaderEntry("main", shaderPlatform));
 
     // M8/T8.5: real-mesh DDGI probe spheres (SPGI_PROBE_SPHERES=1).
     auto probeSphereVs = loadSpv("Engine/Graphics/Vulkan/shaders/Debug/ProbeSphere.vert.spv");
     auto probeSpherePs = loadSpv("Engine/Graphics/Vulkan/shaders/Debug/ProbeSphere.frag.spv");
     if (!probeSphereVs.empty())
         handles.probe_sphere_vs = device_->CreateShader(
-            probeSphereVs.data(), probeSphereVs.size(), ShaderStage::Vertex, "main");
+            probeSphereVs.data(), probeSphereVs.size(), ShaderStage::Vertex,
+            TvsrgShaderEntry("main", shaderPlatform));
     if (!probeSpherePs.empty())
         handles.probe_sphere_ps = device_->CreateShader(
-            probeSpherePs.data(), probeSpherePs.size(), ShaderStage::Pixel, "main");
+            probeSpherePs.data(), probeSpherePs.size(), ShaderStage::Pixel,
+            TvsrgShaderEntry("main", shaderPlatform));
 
     pipeline_->SetShaderHandles(handles);
 
@@ -1428,7 +1517,16 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
     // RHI Vulkan enables this feature only when supported, so keep 1x on
     // devices that expose no sampler anisotropy capability.
     u32 textureAnisotropy = 1;
-    if (auto* vkDevice = static_cast<VulkanDevice*>(device_)) {
+    // R3 (D3D12): 各向异性档位查询。Vulkan 物理设备特性查询是 Vulkan-only
+    // API（vkGetPhysicalDeviceFeatures）——D3D12 分支不查（FL11+ 硬性保证
+    // anisotropic filtering 可用、maxSamplerAnisotropy>=16），固定为与
+    // Vulkan 支持档相同的 8x 基准。
+    if (device_->GetPlatform() == RHIPlatform::D3D12) {
+        textureAnisotropy = 8;
+        std::cerr << "[Part30.4] D3D12: sampler anisotropy fixed at 8x "
+                     "(Vulkan capability query is a Vulkan-only path)"
+                  << std::endl;
+    } else if (auto* vkDevice = static_cast<VulkanDevice*>(device_)) {
         VkPhysicalDeviceFeatures supportedFeatures{};
         vkGetPhysicalDeviceFeatures(vkDevice->GetNativePhysicalDevice(),
                                     &supportedFeatures);
@@ -1910,7 +2008,7 @@ bool TestVulkanSponzaRenderGraph::InitializeIBL() {
 
     {
         CommandBufferHandle cmd = device_->CreateCommandBuffer(CommandQueueType::Graphics);
-        VulkanCommandBuffer* vcmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(cmd);
+        RHICommandBuffer* vcmd = rhi::GetCommandBuffer(cmd);
         vcmd->Reset(); vcmd->Begin();
         BufferTextureCopyRegion region{};
         region.bufferOffset = 0;
@@ -1981,9 +2079,12 @@ bool TestVulkanSponzaRenderGraph::InitializeIBL() {
     }
 
     // ----- 6. Load IBL_EquirectangularToCube.spv + create compute pipeline -----
-    auto eqCubeSpv = LoadSpvBytes("Engine/Graphics/Vulkan/shaders/IBL_EquirectangularToCube.spv");
+    // R3 (D3D12): 平台化装载（Vulkan .spv 原样；D3D12 → .cso 映射）。
+    auto eqCubeSpv = LoadPlatformShaderBytes(
+        "Engine/Graphics/Vulkan/shaders/IBL_EquirectangularToCube.spv", device_->GetPlatform());
     if (eqCubeSpv.empty()) {
-        eqCubeSpv = LoadSpvBytes("Assets/Shaders/IBL_EquirectangularToCube.spv");
+        eqCubeSpv = LoadPlatformShaderBytes(
+            "Assets/Shaders/IBL_EquirectangularToCube.spv", device_->GetPlatform());
     }
     if (eqCubeSpv.empty()) {
         std::cerr << "[Part37] IBL_EquirectangularToCube.spv not found" << std::endl;
@@ -1997,7 +2098,8 @@ bool TestVulkanSponzaRenderGraph::InitializeIBL() {
         return false;
     }
     ShaderHandle eqCubeCs = device_->CreateShader(eqCubeSpv.data(), eqCubeSpv.size(),
-                                                   ShaderStage::Compute, "cs_main");
+                                                   ShaderStage::Compute,
+                                                   TvsrgShaderEntry("cs_main", device_->GetPlatform()));
     if (eqCubeCs == handles::INVALID_SHADER) {
         std::cerr << "[Part37] CreateShader eqCubeCs failed" << std::endl;
         return false;
@@ -2040,7 +2142,7 @@ bool TestVulkanSponzaRenderGraph::InitializeIBL() {
     // ----- 7. Dispatch equirect→cube -----
     {
         CommandBufferHandle cmd = device_->CreateCommandBuffer(CommandQueueType::Compute);
-        VulkanCommandBuffer* vcmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(cmd);
+        RHICommandBuffer* vcmd = rhi::GetCommandBuffer(cmd);
         vcmd->Reset(); vcmd->Begin();
 
         // envCube_ UNDEFINED → GENERAL (StorageImage write).
@@ -2156,7 +2258,13 @@ void TestVulkanSponzaRenderGraph::Run() {
         if (!hasShutdown_) {
             Shutdown();
         }
+#if defined(__APPLE__)
+        // R3 (Windows 构建面): NSApplication terminate 仅 Apple。Windows 侧
+        // WinMain 循环无等价物——已 Shutdown 后每帧 Run() 在本安全网早退
+        // （hasShutdown_ 幂等），进程退出交给外部 kill/WM_QUIT；D3D12 验证
+        // 跑法（SPGI_CAM_LOCK+定帧捕获+kill）不受影响。
         NS::Application::sharedApplication()->terminate(nullptr);
+#endif
         return;
     }
 
@@ -3350,17 +3458,25 @@ void TestVulkanSponzaRenderGraph::Run() {
         }
         u32 capW = targetDesc.size.x;
         u32 capH = targetDesc.size.y;
+        // R3 (D3D12): Vulkan 维持历史 Staging 位与紧排行距（host-visible，
+        // 逐字节回归不变）；D3D12 必须 READBACK 堆（CopyTextureRegion 的 GPU
+        // 写目标，UPLOAD 堆非法——harness R19-1/TestRHISponzaShared #849 先例）
+        // 且目标行距按 256 对齐（D3D12CommandBuffer::CopyTextureToBuffer 的
+        // RowPitch=(rowBytes+255)&~255 公式），缓冲尺寸随之取 pitch*height。
+        const bool capD3D12 = device_->GetPlatform() == RHIPlatform::D3D12;
+        const u64 captureRowPitch = capD3D12
+            ? (((u64)capW * 4 + 255) & ~u64(255)) : (u64)capW * 4;
         BufferDesc sbDesc{};
-        sbDesc.size = (u64)capW * capH * 4;
-        sbDesc.usage = GPUMemoryUsage::Staging;
-        sbDesc.memoryUsage = GPUMemoryUsage::Staging;
+        sbDesc.size = captureRowPitch * capH;
+        sbDesc.usage = capD3D12 ? GPUMemoryUsage::Readback : GPUMemoryUsage::Staging;
+        sbDesc.memoryUsage = capD3D12 ? GPUMemoryUsage::Readback : GPUMemoryUsage::Staging;
         ResourceHandle stagingBuf = device_->CreateBuffer(sbDesc);
         if (stagingBuf == handles::INVALID_RESOURCE) captureFailure("staging buffer creation");
 
         auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
         if (capCmdHandle == handles::INVALID_COMMAND_BUFFER) captureFailure("command buffer creation");
         {
-            auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+            auto* capCmd = rhi::GetCommandBuffer(capCmdHandle);
             if (!capCmd) captureFailure("command buffer lookup");
             if (!capCmd->Begin()) captureFailure("command buffer begin");
 
@@ -3422,9 +3538,12 @@ void TestVulkanSponzaRenderGraph::Run() {
             if (sequenceStats) sequenceRgb.reserve((size_t)capW * capH * 3u);
             std::ofstream ppm(ppmPath, std::ios::binary);
             ppm << "P6\n" << capW << " " << capH << "\n255\n";
+            // R3: PPM 字节序与 Vulkan 现行产物逐字节可比——BGRA→RGB 采样序、
+            // 顶到底行序（两端 CopyTextureToBuffer 均无翻转）不变；仅行距按
+            // 平台取（Vulkan 紧排 capW*4 与原 (y*capW+x)*4 算术等价）。
             for (u32 y = 0; y < capH; ++y) {
                 for (u32 x = 0; x < capW; ++x) {
-                    u8* p = mapped + (y * capW + x) * 4;
+                    u8* p = mapped + y * captureRowPitch + x * 4;
                     // BGRA8 -> RGB
                     ppm.write(reinterpret_cast<const char*>(&p[2]), 1);
                     ppm.write(reinterpret_cast<const char*>(&p[1]), 1);
@@ -3596,7 +3715,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                 auto dcmdH = device_->CreateCommandBuffer(CommandQueueType::Graphics);
                 if (dcmdH != handles::INVALID_COMMAND_BUFFER &&
                     dstaging != handles::INVALID_RESOURCE) {
-                    auto* dcmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(dcmdH);
+                    auto* dcmd = rhi::GetCommandBuffer(dcmdH);
                     dcmd->Begin();
                     BufferTextureCopyRegion dregion{};
                     dregion.bufferOffset = 0;
@@ -3648,7 +3767,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
             if (capCmdHandle != handles::INVALID_COMMAND_BUFFER &&
                 staging != handles::INVALID_RESOURCE) {
-                auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+                auto* capCmd = rhi::GetCommandBuffer(capCmdHandle);
                 capCmd->Begin();
                 BufferTextureCopyRegion region{};
                 region.bufferOffset = 0;
@@ -4475,10 +4594,12 @@ void TestVulkanSponzaRenderGraph::Run() {
                     }
                 }
 
-                auto* vk = static_cast<VulkanDevice*>(device_);
+                // R3 (D3D12): 缓冲尺寸查询与命令缓冲均走基类多态通道
+                // （GetBufferByteSize 自 D3D12 M1 起接通；GetCommandBuffer 走
+                // 全局 CommandBufferManager 注册表）。
                 for (auto& source : sources) {
                     if (source.handle == handles::INVALID_RESOURCE ||
-                        !vk->GetBufferByteSize(source.handle, source.bytes) ||
+                        !device_->GetBufferByteSize(source.handle, source.bytes) ||
                         source.bytes == 0 || source.bytes > kMaxWriterBufferBytes) {
                         fail("resident_source_buffer_invalid_or_over_capacity");
                         continue;
@@ -4524,7 +4645,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                     if (readbackCommand == handles::INVALID_COMMAND_BUFFER) {
                         fail("graphics_readback_command_allocation_failed");
                     } else {
-                        auto* cmd = vk->GetCommandBuffer(readbackCommand);
+                        auto* cmd = rhi::GetCommandBuffer(readbackCommand);
                         const bool resetOk = cmd && cmd->Reset();
                         const bool beginOk = resetOk && cmd->Begin();
                         if (!beginOk) {
@@ -4805,7 +4926,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                 std::vector<u8> result;
                 u64 sourceBytes=0;
                 if (source == handles::INVALID_RESOURCE || !bytes ||
-                    !static_cast<VulkanDevice*>(device_)->GetBufferByteSize(source,sourceBytes) ||
+                    !device_->GetBufferByteSize(source,sourceBytes) ||
                     offset>sourceBytes || bytes>sourceBytes-offset) return result;
                 BufferDesc desc{};
                 desc.size = bytes;
@@ -4814,7 +4935,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                 const auto stage = device_->CreateBuffer(desc);
                 const auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
                 if (stage != handles::INVALID_RESOURCE && command != handles::INVALID_COMMAND_BUFFER) {
-                    auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                    auto* cmd = rhi::GetCommandBuffer(command);
                     if (!cmd || !cmd->Begin()) {
                         device_->DestroyCommandBuffer(command);device_->DestroyBuffer(stage);
                         return result;
@@ -4868,7 +4989,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                     // tail carries native Trace/Finalize origins/directions;
                     // slot records outside the actual update list are stale.
                     u64 bytes=0;
-                    if (!static_cast<VulkanDevice*>(device_)->GetBufferByteSize(pass->GetHitNormalBuffer(),bytes) ||
+                    if (!device_->GetBufferByteSize(pass->GetHitNormalBuffer(),bytes) ||
                         bytes<u64(vd.ProbeCountTotal)*vd.RaysPerProbe*9u*16u)
                         throw std::runtime_error("DDGI primary source tail extent");
                     items.push_back({"normal_allocation",pass->GetHitNormalBuffer(),bytes});
@@ -5230,7 +5351,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             const auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
             if (stage != handles::INVALID_RESOURCE && normalStage != handles::INVALID_RESOURCE &&
                 command != handles::INVALID_COMMAND_BUFFER) {
-                auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                auto* cmd = rhi::GetCommandBuffer(command);
                 cmd->Begin();
                 ResourceBarrier toCopy{};
                 toCopy.resource = depth;
@@ -5336,7 +5457,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             const auto momentCommand = device_->CreateCommandBuffer(CommandQueueType::Graphics);
             if (momentSource != handles::INVALID_RESOURCE && momentStage != handles::INVALID_RESOURCE &&
                 momentCommand != handles::INVALID_COMMAND_BUFFER) {
-                auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(momentCommand);
+                auto* cmd = rhi::GetCommandBuffer(momentCommand);
                 cmd->Begin();
                 ResourceBarrier toCopy{};
                 toCopy.resource = momentSource;
@@ -5376,7 +5497,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             const auto shCommand = device_->CreateCommandBuffer(CommandQueueType::Graphics);
             if (shSource != handles::INVALID_RESOURCE && shStage != handles::INVALID_RESOURCE &&
                 shCommand != handles::INVALID_COMMAND_BUFFER) {
-                auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(shCommand);
+                auto* cmd = rhi::GetCommandBuffer(shCommand);
                 cmd->Begin();
                 ResourceBarrier toCopy{};
                 toCopy.resource = shSource;
@@ -5447,7 +5568,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             ResourceHandle staging = device_->CreateBuffer(rbDesc);
             auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
             if (capCmdHandle != handles::INVALID_COMMAND_BUFFER && staging != handles::INVALID_RESOURCE) {
-                auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+                auto* capCmd = rhi::GetCommandBuffer(capCmdHandle);
                 capCmd->Begin();
                 BufferTextureCopyRegion region{};
                 region.bufferOffset = 0;
@@ -5542,7 +5663,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             if (staging != handles::INVALID_RESOURCE &&
                 capCmdHandle != handles::INVALID_COMMAND_BUFFER &&
                 depth != handles::INVALID_RESOURCE) {
-                auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+                auto* capCmd = rhi::GetCommandBuffer(capCmdHandle);
                 capCmd->Begin();
                 ResourceBarrier toCopy{};
                 toCopy.resource = depth;
@@ -5615,7 +5736,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             ResourceHandle staging = device_->CreateBuffer(sbDesc);
             auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
             if (capCmdHandle != handles::INVALID_COMMAND_BUFFER && staging != handles::INVALID_RESOURCE) {
-                auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+                auto* capCmd = rhi::GetCommandBuffer(capCmdHandle);
                 capCmd->Begin();
                 ResourceBarrier toCopy{};
                 toCopy.resource = atlasTex;
@@ -5684,7 +5805,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             ResourceHandle staging = device_->CreateBuffer(sbDesc);
             auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
             if (capCmdHandle != handles::INVALID_RESOURCE && staging != handles::INVALID_RESOURCE) {
-                auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+                auto* capCmd = rhi::GetCommandBuffer(capCmdHandle);
                 capCmd->Begin();
                 ResourceBarrier toCopy{};
                 toCopy.resource = atlasTex;
@@ -5781,7 +5902,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                     throw std::runtime_error(std::string("DDGI diagnostic readback: ") + operation);
                 }
             };
-            auto prepareReadback = [&](VulkanCommandBuffer* command) {
+            auto prepareReadback = [&](RHICommandBuffer* command) {
                 requireReadback(command && command->Begin(), "Begin");
                 // This is the diagnostic-only producer -> copy dependency.
                 // Vulkan InsertBarrier does not emit VkBufferMemoryBarrier
@@ -5793,7 +5914,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                     PipelineStage::Transfer, AccessFlag::HostWrite | AccessFlag::ShaderWrite | AccessFlag::TransferWrite | AccessFlag::ColorAttachmentWrite,
                     AccessFlag::TransferRead);
             };
-            auto completeReadback = [&](VulkanCommandBuffer* command) {
+            auto completeReadback = [&](RHICommandBuffer* command) {
                 command->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
                     AccessFlag::TransferWrite, AccessFlag::HostRead);
                 command->MemoryBarrier(PipelineStage::Transfer, PipelineStage::AllCommands,
@@ -5831,7 +5952,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             ResourceHandle staging = device_->CreateBuffer(rbDesc);
             auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
             if (capCmdHandle != handles::INVALID_COMMAND_BUFFER && staging != handles::INVALID_RESOURCE) {
-                auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+                auto* capCmd = rhi::GetCommandBuffer(capCmdHandle);
                 prepareReadback(capCmd);
                 capCmd->CopyBuffer(pass->GetRayDataBuffer(), staging, 0, 0, copyBytes);
                 completeReadback(capCmd);
@@ -5853,7 +5974,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                     auto ulCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
                     std::vector<u32> listed;
                     if (ulCmdHandle != handles::INVALID_COMMAND_BUFFER && ulStaging != handles::INVALID_RESOURCE) {
-                        auto* ulCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(ulCmdHandle);
+                        auto* ulCmd = rhi::GetCommandBuffer(ulCmdHandle);
                         prepareReadback(ulCmd);
                         ulCmd->CopyBuffer(pass->GetProbeUpdateListBuffer(fidx), ulStaging, 0, 0,
                                           size_t(updateCount) * sizeof(u32));
@@ -5889,11 +6010,11 @@ void TestVulkanSponzaRenderGraph::Run() {
                         auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
                         if (stage != handles::INVALID_RESOURCE && command != handles::INVALID_COMMAND_BUFFER) {
                             u64 sourceBytes = 0;
-                            requireReadback(static_cast<VulkanDevice*>(device_)->GetBufferByteSize(source, sourceBytes),
+                            requireReadback(device_->GetBufferByteSize(source, sourceBytes),
                                 "query vec4 source extent");
                             requireReadback(sourceOffset <= sourceBytes && desc.size <= sourceBytes - sourceOffset,
                                 "vec4 source range");
-                            auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                            auto* cmd = rhi::GetCommandBuffer(command);
                             prepareReadback(cmd);
                             cmd->CopyBuffer(source, stage, sourceOffset, 0, desc.size);
                             completeReadback(cmd);
@@ -5953,7 +6074,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                         const char* names[] = {"sc_light_info.raw", "sc_light_params.raw", "sc_shadow_params.raw"};
                         u64 sizes[3]{};
                         for (u32 i = 0; i < 3; ++i) {
-                            requireReadback(static_cast<VulkanDevice*>(device_)->GetBufferByteSize(sources[i], sizes[i]),
+                            requireReadback(device_->GetBufferByteSize(sources[i], sizes[i]),
                                 "query SC lighting source extent");
                             requireReadback(sizes[i] && sizes[i] <= 64u * 1024u && sizes[i] % sizeof(math::v4) == 0u,
                                 "bounded SC lighting source extent");
@@ -6101,7 +6222,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                         for (const auto item : {std::pair{pass->GetFirstSurfaceNodesBuffer(),"first_surface_nodes.raw"},
                                                 std::pair{pass->GetFirstSurfaceTrianglesBuffer(),"first_surface_triangles.raw"}}) {
                             u64 bytes=0;
-                            requireReadback(static_cast<VulkanDevice*>(device_)->GetBufferByteSize(item.first,bytes) && bytes%sizeof(math::v4)==0,"first surface input extent");
+                            requireReadback(device_->GetBufferByteSize(item.first,bytes) && bytes%sizeof(math::v4)==0,"first surface input extent");
                             const auto input=readVec4Buffer(item.first,bytes/sizeof(math::v4));
                             if (std::strcmp(item.second, "first_surface_triangles.raw") == 0)
                                 firstSurfaceTrianglesForProof = input;
@@ -6197,7 +6318,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                         // dependencies and Reset/Begin/End/Submit/Wait/Map.
                         const auto volumeSource = pass->GetVolumeUniformBuffer(fidx);
                         u64 volumeBytes = 0u;
-                        requireReadback(static_cast<VulkanDevice*>(device_)->GetBufferByteSize(
+                        requireReadback(device_->GetBufferByteSize(
                             volumeSource, volumeBytes), "query actual history volume CB extent");
                         requireReadback(volumeBytes >= sizeof(vd) && volumeBytes <= 4096u &&
                             volumeBytes % sizeof(math::v4) == 0u, "bounded actual volume CB extent");
@@ -6248,7 +6369,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                         const auto stage = device_->CreateBuffer(desc);
                         const auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
                         requireReadback(stage != handles::INVALID_RESOURCE && command != handles::INVALID_COMMAND_BUFFER, "allocate SDF readback");
-                        auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                        auto* cmd = rhi::GetCommandBuffer(command);
                         prepareReadback(cmd);
                         ResourceBarrier barrier{};
                         barrier.resource = source;
@@ -6446,7 +6567,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                                 meta << "{\"frame\":" << fidx << ",\"source_identity\":\"host wiring, not independent descriptor capture\",\"buffers\":[";
                                 for (u32 i = 0; i < 5u; ++i) {
                                     u64 bytes = 0;
-                                    requireReadback(static_cast<VulkanDevice*>(device_)->GetBufferByteSize(sources[i], bytes) &&
+                                    requireReadback(device_->GetBufferByteSize(sources[i], bytes) &&
                                         bytes > 0 && bytes <= 64u*1024u*1024u && bytes % 4u == 0, "lookup/material buffer extent");
                                     // Copy the exact byte extent, including a
                                     // non-vec4 tail; never round a u32 buffer up.
@@ -6458,7 +6579,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                                     const auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
                                     requireReadback(stage != handles::INVALID_RESOURCE && command != handles::INVALID_COMMAND_BUFFER,
                                         "allocate lookup/material readback");
-                                    auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                                    auto* cmd = rhi::GetCommandBuffer(command);
                                     prepareReadback(cmd);
                                     cmd->CopyBuffer(sources[i], stage, 0, 0, bytes);
                                     completeReadback(cmd);
@@ -6486,7 +6607,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                                 auto stage = device_->CreateBuffer(desc);
                                 auto command = device_->CreateCommandBuffer(CommandQueueType::Graphics);
                                 if (stage != handles::INVALID_RESOURCE && command != handles::INVALID_COMMAND_BUFFER) {
-                                    auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                                    auto* cmd = rhi::GetCommandBuffer(command);
                                     prepareReadback(cmd);
                                     ResourceBarrier barrier{};
                                     barrier.resource = source;
@@ -6559,7 +6680,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                                         auto sdfSource = offlineSDFMerger_->GetTexture();
                                         if (sdfStage != handles::INVALID_RESOURCE &&
                                             sdfCommand != handles::INVALID_COMMAND_BUFFER) {
-                                            auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(sdfCommand);
+                                            auto* cmd = rhi::GetCommandBuffer(sdfCommand);
                                             prepareReadback(cmd);
                                             ResourceBarrier toCopy{};
                                             toCopy.resource = sdfSource;
@@ -6626,7 +6747,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                                     auto source = sc->GetIndirectRayHitsBuffer();
                                     if (stage != handles::INVALID_RESOURCE && command != handles::INVALID_COMMAND_BUFFER &&
                                         source != handles::INVALID_RESOURCE) {
-                                        auto* cmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(command);
+                                        auto* cmd = rhi::GetCommandBuffer(command);
                                         prepareReadback(cmd);
                                         cmd->CopyBuffer(source, stage, rayOffset, 0, rayBytes);
                                         completeReadback(cmd);
@@ -6692,7 +6813,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                 ResourceHandle staging = device_->CreateBuffer(rbDesc);
                 auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
                 if (capCmdHandle != handles::INVALID_COMMAND_BUFFER && staging != handles::INVALID_RESOURCE) {
-                    auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+                    auto* capCmd = rhi::GetCommandBuffer(capCmdHandle);
                     capCmd->Begin();
                     ResourceBarrier toCopy{};
                     toCopy.resource = vol.irradiance;
@@ -6928,7 +7049,7 @@ bool TestVulkanSponzaRenderGraph::DumpSCAtlasBits(const char* path, u64& nonzero
     bool ok = false;
     auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
     if (capCmdHandle != handles::INVALID_COMMAND_BUFFER) {
-        auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+        auto* capCmd = rhi::GetCommandBuffer(capCmdHandle);
         capCmd->Begin();
         ResourceBarrier toCopy{};
         toCopy.resource = atlasTex;
@@ -7171,7 +7292,7 @@ void TestVulkanSponzaRenderGraph::RunGIVerify() {
         ResourceHandle staging = device_->CreateBuffer(rbDesc);
         auto capCmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
         if (staging != INVALID_RESOURCE && capCmdHandle != handles::INVALID_COMMAND_BUFFER) {
-            auto* capCmd = static_cast<VulkanDevice*>(device_)->GetCommandBuffer(capCmdHandle);
+            auto* capCmd = rhi::GetCommandBuffer(capCmdHandle);
             capCmd->Begin();
             BufferTextureCopyRegion region{};
             region.bufferOffset = 0;
@@ -7599,7 +7720,15 @@ void TestVulkanSponzaRenderGraph::Shutdown() {
         std::cerr << "[Part35.7] GC flush done" << std::endl;
     }
 
-    deviceOwnership_.reset();
+    // R3 (D3D12): 工厂创建的设备走工厂生命周期（DestroyRHIDevice =
+    // Shutdown + delete + g_deviceManager 注销，harness 同款）；Vulkan 维持
+    // 原 unique_ptr 默认删除（VulkanDevice 析构链）零改动。
+    if (device_ && device_->GetPlatform() == RHIPlatform::D3D12) {
+        deviceOwnership_.release();
+        DestroyRHIDevice(device_);
+    } else {
+        deviceOwnership_.reset();
+    }
     device_ = nullptr;
     std::cerr << "[Part35.7] device reset done" << std::endl;
 

@@ -216,7 +216,8 @@ bool DepthHistoryManager::CopyDepthTexture(rhi::ResourceHandle source,
     // the history texture must be GENERAL for the r32f imageStore. Unknown-as-old
     // accepts either source state — same pattern as HZBSystem's HZB copy. Metal
     // has no image layouts and needs none of this.
-    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+        device_->GetPlatform() == rhi::RHIPlatform::D3D12) {
         rhi::ResourceBarrier barriers[2]{};
         barriers[0].resource = source;
         barriers[0].beforeState = rhi::ResourceState::Unknown;
@@ -249,7 +250,8 @@ bool DepthHistoryManager::CopyDepthTexture(rhi::ResourceHandle source,
     // Downstream consumers (TAAPass's prevDepth binding) sample it as
     // SHADER_READ_ONLY — transition back so the recorded descriptor layout
     // matches the actual one next frame. Metal has no layouts.
-    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+        device_->GetPlatform() == rhi::RHIPlatform::D3D12) {
         rhi::ResourceBarrier srBarrier{};
         srBarrier.resource = destination;
         srBarrier.beforeState = rhi::ResourceState::UnorderedAccess;
@@ -268,7 +270,8 @@ bool DepthHistoryManager::CreateCopyPipeline() {
         { 0, rhi::DescriptorType::SampledImage, 1, rhi::ShaderStage::Compute, nullptr },
         { 1, rhi::DescriptorType::StorageImage, 1, rhi::ShaderStage::Compute, nullptr }
     };
-    const bool isVulkan = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+    const bool isVulkan = device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                           device_->GetPlatform() == rhi::RHIPlatform::D3D12;
     if (isVulkan) {
         // SPIR-V storage image is declared r32f (HZBCopy.wgsl) — annotate the
         // layout like HZBSystem's copy-stage layout.
@@ -291,8 +294,9 @@ bool DepthHistoryManager::CreateCopyPipeline() {
         // copy_depth_to_hzb_mip0: texel-fetch source depth, clamp NaN/Inf to 1.0,
         // store to R32F. Its 16x16 workgroup matches the dispatch below.
         // Same load pattern as HZBSystem: CWD-relative first, worktree root second.
+        // D3D12 与 Vulkan 同形：按设备平台解析（spv / .cso 镜像）。
         const std::string relPath =
-            utils::ShaderRegistry::GetNaniteShaderPath(rhi::RHIPlatform::Vulkan, "HZBCopy");
+            utils::ShaderRegistry::GetNaniteShaderPath(device_->GetPlatform(), "HZBCopy");
         const std::string candidates[2] = {
             relPath,
             utils::ShaderRegistry::ResolveShaderPath(relPath),

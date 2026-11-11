@@ -199,18 +199,43 @@ static void EnsurePipeline(RHIDeviceBase& device) {
 
     auto platform = device.GetPlatform();
     s_UpstreamIsHDR = platform != RHIPlatform::Metal;
-    std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "ToneMapping");
-    // Resolve independently of process CWD（同 T8.13 对 TAA 的修复——从构建
-    // 目录启动时裸 CWD 相对路径打不开文件，管线静默 INVALID，ToneMapping 整体旁路）。
-    shaderPath = utils::ShaderRegistry::ResolveShaderPath(shaderPath);
-    std::string shaderSource = LoadShaderSource(shaderPath);
-    if (shaderSource.empty()) {
-        std::cerr << "[ToneMapping] Shader source not found: " << shaderPath << std::endl;
-        return;
+    // D3D12 多入口单模块拆分：ToneMapping.spv 含 tonemap_vs/tonemap_fs/
+    // tonemap_fs_passthrough 三个入口，DXIL 每入口一个 cso（协调约定
+    // ToneMapping.<entry>.cso，入口恒 "main"）。Vulkan spv / Metal 源码保持
+    // 单文件多入口形态。
+    const bool d3d12 = (platform == RHIPlatform::D3D12);
+    std::string shaderSource;
+    if (!d3d12) {
+        std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "ToneMapping");
+        // Resolve independently of process CWD（同 T8.13 对 TAA 的修复——从构建
+        // 目录启动时裸 CWD 相对路径打不开文件，管线静默 INVALID，ToneMapping 整体旁路）。
+        shaderPath = utils::ShaderRegistry::ResolveShaderPath(shaderPath);
+        shaderSource = LoadShaderSource(shaderPath);
+        if (shaderSource.empty()) {
+            std::cerr << "[ToneMapping] Shader source not found: " << shaderPath << std::endl;
+            return;
+        }
     }
+    auto stageShader = [&](ShaderStage stage, const char* entry) -> ShaderHandle {
+        if (d3d12) {
+            const std::string rel = std::string("EngineTest/shaders/d3d12/ToneMapping.") + entry + ".cso";
+            const std::string path = utils::ShaderRegistry::ResolveShaderPath(rel);
+            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) {
+                std::cerr << "[ToneMapping] cso not found: " << path << std::endl;
+                return handles::INVALID_SHADER;
+            }
+            std::streamsize size = file.tellg();
+            file.seekg(0, std::ios::beg);
+            std::vector<char> bytes(static_cast<size_t>(size));
+            if (!file.read(bytes.data(), size)) return handles::INVALID_SHADER;
+            return device.CreateShader(bytes.data(), bytes.size(), stage, "main");
+        }
+        return device.CreateShader(shaderSource.data(), shaderSource.size(), stage, entry);
+    };
 
-    ShaderHandle vs = device.CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Vertex, "tonemap_vs");
-    ShaderHandle fs = device.CreateShader(shaderSource.data(), shaderSource.size(), ShaderStage::Pixel, "tonemap_fs");
+    ShaderHandle vs = stageShader(ShaderStage::Vertex, "tonemap_vs");
+    ShaderHandle fs = stageShader(ShaderStage::Pixel, "tonemap_fs");
     if (vs == handles::INVALID_SHADER || fs == handles::INVALID_SHADER) return;
 
     // DSL: binding 0 = scene texture, binding 1 = bloom texture, binding 2 = sampler,
@@ -376,8 +401,7 @@ static void EnsurePipeline(RHIDeviceBase& device) {
     // HDR，legacy 基准观感 = 直通显示（无 ACES）。ACES 完整管线保留为
     // PRIMAL_TONE_ACES=1 的可选展示路径（见 exec 的选择逻辑）。
     {
-        ShaderHandle fsPT = device.CreateShader(shaderSource.data(), shaderSource.size(),
-                                                ShaderStage::Pixel, "tonemap_fs_passthrough");
+        ShaderHandle fsPT = stageShader(ShaderStage::Pixel, "tonemap_fs_passthrough");
         if (fsPT != handles::INVALID_SHADER) {
             GraphicsPipelineDesc ptDesc = pipelineDesc;
             ptDesc.pixelShader = fsPT;
@@ -411,16 +435,24 @@ static void EnsurePipeline(RHIDeviceBase& device) {
     // P3.1: 资源始终创建+dispatch 始终跑（开销≈0）——binding 7 是 tonemap
     // shader 的静态引用，必须始终有效；是否采纳适应值由 UBO 的 autoAdapt
     // 门控（PRIMAL_TONE_ADAPT=1）。
-    if (device.GetPlatform() == RHIPlatform::Vulkan) {
-        // spv: Lumen/EyeAdaptation.comp.spv（build_spv.sh Volume 同表）
-        std::ifstream adaptFile("Engine/Graphics/Vulkan/shaders/Lumen/EyeAdaptation.comp.spv",
-                                std::ios::binary | std::ios::ate);
+    if (device.GetPlatform() == RHIPlatform::Vulkan ||
+        device.GetPlatform() == RHIPlatform::D3D12) {
+        // spv: Lumen/EyeAdaptation.comp.spv（build_spv.sh Volume 同表）。
+        // D3D12: Lumen/EyeAdaptation.comp.cso 镜像（入口恒 "main"，后端忽略
+        // entry 名——与 spv 的 eye_adaptation 入口等价消费）。
+        const bool d3d12Adapt = device.GetPlatform() == RHIPlatform::D3D12;
+        const std::string adaptRel = d3d12Adapt
+            ? "EngineTest/shaders/d3d12/Lumen/EyeAdaptation.comp.cso"
+            : "Engine/Graphics/Vulkan/shaders/Lumen/EyeAdaptation.comp.spv";
+        const std::string adaptPath = utils::ShaderRegistry::ResolveShaderPath(adaptRel);
+        std::ifstream adaptFile(adaptPath, std::ios::binary | std::ios::ate);
         if (adaptFile.is_open()) {
             std::streamsize asz = adaptFile.tellg();
             adaptFile.seekg(0);
             std::vector<char> acode(static_cast<size_t>(asz));
             adaptFile.read(acode.data(), asz);
-            ShaderHandle adaptCS = device.CreateShader(acode.data(), asz, ShaderStage::Compute, "eye_adaptation");
+            ShaderHandle adaptCS = device.CreateShader(acode.data(), asz, ShaderStage::Compute,
+                                                       d3d12Adapt ? "main" : "eye_adaptation");
             if (adaptCS != handles::INVALID_SHADER) {
                 DescriptorSetLayoutBinding abindings[4]{};
                 abindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr};
@@ -622,7 +654,8 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
             // P3.1: eye adaptation dispatch——写本帧适应态（下一帧作 prev）。
             // ping 语义：s_AdaptPing = 最近一帧写出的态；tonemap 绑定它。
             if (s_AdaptPipeline != handles::INVALID_PIPELINE &&
-                device.GetPlatform() == RHIPlatform::Vulkan &&
+                (device.GetPlatform() == RHIPlatform::Vulkan ||
+                 device.GetPlatform() == RHIPlatform::D3D12) &&
                 inputView != handles::INVALID_RESOURCE &&
                 s_AdaptSets[fi] != handles::INVALID_DESCRIPTOR_SET) {
                 const u32 prevIdx = s_AdaptPing;
