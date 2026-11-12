@@ -253,8 +253,10 @@ bool D3D12SwapChain::createSwapChain() {
     // 队列是排障高频错配——创建前留 type（D3D12_COMMAND_LIST_TYPE 枚举值，
     // 4=DIRECT）。
     if (ID3D12CommandQueue* queue = dev.GetGraphicsQueue()) {
-        D3D12_COMMAND_QUEUE_DESC queueDesc{};
-        queue->GetDesc(&queueDesc);
+        // R8：MSVC/Agility SDK 的 ID3D12CommandQueue::GetDesc() 按值返回
+        // D3D12_COMMAND_QUEUE_DESC（无参）；R7 误用 MinGW 出参风格
+        // GetDesc(&desc) 导致 C2660，改为按值接收。
+        D3D12_COMMAND_QUEUE_DESC queueDesc = queue->GetDesc();
         PRIMAL_LOG_STREAM(Info, "RHI")
             << "[D3D12SwapChain] queue: type=" << static_cast<unsigned>(queueDesc.Type)
             << " (4=DIRECT)"
