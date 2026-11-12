@@ -886,16 +886,17 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "SSRComposite");
         std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
         if (!file.is_open()) {
-             // Best-effort fallback: try the main checkout, then the
-             // worktree. Both are project-specific and may not match the
-             // user's local checkout. Proper fix: embed pre-compiled
-             // metallib bytes in the dylib.
-             shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath;
+             // Portable fallback: $PRIMAL_SHADER_ROOT -> cwd ancestors -> exe
+             // ancestors (ShaderRegistry). No machine-specific absolute paths.
+             shaderPath = utils::ShaderRegistry::ResolveShaderPath(shaderPath);
              file.open(shaderPath, std::ios::ate | std::ios::binary);
-             if (!file.is_open()) {
-                 shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration/" + shaderPath;
-                 file.open(shaderPath, std::ios::ate | std::ios::binary);
-             }
+        }
+        if (!file.is_open()) {
+             // Non-fatal by design: the composite step is skipped at render
+             // time when compositePipeline_ stays INVALID.
+             PRIMAL_LOG_STREAM(Warn, "Engine")
+                 << "ForwardRenderer: SSRComposite shader not found (" << shaderPath
+                 << ") — SSR composite pipeline disabled" << std::endl;
         }
         if (file.is_open()) {
             size_t size = file.tellg();

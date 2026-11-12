@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 
 namespace primal::diag {
 
@@ -56,6 +57,22 @@ inline void Emit(std::uint32_t level, const char* category, const char* message)
         fn(detail::g_emitUserdata.load(std::memory_order_relaxed), level, category, message);
     else if (message != nullptr)
         std::fprintf(stderr, "%s\n", message);
+}
+
+// R9-WIN fail-fast（Windows Vulkan tonemap 事故 2026-11-12）：「帧输出必需的
+// 管线 INVALID」不允许静默跳过后死等 fence/vkAcquireNextImageKHR 到 watchdog。
+// 语义与 tvsrg watchdog（r7，std::_Exit(7)）一致：诊断直写 stderr + flush +
+// std::_Exit —— 不跑静态析构、不触碰可能已挂起的 GPU 资源；从任意线程调用
+// 均直接终结进程。调用方负责在 message 里写全定位信息（pass/入口/路径/字节）。
+// 退出码 8：避开既有占用 0=成功 / 2=tvsrg 诊断 / 3=启动器无 PPM /
+// 4,5=primal CLI / 7=watchdog（Windows wrapper 语义，见 r9 报告）。
+inline constexpr int kFatalPipelineExitCode = 8;
+
+inline void FatalPipelineExit(const char* message)
+{
+    if (message != nullptr) std::fprintf(stderr, "%s\n", message);
+    std::fflush(stderr);
+    std::_Exit(kFatalPipelineExitCode);
 }
 
 } // namespace primal::diag

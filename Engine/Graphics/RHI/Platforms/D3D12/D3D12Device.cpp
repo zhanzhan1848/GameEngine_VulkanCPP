@@ -1110,6 +1110,15 @@ ShaderHandle D3D12Device::createShaderImpl(const void* data, size_t size, Shader
 
 void D3D12Device::destroyShaderImpl(ShaderHandle handle) {
     if (handle == handles::INVALID_SHADER) return;
+    // r9 幂等防护：与 buffer/texture 同款 double-free 守卫。Free() 落到
+    // 已释放槽位时 free_list::remove 会二次跑 ~T()（Release 下 assert 死、
+    // 0xCC 毒化槽上 vptr 已被空闲链戳覆盖）——虚调用跳野地址即 0xC0000005
+    // （r9 Shutdown AV 根因族）。合法单次销毁不受影响。
+    if (!GetShader(handle)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] double-free shader handle=" << handle << " — skipping" << std::endl;
+        return;
+    }
     shaderAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -1143,7 +1152,15 @@ PipelineHandle D3D12Device::createComputePipelineImpl(const ComputePipelineDesc&
 
 void D3D12Device::destroyPipelineImpl(PipelineHandle handle) {
     if (handle == handles::INVALID_PIPELINE) return;
-    if (d3d12::D3D12Pipeline* p = GetPipeline(handle)) p->Destroy();
+    // r9 幂等防护：同 buffer/texture 守卫（Free 落已释放槽位会二次 ~T()，
+    // 毒化 vptr 上虚调用 → AV；见 destroyShaderImpl 注）。
+    d3d12::D3D12Pipeline* p = GetPipeline(handle);
+    if (!p) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] double-free pipeline handle=" << handle << " — skipping" << std::endl;
+        return;
+    }
+    p->Destroy();
     pipelineAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -1388,6 +1405,13 @@ DescriptorSetLayoutHandle D3D12Device::createDescriptorSetLayoutImpl(
 
 void D3D12Device::destroyDescriptorSetLayoutImpl(DescriptorSetLayoutHandle handle) {
     if (handle == handles::INVALID_DESCRIPTOR_SET_LAYOUT) return;
+    // r9 幂等防护：同 buffer/texture 守卫（见 destroyShaderImpl 注）。
+    if (!GetDescriptorSetLayout(handle)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] double-free descriptor set layout handle=" << handle
+            << " — skipping" << std::endl;
+        return;
+    }
     descriptorSetLayoutAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -1405,6 +1429,13 @@ PipelineLayoutHandle D3D12Device::createPipelineLayoutImpl(const PipelineLayoutD
 
 void D3D12Device::destroyPipelineLayoutImpl(PipelineLayoutHandle handle) {
     if (handle == handles::INVALID_PIPELINE_LAYOUT) return;
+    // r9 幂等防护：同 buffer/texture 守卫（见 destroyShaderImpl 注）。
+    if (!GetPipelineLayout(handle)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] double-free pipeline layout handle=" << handle
+            << " — skipping" << std::endl;
+        return;
+    }
     pipelineLayoutAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -1423,6 +1454,14 @@ DescriptorSetHandle D3D12Device::createDescriptorSetImpl(const DescriptorSetDesc
 
 void D3D12Device::destroyDescriptorSetImpl(DescriptorSetHandle handle) {
     if (handle == handles::INVALID_DESCRIPTOR_SET) return;
+    // r9 幂等防护：同 buffer/texture 守卫（见 destroyShaderImpl 注）。
+    // BlurPass 早失败路径曾以未初始化的 setPool_ 垃圾句柄批量走到这里。
+    if (!GetDescriptorSet(handle)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] double-free descriptor set handle=" << handle
+            << " — skipping" << std::endl;
+        return;
+    }
     descriptorSetAllocator_.Free(static_cast<u32>(handle));
 }
 

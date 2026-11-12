@@ -112,6 +112,47 @@ bool VulkanShader::Initialize() {
                   << " not multiple of 4" << std::endl;
         return false;
     }
+    // R9-WIN 防御：完整 5-dword 头校验（magic/version/generator/bound/schema，
+    // 共 20 字节）。r7 的 createShaderImpl 预检只查 magic+4 对齐——Windows 实测
+    // （2026-11-12 GTX1060）12 字节截断载荷（text-mode ifstream 在 0x1A 处停读，
+    // ToneMapping.spv 第 13 字节恰为 0x1A）能穿过该预检、把拒绝推迟到
+    // vkCreateShaderModule（01379）。这里提前拒绝并给出「截断」级别的明确诊断；
+    // 失败语义与驱动拒绝一致（返回 false → 上游 INVALID_SHADER）。本函数是所有
+    // Vulkan 模块创建的漏斗（createShaderImpl / Reload / 直接构造都经此），
+    // 合法 .spv 头 5 项恒过，行为零变化。
+    if (spirv_.size() < 20) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[VulkanShader] SPIR-V truncated: entryPoint=" << entryPoint_
+            << " size=" << spirv_.size() << " < 20-byte header (5 dwords: "
+               "magic+version+generator+bound+schema) "
+            << detail::DescribeBadSpirvBytes(spirv_.data(), spirv_.size())
+            << " — truncated file or text-mode read stopped at 0x1A" << std::endl;
+        return false;
+    }
+    {
+        u32 header[5] = {0, 0, 0, 0, 0};
+        std::memcpy(header, spirv_.data(), sizeof(header));
+        const bool magicOk = header[0] == 0x07230203u;
+        // version 高字节必须为 0，主版本 1..2（SPIR-V 1.0-2.0，涵盖 naga/glslang
+        // 现役产出；0 = 缺省/损坏）。
+        const u32 version = header[1];
+        const bool versionOk = version != 0 && (version >> 24) == 0 &&
+                               (version >> 16) >= 1 && (version >> 16) <= 2;
+        // 现行规范只定义 schema 0。
+        const bool schemaOk = header[4] == 0;
+        if (!magicOk || !versionOk || !schemaOk) {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[VulkanShader] SPIR-V header invalid: entryPoint=" << entryPoint_
+                << " size=" << spirv_.size() << " magic=0x" << std::hex << header[0]
+                << " version=0x" << version << " schema=" << header[4] << std::dec
+                << (!magicOk ? " (bad magic)" : "")
+                << (!versionOk ? " (bad version)" : "")
+                << (!schemaOk ? " (bad schema)" : "") << " "
+                << detail::DescribeBadSpirvBytes(spirv_.data(), spirv_.size())
+                << std::endl;
+            return false;
+        }
+    }
 
     VkShaderModuleCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;

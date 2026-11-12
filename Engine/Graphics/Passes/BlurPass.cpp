@@ -6,7 +6,20 @@
 
 namespace primal::graphics {
 
-BlurPass::BlurPass() {}
+BlurPass::BlurPass() {
+    // r9: Initialize() may fail before the per-frame resources are created
+    // (e.g. shader file missing on a fresh D3D12 tree); Shutdown() must then
+    // see INVALID handles instead of uninitialized garbage. Garbage handles
+    // that reach device_->Destroy*() poison free_list slots (double remove
+    // re-runs ~T() over 0xCC-stamped memory, clobbered vptr -> AV).
+    for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+        paramBuffer_[i] = rhi::handles::INVALID_RESOURCE;
+        paramBufferMapped_[i] = nullptr;
+        for (u32 j = 0; j < MAX_SETS_PER_FRAME; ++j) {
+            setPool_[i][j] = rhi::handles::INVALID_DESCRIPTOR_SET;
+        }
+    }
+}
 
 BlurPass::~BlurPass() {
     Shutdown();
@@ -21,12 +34,11 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "BlurPass");
     std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
+        // Portable fallback: $PRIMAL_SHADER_ROOT -> cwd ancestors -> exe
+        // ancestors (ShaderRegistry). No hardcoded machine-specific paths —
+        // on failure we report and bail so Shutdown() stays clean.
         shaderPath = utils::ShaderRegistry::ResolveShaderPath(shaderPath);
         file.open(shaderPath, std::ios::ate | std::ios::binary);
-        if (!file.is_open()) {
-            shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration/" + shaderPath;
-            file.open(shaderPath, std::ios::ate | std::ios::binary);
-        }
     }
 
     if (!file.is_open()) {

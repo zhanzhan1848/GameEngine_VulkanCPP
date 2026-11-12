@@ -251,7 +251,7 @@ bool D3D12SwapChain::createSwapChain() {
 
     // R7 队列证据：flip model 的 Present 在创建队列上排序，传非 DIRECT
     // 队列是排障高频错配——创建前留 type（D3D12_COMMAND_LIST_TYPE 枚举值，
-    // 4=DIRECT）。
+    // DIRECT=0；4 是 VIDEO_DECODE，r9 勘误此前写错的枚举注记）。
     if (ID3D12CommandQueue* queue = dev.GetGraphicsQueue()) {
         // R8：MSVC/Agility SDK 的 ID3D12CommandQueue::GetDesc() 按值返回
         // D3D12_COMMAND_QUEUE_DESC（无参）；R7 误用 MinGW 出参风格
@@ -259,7 +259,7 @@ bool D3D12SwapChain::createSwapChain() {
         D3D12_COMMAND_QUEUE_DESC queueDesc = queue->GetDesc();
         PRIMAL_LOG_STREAM(Info, "RHI")
             << "[D3D12SwapChain] queue: type=" << static_cast<unsigned>(queueDesc.Type)
-            << " (4=DIRECT)"
+            << " (0=DIRECT)"
             << " priority=" << static_cast<unsigned>(queueDesc.Priority)
             << " flags=0x" << std::hex
             << static_cast<unsigned long>(queueDesc.Flags) << std::dec

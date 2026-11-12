@@ -1,6 +1,6 @@
 {
   "manifest_version": 1,
-  "generated_utc": "2026-11-12T05:18:37.779204+00:00",
+  "generated_utc": "2026-11-12T15:01:51.700266+00:00",
   "generator": "scripts/build_d3d12_shaders.py",
   "chain": "glslang->SPIR-V->spirv-cross(HLSL sm60)->dxc",
   "tools": {
@@ -1382,6 +1382,58 @@
       "hlsl_sha256": "fffce10f9e777528c090518978f40059e7fd6da5b1fd31301caccd27a159e9ae",
       "cso": "Nanite/GPUDrivenDrawTangentFrameAlbedoMips.frag.gpu_driven_fragment_shader.cso",
       "cso_sha256": "27697016b39ee1b8333231ac0a5c3dcbe7e697d3116cd95632bf015ca12e84e0"
+    },
+    {
+      "source": "BlurPass.spv",
+      "source_sha256": "0a9f8e8a32facc8b90d5bdccdfdf4b70fd83512f9e628b18bba4e7f2b391eccc",
+      "chain": "spirv-cross->dxc (spv passthrough)",
+      "profile": "cs_6_0",
+      "entry": "blurCS",
+      "kind": "spv",
+      "out": "BlurPass",
+      "hlsl": "BlurPass.hlsl",
+      "hlsl_sha256": "74d4bc5c8e73f41293f2d2f838b6a0570f998b83dc5abf021be06026b0e3c7d1",
+      "cso": "BlurPass.cso",
+      "cso_sha256": "512f053b61390b48749da7167c9b2bd8b634bfd0f7d933ff933f021af574782a"
+    },
+    {
+      "source": "SSRPass.spv",
+      "source_sha256": "2ab33b2aaadbba31972cc2747e04b91b2b4437a9aa2d49536948085e3565c6e1",
+      "chain": "spirv-cross->dxc (spv passthrough)",
+      "profile": "cs_6_0",
+      "entry": "ssrCS",
+      "kind": "spv",
+      "out": "SSRPass",
+      "hlsl": "SSRPass.hlsl",
+      "hlsl_sha256": "f6997c0438405d997a523c20c55d5ceaf9499c1ee1ea374a97e4f22f7d3d32a0",
+      "cso": "SSRPass.cso",
+      "cso_sha256": "c79a74a600914e6680d7934424192221d99c361ab0050eba2dd46c676ba7d031"
+    },
+    {
+      "source": "Particle/Particle.vert.spv",
+      "source_sha256": "18e62680111a9c61c60f967e665cf80056477bfeb4a91e2ed6f56ac5c2970582",
+      "chain": "spirv-cross->dxc (spv passthrough)",
+      "profile": "vs_6_0",
+      "entry": "main",
+      "kind": "spv",
+      "out": "Particle/Particle.vert",
+      "hlsl": "Particle/Particle.vert.hlsl",
+      "hlsl_sha256": "2808bccc1832d8776bc43052110b42dc98518a7fd04b636a47c40fb09894b8ee",
+      "cso": "Particle/Particle.vert.cso",
+      "cso_sha256": "42f15dbc6bb0b903813b4e8b8d95a6b3e90439e5bef5da6842bb6971021ce0bb"
+    },
+    {
+      "source": "Particle/Particle.frag.spv",
+      "source_sha256": "2b905e329fc5b2fd82c53e83ca0678e92f04879e57b01f04a16cab65a6683f89",
+      "chain": "spirv-cross->dxc (spv passthrough)",
+      "profile": "ps_6_0",
+      "entry": "main",
+      "kind": "spv",
+      "out": "Particle/Particle.frag",
+      "hlsl": "Particle/Particle.frag.hlsl",
+      "hlsl_sha256": "57bce628ea9db9a49fbd9ded95246c7cfdecdc33c7df61761080a6556087fdc8",
+      "cso": "Particle/Particle.frag.cso",
+      "cso_sha256": "9d13dca24bfcd38f4d34a54cb8b13e413b49b7fa682030131f05c5130593e16e"
     }
   ]
 }

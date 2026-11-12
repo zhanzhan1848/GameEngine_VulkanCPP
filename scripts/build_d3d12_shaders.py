@@ -348,6 +348,22 @@ SHADER_LIST = [
      "Nanite/GPUDrivenDrawAlbedoMips.frag.gpu_driven_fragment_shader", "frag", "spv"),
     ("Nanite/GPUDrivenDrawTangentFrameAlbedoMips.frag.spv", "gpu_driven_fragment_shader",
      "Nanite/GPUDrivenDrawTangentFrameAlbedoMips.frag.gpu_driven_fragment_shader", "frag", "spv"),
+    # -----------------------------------------------------------------------
+    # R9（r9 轮）：D3D12 首次走完整生产初始化（bypassProd=false，此前卡在
+    # BlurPass.cso 缺失）。ForwardRenderer::Initialize 依次要求：
+    # BlurPass.cso（BlurPass.cpp:49，CreateShader 第四参 "blurCS"——D3D12
+    # 后端忽略入口名，此处 spv 真实 OpEntryPoint 也是 blurCS）、SSRPass.cso
+    # （SSRPass.cpp:85 传 "kernelMain" 是 Metal 入口名；spv 真实入口 ssrCS，
+    # D3D12 恒 main 无冲突）、Particle 双件（ParticlePass.cpp r9 D3D12 分支，
+    # 镜像 MapShaderPathForD3D12 布局 Particle/Particle.vert.cso|.frag.cso，
+    # 入口 main）。SSRComposite 无 SPIR-V 图形源（顶层 SSRComposite.spv 是
+    # ssr_composite compute，属另一消费面；Metal 源是 VS+FS），ForwardRenderer
+    # 该装载点失败即优雅跳过（compositePipeline_ 保持 INVALID），不编。
+    # -----------------------------------------------------------------------
+    ("BlurPass.spv", "blurCS", "BlurPass", "comp", "spv"),
+    ("SSRPass.spv", "ssrCS", "SSRPass", "comp", "spv"),
+    ("Particle/Particle.vert.spv", "main", "Particle/Particle.vert", "vert", "spv"),
+    ("Particle/Particle.frag.spv", "main", "Particle/Particle.frag", "frag", "spv"),
 ]
 
 

@@ -5,6 +5,7 @@
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/Utils/ShaderRegistry.h"
 #include "Graphics/Dawn/ShaderLoader.h"
+#include "Engine/Common/CoreDiag.h"  // R9-WIN：FatalPipelineExit（必需管线 fail-fast）
 #include <iostream>
 
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
@@ -23,6 +24,10 @@ using namespace rhi;
 
 static PipelineHandle s_ToneMapPipeline = handles::INVALID_PIPELINE;
 static PipelineHandle s_ToneMapPassthroughPipeline = handles::INVALID_PIPELINE;
+// R9-WIN fail-fast 诊断上下文：EnsurePipeline 最近一次模块加载的路径/字节数，
+// 供 Execute 期 fatal 日志定位（只在管线 INVALID 的失败路径被读，正常路径零影响）。
+static std::string s_LastShaderPath;
+static size_t s_LastShaderBytes = 0;
 
 // P0.3 (2026-09-15): 曝光收编为 exposure_ev 单旋钮。
 //   exposure = 路径标定基值 × 2^EV；EV 由 PRIMAL_TONE_EV 覆盖（默认 0）。
@@ -186,7 +191,14 @@ static std::string LoadShaderSource(const std::string& path) {
     }
     return "";
 #else
-    std::ifstream file(path);
+    // R9-WIN 根因修复（2026-11-12）：必须 binary 打开。裸 ifstream 是文本模式，
+    // MSVC 下读至 0x1A（Ctrl-Z/EOF）字节即停——ToneMapping.spv 第 13 字节恰为
+    // 0x1A（bound dword 首字节），Windows 实测从完好的 6416B 文件只读出 12B
+    // （SPIR-V 头前三个 dword），magic/对齐检查全过、vkCreateShaderModule 拒绝
+    // （01379）→ 管线 INVALID → 第 2 帧后死等。同文件 EyeAdaptation 加载点
+    // （下方 EnsurePipeline）一直是 binary，此处对齐即可。POSIX 文本/二进制
+    // 同义，Mac/Linux 字节零变化。
+    std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) return "";
     std::stringstream buffer;
     buffer << file.rdbuf();
@@ -211,6 +223,8 @@ static void EnsurePipeline(RHIDeviceBase& device) {
         // 目录启动时裸 CWD 相对路径打不开文件，管线静默 INVALID，ToneMapping 整体旁路）。
         shaderPath = utils::ShaderRegistry::ResolveShaderPath(shaderPath);
         shaderSource = LoadShaderSource(shaderPath);
+        s_LastShaderPath = shaderPath;
+        s_LastShaderBytes = shaderSource.size();
         if (shaderSource.empty()) {
             std::cerr << "[ToneMapping] Shader source not found: " << shaderPath << std::endl;
             return;
@@ -236,7 +250,15 @@ static void EnsurePipeline(RHIDeviceBase& device) {
 
     ShaderHandle vs = stageShader(ShaderStage::Vertex, "tonemap_vs");
     ShaderHandle fs = stageShader(ShaderStage::Pixel, "tonemap_fs");
-    if (vs == handles::INVALID_SHADER || fs == handles::INVALID_SHADER) return;
+    if (vs == handles::INVALID_SHADER || fs == handles::INVALID_SHADER) {
+        // R9-WIN：阶段被拒（上层已打过 [VulkanShader] reject / cso 缺失日志）时
+        // 明示后果——本 pass 是帧输出必需管线，Execute 期将 fail-fast 退出，
+        // 不再是旧行为的每帧静默跳过 + watchdog 死等。
+        std::cerr << "[ToneMapping] pipeline stays INVALID (vs=" << (vs == handles::INVALID_SHADER ? "FAIL" : "ok")
+                  << " fs=" << (fs == handles::INVALID_SHADER ? "FAIL" : "ok")
+                  << "); required-pass fail-fast will trigger at Execute" << std::endl;
+        return;
+    }
 
     // DSL: binding 0 = scene texture, binding 1 = bloom texture, binding 2 = sampler,
     //      binding 3 = AO texture, binding 4 = SSGI texture, binding 5 = velocity texture
@@ -587,14 +609,28 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
         },
         [inputHDR, bloomTexture, aoTexture, ssgiTexture, velocityTexture, fi, frameIndex](const ToneMappingPassData& data, RenderGraphContext& context) {
             if (s_ToneMapPipeline == handles::INVALID_PIPELINE) {
-                // 管线 INVALID 时 ToneMapping_Output 成为从未被写入的瞬态，
-                // FinalBlit 采样池化垃圾（stderr 直写——diag 通道在纯测试进程静默）。
-                static bool s_abort = false;
-                if (!s_abort) {
-                    s_abort = true;
-                    std::cerr << "[TONE-EXEC] abort: pipeline INVALID" << std::endl;
-                }
-                return;
+                // R9-WIN fail-fast（2026-11-12 Windows Vulkan 实证）：管线 INVALID 时
+                // 本 pass 跳过绘制后，ToneMapping_Output 成为从未被写入的瞬态、
+                // FinalBlit 采样池化垃圾，随后进程在第 2 帧后死等（vkAcquireNextImageKHR
+                // UINT64_MAX / fence 不返回）直到 watchdog 300s exit 7——「必需管线
+                // 失效还继续跑帧」不可接受。改为立即失败退出：诊断写全 pass/入口/
+                // 路径/字节，进程以 kFatalPipelineExitCode(8) 终结（std::_Exit，不跑
+                // 静态析构、不触碰可能挂起的 GPU 资源，与 tvsrg watchdog 同语义）。
+                // 触发条件即「本 pass 已被加进帧图（TONE_OFF=1 时根本不加）且管线
+                // 无效」——Mac Vulkan/Metal 参照路径管线恒有效，本分支零执行。
+                std::ostringstream fatal;
+                fatal << "[TONE-EXEC] fatal: ToneMapping pipeline INVALID — this pass is "
+                         "required for the frame output; failing fast (exit "
+                      << primal::diag::kFatalPipelineExitCode << ")\n"
+                      << "  last module: "
+                      << (s_LastShaderPath.empty() ? "(d3d12 per-entry .cso — see [ToneMapping] cso logs)"
+                                                   : s_LastShaderPath)
+                      << " (" << s_LastShaderBytes << " bytes read from disk)\n"
+                      << "  entry points: tonemap_vs / tonemap_fs (rejection details in the "
+                         "[VulkanShader] reject lines above — common causes: truncated/absent "
+                         ".spv on disk, or a text-mode read that stopped at a 0x1A byte)\n"
+                      << "  frameIndex=" << frameIndex;
+                primal::diag::FatalPipelineExit(fatal.str().c_str());
             }
 
             auto& device = context.graph->GetDevice();

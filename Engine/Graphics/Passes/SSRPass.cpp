@@ -14,7 +14,17 @@
 
 namespace primal::graphics {
 
-SSRPass::SSRPass() {}
+SSRPass::SSRPass() {
+    // r9: Shutdown() runs even when Initialize() failed early (or never ran) —
+    // uninitialized handle arrays would push garbage into device_->Destroy*(),
+    // poisoning free_list slots (double remove re-runs ~T() over 0xCC-stamped
+    // memory, clobbered vptr -> AV). Initialize everything to INVALID/nullptr.
+    for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+        descriptorSets_[i] = rhi::handles::INVALID_DESCRIPTOR_SET;
+        paramBuffer_[i] = rhi::handles::INVALID_RESOURCE;
+        paramBufferMapped_[i] = nullptr;
+    }
+}
 
 SSRPass::~SSRPass() {
     Shutdown();
@@ -58,16 +68,11 @@ bool SSRPass::Initialize(rhi::RHIDeviceBase* device) {
     std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "SSRPass");
     std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
-        // Best-effort fallback: try the main checkout, then the
-        // worktree. Both are project-specific and may not match the
-        // user's local checkout. Proper fix: embed pre-compiled
-        // metallib bytes in the dylib.
-        shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/" + shaderPath;
+        // Portable fallback: $PRIMAL_SHADER_ROOT -> cwd ancestors -> exe
+        // ancestors (ShaderRegistry). No hardcoded machine-specific paths —
+        // on failure we report and bail so Shutdown() stays clean.
+        shaderPath = utils::ShaderRegistry::ResolveShaderPath(shaderPath);
         file.open(shaderPath, std::ios::ate | std::ios::binary);
-        if (!file.is_open()) {
-            shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration/" + shaderPath;
-            file.open(shaderPath, std::ios::ate | std::ios::binary);
-        }
     }
 
     if (!file.is_open()) {
@@ -133,6 +138,10 @@ void SSRPass::Shutdown() {
             // Descriptor sets are destroyed with pool usually, but if independent:
             // device_->DestroyDescriptorSet(descriptorSets_[i]);
         }
+        // Idempotence: ~SSRPass() calls Shutdown() again after the explicit
+        // RenderSystem::Shutdown() call — without clearing device_ the second
+        // pass would re-destroy every stale handle (double free).
+        device_ = nullptr;
     }
 }
 
