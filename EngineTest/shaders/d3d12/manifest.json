@@ -1,6 +1,6 @@
 {
   "manifest_version": 1,
-  "generated_utc": "2026-11-11T04:26:10.500370+00:00",
+  "generated_utc": "2026-11-12T05:18:37.779204+00:00",
   "generator": "scripts/build_d3d12_shaders.py",
   "chain": "glslang->SPIR-V->spirv-cross(HLSL sm60)->dxc",
   "tools": {
@@ -1206,6 +1206,182 @@
       "hlsl_sha256": "066ee3117e9b656b8a103fecf33a2a6be5b293c42deb25d95ba4d30cb77621d8",
       "cso": "Nanite/GlobalSDFMipmap.cso",
       "cso_sha256": "d3c84718013a3b224f6ec31707b59c40ecca63ac161266494dbcff59e0c3ca07"
+    },
+    {
+      "source": "Lumen/DDGIGIGather.comp",
+      "source_sha256": "3c2f83cf0d017ce5efd64fff64b91419d317f78fd25eea41d759607f02d45239",
+      "chain": "glslang->spirv->spirv-cross->dxc",
+      "profile": "cs_6_0",
+      "entry": "ddgi_gi_gather",
+      "out": "Lumen/DDGIGIGather_geometry_anyhit.comp",
+      "defines": [
+        "-DDDGI_GEOMETRY_CONNECTIONS",
+        "-DDDGI_GEOMETRY_REPLACE",
+        "-DDDGI_GEOMETRY_ANY_HIT"
+      ],
+      "hlsl": "Lumen/DDGIGIGather_geometry_anyhit.comp.hlsl",
+      "hlsl_sha256": "ee25e697bf56d191e8d98c55b4326fa92cfac70246042b1fe55e064f761e0629",
+      "cso": "Lumen/DDGIGIGather_geometry_anyhit.comp.cso",
+      "cso_sha256": "cf861fdfb690b4038c9455058d74f8768996e8558936311d7853d9442ac5786b"
+    },
+    {
+      "source": "Lumen/DDGIGIGather.comp",
+      "source_sha256": "3c2f83cf0d017ce5efd64fff64b91419d317f78fd25eea41d759607f02d45239",
+      "chain": "glslang->spirv->spirv-cross->dxc",
+      "profile": "cs_6_0",
+      "entry": "ddgi_gi_gather",
+      "out": "Lumen/DDGIGIGather_geometry_query_kernel.comp",
+      "defines": [
+        "-DDDGI_GEOMETRY_CONNECTIONS",
+        "-DDDGI_GEOMETRY_REPLACE",
+        "-DDDGI_GEOMETRY_ANY_HIT",
+        "-DDDGI_GEOMETRY_QUERY_KERNEL"
+      ],
+      "hlsl": "Lumen/DDGIGIGather_geometry_query_kernel.comp.hlsl",
+      "hlsl_sha256": "2deef38b4f2c4f1e5f16c1bc52733a3a7914bf383921967eb1dabeff0aaf1cec",
+      "cso": "Lumen/DDGIGIGather_geometry_query_kernel.comp.cso",
+      "cso_sha256": "38507bc7bfd4d81705acd745169b120366a6263dd117af75f7dffe0b81cebd38"
+    },
+    {
+      "source": "Lumen/FusionIndirect.frag",
+      "source_sha256": "23c767be84aa0bcdef8ccbb4f0591fd9af63b68e2be2a7bd56120da8bbfef390",
+      "chain": "glslang->spirv->spirv-cross->dxc",
+      "profile": "ps_6_0",
+      "entry": "fusion_indirect",
+      "out": "Lumen/FusionIndirect_noSsgi.frag",
+      "defines": [
+        "-DGI_NO_SSGI"
+      ],
+      "hlsl": "Lumen/FusionIndirect_noSsgi.frag.hlsl",
+      "hlsl_sha256": "51e946ebad511266a6adb521eb70930a3c24cd5a2242995f3bd57a8f73ff1581",
+      "cso": "Lumen/FusionIndirect_noSsgi.frag.cso",
+      "cso_sha256": "5f651f91229d018897bf1e8d63ff03e9ff9db6098d9a21856a1b8ae9fd6a7e94"
+    },
+    {
+      "source": "Lumen/FusionIndirect.frag",
+      "source_sha256": "23c767be84aa0bcdef8ccbb4f0591fd9af63b68e2be2a7bd56120da8bbfef390",
+      "chain": "glslang->spirv->spirv-cross->dxc",
+      "profile": "ps_6_0",
+      "entry": "fusion_indirect",
+      "out": "Lumen/FusionIndirect_noDdgi.frag",
+      "defines": [
+        "-DGI_NO_DDGI"
+      ],
+      "hlsl": "Lumen/FusionIndirect_noDdgi.frag.hlsl",
+      "hlsl_sha256": "86b86805293b858ed6d3210c0c60ae65727d1195397d860a735d17cf3096a2bf",
+      "cso": "Lumen/FusionIndirect_noDdgi.frag.cso",
+      "cso_sha256": "0a9d279824b3166dbab59c920839b2edc42b1cf0cc00f703d52bbfaeb0e0d814"
+    },
+    {
+      "source": "Lumen/FusionIndirect.frag",
+      "source_sha256": "23c767be84aa0bcdef8ccbb4f0591fd9af63b68e2be2a7bd56120da8bbfef390",
+      "chain": "glslang->spirv->spirv-cross->dxc",
+      "profile": "ps_6_0",
+      "entry": "fusion_indirect",
+      "out": "Lumen/FusionIndirect_noSpgi.frag",
+      "defines": [
+        "-DGI_NO_SPGI"
+      ],
+      "hlsl": "Lumen/FusionIndirect_noSpgi.frag.hlsl",
+      "hlsl_sha256": "abd11ab662750262491a115a6775ec1a8e361eba55ffd16aeed85f7480f07a56",
+      "cso": "Lumen/FusionIndirect_noSpgi.frag.cso",
+      "cso_sha256": "695d8fe639acadd0483444522e3cec49fee785eaddaeb1cdaa8c8b37ff526ab2"
+    },
+    {
+      "source": "Lumen/FusionIndirect.frag",
+      "source_sha256": "23c767be84aa0bcdef8ccbb4f0591fd9af63b68e2be2a7bd56120da8bbfef390",
+      "chain": "glslang->spirv->spirv-cross->dxc",
+      "profile": "ps_6_0",
+      "entry": "fusion_indirect",
+      "out": "Lumen/FusionIndirect_noAll.frag",
+      "defines": [
+        "-DGI_NO_ALL"
+      ],
+      "hlsl": "Lumen/FusionIndirect_noAll.frag.hlsl",
+      "hlsl_sha256": "29636f8bd74c90da52aca7fec0e023c6b9419b121884fef9fbe616a0d43a0bcd",
+      "cso": "Lumen/FusionIndirect_noAll.frag.cso",
+      "cso_sha256": "ed409aa9a1b0315f808a9b64942fa0810fd43f36143aa43837b10f61f1f7d235"
+    },
+    {
+      "source": "Lumen/DDGITraceSDF_measured_geometry.comp",
+      "source_sha256": "8c138067dbf0d0b8c972e3bd7b5cf08cbc68200a271c765ec63d8c71cdae0f5c",
+      "chain": "glslang->spirv->spirv-cross->dxc",
+      "profile": "cs_6_0",
+      "entry": "ddgi_trace_sdf",
+      "defines": [
+        "-DDDGI_MEASURED_GEOMETRY=1"
+      ],
+      "hlsl": "Lumen/DDGITraceSDF_measured_geometry.comp.hlsl",
+      "hlsl_sha256": "147eeec71719fa9a9245884aab3d7becffede646633082c42d6bb5c19dc5dd9b",
+      "cso": "Lumen/DDGITraceSDF_measured_geometry.comp.cso",
+      "cso_sha256": "9e3c6da276539dbd61cb3f257a4aed942e02eb25ad8bd2c7d388dfc597c68895"
+    },
+    {
+      "source": "Lumen/DDGITraceFinalize.comp",
+      "source_sha256": "42388b079994d77d7a3a24ae08e7865871b7d5fa842bdd68d2a3146cf5701e33",
+      "chain": "glslang->spirv->spirv-cross->dxc",
+      "profile": "cs_6_0",
+      "entry": "ddgi_trace_finalize",
+      "out": "Lumen/DDGITraceFinalize_measured_geometry.comp",
+      "defines": [
+        "-DDDGI_MEASURED_GEOMETRY=1"
+      ],
+      "hlsl": "Lumen/DDGITraceFinalize_measured_geometry.comp.hlsl",
+      "hlsl_sha256": "1d71d9c6b8daa48bb60b5c1b831598d3be721c6484da7c8ba5935b66b0d1e01b",
+      "cso": "Lumen/DDGITraceFinalize_measured_geometry.comp.cso",
+      "cso_sha256": "c11a2abab5ac8855eda8e4782cfbdc6f3c2ed12bf92ab932442e57a118be752d"
+    },
+    {
+      "source": "Nanite/GPUDrivenDrawTangentFrame.spv",
+      "source_sha256": "8e4c1f2bc6939d7cd62c6aad7c5a44cf65a06f60657946e5ab1de647454a826d",
+      "chain": "spirv-cross->dxc (spv passthrough)",
+      "profile": "vs_6_0",
+      "entry": "gpu_driven_vertex_shader",
+      "kind": "spv",
+      "out": "Nanite/GPUDrivenDrawTangentFrame.gpu_driven_vertex_shader",
+      "hlsl": "Nanite/GPUDrivenDrawTangentFrame.gpu_driven_vertex_shader.hlsl",
+      "hlsl_sha256": "ab7b6e4eab631640d4a771d44f3a77dbf85a67ad3ebe4546af261e8d3d11a420",
+      "cso": "Nanite/GPUDrivenDrawTangentFrame.gpu_driven_vertex_shader.cso",
+      "cso_sha256": "b1662b74724737a23ffb3caaca3d9ca9484f4b81bbfdfd823d2d5522edeb2923"
+    },
+    {
+      "source": "Nanite/GPUDrivenDrawTangentFrame.spv",
+      "source_sha256": "8e4c1f2bc6939d7cd62c6aad7c5a44cf65a06f60657946e5ab1de647454a826d",
+      "chain": "spirv-cross->dxc (spv passthrough)",
+      "profile": "ps_6_0",
+      "entry": "gpu_driven_fragment_shader",
+      "kind": "spv",
+      "out": "Nanite/GPUDrivenDrawTangentFrame.gpu_driven_fragment_shader",
+      "hlsl": "Nanite/GPUDrivenDrawTangentFrame.gpu_driven_fragment_shader.hlsl",
+      "hlsl_sha256": "302f35a2725540a7db13f7d3a218a224fc4eef6e63affcf678929e1a943acaaa",
+      "cso": "Nanite/GPUDrivenDrawTangentFrame.gpu_driven_fragment_shader.cso",
+      "cso_sha256": "e45f5e605675d1304f390a8c66123ae6b038cbdccf87318d8901424a64d48871"
+    },
+    {
+      "source": "Nanite/GPUDrivenDrawAlbedoMips.frag.spv",
+      "source_sha256": "915dbe756af0a95299c668eeba66e6ee22f2c97df193c7e491bba7173a3ac59e",
+      "chain": "spirv-cross->dxc (spv passthrough)",
+      "profile": "ps_6_0",
+      "entry": "gpu_driven_fragment_shader",
+      "kind": "spv",
+      "out": "Nanite/GPUDrivenDrawAlbedoMips.frag.gpu_driven_fragment_shader",
+      "hlsl": "Nanite/GPUDrivenDrawAlbedoMips.frag.gpu_driven_fragment_shader.hlsl",
+      "hlsl_sha256": "889697bf3dd49da8880ff306b25d71a675d67d3854d759fc62424a7ede16ef49",
+      "cso": "Nanite/GPUDrivenDrawAlbedoMips.frag.gpu_driven_fragment_shader.cso",
+      "cso_sha256": "429b33a67457904c6940d724a647f3230b324fa3f02270e44a5e1163e9681e77"
+    },
+    {
+      "source": "Nanite/GPUDrivenDrawTangentFrameAlbedoMips.frag.spv",
+      "source_sha256": "5c65100d6819f63c297710e62d28f39151547e9f8ca8cc7b96ecb2d60588d1af",
+      "chain": "spirv-cross->dxc (spv passthrough)",
+      "profile": "ps_6_0",
+      "entry": "gpu_driven_fragment_shader",
+      "kind": "spv",
+      "out": "Nanite/GPUDrivenDrawTangentFrameAlbedoMips.frag.gpu_driven_fragment_shader",
+      "hlsl": "Nanite/GPUDrivenDrawTangentFrameAlbedoMips.frag.gpu_driven_fragment_shader.hlsl",
+      "hlsl_sha256": "fffce10f9e777528c090518978f40059e7fd6da5b1fd31301caccd27a159e9ae",
+      "cso": "Nanite/GPUDrivenDrawTangentFrameAlbedoMips.frag.gpu_driven_fragment_shader.cso",
+      "cso_sha256": "27697016b39ee1b8333231ac0a5c3dcbe7e697d3116cd95632bf015ca12e84e0"
     }
   ]
 }

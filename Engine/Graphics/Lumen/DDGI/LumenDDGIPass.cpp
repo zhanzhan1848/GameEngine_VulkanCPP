@@ -181,10 +181,22 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
     ray_sample_mode_ = 0;
     if (const char* env = std::getenv("DDGI_RAY_SAMPLE")) {
         int m = atoi(env);
-        if (((m >= 0 && m <= 5) || m == 7) && ((m != 5 && m != 7) || device_->GetPlatform() == RHIPlatform::Vulkan) && (m != 7 || params_.rays_per_probe == 128)) {
+        // r5w2: mode 7 的采样分布是 UBO 运行时参数（DDGIVolumeData.
+        // RaySampleMode，shader 侧 ProbeSampleLib 按 uniform 分派），无
+        // 编译期 kernel 形状/buffer 尺寸耦合（mode 5 的 128 深度尾射线与
+        // gather 特判不适用于 7）——向 D3D12 开放（.cso 镜像由
+        // build_d3d12_shaders.py 提供）。mode 5 仍 Vulkan-only（GIGatherModule
+        // 的 mode5 特判与 distance 尾射线 buffer 加宽未镜像）。
+        const bool measuredModeAllowed =
+            device_->GetPlatform() == RHIPlatform::Vulkan ||
+            device_->GetPlatform() == RHIPlatform::D3D12;
+        if (((m >= 0 && m <= 5) || m == 7) &&
+            ((m != 5 && m != 7) || (m == 7 ? measuredModeAllowed
+                                          : device_->GetPlatform() == RHIPlatform::Vulkan)) &&
+            (m != 7 || params_.rays_per_probe == 128)) {
             ray_sample_mode_ = (u32)m;
         } else {
-            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] DDGI_RAY_SAMPLE='" << env << "' invalid (0..4; Vulkan-only 5 or 7 with 128 rays), keeping default" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] DDGI_RAY_SAMPLE='" << env << "' invalid (0..4; Vulkan-only 5; 7 on Vulkan/D3D12 with 128 rays), keeping default" << std::endl;
         }
     }
     PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] RaySampleMode = " << ray_sample_mode_
@@ -3820,8 +3832,16 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
                 // --- 1a: SDF trace (texture3D-only, 4 steps) ---
                 {
+                    // r5w2: split-pass 的 flat binding 编号与 17-binding 布局
+                    //（isVulkanPlatform 创建）同属 Vulkan 形——D3D12 必须走
+                    // flat，否则 descriptor 写 Metal 编号进 flat 布局错位。
+                    // 下方的 first_surface/zero_cross/first_native 实验门在
+                    // D3D12 上 fail-closed（SetFirstSurfaceGeometry/
+                    // SetFirstNativeNormalSources 拒绝非 Vulkan，且其变体
+                    // 无 .cso → pipeline INVALID），Vulkan 行为不变。
                     const bool splitIsVk =
-                        (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                        (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                         device_->GetPlatform() == rhi::RHIPlatform::D3D12);
                     const bool useFirstSurface = splitIsVk && first_surface_enabled_ &&
                         !first_zero_cross_enabled_ &&
                         first_surface_sdf_trace_pipeline_ != handles::INVALID_PIPELINE &&
@@ -4027,8 +4047,13 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     // causes GPU hang on Apple Silicon. Skip finalize if no valid source.
                     if (lightingAtlasTex != handles::INVALID_RESOURCE) {
 
+                    // r5w2: 同 splitIsVk——finalize 的 flat binding 编号与
+                    // VP CB 上传对 D3D12 开放（final 布局是 flat 形；
+                    // useAnalyticFirstRho 在 D3D12 上 fail-closed：候选
+                    // 仅 Vulkan+mode0 请求，变体无 .cso）。
                     const bool finIsVk =
-                        (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                        (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                         device_->GetPlatform() == rhi::RHIPlatform::D3D12);
                     const bool useAnalyticFirstRho = finIsVk &&
                         analytic_first_rho_enabled_ &&
                         analytic_first_rho_finalize_pipeline_ != handles::INVALID_PIPELINE &&

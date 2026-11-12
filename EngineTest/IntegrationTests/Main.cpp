@@ -93,7 +93,9 @@ set_current_directory_to_executable_path()
     return std::filesystem::current_path();
 }
 
-int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
+// Win64 公共入口体：调试期 CRT 泄漏标志 + Engine_Test 生命周期 + Win32 消息泵。
+// 供下方两个入口共用：WinMain（GUI 子系统）与 main（CONSOLE 子系统）。
+static int run_engine_test_win64()
 {
 #if _DEBUG
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
@@ -119,6 +121,20 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
     }
     test.shutdown();
     return 0;
+}
+
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int)
+{
+    return run_engine_test_win64();
+}
+
+// R13-C/T1（2026-11-04）起，setup_test_target 对 Windows 集成测试强制
+// WIN32_EXECUTABLE OFF + /SUBSYSTEM:CONSOLE（CRT 默认入口 mainCRTStartup），
+// 链接器因此寻找 main()——此前仅有 WinMain，导致 LNK2019 unresolved main。
+// 此控制台入口满足 CONSOLE 子系统；GUI 子系统目标仍可用上方 WinMain。
+int main()
+{
+    return run_engine_test_win64();
 }
 
 #elif __linux__

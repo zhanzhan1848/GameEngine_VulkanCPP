@@ -289,6 +289,65 @@ SHADER_LIST = [
      "comp", "spv"),
     ("Nanite/GlobalSDFMipmap.spv", "global_sdf_mipmap", "Nanite/GlobalSDFMipmap",
      "comp", "spv"),
+    # -----------------------------------------------------------------------
+    # R5（r5 轮）：TestVulkanSponzaRenderGraph 参照 GI 路径（geometry-
+    # visibility + query-kernel，run_vulkan_sponza_geometry_visibility.sh +
+    # PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL=1）的 D3D12 对齐 + GI_ISOLATE 对照组。
+    # GIGatherModule.cpp 的变体装载点自读 shader 字节：Vulkan 读
+    # Lumen/*.comp.spv，D3D12 需同相对布局 .cso 镜像（tvsrg
+    # MapShaderPathForD3D12 同规则：Engine/Graphics/Vulkan/shaders/ 基座 →
+    # EngineTest/shaders/d3d12/、.spv → .cso）。-D 栈与
+    # scripts/build_ddgi_connections_spv.py 的 anyhit / query-kernel 变体
+    # 逐字一致（源 = Lumen/DDGIGIGather.comp，源入口 ddgi_gi_gather，产物
+    # 基名对齐引擎加载的 .spv 名）。其余变体（pair/payload/equal_box/
+    # bounds_first/cacheless/compact/instance_cache/traversal_audit）参照
+    # 路径不用，本轮不编。
+    # -----------------------------------------------------------------------
+    ("Lumen/DDGIGIGather.comp", "ddgi_gi_gather", "Lumen/DDGIGIGather_geometry_anyhit.comp",
+     ["-DDDGI_GEOMETRY_CONNECTIONS", "-DDDGI_GEOMETRY_REPLACE", "-DDDGI_GEOMETRY_ANY_HIT"]),
+    ("Lumen/DDGIGIGather.comp", "ddgi_gi_gather", "Lumen/DDGIGIGather_geometry_query_kernel.comp",
+     ["-DDDGI_GEOMETRY_CONNECTIONS", "-DDDGI_GEOMETRY_REPLACE", "-DDDGI_GEOMETRY_ANY_HIT",
+      "-DDDGI_GEOMETRY_QUERY_KERNEL"]),
+    # GI_ISOLATE=ssgi|ddgi|spgi|all 对照组（tvsrg.cpp loadSpv 按 D3D12 映射
+    # 载 Lumen/FusionIndirect_no*.frag.cso；-D 宏与 build_spv.sh:1227 的
+    # noSsgi/noDdgi/noSpgi/noAll 配方逐字一致，源入口 fusion_indirect）。
+    ("Lumen/FusionIndirect.frag", "fusion_indirect", "Lumen/FusionIndirect_noSsgi.frag",
+     ["-DGI_NO_SSGI"]),
+    ("Lumen/FusionIndirect.frag", "fusion_indirect", "Lumen/FusionIndirect_noDdgi.frag",
+     ["-DGI_NO_DDGI"]),
+    ("Lumen/FusionIndirect.frag", "fusion_indirect", "Lumen/FusionIndirect_noSpgi.frag",
+     ["-DGI_NO_SPGI"]),
+    ("Lumen/FusionIndirect.frag", "fusion_indirect", "Lumen/FusionIndirect_noAll.frag",
+     ["-DGI_NO_ALL"]),
+    # -----------------------------------------------------------------------
+    # R5 第二波（r5w2）：消除参照 env 链（run_vulkan_sponza_geometry_
+    # visibility.sh：DDGI_RAY_SAMPLE=7 + DDGI_MEASURED_GEOMETRY=1 +
+    # PRIMAL_VK_TANGENT_FRAME=1 + PRIMAL_VK_ALBEDO_MIPS=1）的 D3D12 遗留门。
+    # -----------------------------------------------------------------------
+    # 门 2：measured geometry 变体（LumenDDGIPass.cpp CreatePipelines 的
+    # effectiveName 映射装载，LoadShaderBytecode D3D12 分支拼
+    # Lumen/<name>.comp.cso）。TraceSDF 源是仓库内的包装文件（include
+    # DDGITraceSDF.comp + #ifndef 守卫，build_spv.sh:875-889 同规则）；
+    # Finalize 是基础源 + -D。跳过 _pathdbg 审计变体（参照不用）。
+    ("Lumen/DDGITraceSDF_measured_geometry.comp", "ddgi_trace_sdf",
+     "Lumen/DDGITraceSDF_measured_geometry.comp", ["-DDDGI_MEASURED_GEOMETRY=1"]),
+    ("Lumen/DDGITraceFinalize.comp", "ddgi_trace_finalize",
+     "Lumen/DDGITraceFinalize_measured_geometry.comp", ["-DDDGI_MEASURED_GEOMETRY=1"]),
+    # 门 4：GPUDrivenDraw 光栅变体（naga WGSL→SPIR-V 双入口单模块，R3b
+    # spv 旁路链）。GPUDrivenDrawPipeline.cpp 按 env 组合装载：TANGENT_FRAME
+    # → TangentFrame VS/FS；+ALBEDO_MIPS → TangentFrameAlbedoMips.frag FS
+    #（文件名带 .frag 中缀，与仓库 .spv 同名）。装载侧 D3D12 以
+    # <name>.<entry>.cso 中缀回退解析（R3b 多入口产物约定）。基础
+    # GPUDrivenDraw 双入口与 GPUDrivenDrawQualifiedNormal.vert（Legacy
+    # 实验路径，参照不用）不在本批。
+    ("Nanite/GPUDrivenDrawTangentFrame.spv", "gpu_driven_vertex_shader",
+     "Nanite/GPUDrivenDrawTangentFrame.gpu_driven_vertex_shader", "vert", "spv"),
+    ("Nanite/GPUDrivenDrawTangentFrame.spv", "gpu_driven_fragment_shader",
+     "Nanite/GPUDrivenDrawTangentFrame.gpu_driven_fragment_shader", "frag", "spv"),
+    ("Nanite/GPUDrivenDrawAlbedoMips.frag.spv", "gpu_driven_fragment_shader",
+     "Nanite/GPUDrivenDrawAlbedoMips.frag.gpu_driven_fragment_shader", "frag", "spv"),
+    ("Nanite/GPUDrivenDrawTangentFrameAlbedoMips.frag.spv", "gpu_driven_fragment_shader",
+     "Nanite/GPUDrivenDrawTangentFrameAlbedoMips.frag.gpu_driven_fragment_shader", "frag", "spv"),
 ]
 
 

@@ -43,6 +43,28 @@ static const char* GatherAuditFormatName(DataFormat format) {
     }
 }
 
+// r5: 变体 shader 字节装载的平台化路径。Vulkan/Metal → 原样 .spv 路径；
+// D3D12 → 与 tvsrg 的 MapShaderPathForD3D12（TestVulkanSponzaRenderGraph.cpp
+// :230-245）同规则：Engine/Graphics/Vulkan/shaders/ 基座换成
+// EngineTest/shaders/d3d12/、尾缀 .spv → .cso（build_d3d12_shaders.py 镜像
+// 布局）。CreateShader 入口名不需按平台切换：D3D12 实现忽略入口名参数
+// （D3D12Shader 构造契约——DXIL 容器入口恒 main，D3D12Shader.cpp:14-18），
+// Vulkan 用真实 OpEntryPoint，故装载点保持 "ddgi_gi_gather" 实参不变。
+static std::string ResolveVariantShaderPath(const char* vulkanSpvPath,
+                                            RHIPlatform platform) {
+    std::string path = vulkanSpvPath;
+    if (platform == RHIPlatform::D3D12) {
+        static const char kVulkanBase[] = "Engine/Graphics/Vulkan/shaders/";
+        if (path.rfind(kVulkanBase, 0) == 0)
+            path = "EngineTest/shaders/d3d12/" + path.substr(sizeof(kVulkanBase) - 1);
+        if (path.size() > 4 && path.compare(path.size() - 4, 4, ".spv") == 0) {
+            path.resize(path.size() - 4);
+            path += ".cso";
+        }
+    }
+    return utils::ShaderRegistry::ResolveShaderPath(path);
+}
+
 struct GIGatherCB {
     math::m4x4 inv_view_projection;
     math::v4   probe_origin_spacing;
@@ -150,10 +172,11 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_CONNECTIONS] source audit and connection candidate are separate variants";
             return false;
         }
-        const auto path=utils::ShaderRegistry::ResolveShaderPath(replaceVisibility
+        const auto path=ResolveVariantShaderPath(replaceVisibility
             ? (referenceVisibility ? "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_replace.comp.spv"
                                    : "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_anyhit.comp.spv")
-            : "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry.comp.spv");
+            : "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry.comp.spv",
+            device->GetPlatform());
         std::ifstream file(path,std::ios::binary|std::ios::ate);
         if(!file || file.tellg()<=0) {
             PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_CONNECTIONS] required shader missing or empty: " << path << std::endl;
@@ -298,7 +321,7 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     pipeline_ = device->CreateComputePipeline(pd);
     if (pipeline_ == handles::INVALID_PIPELINE) return false;
     if(queryEnabled) {
-        const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_query_kernel.comp.spv");
+        const auto path=ResolveVariantShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_query_kernel.comp.spv", device->GetPlatform());
         std::ifstream file(path,std::ios::binary|std::ios::ate);
         if(file && file.tellg()>0) {
             const auto count=static_cast<size_t>(file.tellg()); file.seekg(0); std::vector<u8> bytes(count);

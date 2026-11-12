@@ -120,9 +120,18 @@ namespace {
             // D3D12 与 Vulkan 同形：GetNaniteShaderPath 按 platform 解析到
             // EngineTest/shaders/d3d12/Nanite/<name>.cso（入口恒 "main"，
             // 后端忽略 entry 名）。
+            // r5w2: 双入口单模块（GPUDrivenDraw 家族 VS/FS 同名不同 stage）
+            // 在 D3D12 按 stage 分件，产物名带入口中缀
+            // <name>.<entry>.cso（build_d3d12_shaders.py R3b 约定）——直拼
+            // 名之后追加中缀候选。Vulkan .spv 单模块双入口直拼可载，不受
+            // 影响；单入口中缀产物（GPUCullingPipeline stage*）装载名本身
+            // 带中缀，直拼即命中，回退候选不触发。
             const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
             std::vector<std::string> candidates;
             candidates.push_back(relPath);
+            if (platform == rhi::RHIPlatform::D3D12)
+                candidates.push_back(utils::ShaderRegistry::GetShaderBaseDir(platform) +
+                                     "Nanite/" + shaderName + "." + entryPoint + ".cso");
             candidates.push_back(utils::ShaderRegistry::ResolveShaderPath(relPath));
 
             std::ifstream file;
@@ -1317,8 +1326,13 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     }
     
     // The tangent-frame variant requires qualified tangent.z and handedness data.
+    // r5w2: 变体是 naga WGSL→SPIR-V 双入口单模块（与基础 GPUDrivenDraw 同
+    // 形），D3D12 走 build_d3d12_shaders.py R3b spv 旁路链的 .cso 镜像
+    //（LoadShaderBytecode 的 D3D12 中缀回退解析 <name>.<entry>.cso）——
+    // 门向 D3D12 开放，Vulkan 行为不变。
     const char* tangentFrameSetting = std::getenv("PRIMAL_VK_TANGENT_FRAME");
-    const bool tangentFrame = device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+    const bool tangentFrame = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                               device_->GetPlatform() == rhi::RHIPlatform::D3D12) &&
                               tangentFrameSetting && std::strcmp(tangentFrameSetting, "1") == 0;
     if (tangentFrame && LegacyNormalSignsEnabled(device_)) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[VK_TANGENT_FRAME] incompatible with PRIMAL_RASTER_LEGACY_NORMAL_SIGNS; refusing uncertified combination" << std::endl;
@@ -1327,7 +1341,8 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
 
     const char* albedoMips = std::getenv("PRIMAL_VK_ALBEDO_MIPS");
     const char* forceAlbedoLod0 = std::getenv("PRIMAL_VK_ALBEDO_SAMPLE_LOD0");
-    const bool useAlbedoMips = device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+    const bool useAlbedoMips = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                                device_->GetPlatform() == rhi::RHIPlatform::D3D12) &&
         albedoMips && std::strcmp(albedoMips, "1") == 0 &&
         !(forceAlbedoLod0 && std::strcmp(forceAlbedoLod0, "1") == 0);
     std::vector<u8> gpuDrawVertexShaderCode = LoadShaderBytecode(

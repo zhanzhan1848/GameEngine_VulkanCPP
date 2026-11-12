@@ -857,7 +857,12 @@ void CardGenerator::UploadToGPU() {
     if (!lookups_.empty()) {
         std::vector<SurfaceCacheCardLookup> directory;
         const char* requested=std::getenv("PRIMAL_SC_OWNER_CARD_DIRECTORY");
-        const bool built=device_->GetPlatform()==rhi::RHIPlatform::Vulkan && requested && std::strcmp(requested,"1")==0 &&
+        // r5w2: owner directory 是纯 CPU 侧 lookup 表重建（同一 buffer、同一
+        // SurfaceCacheCardLookup 48B 结构，下游 shader 只读数据内容、无布局
+        // 分叉）——向 D3D12 开放，Vulkan 行为不变。
+        const bool built=(device_->GetPlatform()==rhi::RHIPlatform::Vulkan ||
+                          device_->GetPlatform()==rhi::RHIPlatform::D3D12) &&
+            requested && std::strcmp(requested,"1")==0 &&
             lookups_.size()==meshes_.size() && BuildOwnerCardDirectory(cards_,lookups_,directory);
         const auto* source=built?directory.data():lookups_.data();
         auto* lookup_data = static_cast<SurfaceCacheCardLookup*>(device_->MapBuffer(card_lookup_buffer_));
