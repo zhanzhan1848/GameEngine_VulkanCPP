@@ -646,6 +646,48 @@ if(NOT EMSCRIPTEN)
     endif()
 endif()
 
+# ============================================================================
+# D3D12 shader mirrors（生成物，不入库；见 .gitignore 的 EngineTest/shaders/d3d12）
+#   GLSL --glslangValidator--> SPIR-V --spirv-cross--> .hlsl --dxc--> .cso
+# 运行时由 StandardRenderPipeline / TAA / ToneMapping / IBLPrecomputer /
+# GPUDrivenDraw 从 EngineTest/shaders/d3d12/** 装载（缺 .cso 时对应 pass
+# fail-closed，不会崩）。手写 HLSL 在 scripts/d3d12_handmade/，属于源文件。
+# 工具链缺失只提示不 FAIL：没有 shader 编译器的机器仍可构建（沿用 Vulkan
+# SPIR-V 的同一约定）。
+# ============================================================================
+if(ENABLE_D3D12)
+    find_program(PRIMAL_D3D12_MIRROR_PYTHON NAMES python3 python)
+    find_program(PRIMAL_D3D12_MIRROR_GLSLANG NAMES glslangValidator)
+    find_program(PRIMAL_D3D12_MIRROR_SPIRV_CROSS NAMES spirv-cross)
+    find_program(PRIMAL_D3D12_MIRROR_DXC NAMES dxc)
+    if(PRIMAL_D3D12_MIRROR_PYTHON AND PRIMAL_D3D12_MIRROR_GLSLANG AND
+       PRIMAL_D3D12_MIRROR_SPIRV_CROSS AND PRIMAL_D3D12_MIRROR_DXC)
+        # 脚本的默认工具路径是 /usr/local/bin，跨平台由环境变量覆盖。
+        add_custom_target(D3D12ShaderMirrors
+            COMMAND ${CMAKE_COMMAND} -E env
+                    "D3D12_GLSLANG=${PRIMAL_D3D12_MIRROR_GLSLANG}"
+                    "D3D12_SPIRV_CROSS=${PRIMAL_D3D12_MIRROR_SPIRV_CROSS}"
+                    "D3D12_DXC=${PRIMAL_D3D12_MIRROR_DXC}"
+                    ${PRIMAL_D3D12_MIRROR_PYTHON}
+                    ${CMAKE_SOURCE_DIR}/scripts/build_d3d12_shaders.py
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Generating D3D12 shader mirrors (.hlsl/.cso) from GLSL sources"
+            VERBATIM
+        )
+        add_custom_target(D3D12ShaderFreshnessGate
+            COMMAND ${PRIMAL_D3D12_MIRROR_PYTHON}
+                    ${CMAKE_SOURCE_DIR}/scripts/build_d3d12_shaders.py --check
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            COMMENT "Checking D3D12 shader mirror freshness"
+            VERBATIM
+        )
+        message(STATUS "D3D12 shader mirrors: `cmake --build <dir> --target D3D12ShaderMirrors` regenerates them")
+    else()
+        message(STATUS "D3D12 shader mirrors: toolchain incomplete (need python3, glslangValidator, spirv-cross, dxc); "
+                       "run scripts/build_d3d12_shaders.py manually — missing .cso make D3D12 passes fail closed")
+    endif()
+endif()
+
 # 打印配置信息
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Generator: ${CMAKE_GENERATOR}")

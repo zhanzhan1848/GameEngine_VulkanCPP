@@ -369,6 +369,33 @@ jobs:
           Write-Host '--- D3D12 gate markers ---'
           Select-String -Path build-d3d12/CMakeCache.txt -Pattern 'ENABLE_D3D12|PRIMAL_D3D12_AGILITY' | ForEach-Object { Write-Host $_.Line.Trim() }
 
+      - name: 生成 D3D12 shader 镜像（.hlsl/.cso 已不入库）
+        shell: powershell
+        run: |
+          # .hlsl/.cso/manifest.json 是 scripts/build_d3d12_shaders.py 的产物，
+          # 2026-11-12 起从 git 移除（构建产物不入库）。fresh checkout 必须先生成，
+          # 否则 D3D12 的 TAA/ToneMapping/IBL/GPUDrivenDraw 等 pass 会因 .cso
+          # 缺失而 fail-closed。工具链齐全就生成并过 freshness gate；
+          # 工具链缺失但工作区已有镜像时只告警；两者都没有则报错。
+          $mirror = 'EngineTest/shaders/d3d12/Forward/M1Forward.frag.cso'
+          $python  = Get-Command python  -ErrorAction SilentlyContinue
+          if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
+          $glslang = Get-Command glslangValidator -ErrorAction SilentlyContinue
+          $cross   = Get-Command spirv-cross      -ErrorAction SilentlyContinue
+          $dxc     = Get-Command dxc              -ErrorAction SilentlyContinue
+          if ($python -and $glslang -and $cross -and $dxc) {
+            Write-Host "tools: $($glslang.Source) | $($cross.Source) | $($dxc.Source)"
+            & $python.Source scripts/build_d3d12_shaders.py
+            if ($LASTEXITCODE -ne 0) { Write-Host '::error::build_d3d12_shaders.py failed'; exit $LASTEXITCODE }
+            & $python.Source scripts/build_d3d12_shaders.py --check
+            if ($LASTEXITCODE -ne 0) { Write-Host '::error::D3D12 shader freshness gate failed'; exit $LASTEXITCODE }
+          } elseif (Test-Path $mirror) {
+            Write-Host '::warning::D3D12 shader toolchain (glslangValidator/spirv-cross/dxc) not found; reusing mirrors already present in the workspace'
+          } else {
+            Write-Host '::error::D3D12 shader mirrors are build products (not tracked) and no toolchain is available to generate them. Install glslang, spirv-cross and dxc, or run scripts/build_d3d12_shaders.py manually.'
+            exit 1
+          }
+
       - name: 编译 (Release, 双后端)
         shell: powershell
         run: |
