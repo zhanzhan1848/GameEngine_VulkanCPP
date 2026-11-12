@@ -76,6 +76,7 @@
 #include <mutex>
 #include <chrono>
 #include <thread>
+#include <atomic>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -298,12 +299,117 @@ Engine_Test::Engine_Test()
     : primal::test::RenderTestRunner(std::make_unique<TestVulkanSponzaRenderGraph>())
 {}
 
+// ===== r7（2026-11-12）帧进度 watchdog =====
+// GTX1060 实机症状：帧 0-2 后进程卡死（GPU 0%、CPU 多核空转、显存
+// 5882/6144MiB）15 分钟无 PPM，只能人工 kill。最可疑永卡点在引擎层
+// （vkAcquireNextImageKHR 的 UINT64_MAX 超时 / fence 等待不返回——见本
+// 文件 Run() 内 BeginFrame/EndFrame 调用点注释），测试层兜底：纯观察者
+// 线程，每 1 秒检查"最近一次帧进度"（帧完成或 Initialize 里程碑喂狗），
+// 超时未前进且未进入退出流程 → stderr 诊断块 + std::_Exit(7)（与本文件
+// SPONZA_CAPTURE 失败的 _Exit(7) 同语义：不跑静态析构、不触碰可能已
+// 挂起的 GPU 资源）。默认 120s，PRIMAL_SPONZA_WATCHDOG_SECS 覆盖
+// （"0"=禁用；解析失败/负数回退默认）。watchdog 不改任何渲染行为/
+// GI env/相机/帧数——只读观察 + stderr 输出。
+namespace {
+
+struct SponzaWatchdogState {
+    std::atomic<uint64_t> lastFrame{0};     // 最近完成帧号（frameCount_ 递增后）
+    std::atomic<int64_t> lastProgressNs{0}; // 最近进度时刻（steady ns；0=未 arm）
+    std::atomic<int64_t> timeoutNs{0};      // 0=未 arm/禁用
+    std::atomic<bool> stopRequested{false};
+    std::thread worker;
+    ~SponzaWatchdogState() {  // 静态析构兜底：joinable 的 std::thread 析构会 terminate
+        stopRequested.store(true);
+        if (worker.joinable()) worker.join();
+    }
+};
+SponzaWatchdogState g_sponzaWatchdog;
+
+int64_t SponzaWatchdogSteadyNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Initialize 阶段大里程碑（管线/场景/IBL 完成）喂狗：慢初始化不算卡死，
+// 只有里程碑间隔也超阈值才报警。
+void SponzaWatchdogTouch() {
+    if (g_sponzaWatchdog.timeoutNs.load() > 0)
+        g_sponzaWatchdog.lastProgressNs.store(SponzaWatchdogSteadyNs());
+}
+
+void SponzaWatchdogFrameDone(uint64_t frame) {
+    if (g_sponzaWatchdog.timeoutNs.load() > 0) {
+        g_sponzaWatchdog.lastFrame.store(frame);
+        g_sponzaWatchdog.lastProgressNs.store(SponzaWatchdogSteadyNs());
+    }
+}
+
+// 进入退出流程即停（stop + join）：避免 teardown 期间误报 _Exit(7) 抢占
+// 干净退出码。幂等，可从 Shutdown()/截帧路径多次调用。
+void SponzaWatchdogStop() {
+    g_sponzaWatchdog.stopRequested.store(true);
+    if (g_sponzaWatchdog.worker.joinable()) g_sponzaWatchdog.worker.join();
+}
+
+void SponzaWatchdogLoop(int64_t timeoutNs) {
+    while (!g_sponzaWatchdog.stopRequested.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (g_sponzaWatchdog.stopRequested.load()) break;
+        const int64_t last = g_sponzaWatchdog.lastProgressNs.load();
+        if (last <= 0) continue;  // 未 arm（防御；Start 先存时间戳再起线程）
+        const int64_t stalledNs = SponzaWatchdogSteadyNs() - last;
+        if (stalledNs <= timeoutNs) continue;
+        if (g_sponzaWatchdog.stopRequested.load()) break;
+        // wall 用 unix 秒（避免 localtime_s/_r 平台分歧；诊断够用）。
+        std::cerr << "[WATCHDOG] no frame progress for " << (stalledNs / 1000000000LL)
+                  << "s (last frame=" << g_sponzaWatchdog.lastFrame.load()
+                  << ", wall=" << std::time(nullptr)
+                  << "); exiting with code 7" << std::endl;
+        std::cerr << "[WATCHDOG] common causes: frame fence never signals "
+                     "(vkWaitForFences / vkAcquireNextImageKHR blocked in driver), "
+                     "pipeline creation stall, GPU hang, VRAM exhaustion" << std::endl;
+        std::cerr << "[WATCHDOG] tune/disable via PRIMAL_SPONZA_WATCHDOG_SECS "
+                     "(0 disables)" << std::endl;
+        std::cerr.flush();
+        std::_Exit(7);
+    }
+}
+
+void SponzaWatchdogStart() {
+    if (g_sponzaWatchdog.worker.joinable()) return;  // 防御：Initialize 只应调一次
+    int64_t timeoutSecs = 120;  // 默认 120s
+    if (const char* e = std::getenv("PRIMAL_SPONZA_WATCHDOG_SECS")) {
+        char* end = nullptr;
+        const long v = std::strtol(e, &end, 10);
+        if (end != nullptr && end != e && *end == '\0' && v >= 0)
+            timeoutSecs = v;  // 合法整数值（含 0=禁用）
+        // 非数字/负数/空串：回退默认 120
+    }
+    if (timeoutSecs <= 0) {
+        std::cerr << "[WATCHDOG] disabled (PRIMAL_SPONZA_WATCHDOG_SECS=0)" << std::endl;
+        return;
+    }
+    const int64_t timeoutNs = timeoutSecs * 1000000000LL;
+    g_sponzaWatchdog.timeoutNs.store(timeoutNs);
+    g_sponzaWatchdog.lastProgressNs.store(SponzaWatchdogSteadyNs());
+    g_sponzaWatchdog.worker = std::thread(SponzaWatchdogLoop, timeoutNs);
+    std::cerr << "[WATCHDOG] armed: no frame progress for " << timeoutSecs
+              << "s -> _Exit(7) (PRIMAL_SPONZA_WATCHDOG_SECS)" << std::endl;
+}
+
+} // anonymous namespace
+
 TestVulkanSponzaRenderGraph::~TestVulkanSponzaRenderGraph() {
     Shutdown();
 }
 
 bool TestVulkanSponzaRenderGraph::Initialize() {
     std::cout << "[Part30.4] TestVulkanSponzaRenderGraph::Initialize" << std::endl;
+
+    // r7 watchdog：最先 arm，覆盖初始化期卡死（LoadSponzaScene 的 cook、
+    // InitializeIBL 的 GPU 预计算都可能等挂起的驱动）；下方每个大里程碑
+    // 喂狗，慢初始化不误报（PRIMAL_SPONZA_WATCHDOG_SECS 可调/禁用）。
+    SponzaWatchdogStart();
 
     if (!primal::jobsystem::JobSystem::Initialize(
             primal::jobsystem::JobSchedulerConfig::Default())) {
@@ -324,10 +430,12 @@ bool TestVulkanSponzaRenderGraph::Initialize() {
         std::cerr << "[Part30.4] InitializePipeline failed" << std::endl;
         return false;
     }
+    SponzaWatchdogTouch();  // r7: shader 编译/管线创建完成（慢里程碑喂狗）
     if (!LoadSponzaScene()) {
         std::cerr << "[Part30.4] LoadSponzaScene failed" << std::endl;
         return false;
     }
+    SponzaWatchdogTouch();  // r7: 场景资产 cook/加载完成
     // T4.6.5 part 37: Tier 5 IBL (sunset.hdr environment). Failure is non-fatal —
     // pipeline falls back to flat 0.03*albedo ambient (DeferredLightingModule
     // binds a 1x1 white fallback when IBL handles are INVALID). Test still
@@ -335,6 +443,7 @@ bool TestVulkanSponzaRenderGraph::Initialize() {
     if (!InitializeIBL()) {
         std::cerr << "[Part37] InitializeIBL failed — continuing without IBL" << std::endl;
     }
+    SponzaWatchdogTouch();  // r7: IBL 预计算（或其降级）完成
 
     // T4.6.5 part 38: ParticleSystem emitter. Config-driven (no per-frame
     // emit() call); ParticleSystem::update(dt) advances the simulation, then
@@ -1945,10 +2054,28 @@ bool TestVulkanSponzaRenderGraph::InitializeIBL() {
         "sunset.hdr",
     };
     std::string hdrPath;
+    // r7（Windows 资产可移植）：探测来源标注，与 LoadSponzaScene 的
+    // resolveModelPath source=env / source=cwd-probe 同一套词汇。
+    std::string hdrSource;
     if (!skyIbl) {
+        // r7：PRIMAL_TEST_ASSET_DIR 显式覆盖目录最先（Windows 树缺
+        // EngineTest/assets/... 时用 env 指到资产根）。与 resolveModelPath
+        // 一致：目录尾部缺 / 或 \\ 自动补上；未命中不直接失败，继续走
+        // 下方既有候选数组 + walk-up。顺序仅在头部加探测项——Mac
+        // cwd=仓库根时仍由候选[0] 命中，加载路径与文件均不变。
+        if (const char* envDir = std::getenv("PRIMAL_TEST_ASSET_DIR")) {
+            if (envDir[0] != '\0') {
+                std::string dir(envDir);
+                if (dir.back() != '/' && dir.back() != '\\') dir += '/';
+                const std::string candidate = dir + "textures/hdr/sunset.hdr";
+                std::ifstream f(candidate);
+                if (f.is_open()) { hdrPath = candidate; hdrSource = "env"; }
+            }
+        }
+        if (hdrPath.empty())
         for (const char* p : kHdrPaths) {
             std::ifstream f(p);
-            if (f.is_open()) { hdrPath = p; break; }
+            if (f.is_open()) { hdrPath = p; hdrSource = "cwd-probe"; break; }
         }
         // T4.6.5 part 37: walk up parent dirs as fallback (test runs from various cwd).
         if (hdrPath.empty()) {
@@ -1958,6 +2085,7 @@ bool TestVulkanSponzaRenderGraph::InitializeIBL() {
                 std::ifstream f(prefix + "EngineTest/assets/textures/hdr/sunset.hdr");
                 if (f.is_open()) {
                     hdrPath = prefix + "EngineTest/assets/textures/hdr/sunset.hdr";
+                    hdrSource = "cwd-probe";
                     break;
                 }
             }
@@ -1966,7 +2094,8 @@ bool TestVulkanSponzaRenderGraph::InitializeIBL() {
             std::cerr << "[Part37] sunset.hdr not found — IBL disabled" << std::endl;
             return false;
         }
-        std::cerr << "[Part37] Loading HDR: " << hdrPath << std::endl;
+        std::cerr << "[Part37] Loading HDR: " << hdrPath
+                  << " (source=" << hdrSource << ")" << std::endl;
     }
 
     // ----- 2. HDR source: sunset.hdr（默认）或解析天空（PRIMAL_SKY_IBL=1）-----
@@ -6948,6 +7077,18 @@ void TestVulkanSponzaRenderGraph::Run() {
     cpuAudit.ReachedFrameTail();
     frameCount_++;
 
+    // r7 watchdog：本帧已完整走完 EndFrame(present)/截帧读回，即"帧进度"
+    // 喂狗点（BeginFrame 失败早退的帧不算完成，不喂）。
+    SponzaWatchdogFrameDone(frameCount_);
+    // r7 心跳：每 10 帧一行 stderr，供外部监控/卡死取证对齐时间线；分母
+    // 为 SPONZA_MAX_FRAMES（未设时显示 400 基准值），只读不改截帧语义。
+    static const u32 heartbeatTarget = [] {
+        const char* e = std::getenv("SPONZA_MAX_FRAMES");
+        return (e && std::atoi(e) > 0) ? u32(std::atoi(e)) : 400u;
+    }();
+    if (frameCount_ % 10 == 0)
+        std::cerr << "[SponzaRun] frame " << frameCount_ << "/" << heartbeatTarget << std::endl;
+
     // GI ownership baseline (2026-09-18 plan Phase 0): env-gated auto-exit so
     // scripted long runs (500-frame baselines) don't need a window close.
     // _Exit matches the GI_VERIFY/GI_HALFLIFE gate convention — no static
@@ -6957,6 +7098,7 @@ void TestVulkanSponzaRenderGraph::Run() {
             std::cout << "[SponzaRun] SPONZA_MAX_FRAMES=" << mf
                       << " reached — clean exit at frame " << frameCount_ << std::endl;
             cpuAudit.Finish();
+            SponzaWatchdogStop();  // r7: 干净退出前停 watchdog（exit code 0 语义不变）
             std::_Exit(0);
         }
     }
@@ -7608,6 +7750,10 @@ void TestVulkanSponzaRenderGraph::Shutdown() {
     // remove_window is guaranteed to execute.
     if (hasShutdown_) return;
     hasShutdown_ = true;
+
+    // r7 watchdog：进入退出流程即停（stop + join），teardown 期间不再报警、
+    // 也不让诊断 _Exit(7) 抢占干净退出码。
+    SponzaWatchdogStop();
 
     std::cerr << "[Part30.4] Shutdown — rendered " << frameCount_ << " frames" << std::endl;
 

@@ -141,6 +141,12 @@ private:
     // feature — use a real texture as a safe fallback.
     rhi::ResourceHandle fallback_tex_{rhi::handles::INVALID_RESOURCE};
 
+    // R7-WIN(07752): IBL 不可用时 bindings 10/11(cube 槽)的占位 cube
+    // (1x1x6 RGBA8,TextureType::TextureCube)。旧实现把 2D fallback_tex_
+    // 绑进 cube 槽,shader OpTypeImage Dim=Cube 与 TYPE_2D 视图不符触发
+    // VUID-vkCmdDraw-viewType-07752。IBL 有效时(Mac 正常路径)不参与绑定。
+    rhi::ResourceHandle fallback_cube_tex_{rhi::handles::INVALID_RESOURCE};
+
     // T4.6.5 part 37: IBL resources (Tier 5 visual fidelity).
     // Set via SetIBLResources before first AddPasses call.
     rhi::ResourceHandle ibl_irradiance_{rhi::handles::INVALID_RESOURCE};

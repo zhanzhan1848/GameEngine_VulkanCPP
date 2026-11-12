@@ -888,6 +888,26 @@ ShaderHandle VulkanDevice::createShaderImpl(const void* data, size_t size, Shade
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createShaderImpl: invalid args" << std::endl;
         return handles::INVALID_SHADER;
     }
+    // R7-WIN 诊断(01379):SPIR-V 预检 —— magic 0x07230203(小端字节序
+    // 03 02 23 07)+ size 必须是 4 的倍数。本函数只接受 Vulkan 字节码;
+    // 喂进 DXBC .cso 或 GLSL/WGSL/Metal 源文本时 vkCreateShaderModule
+    // 必定失败(Initialize 返回 false 后本函数同样返回 INVALID_SHADER),
+    // 提前拒绝只是省一次无效驱动调用并留下可定位日志(entryPoint+判类+
+    // hex)。合法 .spv(Mac/Windows 正常路径)首四字节即 magic,预检恒过、
+    // 行为零变化。
+    {
+        const u8* spirvBytes = static_cast<const u8*>(data);
+        const bool spirvHeaderOk = size >= 4 && (size % 4) == 0 &&
+                                   spirvBytes[0] == 0x03 && spirvBytes[1] == 0x02 &&
+                                   spirvBytes[2] == 0x23 && spirvBytes[3] == 0x07;
+        if (!spirvHeaderOk) {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[VulkanShader] reject non-SPIR-V bytes: entryPoint="
+                << (entryPoint ? entryPoint : "(null)") << " size=" << size << " "
+                << detail::DescribeBadSpirvBytes(data, size) << std::endl;
+            return handles::INVALID_SHADER;
+        }
+    }
     u32 id = shaderAllocator_->Allocate(*this, data, size, stage, entryPoint);
     VulkanShader* sh = shaderAllocator_->Get(id);
     if (!sh || !sh->Initialize()) {
@@ -1044,6 +1064,26 @@ void VulkanDevice::destroyDescriptorSetImpl(DescriptorSetHandle handle) {
     descriptorSetAllocator_->Free(static_cast<u32>(handle));
 }
 
+namespace {
+
+// R7-WIN 诊断(00327):physical device 的 minUniformBufferOffsetAlignment
+// 按 physicalDevice_ 句柄缓存(GTX1060 为 256;MoltenVK 较小),避免每帧
+// updateDescriptorSets 路径反复 vkGetPhysicalDeviceProperties。返回 0
+// 表示未知(跳过告警)。仅诊断用,RHI 更新单线程。
+VkDeviceSize CachedMinUniformBufferOffsetAlignment(VkPhysicalDevice pd) {
+    static VkPhysicalDevice sCachedPd = VK_NULL_HANDLE;
+    static VkDeviceSize sCachedAlign = 0;
+    if (pd != VK_NULL_HANDLE && pd != sCachedPd) {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(pd, &props);
+        sCachedPd = pd;
+        sCachedAlign = props.limits.minUniformBufferOffsetAlignment;
+    }
+    return (pd == sCachedPd) ? sCachedAlign : 0;
+}
+
+} // namespace
+
 void VulkanDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorSet* writes) {
     if (!writes || writeCount == 0) return;
     // P0.1 诊断:PRIMAL_DS_TRACE=1 时打印 set 更新(原生句柄与 MoltenVK
@@ -1051,6 +1091,42 @@ void VulkanDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescripto
     const bool dsTrace = DSTraceEnabled();
     // 按 dstSet 分组(每个 DescriptorSet::Update 单独处理自己)
     for (u32 i = 0; i < writeCount; ++i) {
+        // R7-WIN 诊断(00327):UBO/UBO_DYNAMIC 子区间 offset 未按
+        // minUniformBufferOffsetAlignment 对齐的旧写入(如 0x40/0x50)在
+        // 桌面驱动上必触发验证错误。有界告警(前 10 次 + 汇总一次),
+        // 纯日志,不改变任何写入行为;Mac 正常路径 offset 均为 0,不触发。
+        if ((writes[i].descriptorType == DescriptorType::UniformBuffer ||
+             writes[i].descriptorType == DescriptorType::UniformBufferDynamic) &&
+            writes[i].bufferInfo) {
+            const VkDeviceSize uboAlign = CachedMinUniformBufferOffsetAlignment(physicalDevice_);
+            if (uboAlign > 1) {
+                // 与 VulkanDescriptorSet::Update 同口径:descriptorCount==0 按 1 处理
+                const u32 uboN = std::max<u32>(1u, writes[i].descriptorCount);
+                for (u32 j = 0; j < uboN; ++j) {
+                    const u64 uboOff = writes[i].bufferInfo[j].offset;
+                    if ((uboOff % uboAlign) != 0) {
+                        static u32 sUnalignedUboWarns = 0;
+                        if (sUnalignedUboWarns < 10) {
+                            ++sUnalignedUboWarns;
+                            PRIMAL_LOG_STREAM(Warn, "RHI")
+                                << "[VulkanDevice] unaligned UBO offset in UpdateDescriptorSets: set="
+                                << static_cast<unsigned>(writes[i].dstSet)
+                                << " binding=" << writes[i].dstBinding
+                                << " offset=0x" << std::hex << uboOff
+                                << " not multiple of minUniformBufferOffsetAlignment=0x"
+                                << uboAlign << std::dec
+                                << " (VUID-VkWriteDescriptorSet-descriptorType-00327 risk)"
+                                << std::endl;
+                            if (sUnalignedUboWarns == 10) {
+                                PRIMAL_LOG_STREAM(Warn, "RHI")
+                                    << "[VulkanDevice] unaligned UBO offset warnings suppressed after "
+                                    << sUnalignedUboWarns << " hits (per-process)" << std::endl;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         VulkanDescriptorSet* ds = GetDescriptorSet(writes[i].dstSet);
         if (ds) {
             if (dsTrace) {

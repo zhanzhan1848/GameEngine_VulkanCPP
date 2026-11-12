@@ -141,10 +141,20 @@ bool D3D12Device::initializeImpl() {
 #else
     constexpr const char* kAgilityRuntime = "0";
 #endif
+    // R7：debug/validation 打实际决策结果而非 desc_ 原始标志。决策链 =
+    // enableDebugLayer()：desc 双关全假不创建；PRIMAL_D3D12_VALIDATION=0
+    // 诊断 lane 完全跳过（debug 层/GBV/InfoQueue 一并缺席）。此前照抄
+    // desc_ 令 VALIDATION=0 时 stage 0 打 "debug=1, validation=1"，与下方
+    // lane 的 "NOT created" 口径矛盾。无独立 PRIMAL_D3D12_DEBUG 开关
+    //（debug/validation 共用 VALIDATION lane；GBV 另由 PRIMAL_D3D12_GBV
+    // opt-in），两标志同值 = "本次 init 是否创建 debug 层"。
+    const bool validationLaneOff = EnvFlagDisabled("PRIMAL_D3D12_VALIDATION");
+    const bool debugLayerEnabled =
+        (desc_.enableDebug || desc_.enableValidation) && !validationLaneOff;
     PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
         << "[D3D12:init] stage 0 enter (agility_runtime=" << kAgilityRuntime
-        << ", debug=" << (desc_.enableDebug ? 1 : 0)
-        << ", validation=" << (desc_.enableValidation ? 1 : 0)
+        << ", debug=" << (debugLayerEnabled ? 1 : 0)
+        << ", validation=" << (debugLayerEnabled ? 1 : 0)
         << ", warp_env=" << (EnvFlag("PRIMAL_D3D12_WARP") ? 1 : 0)
         << ", gbv_env=" << (EnvFlag("PRIMAL_D3D12_GBV") ? 1 : 0) << ")" << std::endl;
     PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 1 debug layer" << std::endl;
@@ -242,7 +252,8 @@ bool D3D12Device::enableDebugLayer() {
     if (EnvFlagDisabled("PRIMAL_D3D12_VALIDATION")) {
         PRIMAL_LOG_STREAM(Warn, "RHI")
             << "[D3D12Device] PRIMAL_D3D12_VALIDATION=0 diagnostic lane: "
-               "debug layer/GBV/InfoQueue NOT created (no validation)" << std::endl;
+               "debug layer/GBV/InfoQueue NOT created (no validation; stage 0 "
+               "debug/validation flags report 0 accordingly — R7)" << std::endl;
         return true;
     }
 

@@ -55,6 +55,16 @@ private:
     VkShaderModule  module_{VK_NULL_HANDLE};
 };
 
+namespace detail {
+
+// R7-WIN 诊断辅助:判类一段"非 SPIR-V"字节并生成前 32 字节 hex 预览
+// (DXBC .cso 镜像 / 文本源 / 全零),定位"哪条路径把非字节码喂给了
+// Vulkan 加载器"(01379 定位用)。仅用于 Error 日志,不参与加载决策,
+// 对合法 .spv 零影响。实现见 VulkanShader.cpp。
+std::string DescribeBadSpirvBytes(const void* data, size_t size);
+
+} // namespace detail
+
 } // namespace primal::graphics::rhi
 
 #endif // ENABLE_VULKAN

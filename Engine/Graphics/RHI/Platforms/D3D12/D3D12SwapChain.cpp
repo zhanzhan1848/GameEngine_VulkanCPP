@@ -14,6 +14,45 @@
 
 namespace primal::graphics::rhi::d3d12 {
 
+namespace {
+
+/// R7：desc 转储用常见 DXGI_FORMAT 名（未命中返回 "other"，数值由调用方
+/// 一并打印——两值并列即可读）。
+const char* DxgiFormatName(DXGI_FORMAT format) {
+    switch (format) {
+        case DXGI_FORMAT_UNKNOWN: return "UNKNOWN";
+        case DXGI_FORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
+        case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return "B8G8R8A8_UNORM_SRGB";
+        case DXGI_FORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return "R8G8B8A8_UNORM_SRGB";
+        case DXGI_FORMAT_R8G8B8A8_SNORM: return "R8G8B8A8_SNORM";
+        case DXGI_FORMAT_R10G10B10A2_UNORM: return "R10G10B10A2_UNORM";
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: return "R16G16B16A16_FLOAT";
+        case DXGI_FORMAT_R16G16B16A16_UNORM: return "R16G16B16A16_UNORM";
+        case DXGI_FORMAT_R16G16_FLOAT: return "R16G16_FLOAT";
+        case DXGI_FORMAT_R8_UNORM: return "R8_UNORM";
+        case DXGI_FORMAT_R32_FLOAT: return "R32_FLOAT";
+        case DXGI_FORMAT_D32_FLOAT: return "D32_FLOAT";
+        case DXGI_FORMAT_D24_UNORM_S8_UINT: return "D24_UNORM_S8_UINT";
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: return "D32_FLOAT_S8X24_UINT";
+        default: return "other";
+    }
+}
+
+/// R7：desc 转储用 SwapEffect 名（前两代是 BLT 模型，flip 才支持同 HWND
+/// 单交换链约束的语义对照）。
+const char* SwapEffectName(DXGI_SWAP_EFFECT effect) {
+    switch (effect) {
+        case DXGI_SWAP_EFFECT_DISCARD: return "BLT_DISCARD";
+        case DXGI_SWAP_EFFECT_SEQUENTIAL: return "BLT_SEQUENTIAL";
+        case DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL: return "FLIP_SEQUENTIAL";
+        case DXGI_SWAP_EFFECT_FLIP_DISCARD: return "FLIP_DISCARD";
+        default: return "other";
+    }
+}
+
+} // namespace
+
 D3D12SwapChain::D3D12SwapChain(D3D12Device& device, const SwapChainDesc& desc)
     : RHISwapChain(device, desc) {
     // PresentMode → SyncInterval（§3.5：Vulkan FIFO ↔ FLIP+1 等价）。
@@ -49,22 +88,66 @@ bool D3D12SwapChain::createSwapChain() {
     // IDXGIDevice → GetAdapter → GetParent 从设备自身派生 factory，
     // 构造上保证 factory/adapter/queue 同 driver 实例。派生失败回退
     // 枚举 factory（原路径）并 Warn。
+    //
+    // === R7（第七轮）结论：派生在 D3D12 上机制性不可能成功 ===
+    // ID3D12Device 不实现 IDXGIDevice（那是 D3D11-era 接口；设备侧
+    // QI 必然 E_NOINTERFACE）——R6 的派生永远走不到，实际建链的始终是
+    // 枚举 factory，且 LUID 已证一致（R7 排除 driver-instance 错配为
+    // E_ACCESSDENIED 根因）。保留本块仅为完整留痕三步 HRESULT（每步
+    // 失败 Warn 一行），回退枚举 factory 是预期正路，不是降级。
     Microsoft::WRL::ComPtr<IDXGIFactory2> factoryFromDevice;
     LUID derivedAdapterLuid{};
     bool haveDerivedAdapterLuid = false;
+    // 首个失败步（默认 QI：D3D12 下必失败的那一步）——回退日志引用。
+    static constexpr const char* kDeriveStepQi = "QI IDXGIDevice";
+    HRESULT deriveFailHr = E_NOINTERFACE;
+    const char* deriveFailStep = kDeriveStepQi;
     {
         Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
         Microsoft::WRL::ComPtr<IDXGIAdapter> deviceAdapter;
         ID3D12Device* nativeDevice = dev.GetNativeDevice();
-        if (nativeDevice
-            && SUCCEEDED(nativeDevice->QueryInterface(IID_PPV_ARGS(&dxgiDevice)))
-            && SUCCEEDED(dxgiDevice->GetAdapter(&deviceAdapter))
-            && SUCCEEDED(deviceAdapter->GetParent(IID_PPV_ARGS(&factoryFromDevice)))) {
-            // 派生成功；deviceAdapter 即设备所在 adapter（LUID 留作失败诊断）。
-            DXGI_ADAPTER_DESC derivedDesc{};
-            if (SUCCEEDED(deviceAdapter->GetDesc(&derivedDesc))) {
-                derivedAdapterLuid = derivedDesc.AdapterLuid;
-                haveDerivedAdapterLuid = true;
+        const HRESULT hrQi =
+            nativeDevice ? nativeDevice->QueryInterface(IID_PPV_ARGS(&dxgiDevice))
+                         : E_POINTER;
+        if (FAILED(hrQi)) {
+            deriveFailHr = hrQi;
+            deriveFailStep = kDeriveStepQi;
+            PRIMAL_LOG_STREAM(Warn, "RHI")
+                << "[D3D12SwapChain] derive factory 1/3 ID3D12Device->QI"
+                   "(IDXGIDevice) hr=0x" << std::hex
+                << static_cast<unsigned long>(hrQi) << std::dec
+                << " (ID3D12Device does not implement IDXGIDevice — D3D11-era"
+                   " path, E_NOINTERFACE expected on D3D12; R7)" << std::endl;
+        } else {
+            const HRESULT hrAdapter = dxgiDevice->GetAdapter(&deviceAdapter);
+            if (FAILED(hrAdapter)) {
+                deriveFailHr = hrAdapter;
+                deriveFailStep = "GetAdapter";
+                PRIMAL_LOG_STREAM(Warn, "RHI")
+                    << "[D3D12SwapChain] derive factory 2/3 IDXGIDevice->"
+                       "GetAdapter hr=0x" << std::hex
+                    << static_cast<unsigned long>(hrAdapter) << std::dec
+                    << " (R7)" << std::endl;
+            } else {
+                const HRESULT hrParent =
+                    deviceAdapter->GetParent(IID_PPV_ARGS(&factoryFromDevice));
+                if (FAILED(hrParent)) {
+                    deriveFailHr = hrParent;
+                    deriveFailStep = "GetParent(IDXGIFactory2)";
+                    PRIMAL_LOG_STREAM(Warn, "RHI")
+                        << "[D3D12SwapChain] derive factory 3/3 IDXGIAdapter->"
+                           "GetParent(IDXGIFactory2) hr=0x" << std::hex
+                        << static_cast<unsigned long>(hrParent) << std::dec
+                        << " (R7)" << std::endl;
+                } else {
+                    // 派生成功；deviceAdapter 即设备所在 adapter（LUID 留作
+                    // 失败诊断）。
+                    DXGI_ADAPTER_DESC derivedDesc{};
+                    if (SUCCEEDED(deviceAdapter->GetDesc(&derivedDesc))) {
+                        derivedAdapterLuid = derivedDesc.AdapterLuid;
+                        haveDerivedAdapterLuid = true;
+                    }
+                }
             }
         }
     }
@@ -78,10 +161,21 @@ bool D3D12SwapChain::createSwapChain() {
             << "(device-derived and enumeration both failed)" << std::endl;
         return false;
     } else {
-        PRIMAL_LOG_STREAM(Warn, "RHI")
-            << "[D3D12SwapChain] device-derived DXGI factory failed; "
-            << "falling back to enumeration factory (driver-instance mismatch "
-            << "possible — R6)" << std::endl;
+        // QI 步失败（D3D12 常态）打规格口径文案；后续步失败打实际步名。
+        if (deriveFailStep == kDeriveStepQi) {
+            PRIMAL_LOG_STREAM(Warn, "RHI")
+                << "[D3D12SwapChain] device-derived factory unavailable "
+                   "(QI IDXGIDevice hr=0x" << std::hex
+                << static_cast<unsigned long>(deriveFailHr) << std::dec
+                << ": ID3D12Device does not implement IDXGIDevice — D3D11-era"
+                   " path; using enumeration factory, R7)" << std::endl;
+        } else {
+            PRIMAL_LOG_STREAM(Warn, "RHI")
+                << "[D3D12SwapChain] device-derived factory unavailable "
+                   "(" << deriveFailStep << " hr=0x" << std::hex
+                << static_cast<unsigned long>(deriveFailHr) << std::dec
+                << "; using enumeration factory, R7)" << std::endl;
+        }
     }
 
     // 窗口句柄契约（M0 §8.1）：platform::window_handle（Win32=HWND）直传。
@@ -89,6 +183,23 @@ bool D3D12SwapChain::createSwapChain() {
     if (!hwnd) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12SwapChain] SwapChainDesc.window is null" << std::endl;
         return false;
+    }
+
+    // R7 窗口证据（创建前一次）：style/exstyle（WS_CHILD=0x40000000 /
+    // WS_POPUP=0x80000000 判读）、顶层判定（GetAncestor(GA_PARENT)==NULL 即
+    // 无父窗口）与可见性——E_ACCESSDENIED 复跑时排除"子窗口/隐形窗"变量。
+    {
+        const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        const HWND parent = GetAncestor(hwnd, GA_PARENT);
+        const BOOL visible = IsWindowVisible(hwnd);
+        PRIMAL_LOG_STREAM(Info, "RHI")
+            << "[D3D12SwapChain] window: hwnd=0x" << std::hex
+            << static_cast<void*>(hwnd) << std::dec
+            << " style=0x" << std::hex << static_cast<unsigned long long>(style)
+            << " exstyle=0x" << static_cast<unsigned long long>(exStyle) << std::dec
+            << " parent=" << (parent ? "yes" : "NULL(top-level)")
+            << " visible=" << (visible ? 1 : 0) << std::endl;
     }
 
     DXGI_SWAP_CHAIN_DESC1 scDesc{};
@@ -119,6 +230,39 @@ bool D3D12SwapChain::createSwapChain() {
         << " hwnd=0x" << std::hex << static_cast<void*>(hwnd) << std::dec
         << " size=" << scDesc.Width << "x" << scDesc.Height
         << " BufferCount=" << scDesc.BufferCount << std::endl;
+
+    // R7 desc 全量转储（一行）：失败复跑时逐字段比对调用方预期。
+    PRIMAL_LOG_STREAM(Info, "RHI")
+        << "[D3D12SwapChain] desc: Format=" << static_cast<unsigned>(scDesc.Format)
+        << "(" << DxgiFormatName(scDesc.Format) << ")"
+        << " SwapEffect=" << static_cast<unsigned>(scDesc.SwapEffect)
+        << "(" << SwapEffectName(scDesc.SwapEffect) << ")"
+        << " BufferCount=" << scDesc.BufferCount
+        << " BufferUsage=0x" << std::hex
+        << static_cast<unsigned long>(scDesc.BufferUsage) << std::dec
+        << " Scaling=" << static_cast<unsigned>(scDesc.Scaling)
+        << " AlphaMode=" << static_cast<unsigned>(scDesc.AlphaMode)
+        << " Stereo=" << scDesc.Stereo
+        << " SampleDesc=" << scDesc.SampleDesc.Count << "x"
+        << scDesc.SampleDesc.Quality
+        << " Size=" << scDesc.Width << "x" << scDesc.Height
+        << " Flags=0x" << std::hex
+        << static_cast<unsigned long>(scDesc.Flags) << std::dec << std::endl;
+
+    // R7 队列证据：flip model 的 Present 在创建队列上排序，传非 DIRECT
+    // 队列是排障高频错配——创建前留 type（D3D12_COMMAND_LIST_TYPE 枚举值，
+    // 4=DIRECT）。
+    if (ID3D12CommandQueue* queue = dev.GetGraphicsQueue()) {
+        D3D12_COMMAND_QUEUE_DESC queueDesc{};
+        queue->GetDesc(&queueDesc);
+        PRIMAL_LOG_STREAM(Info, "RHI")
+            << "[D3D12SwapChain] queue: type=" << static_cast<unsigned>(queueDesc.Type)
+            << " (4=DIRECT)"
+            << " priority=" << static_cast<unsigned>(queueDesc.Priority)
+            << " flags=0x" << std::hex
+            << static_cast<unsigned long>(queueDesc.Flags) << std::dec
+            << std::endl;
+    }
 
     Microsoft::WRL::ComPtr<IDXGISwapChain1> sc1;
     // 呈现与 DIRECT 队列绑定：flip model 的 Present 在创建队列上排序，
@@ -188,6 +332,15 @@ bool D3D12SwapChain::createSwapChain() {
                 << " (device-derived factory; must equal device LUID above)"
                 << std::endl;
         }
+        // R7：E_ACCESSDENIED 的三个已知成因按命中概率排列（首位=本轮根因，
+        // 双 Initialize 已由幂等守卫防护；仍出现时查后两项）。
+        if (hr == E_ACCESSDENIED) {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12SwapChain] hint: E_ACCESSDENIED = flip-model "
+                   "swapchain already exists on this hwnd (double init — "
+                   "now guarded), another process owns the window, or "
+                   "exclusive fullscreen is held" << std::endl;
+        }
         return false;
     }
     if (FAILED(sc1.As(&swapChain_))) {
@@ -247,6 +400,21 @@ void D3D12SwapChain::destroyBackBuffers() {
 }
 
 bool D3D12SwapChain::Initialize() {
+    // R7 幂等守卫（对齐 VulkanSwapChain::Initialize 的既有模式）：
+    // D3D12Device::createSwapChainImpl 返回前已内调本函数完成真建；
+    // RenderSystem::Initialize 随后对同一对象再调一次。DXGI 规定每个
+    // HWND 至多一个 flip-model 交换链——第二次 CreateSwapChainForHwnd
+    // 必 E_ACCESSDENIED（R7 Windows GTX1060 实测根因：首个交换链仍存活
+    // 于同一 HWND）。swapChain_ 非空 = 已完成真建（createBackBuffers 的
+    // backbuffer wrap 随其之后），直接返回成功。
+    if (swapChain_) {
+        PRIMAL_LOG_STREAM(Info, "RHI")
+            << "[D3D12SwapChain] Initialize: swap chain already created — "
+               "skipping (RenderSystem double-init guard, R7: second "
+               "flip-model swapchain on same HWND would fail E_ACCESSDENIED)"
+            << std::endl;
+        return true;
+    }
     if (!createSwapChain()) return false;
     if (!createBackBuffers()) {
         swapChain_.Reset();
