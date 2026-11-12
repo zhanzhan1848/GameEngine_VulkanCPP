@@ -779,14 +779,61 @@ bool TestVulkanSponzaRenderGraph::InitializePipeline() {
 }
 
 bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
-    const std::string baseDir =
-        "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
     // Try pipeline model (high-precision per-mesh SDF) first, fall back to old.
     // PRIMAL_TEST_MODEL：A/B 替代资产名（如 SponzaSDF.model——--sdf 烘焙的
     // per-mesh SDF 版本，供 PRIMAL_DDGI_DETAIL_SDF 消费）。
     std::string modelName = "Sponza.model";
     if (const char* e = std::getenv("PRIMAL_TEST_MODEL")) modelName = e;
-    std::string modelPath = baseDir + modelName;
+    // R6（D3D12 视觉对齐）：模型路径从写死的 Mac 绝对路径改为可移植查找，
+    // 复用 InitializePipeline 里 loadSpv 的同一探测序（cwd 相对先试，再按
+    // "../" 逐级上溯 6 层），避免出现第二套不一致的查找规则。优先级：
+    //   1. PRIMAL_TEST_ASSET_DIR 显式覆盖目录：拼 <dir>/<model> 试开（目录
+    //      末尾缺 / 或 \\ 时自动补上）；未命中不直接失败，继续走探测。
+    //   2. EngineTest/assets/<model> 相对 cwd 试开，再逐级上溯 6 层。
+    //   3. 全部未命中：返回旧式拼接 EngineTest/assets/<model>（相对路径），
+    //      让下方 open 失败走既有错误路径——错误信息带相对路径而不是崩溃。
+    // 探测只试开不读内容；真正加载仍由下方 std::ifstream 完成。
+    auto resolveModelPath = [](const std::string& model) -> std::string {
+        auto tryOpen = [](const std::string& p) -> bool {
+            std::ifstream probe(p, std::ios::binary);
+            return probe.is_open();
+        };
+        const char* envDir = std::getenv("PRIMAL_TEST_ASSET_DIR");
+        if (envDir != nullptr && envDir[0] != '\0') {
+            std::string dir(envDir);
+            if (dir.back() != '/' && dir.back() != '\\') dir += '/';
+            const std::string candidate = dir + model;
+            if (tryOpen(candidate)) {
+                std::cerr << "[Part30.4] model path: " << candidate
+                          << " (model=" << model << ", source=env)" << std::endl;
+                return candidate;
+            }
+        }
+        const std::string rel = "EngineTest/assets/" + model;
+        if (tryOpen(rel)) {
+            std::cerr << "[Part30.4] model path: " << rel << " (model=" << model
+                      << ", source=cwd-probe)" << std::endl;
+            return rel;
+        }
+        for (int i = 1; i <= 6; ++i) {
+            std::string prefix;
+            for (int j = 0; j < i; ++j) prefix += "../";
+            const std::string candidate = prefix + rel;
+            if (tryOpen(candidate)) {
+                std::cerr << "[Part30.4] model path: " << candidate
+                          << " (model=" << model << ", source=cwd-probe)"
+                          << std::endl;
+                return candidate;
+            }
+        }
+        return rel;
+    };
+    std::string modelPath = resolveModelPath(modelName);
+    // 下游贴图与 SDF 缓存仍以"模型所在目录"为基准拼接（ResolveTexturePath
+    // 直接 base+filename），从解析出的模型路径反推目录（尾部保留 / 或 \\）：
+    // env 命中时贴图落在同一覆盖目录，cwd 探测命中时为相对仓库的路径。
+    const std::string baseDir =
+        modelPath.substr(0, modelPath.size() - modelName.size());
     std::ifstream file(modelPath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         std::cerr << "[Part30.4] Failed to open " << modelPath << std::endl;

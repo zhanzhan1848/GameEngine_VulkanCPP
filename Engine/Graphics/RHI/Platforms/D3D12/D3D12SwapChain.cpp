@@ -40,10 +40,48 @@ D3D12SwapChain::~D3D12SwapChain() { Destroy(); }
 
 bool D3D12SwapChain::createSwapChain() {
     D3D12Device& dev = static_cast<D3D12Device&>(device_);
+
+    // === R6（D3D12 视觉对齐第六轮）：factory 优先从设备派生 ===
+    // 原路径拿 selectAdapter() 里 CreateDXGIFactory2 枚举期新建的 factory
+    // 建交换链；该 factory 与设备/队列不保证同一 driver 实例，错配时
+    // CreateSwapChainForHwnd 返回 E_ACCESSDENIED（0x80070005，R6 Windows
+    // GTX1060 实测）。规范做法（D3D12 官方 sample）：ID3D12Device → QI
+    // IDXGIDevice → GetAdapter → GetParent 从设备自身派生 factory，
+    // 构造上保证 factory/adapter/queue 同 driver 实例。派生失败回退
+    // 枚举 factory（原路径）并 Warn。
+    Microsoft::WRL::ComPtr<IDXGIFactory2> factoryFromDevice;
+    LUID derivedAdapterLuid{};
+    bool haveDerivedAdapterLuid = false;
+    {
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDevice;
+        Microsoft::WRL::ComPtr<IDXGIAdapter> deviceAdapter;
+        ID3D12Device* nativeDevice = dev.GetNativeDevice();
+        if (nativeDevice
+            && SUCCEEDED(nativeDevice->QueryInterface(IID_PPV_ARGS(&dxgiDevice)))
+            && SUCCEEDED(dxgiDevice->GetAdapter(&deviceAdapter))
+            && SUCCEEDED(deviceAdapter->GetParent(IID_PPV_ARGS(&factoryFromDevice)))) {
+            // 派生成功；deviceAdapter 即设备所在 adapter（LUID 留作失败诊断）。
+            DXGI_ADAPTER_DESC derivedDesc{};
+            if (SUCCEEDED(deviceAdapter->GetDesc(&derivedDesc))) {
+                derivedAdapterLuid = derivedDesc.AdapterLuid;
+                haveDerivedAdapterLuid = true;
+            }
+        }
+    }
+    // 实际用于创建的 factory（借用指针，不持有引用）。
     IDXGIFactory2* factory = nullptr;
-    if (!dev.GetDxgiFactory(&factory) || !factory) {
-        PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12SwapChain] DXGI factory unavailable" << std::endl;
+    if (factoryFromDevice) {
+        factory = factoryFromDevice.Get();
+    } else if (!dev.GetDxgiFactory(&factory) || !factory) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12SwapChain] DXGI factory unavailable "
+            << "(device-derived and enumeration both failed)" << std::endl;
         return false;
+    } else {
+        PRIMAL_LOG_STREAM(Warn, "RHI")
+            << "[D3D12SwapChain] device-derived DXGI factory failed; "
+            << "falling back to enumeration factory (driver-instance mismatch "
+            << "possible — R6)" << std::endl;
     }
 
     // 窗口句柄契约（M0 §8.1）：platform::window_handle（Win32=HWND）直传。
@@ -74,6 +112,14 @@ bool D3D12SwapChain::createSwapChain() {
     scDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
     scDesc.Flags = 0;
 
+    // R6 预检证据（成功路径也留痕）：factory 来源与关键创建参数一目了然。
+    PRIMAL_LOG_STREAM(Info, "RHI")
+        << "[D3D12SwapChain] create: factory="
+        << (factoryFromDevice ? "device-derived" : "enumeration")
+        << " hwnd=0x" << std::hex << static_cast<void*>(hwnd) << std::dec
+        << " size=" << scDesc.Width << "x" << scDesc.Height
+        << " BufferCount=" << scDesc.BufferCount << std::endl;
+
     Microsoft::WRL::ComPtr<IDXGISwapChain1> sc1;
     // 呈现与 DIRECT 队列绑定：flip model 的 Present 在创建队列上排序，
     // 与该队列先前的 ExecuteCommandLists 天然有序（canonical 模式）。
@@ -83,13 +129,73 @@ bool D3D12SwapChain::createSwapChain() {
         PRIMAL_LOG_STREAM(Error, "RHI")
             << "[D3D12SwapChain] CreateSwapChainForHwnd failed hr=0x" << std::hex
             << static_cast<unsigned long>(hr) << std::dec << std::endl;
+        // R6 失败自诊断（一次性，供下次 Windows 复跑定位 E_ACCESSDENIED）：
+        // ① hwnd 属主 pid/tid vs 本进程（他进程窗口）；
+        // ② factory 既有窗口关联（非空且 != hwnd → hwnd 已被别的
+        //    交换链/工厂占用）；
+        // ③ 设备 adapter LUID vs 创建 factory 的 EnumAdapters1(0) LUID
+        //    （不一致 = adapter/factory 错配疑点；注意枚举序 0 未必是设备
+        //    由 EnumAdapterByGpuPreference 选中的序号，需结合判读）。
+        DWORD ownerPid = 0;
+        const DWORD ownerTid = GetWindowThreadProcessId(hwnd, &ownerPid);
+        HWND assoc = nullptr;
+        factory->GetWindowAssociation(&assoc);
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12SwapChain] diag window: hwnd=0x" << std::hex
+            << static_cast<void*>(hwnd) << std::dec
+            << " owner pid=" << ownerPid << " tid=" << ownerTid
+            << " vs cur pid=" << GetCurrentProcessId()
+            << " tid=" << GetCurrentThreadId()
+            << "; factory assoc hwnd=0x" << std::hex
+            << static_cast<void*>(assoc) << std::dec
+            << (assoc && assoc != hwnd
+                    ? " (assoc!=hwnd: bound to another swapchain/factory)"
+                    : "")
+            << std::endl;
+        DXGI_ADAPTER_DESC1 devAdapterDesc{};
+        const bool haveDevAdapter =
+            dev.GetNativeAdapter()
+            && SUCCEEDED(dev.GetNativeAdapter()->GetDesc1(&devAdapterDesc));
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> factoryAdapter0;
+        DXGI_ADAPTER_DESC1 factoryAdapterDesc{};
+        const bool haveFactoryAdapter =
+            SUCCEEDED(factory->EnumAdapters1(0, &factoryAdapter0))
+            && SUCCEEDED(factoryAdapter0->GetDesc1(&factoryAdapterDesc));
+        if (haveDevAdapter && haveFactoryAdapter) {
+            const bool luidMatch =
+                devAdapterDesc.AdapterLuid.HighPart == factoryAdapterDesc.AdapterLuid.HighPart
+                && devAdapterDesc.AdapterLuid.LowPart == factoryAdapterDesc.AdapterLuid.LowPart;
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12SwapChain] diag adapter LUID: device=0x" << std::hex
+                << static_cast<unsigned long>(devAdapterDesc.AdapterLuid.HighPart)
+                << ':' << devAdapterDesc.AdapterLuid.LowPart
+                << " factoryEnum0=0x"
+                << static_cast<unsigned long>(factoryAdapterDesc.AdapterLuid.HighPart)
+                << ':' << factoryAdapterDesc.AdapterLuid.LowPart << std::dec
+                << (luidMatch ? " (match)" : " (MISMATCH: adapter/factory)")
+                << std::endl;
+        } else {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12SwapChain] diag adapter LUID unavailable"
+                << " (deviceDesc=" << haveDevAdapter
+                << " factoryEnum0Desc=" << haveFactoryAdapter << ")" << std::endl;
+        }
+        if (haveDerivedAdapterLuid) {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12SwapChain] diag derivation chain LUID=0x" << std::hex
+                << static_cast<unsigned long>(derivedAdapterLuid.HighPart)
+                << ':' << derivedAdapterLuid.LowPart << std::dec
+                << " (device-derived factory; must equal device LUID above)"
+                << std::endl;
+        }
         return false;
     }
     if (FAILED(sc1.As(&swapChain_))) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12SwapChain] IDXGISwapChain3 QI failed" << std::endl;
         return false;
     }
-    // 关闭 Alt+Enter 自动全屏切换（窗口宿主自管 resize 语义）。
+    // 关闭 Alt+Enter 自动全屏切换（窗口宿主自管 resize 语义）——
+    // 在实际用于创建的 factory 上调用（R6：关联随 factory 实例走）。
     factory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
     return true;
 }
