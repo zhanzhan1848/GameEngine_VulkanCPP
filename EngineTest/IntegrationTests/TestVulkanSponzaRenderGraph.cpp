@@ -285,10 +285,10 @@ std::string ResolveTexturePath(const std::string& base, const std::string& filen
 m4x4 make_identity_m4x4() {
     m4x4 r{};
     std::memset(&r, 0, sizeof(r));
-    r.columns[0][0] = 1.0f;
-    r.columns[1][1] = 1.0f;
-    r.columns[2][2] = 1.0f;
-    r.columns[3][3] = 1.0f;
+    math::set_elem(r, 0, 0, 1.0f);
+    math::set_elem(r, 1, 1, 1.0f);
+    math::set_elem(r, 2, 2, 1.0f);
+    math::set_elem(r, 3, 3, 1.0f);
     return r;
 }
 
@@ -427,7 +427,11 @@ bool TestVulkanSponzaRenderGraph::InitializeDevice() {
 
 bool TestVulkanSponzaRenderGraph::InitializeWindowAndRenderSystem() {
     primal::platform::window_init_info wi{};
+#if defined(_WIN32) || defined(__linux__)
+    wi.caption = L"Vulkan Sponza (RenderSystem)";
+#else
     wi.caption = "Vulkan Sponza (RenderSystem)";
+#endif
     wi.left = 100;
     wi.top = 100;
     wi.width = 1280;
@@ -441,7 +445,7 @@ bool TestVulkanSponzaRenderGraph::InitializeWindowAndRenderSystem() {
 
     RenderSystemInitInfo sysInfo;
     sysInfo.device = device_;
-    sysInfo.window = window_.handle();
+    sysInfo.window = static_cast<primal::platform::window_handle>(window_.handle());
     sysInfo.width = window_.width();
     sysInfo.height = window_.height();
 
@@ -6440,9 +6444,9 @@ void TestVulkanSponzaRenderGraph::Run() {
                         }
                     }
                     const math::v3 detO = offlineSDFMerger_ && offlineSDFMerger_->IsValid()
-                        ? offlineSDFMerger_->GetOrigin() : math::v3{0.0f};
+                        ? offlineSDFMerger_->GetOrigin() : math::splat3(0.0f);
                     const math::v3 detE = offlineSDFMerger_ && offlineSDFMerger_->IsValid()
-                        ? offlineSDFMerger_->GetExtent() : math::v3{0.0f};
+                        ? offlineSDFMerger_->GetExtent() : math::splat3(0.0f);
                     for (size_t slot = 0; slot < listed.size(); ++slot) {
                         const u32 idx = listed[slot];
                         u32 x = idx % cx3;
@@ -7356,9 +7360,9 @@ void TestVulkanSponzaRenderGraph::RunGIVerify() {
             if (float* hd = static_cast<float*>(device_->MapBuffer(
                     hdBuf, 0, totalRays * sizeof(float)))) {
                 const math::v3 sdfO = offlineSDFMerger_ && offlineSDFMerger_->IsValid()
-                    ? offlineSDFMerger_->GetOrigin() : math::v3{0.0f};
+                    ? offlineSDFMerger_->GetOrigin() : math::splat3(0.0f);
                 const math::v3 sdfE = offlineSDFMerger_ && offlineSDFMerger_->IsValid()
-                    ? offlineSDFMerger_->GetExtent() : math::v3{0.0f};
+                    ? offlineSDFMerger_->GetExtent() : math::splat3(0.0f);
                 // The update list is priority-sorted (NOT identity after frame
                 // 1): hd[slot] holds the rays of probe = update_list[slot].
                 u32 updateCount = ddgi->GetLastUpdateCount();

@@ -6,11 +6,11 @@ static bool RunSCGeometryFirstHitTest(RHIDeviceBase* device) {
     mesh.position_buffer.resize(sizeof(vertices));std::memcpy(mesh.position_buffer.data(),vertices,sizeof(vertices));
     mesh.index_buffer.resize(sizeof(indices));std::memcpy(mesh.index_buffer.data(),indices,sizeof(indices));
     auto blas=BuildMeshBLAS(mesh);if(!blas) return false;
-    auto matrix=[](float x,float y,float z){math::m4x4 m{};m.columns[0]={x,0,0,0};m.columns[1]={0,y,0,0};m.columns[2]={0,0,z,0};m.columns[3]={0,0,0,1};return m;};
+    auto matrix=[](float x,float y,float z){return math::make_m4x4(math::v4{x,0,0,0},math::v4{0,y,0,0},math::v4{0,0,z,0},math::v4{0,0,0,1});};
     // R4: 局部变量避开 near/far 名字（Windows rpcndr.h 空宏）。
     auto farMat=matrix(1,1,1),nearMat=matrix(-2,3,.25),rotated=matrix(1,1,1);
-    farMat.columns[3].z=5;nearMat.columns[3].z=2;
-    rotated.columns[0]={0,0,-2,0};rotated.columns[1]={.3f,3,0,0};rotated.columns[2]={.25f,0,0,0};rotated.columns[3]={4,0,0,1};
+    math::set_elem(farMat,3,2,5.f);math::set_elem(nearMat,3,2,2.f);
+    math::set_column(rotated,0,math::v4{0,0,-2,0});math::set_column(rotated,1,math::v4{.3f,3,0,0});math::set_column(rotated,2,math::v4{.25f,0,0,0});math::set_column(rotated,3,math::v4{4,0,0,1});
     // Captured Sponza ray/skinny triangle whose old GPU triple-product t
     // differed from the independent float64 oracle by 2.9458e-5 m.
     auto skinny=std::make_shared<MeshBLAS>();

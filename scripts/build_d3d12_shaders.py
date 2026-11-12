@@ -331,8 +331,26 @@ def tool_version(cmd):
     return out.strip().splitlines()[0] if rc == 0 and out.strip() else f"unknown(rc={rc})"
 
 
-def sha256_file(path):
+def _normalize_text_bytes(data):
+    """文本工件的 CRLF→LF 字节规范化（仅此一种，孤立 CR 不动）。
+
+    Windows 在 core.autocrlf=true 检出下，文本文件（GLSL 源/.hlsl/.wgsl）
+    落盘为 CRLF，与 Mac（LF）生成的 manifest 哈希不符——着色器内容没坏，
+    是校验层没对齐。所有文本哈希路径统一先经此规范化再取 SHA；LF 检出上
+    是无操作（Mac 行为与退出码不变）。二进制工件（.cso/.spv）git 不做
+    换行转换、Windows 上已逐字节一致，绝不规范化。"""
+    return data.replace(b"\r\n", b"\n")
+
+
+def sha256_file(path, text=False):
+    """文件 SHA256。text=True 按文本工件处理：整读后经 _normalize_text_bytes
+    再哈希（着色器文本均是小文件，整读可避免 CRLF 对跨读取块边界）；
+    默认逐块哈希给二进制（.cso/.spv），二进制绝不传 text=True。"""
     h = hashlib.sha256()
+    if text:
+        with open(path, "rb") as f:
+            h.update(_normalize_text_bytes(f.read()))
+        return h.hexdigest()
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
@@ -420,7 +438,10 @@ def compile_shader(item, out_dir, timeout=120):
                 else open(src, encoding="utf-8", errors="replace").read()
             spv = os.path.join(td, "stage.spv")
             src_tmp = os.path.join(td, f"in.{stage}")
-            with open(src_tmp, "w", encoding="utf-8") as f:
+            # 文本写强制 LF（newline="\n"）：Windows 文本模式默认会把 LF
+            # 译成 CRLF，防止未来在 Windows 重生成时 glslang 输入端引入
+            # 行尾差异。flat 经 universal newlines 读入，本身已是 LF。
+            with open(src_tmp, "w", encoding="utf-8", newline="\n") as f:
                 f.write(flat)
             # 第一级与生产 build_spv.sh 同前端同 flags（spike §5 理由②：
             # GLSL 语义单一事实源）。R3 入口参数化：--source-entrypoint 取
@@ -443,9 +464,12 @@ def compile_shader(item, out_dir, timeout=120):
             return False, None, [f"dxc failed: {err_d.strip()[:2000]}"]
         shutil.copyfile(hlsl_tmp, hlsl_out)
 
+    # 文本源（glsl/handwritten）取规范化哈希，与 --check 同口径（未来在
+    # Windows 重生成 manifest 时 source_sha256 不因 CRLF 检出漂移）；spv
+    # 链源是二进制，保持逐字节哈希。
     record = {
         "source": rel,
-        "source_sha256": sha256_file(src),
+        "source_sha256": sha256_file(src, text=kind != "spv"),
         "chain": {"spv": "spirv-cross->dxc (spv passthrough)",
                   "handwritten": "dxc (handwritten HLSL, WGSL-derived)"}.get(
                       kind, "glslang->spirv->spirv-cross->dxc"),
@@ -459,7 +483,9 @@ def compile_shader(item, out_dir, timeout=120):
         # 比对（手写件语义正确性的上游锚点）。
         wgsl = os.path.join(REPO, extra[1])
         record["wgsl_source"] = extra[1]
-        record["wgsl_source_sha256"] = sha256_file(wgsl) if os.path.isfile(wgsl) else None
+        # WGSL 源是文本，规范化哈希（provenance 锚点跨平台一致）。
+        record["wgsl_source_sha256"] = (sha256_file(wgsl, text=True)
+                                        if os.path.isfile(wgsl) else None)
     # 产物基名覆盖与宏变体（同源多产物）时记录 out/defines，保持 harness
     # 16 条记录字段形状与 origin/d3d12-windows-test-20261103 manifest 一致。
     if out_rel != rel:
@@ -467,9 +493,9 @@ def compile_shader(item, out_dir, timeout=120):
     if kind == "glsl" and extra:
         record["defines"] = list(extra)
     record["hlsl"] = os.path.relpath(hlsl_out, out_dir)
-    record["hlsl_sha256"] = sha256_file(hlsl_out)
+    record["hlsl_sha256"] = sha256_file(hlsl_out, text=True)  # 文本，规范化
     record["cso"] = os.path.relpath(cso_out, out_dir)
-    record["cso_sha256"] = sha256_file(cso_out)
+    record["cso_sha256"] = sha256_file(cso_out)  # DXIL 二进制，绝不规范化
     return True, record, errors
 
 
@@ -504,7 +530,8 @@ def do_build(shader_list, out_dir):
         "shaders": records,
     }
     mpath = os.path.join(out_dir, MANIFEST_NAME)
-    with open(mpath, "w", encoding="utf-8") as f:
+    # 同上强制 LF：Windows 重生成时 manifest.json 字节与 Mac 生成一致。
+    with open(mpath, "w", encoding="utf-8", newline="\n") as f:
         json.dump(manifest, f, indent=2)
         f.write("\n")
     print(f"manifest: {mpath} ({len(records)} ok, {len(failures)} failed)")
@@ -540,7 +567,10 @@ def do_check(shader_list, out_dir):
         if not os.path.isfile(src):
             stale.append(f"{out_rel}: source missing")
             continue
-        src_sha = sha256_file(src)
+        # 文本源（glsl 链 .vert/.frag/.comp、handwritten 链 .hlsl）取
+        # CRLF→LF 规范化哈希（Windows autocrlf=true 检出兼容）；spv 链源
+        # 是二进制 .spv，git 不转换，保持逐字节哈希。
+        src_sha = sha256_file(src, text=kind != "spv")
         if src_sha != rec["source_sha256"]:
             stale.append(f"{out_rel}: source changed since manifest "
                          f"(manifest {rec['source_sha256'][:12]}.., now {src_sha[:12]}..)")
@@ -550,7 +580,9 @@ def do_check(shader_list, out_dir):
             if not os.path.isfile(p):
                 stale.append(f"{out_rel}: product missing: {rec[key]}")
                 continue
-            got = sha256_file(p)
+            # hlsl 是文本（CRLF→LF 规范化后比对）；cso 是二进制，git 不
+            # 转换、Windows 上逐字节一致，绝不规范化。
+            got = sha256_file(p, text=(key == "hlsl"))
             if got != rec[key + "_sha256"]:
                 stale.append(f"{out_rel}: {key} sha mismatch (manifest "
                              f"{rec[key + '_sha256'][:12]}.., now {got[:12]}..)")
@@ -560,7 +592,9 @@ def do_check(shader_list, out_dir):
         for s in stale:
             print(f"  STALE: {s}", file=sys.stderr)
         return 1
-    print(f"D3D12 shader freshness check passed ({len(shader_list)} shaders).")
+    # 摘要注明文本哈希口径（ASCII 写法，避免 Windows 重定向编码问题）。
+    print(f"D3D12 shader freshness check passed ({len(shader_list)} shaders; "
+          f"text hashes are CRLF->LF normalized).")
     return 0
 
 

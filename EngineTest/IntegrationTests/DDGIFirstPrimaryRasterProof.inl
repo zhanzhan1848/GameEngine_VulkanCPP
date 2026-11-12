@@ -138,7 +138,7 @@ static void DDGIFirstPrimaryRasterSetMatrix(math::m4x4& matrix,
                                              const float* values) {
     for (u32 c = 0; c < 4u; ++c)
         for (u32 r = 0; r < 4u; ++r)
-            matrix.columns[c][r] = values[c * 4u + r];
+            math::set_elem(matrix, c, r, values[c * 4u + r]);
 }
 
 static bool DDGIFirstPrimaryRasterReadBuffer(
@@ -341,15 +341,15 @@ static bool DDGIFirstPrimaryRasterProject(const math::m4x4& view,
     float viewPoint[4]{};
     float clip[4]{};
     for (u32 r = 0; r < 4u; ++r)
-        viewPoint[r] = view.columns[0][r] * point[0] +
-                       view.columns[1][r] * point[1] +
-                       view.columns[2][r] * point[2] +
-                       view.columns[3][r];
+        viewPoint[r] = math::elem(view, 0, r) * point[0] +
+                       math::elem(view, 1, r) * point[1] +
+                       math::elem(view, 2, r) * point[2] +
+                       math::elem(view, 3, r);
     for (u32 r = 0; r < 4u; ++r)
-        clip[r] = projection.columns[0][r] * viewPoint[0] +
-                  projection.columns[1][r] * viewPoint[1] +
-                  projection.columns[2][r] * viewPoint[2] +
-                  projection.columns[3][r] * viewPoint[3];
+        clip[r] = math::elem(projection, 0, r) * viewPoint[0] +
+                  math::elem(projection, 1, r) * viewPoint[1] +
+                  math::elem(projection, 2, r) * viewPoint[2] +
+                  math::elem(projection, 3, r) * viewPoint[3];
     if (!DDGIFirstPrimaryRasterFinite(clip[0]) || !DDGIFirstPrimaryRasterFinite(clip[1]) ||
         !DDGIFirstPrimaryRasterFinite(clip[2]) || !DDGIFirstPrimaryRasterFinite(clip[3]) ||
         std::abs(clip[3]) <= 1.0e-8f) return false;
@@ -523,8 +523,8 @@ static bool RunDDGIFirstPrimaryRasterProof(
             sample.first_t = a[3].x;
             sample.bary[0] = a[3].y; sample.bary[1] = a[3].z; sample.bary[2] = a[3].w;
             for (u32 k = 0; k < 3u; ++k) {
-                sample.origin[k] = a[0][k]; sample.direction[k] = a[1][k];
-                sample.first_point[k] = r[40][k];
+                sample.origin[k] = math::component(a[0], k); sample.direction[k] = math::component(a[1], k);
+                sample.first_point[k] = math::component(r[40], k);
             }
             if (!DDGIFirstPrimaryRasterFinite3(sample.origin) ||
                 !DDGIFirstPrimaryRasterFinite3(sample.direction) ||
@@ -697,7 +697,7 @@ static bool RunDDGIFirstPrimaryRasterProof(
         DDGIFirstPrimaryRasterBuildCamera(sample, worldVertices, view, projection, maxViewport, virtualViewport);
         // Same fresh primitive, four diagnostic conditions; production camera is untouched.
         // Reflect only camera X (including translation), preserving U/F and clip depth.
-        if (variant >= 2u) for (u32 column = 0u; column < 4u; ++column) view.columns[column][0] = -view.columns[column][0];
+        if (variant >= 2u) for (u32 column = 0u; column < 4u; ++column) math::set_elem(view, column, 0u, -math::elem(view, column, 0u));
         if (variantCount == 4u && (variant & 1u)) virtualViewport = 17.0f;
         float centerNdc[3]{};
         if (!DDGIFirstPrimaryRasterProject(view, projection, sample.first_point, centerNdc) ||
