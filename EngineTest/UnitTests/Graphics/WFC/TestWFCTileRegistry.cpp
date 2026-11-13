@@ -93,6 +93,6 @@ int main() {
     TEST_CASE(suite, "Count_Grows", TestWFCTileRegistry_Count_Grows);
     TEST_CASE(suite, "RegisterFromCatalogSetsCategory", TestRegisterFromCatalogSetsCategory);
     TEST_CASE(suite, "MultiCatalogAppend", TestMultiCatalogAppend);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

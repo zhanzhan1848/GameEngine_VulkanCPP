@@ -92,7 +92,7 @@ int main() {
     suite.AddTestCase({"MultipleEntities", TestMultipleEntities});
     suite.AddTestCase({"EnsureCapacity", TestEnsureCapacity});
     
-    suite.RunAllTests();
+    const auto runStats = suite.RunAllTests();
     
-    return 0;
+    return runStats.failedTests == 0 ? 0 : 1;
 }

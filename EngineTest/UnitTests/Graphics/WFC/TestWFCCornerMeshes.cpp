@@ -92,9 +92,9 @@ int main() {
               TestCornerOut_Registration_Succeeds);
     TEST_CASE(suite, "CornerOut_First_Triangle_Non_Degenerate",
               TestCornerOut_First_Triangle_Non_Degenerate);
-    suite.RunAllTests();
+    const auto runStats = suite.RunAllTests();
     // Release registered mesh assets so engine free_lists don't assert at
     // program exit (matches the Shutdown pattern in TestWFCRendering).
     primal::content::shutdown();
-    return 0;
+    return runStats.failedTests == 0 ? 0 : 1;
 }

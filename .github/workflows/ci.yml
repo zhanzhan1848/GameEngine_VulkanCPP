@@ -150,7 +150,9 @@ jobs:
       - name: 安装 Vulkan 开发包（configure 冒烟用）
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libvulkan-dev
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev glslang-tools libx11-dev libxext-dev libxrandr-dev \
+            libxcursor-dev libxi-dev libwayland-dev libxkbcommon-dev
 
       - name: CMake configure 冒烟（默认配置）
         run: |

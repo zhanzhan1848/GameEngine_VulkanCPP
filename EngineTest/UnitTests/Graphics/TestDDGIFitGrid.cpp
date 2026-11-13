@@ -91,7 +91,7 @@ int main()
 
     primal::test::RegisterDDGIFitGridTests(suite);
 
-    suite.RunAllTests();
+    const auto runStats = suite.RunAllTests();
 
-    return 0;
+    return runStats.failedTests == 0 ? 0 : 1;
 }

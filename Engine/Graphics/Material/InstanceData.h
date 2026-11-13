@@ -3,7 +3,10 @@
 
 namespace primal::graphics {
 
-struct alignas(16) InstanceData {
+// Forward renderer's compact per-draw instance payload. Keep this distinct
+// from Scene/RenderSceneSnapshot.h's 192-byte GPU-driven InstanceData; both
+// declarations previously shared the same namespace and name, violating ODR.
+struct alignas(16) ForwardInstanceData {
     math::m4x4 transform;
     f32        base_color[4]{1.f, 1.f, 1.f, 1.f};
     f32        roughness{0.5f};
@@ -14,6 +17,6 @@ struct alignas(16) InstanceData {
     f32        transmission{0.f};
 };
 
-static_assert(sizeof(InstanceData) == 96, "InstanceData must be 96 bytes");
+static_assert(sizeof(ForwardInstanceData) == 96, "ForwardInstanceData must be 96 bytes");
 
 } // namespace primal::graphics

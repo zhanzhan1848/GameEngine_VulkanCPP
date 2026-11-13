@@ -5,6 +5,7 @@
 
 #include "LightmapModule.h"
 #include "Graphics/Baking/LightmapContainer.h"
+#include "Graphics/EntityIdentityRegistry.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/RHI/Core/RHICommand.h"
@@ -483,7 +484,17 @@ bool LightmapModule::LoadLightmap(const std::string& path) {
     entities_.clear();
     matchedEntities_.clear();
     for (const auto& e : c.entries) {
-        entryScaleBias_[e.GetName()] = {e.scale_x, e.scale_y, e.bias_x, e.bias_y};
+        // 防重名覆盖（2026-11-05）：同名条目不再静默覆盖——保留首个并告警
+        //（重名 = 实例键歧义，命中哪个矩形未定义；告警暴露 bake 侧键冲突）。
+        const std::string name = e.GetName();
+        const auto [it, inserted] = entryScaleBias_.emplace(
+            name, std::array<float, 4>{e.scale_x, e.scale_y, e.bias_x, e.bias_y});
+        if (!inserted) {
+            PRIMAL_LOG_STREAM(Warn, "Render")
+                << "[Lightmap] duplicate entry name '" << name << "' in " << path
+                << " — keeping first entry's scale/bias, later duplicate ignored"
+                << std::endl;
+        }
     }
     PRIMAL_LOG_STREAM(Info, "Render")
         << "[Lightmap] loaded " << path << " (" << page.width << "x" << page.height
@@ -496,14 +507,20 @@ void LightmapModule::UpdateFrame(const RenderScene& scene) {
 
     bool added = false;
     for (const auto& proxy : scene.GetProxies()) {
+        // mesh 键位 = content geometry id（editor 管线路径 proxy.meshId 是
+        // mesh 资源绑定的 ECS 实体 id，进 content 解析必败，2026-11-05 排查）。
+        const id::id_type geometryId =
+            proxy.contentMeshId != id::invalid_id ? proxy.contentMeshId : proxy.meshId;
         const std::uint64_t key =
-            ((std::uint64_t)proxy.meshId << 32) | (std::uint32_t)proxy.entityId;
+            ((std::uint64_t)geometryId << 32) | (std::uint32_t)proxy.entityId;
         if (std::find(matchedEntities_.begin(), matchedEntities_.end(), key) !=
             matchedEntities_.end())
             continue;
-        // 收集器命名约定（LightmapSceneCollector）：mesh_<contentId>_e<entityId>。
-        const std::string name = "mesh_" + std::to_string(proxy.meshId) + "_e" +
-                                 std::to_string(proxy.entityId);
+        // 实例键（2026-11-05 稳定键轮）：与收集器共用
+        // ResolveLightmapInstanceKey——注册表命中用稳定键（跨会话匹配
+        // 持久化 LMAP），未命中回退 mesh_<contentId>_e<entityId> 老命名。
+        const std::string name =
+            ResolveLightmapInstanceKey((u32)proxy.entityId, geometryId);
         if (entryScaleBias_.find(name) == entryScaleBias_.end()) continue;
         matchedEntities_.push_back(key);
         added = true;
@@ -511,17 +528,19 @@ void LightmapModule::UpdateFrame(const RenderScene& scene) {
     if (added) {
         std::vector<EntitySpec> specs;
         for (const auto& proxy : scene.GetProxies()) {
+            const id::id_type geometryId =
+                proxy.contentMeshId != id::invalid_id ? proxy.contentMeshId : proxy.meshId;
             const std::uint64_t key =
-                ((std::uint64_t)proxy.meshId << 32) | (std::uint32_t)proxy.entityId;
+                ((std::uint64_t)geometryId << 32) | (std::uint32_t)proxy.entityId;
             if (std::find(matchedEntities_.begin(), matchedEntities_.end(), key) ==
                 matchedEntities_.end())
                 continue;
-            const std::string name = "mesh_" + std::to_string(proxy.meshId) + "_e" +
-                                     std::to_string(proxy.entityId);
+            const std::string name =
+                ResolveLightmapInstanceKey((u32)proxy.entityId, geometryId);
             const auto it = entryScaleBias_.find(name);
             if (it == entryScaleBias_.end()) continue;
             EntitySpec spec;
-            spec.mesh = proxy.meshId;
+            spec.mesh = geometryId;  // content id——RebuildEntityBuffers 两步解析即成立
             spec.entity = (u32)proxy.entityId;
             spec.transform = proxy.transform;
             std::memcpy(spec.scale_bias, it->second.data(), sizeof(spec.scale_bias));

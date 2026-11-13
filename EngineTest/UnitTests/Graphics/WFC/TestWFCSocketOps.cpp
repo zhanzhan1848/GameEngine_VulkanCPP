@@ -328,6 +328,6 @@ int main() {
     TEST_CASE(suite, "AreSocketsCompatible_MirrorMatch",        TestAreSocketsCompatible_MirrorMatch);
     TEST_CASE(suite, "AreSocketsCompatible_Incompatible",       TestAreSocketsCompatible_Incompatible);
     TEST_CASE(suite, "AddAutoFromSockets_CubeToCubeStrict",     TestAddAutoFromSockets_CubeToCubeStrict);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

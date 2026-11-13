@@ -29,8 +29,11 @@ class RenderScene;
 //
 // 运行时链路：
 //   LoadLightmap(path)      —— LMAP 容器 → RGBA16F 页上传 + per-mesh 清单
-//   UpdateFrame(scene)      —— RenderScene proxy 按收集器命名约定
-//                              （mesh_<contentId>_e<entityId>）匹配清单，
+//                              （2026-11-05：同名条目保留首个 + Warn 告警）
+//   UpdateFrame(scene)      —— RenderScene proxy 按收集器同款实例键
+//                              （ResolveLightmapInstanceKey：注册表稳定键
+//                              "e"+entityGuid，未命中回退
+//                              mesh_<contentId>_e<entityId>）匹配清单，
 //                              为命中实体构建世界空间顶点/UV/索引缓冲
 //   AddUVPrePass(graph, in) —— 静态几何按实体直绘（深度 LessEqual 只读），
 //                              输出逐像素 atlas UV RT
@@ -182,7 +185,8 @@ private:
     rhi::ResourceHandle uvs_sb_{rhi::handles::INVALID_RESOURCE};         // vec2[]
     rhi::ResourceHandle indices_ib_{rhi::handles::INVALID_RESOURCE};     // u32[]
     std::vector<EntityRecord> entities_;
-    // LMAP 清单（mesh 名 → scale/bias）。收集器命名约定匹配。
+    // LMAP 清单（实例键 → scale/bias）。与收集器共用
+    // ResolveLightmapInstanceKey 匹配（稳定键优先，回退老命名）。
     std::unordered_map<std::string, std::array<float, 4>> entryScaleBias_;
     std::vector<std::uint64_t> matchedEntities_;  // 已建实体的 (meshId<<32|entityId)
 };

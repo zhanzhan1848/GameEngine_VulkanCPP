@@ -75,6 +75,8 @@ file(GLOB_RECURSE GRAPHICS_UTILS
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Camera/RenderViewBuilder.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderProxy.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RenderProxy.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/EntityIdentityRegistry.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/EntityIdentityRegistry.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Material.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Material.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/MaterialInstance.h"

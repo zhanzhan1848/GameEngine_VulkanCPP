@@ -147,6 +147,6 @@ int main() {
               DrainStream_MultipleRestarts_IncrementsCountAndKeepsLastBatch);
     TEST_CASE(suite, "RestartAsLastStep_YieldsZeroPoints",
               DrainStream_RestartAsLastStep_YieldsZeroPoints);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

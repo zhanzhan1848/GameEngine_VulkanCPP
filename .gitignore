@@ -459,6 +459,7 @@ build-wt/
 test-output/
 .zcode/
 .codex/
+.superagent/
 autoresearch/
 build-wasm/
 projects_test/

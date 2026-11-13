@@ -72,6 +72,6 @@ int main() {
     TEST_CASE(suite, "GetParamDescriptors_Reflects_Offsets", TestWFCConfig_GetParamDescriptors_Reflects_Offsets);
     TEST_CASE(suite, "DefaultCategoryMask_AllCategories", TestWFCConfig_DefaultCategoryMask_AllCategories);
     TEST_CASE(suite, "CategoryMask_Roundtrip",            TestWFCConfig_CategoryMask_Roundtrip);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

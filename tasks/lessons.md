@@ -4035,3 +4035,13 @@ NodifyM uses Flow for layout.
 loads, palette→canvas drag works, but the canvas visually looks broken
 because nothing renders. Verify by checking that `nodes` appear at their
 declared Location after an AddNode call.
+
+---
+
+## Tool/Harness Transformation Scope Must Stay General-Purpose
+
+**Date:** 2026-11-04
+
+**Correction:** When the user asks to analyze modifying or extending a meta-tool (e.g., transforming "Claude Code" into a DeepSeek-style Super Agent), never anchor the design onto the current repository's domain (e.g. game engine, graphics shaders, CMake). The modification is of Claude Code as a universal agent platform.
+
+**Rule:** Always treat requests about Claude Code's architecture, harness, runner, or multi-agent orchestration as purely generic and decoupled from the local codebase unless the user explicitly asks for domain-specific integration. Keep designs general, reusable across any software project.
