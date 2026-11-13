@@ -72,6 +72,11 @@ public:
     // 首帧 submit 会报"expects SRO, actual UNDEFINED"。
     void PrimeTextureLayout(rhi::ResourceHandle texture);
 
+    // R12-3.4: 代际保护的延迟纹理释放（见 RHIDeviceBase::RetireTexture 与
+    // RHIAllocator 的 retire 队列注释）。Vulkan 实现：双释放护栏 + 槽位入队；
+    // 帧时钟由 beginFrameImpl 的 TickRetires 驱动。
+    void RetireTexture(rhi::ResourceHandle texture) override;
+
     VkInstance GetNativeInstance() const { return instance_; }
     VkPhysicalDevice GetNativePhysicalDevice() const { return physicalDevice_; }
     VkDevice GetNativeDevice() const { return device_; }
@@ -281,6 +286,7 @@ private:
 
     // === Per-type free_list allocators ===
     u64 deferred_frame_counter_{0};   ///< R1/T0.13 deferred-release clock
+    u64 textureRetireFrame_{0};       ///< R12-3.4 retire-queue clock (always ticking)
     RHIAllocator<VulkanBuffer>   bufferAllocator_;
     RHIAllocator<VulkanSync>     syncAllocator_;
     RHIAllocator<VulkanQueryPool> queryPoolAllocator_;

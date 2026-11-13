@@ -309,6 +309,13 @@ void VulkanDevice::shutdownImpl() {
 
 void VulkanDevice::waitIdleImpl() const {
     lastWaitIdleResult_=device_!=VK_NULL_HANDLE?vkDeviceWaitIdle(device_):VK_ERROR_DEVICE_LOST;
+    // R12-3.2：WaitIdle 非 SUCCESS 无条件落日志（此前仅 hang-diag 门控内可见，
+    // r12 Windows 关机日志里 device-lost 只能从下游副作用猜）。行为零变化——
+    // 只加一行 Error。
+    if (lastWaitIdleResult_.load() != VK_SUCCESS) {
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] WaitIdle returned "
+                  << static_cast<int>(lastWaitIdleResult_.load()) << " (device lost / driver error)" << std::endl;
+    }
     // R10 taskC：WaitIdle 返回 device lost 时 fail-fast（门控）。
     if (lastWaitIdleResult_.load() == VK_ERROR_DEVICE_LOST)
         hangdiag::ReportDeviceLost("VulkanDevice::WaitIdle", lastWaitIdleResult_.load());
@@ -321,6 +328,34 @@ void VulkanDevice::beginFrameImpl() {
     // 每帧 BeginFrame 把当前 frame 的 staging pool bump offset 归零
     // (上一帧的 blit 应已 submit 完成,frame N+MAX_FRAMES_IN_FLIGHT 的 pool 安全复用)
     stagingAllocator_.BeginFrame();
+
+    // R12-3.4: 纹理 retire 队列的帧时钟无条件推进（RetireTexture 排入的槽位
+    // 在 kRetireFreeLag 帧后回收+代际推进）。这与下面的 PRIMAL_DEFERRED_FREE
+    // 门无关：Free() 延迟保持默认关（Metal 有已知崩溃不启用），retire 是
+    // 独立队列、仅由显式 RetireTexture 使用。
+    if (textureAllocator_) {
+        textureAllocator_->TickRetires(++textureRetireFrame_);
+        // R12-3.4 诊断（默认关）：每 30 帧打印活纹理的 VMA 持有字节总量。
+        // MoltenVK 的 heapUsage 不随 vmaDestroyImage 即时回落（VMA 池保留
+        // VkDeviceMemory 块），双驻留消除的判据以本计数为准。
+        static const bool s_vramDiag = std::getenv("PRIMAL_VK_VRAM_DIAG") != nullptr;
+        if (s_vramDiag && textureRetireFrame_ % 30 == 0) {
+            u64 ownedBytes = 0, ownedCount = 0, pendingRetires = 0;
+            textureAllocator_->ForEach([&](VulkanTexture& tex) {
+                if (!tex.OwnsImage() || !tex.GetNativeImage()) return;
+                VmaAllocationInfo info{};
+                vmaGetAllocationInfo(vmaAllocator_, tex.GetAllocation(), &info);
+                if (info.size) { ownedBytes += info.size; ++ownedCount; }
+            });
+            textureAllocator_->PendingRetireCount(pendingRetires);
+            std::fprintf(stderr,
+                "[R12-3.4] frame=%llu liveOwnedImages=%llu ownedBytes=%.1fMB pendingRetires=%llu\n",
+                static_cast<unsigned long long>(textureRetireFrame_),
+                static_cast<unsigned long long>(ownedCount),
+                static_cast<double>(ownedBytes) / (1024.0 * 1024.0),
+                static_cast<unsigned long long>(pendingRetires));
+        }
+    }
 
     // R1/T0.13: 驱动延迟槽位释放 — 已释放槽保留 kDeferredFreeLag 帧，防止
     // in-flight 帧持有的 ResourceHandle 被新分配别名到新对象（C1-H2）。
@@ -647,7 +682,12 @@ bool VulkanDevice::ReloadShader(ShaderHandle shaderHandle, const void* data, siz
 
 VulkanTexture* VulkanDevice::GetTexture(ResourceHandle handle) {
     if (handle == handles::INVALID_RESOURCE || !textureAllocator_) return nullptr;
-    return textureAllocator_->Get(static_cast<u32>(handle));
+    // R12-3.4: 代际校验解析——句柄 = (generation<<32)|slot id。槽位回收复用后
+    // generation 已推进，过期句柄解析为 nullptr 而不是槽位新对象（R11 taskC
+    // 的 id 别名 hazard：回收 id 上的新 1×1 占位被旧句柄解析成语义别名，
+    // 20 条布局错配）。未编码句柄（gen=0）同样不匹配——生产者必须走
+    // MakeHandle（createTextureImpl / createTextureViewImpl / SwapChain wrap）。
+    return textureAllocator_->GetChecked(handle);
 }
 
 bool VulkanDevice::GetBufferByteSize(ResourceHandle buffer, u64& bytes) {
@@ -693,7 +733,9 @@ ResourceHandle VulkanDevice::createTextureImpl(const TextureDesc& desc) {
         textureAllocator_->Free(id);
         return handles::INVALID_RESOURCE;
     }
-    tex->SetHandle(ResourceHandle(id));
+    // R12-3.4: 句柄带代际编码（generation<<32|id），GetTexture 按代际校验。
+    const ResourceHandle handle = ResourceHandle(textureAllocator_->MakeHandle(id));
+    tex->SetHandle(handle);
     // P0-B 定位（PRIMAL_RG_LAYOUT_TRACE=1）: 创建序号+名字+尺寸，与
     // [DSSAMPLED]/[RGTRACE] 的 VkImage 句柄对照，定位匿名纹理的创建流程。
     if (std::getenv("PRIMAL_RG_LAYOUT_TRACE")) {
@@ -702,7 +744,7 @@ ResourceHandle VulkanDevice::createTextureImpl(const TextureDesc& desc) {
                 desc.name.c_str(), desc.size.x, desc.size.y,
                 (int)desc.format, desc.mipLevels);
     }
-    return ResourceHandle(id);
+    return handle;
 }
 
 void VulkanDevice::destroyTextureImpl(ResourceHandle handle) {
@@ -715,6 +757,29 @@ void VulkanDevice::destroyTextureImpl(ResourceHandle handle) {
     }
     // VulkanTexture::~VulkanTexture 注册 GC deferred vmaDestroyImage + vkDestroyImageView。
     textureAllocator_->Free(static_cast<u32>(handle));
+}
+
+void VulkanDevice::RetireTexture(rhi::ResourceHandle handle) {
+    if (handle == handles::INVALID_RESOURCE) return;
+    VulkanTexture* tex = GetTexture(handle);
+    if (!tex) {
+        // 已释放/已 retire/代际过期：无事可做。区别于 destroyTextureImpl 的
+        // 显式销毁路径，这里保持安静（批量释放的幂等护栏，非错误）。
+        return;
+    }
+    // R12-3.4: 槽位入 retire 队列——不立即回池。对象保持存活到
+    // TickRetires 推进 kRetireFreeLag 帧后（析构 → GC 延迟销毁原生
+    // VkImage/VkView + 槽位代际+1）。R11 taskC 复检证明立即回池会让
+    // 紧随其后的批量分配（帧 0-1 GI 重初始化 ~2000 个）拿到回收 id，
+    // 已捕获旧句柄值的结构把新对象解析成语义别名（20 条布局错配）。
+    textureAllocator_->Retire(static_cast<u32>(handle));
+    if (std::getenv("PRIMAL_VK_VRAM_DIAG")) {
+        fprintf(stderr, "[R12-3.4] RetireTexture id=%u gen=%u name='%s' (%ux%u fmt=%d)\n",
+                static_cast<u32>(handle), static_cast<u32>(handle >> 32),
+                tex->GetTextureDesc().name.c_str(),
+                tex->GetTextureDesc().size.x, tex->GetTextureDesc().size.y,
+                (int)tex->GetTextureDesc().format);
+    }
 }
 
 CommandBufferHandle VulkanDevice::createCommandBufferImpl(CommandQueueType type) {
@@ -873,7 +938,7 @@ ResourceHandle VulkanDevice::createTextureViewImpl(const TextureViewDesc& desc) 
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createTextureViewImpl: invalid source texture handle" << std::endl;
         return handles::INVALID_RESOURCE;
     }
-    auto* srcTex = textureAllocator_->Get(static_cast<u32>(desc.texture));
+    auto* srcTex = textureAllocator_->GetChecked(desc.texture);
     if (!srcTex || srcTex->GetNativeImage() == VK_NULL_HANDLE) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createTextureViewImpl: source texture not found or null image" << std::endl;
         return handles::INVALID_RESOURCE;
@@ -891,8 +956,10 @@ ResourceHandle VulkanDevice::createTextureViewImpl(const TextureViewDesc& desc) 
         textureAllocator_->Free(id);
         return handles::INVALID_RESOURCE;
     }
-    viewTex->SetHandle(ResourceHandle(id));
-    return ResourceHandle(id);
+    // R12-3.4: 代际编码句柄（与 createTextureImpl 一致）。
+    const ResourceHandle handle = ResourceHandle(textureAllocator_->MakeHandle(id));
+    viewTex->SetHandle(handle);
+    return handle;
 }
 
 VulkanShader* VulkanDevice::GetShader(ShaderHandle handle) {
@@ -1552,6 +1619,17 @@ bool VulkanDevice::createLogicalDevice() {
             if (std::strcmp(e.extensionName, VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) == 0) {
                 hasExtDescriptorIndexing = true;
                 break;
+            }
+        }
+        // R12-3.2（Windows GI-off f301 AV 诊断）：PRIMAL_VK_MEM_BUDGET_DIAG=1
+        // 时启用 VK_EXT_memory_budget——heapUsage/heapBudget 只有扩展启用后才
+        // 保证有效。默认关闭时零行为变化（不加扩展、不查询）。
+        if (hangdiag::BudgetDiagEnabled()) {
+            for (const auto& e : avail) {
+                if (std::strcmp(e.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) == 0) {
+                    deviceExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+                    break;
+                }
             }
         }
     }

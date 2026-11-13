@@ -251,7 +251,10 @@ bool VulkanSwapChain::createBackBufferTextures() {
             if (wrapper) vk.GetTextureAllocator().Free(id);
             return false;
         }
-        backBufferHandles_.push_back(static_cast<ResourceHandle>(id));
+        // R12-3.4: 代际编码句柄（GetTexture 按代际校验，裸 id 不再匹配活槽位）。
+        const ResourceHandle wrapped = static_cast<ResourceHandle>(vk.GetTextureAllocator().MakeHandle(id));
+        wrapper->SetHandle(wrapped);
+        backBufferHandles_.push_back(wrapped);
     }
     return true;
 }
@@ -259,11 +262,12 @@ bool VulkanSwapChain::createBackBufferTextures() {
 void VulkanSwapChain::destroyBackBufferTextures() {
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
     for (ResourceHandle h : backBufferHandles_) {
-        u32 id = static_cast<u32>(h);
-        VulkanTexture* wrapper = vk.GetTextureAllocator().Get(id);
+        // R12-3.4: 代际校验解析（槽位若已被复用，这里拿到的是过期句柄——
+        // 宁可跳过也不能销毁槽位新对象）。
+        VulkanTexture* wrapper = vk.GetTextureAllocator().GetChecked(h);
         if (wrapper) {
             wrapper->Destroy();
-            vk.GetTextureAllocator().Free(id);
+            vk.GetTextureAllocator().Free(static_cast<u32>(h));
         }
     }
     backBufferHandles_.clear();

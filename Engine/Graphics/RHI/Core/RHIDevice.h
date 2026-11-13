@@ -244,6 +244,12 @@ public:
     // 默认 no-op；Vulkan 实现一次性 UNDEF→SHADER_READ_ONLY 提交。用于
     // "创建后即被 raw descriptor 绑成 SampledImage" 的模块三缓冲纹理。
     virtual void PrimeTextureLayout(ResourceHandle /*texture*/) {}
+    // R12-3.4: 代际保护的延迟纹理释放（可选能力）。与 DestroyTexture 的区别：
+    // 槽位不立即回池，而是排入 retire 队列，帧时钟推进 kRetireFreeLag 帧后才
+    // 真正析构+回收（generation+1）——用于"数组已持有逐字节拷贝、源贴图不再
+    // 被任何渲染路径读取"的批量释放（材质源贴图双驻留）。默认 no-op；
+    // 非 Vulkan 后端继承默认（行为不变）。
+    virtual void RetireTexture(ResourceHandle /*texture*/) {}
     virtual void DestroyShader(ShaderHandle handle) = 0;
     virtual void DestroyPipeline(PipelineHandle handle) = 0;
     virtual bool GetQueryPoolResults(QueryPoolHandle handle, u32 firstQuery, u32 queryCount, void* data, size_t stride) = 0;

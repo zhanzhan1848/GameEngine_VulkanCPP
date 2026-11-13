@@ -19,6 +19,9 @@
 
 #include <iostream>
 #include <cstring>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
@@ -1054,6 +1057,14 @@ void VulkanTexture::destroyImpl() {
         // wrap 模式不释放 VkImage(swapchain 拥有)
         if (owned && allocator && image != VK_NULL_HANDLE && alloc) {
             vmaDestroyImage(allocator, image, alloc);
+            // R12-3.4 诊断（默认关）：确认原生 image 释放真实执行。
+            static std::atomic<u64> s_destroyedImageCount{0};
+            const u64 n = s_destroyedImageCount.fetch_add(1) + 1;
+            static const bool s_vramDiag = std::getenv("PRIMAL_VK_VRAM_DIAG") != nullptr;
+            if (s_vramDiag && (n % 200 == 0)) {
+                std::fprintf(stderr, "[R12-3.4] vmaDestroyImage executed count=%llu\n",
+                             static_cast<unsigned long long>(n));
+            }
         }
     });
 

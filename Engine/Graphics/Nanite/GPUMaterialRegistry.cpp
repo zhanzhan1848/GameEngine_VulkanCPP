@@ -7,6 +7,9 @@
 #include "JobSystem/JobSystem.h"
 #include <iostream>
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <unordered_map>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::nanite {
@@ -261,6 +264,66 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         }
 
         device->DestroySync(fence);
+
+        // R12-3.4: VRAM 双驻留释放（取代 r11 撤回的立即释放版）。
+        //
+        // 三个 Texture2DArray 此刻已持有每层的逐字节精确拷贝（albedo 走
+        // BuildCheckedVulkanAlbedoArray 的 mip0 exact-copy，normal/ORM 走整层
+        // blit——全部命令在上方 fence 等待中完成）。逐材质源贴图（Sponza：
+        // ~1161 张 1024²RGBA8×11mip ≈ 6.49GiB device-local）此后不再被任何
+        // 渲染路径读取（GPUDrivenDrawPipeline 只按 MaterialData 索引表采样
+        // 数组），立即释放即可消除双驻留。
+        //
+        // 安全性（逐条回应 r11 §8 复检教训）：
+        //   - r11 v1 崩溃模式「id 回池别名」：DestroyTexture 立即回池 → 帧 0-1
+        //     GI 重初始化的 ~2000 个分配拿到回收 id → 旧句柄把新对象（1×1
+        //     sc_depth_atlas 占位）解析成语义别名 → 20 条布局错配。本版走
+        //     RetireTexture 延迟回收：槽位在帧时钟推进 kRetireFreeLag 帧后才
+        //     归还（GI 重初始化早已完成），且槽位复用时句柄代际+1，残留旧
+        //     句柄经 GetTexture 解析为 nullptr 而不是新对象。
+        //   - r11 v2 崩溃模式「毒化槽搬移」：本版不动 free_list 毒化协议，
+        //     代际存于 RHIAllocator 的平行数组，utl::vector 增长搬移不受影响。
+        //   - 仅 Vulkan 启用（Metal/Dawn 本轮行为不变）；PRIMAL_MAT_RELEASE=0
+        //     可关断（r11 判别实验同名开关，供 A/B）。
+        static const bool matReleaseDisabled = [] {
+            const char* e = std::getenv("PRIMAL_MAT_RELEASE");
+            return e && std::strcmp(e, "0") == 0;
+        }();
+        static const bool vramDiag = std::getenv("PRIMAL_VK_VRAM_DIAG") != nullptr;
+        if (device->GetPlatform() == rhi::RHIPlatform::Vulkan && !matReleaseDisabled) {
+            // 引用计数：只释放被 ≤1 个 MaterialInstance 绑定的源贴图。
+            // 共享贴图（fallback 等）保持原状；占位贴图（layer 0 源，无
+            // 实例绑定，refCount=0）同样可释放。
+            std::unordered_map<rhi::ResourceHandle, u32> refCount;
+            for (const auto* inst : instances) {
+                if (!inst) continue;
+                for (u32 binding = 0; binding < 3; ++binding) {
+                    const rhi::ResourceHandle h = inst->GetTextureHandle(binding);
+                    if (h != rhi::handles::INVALID_RESOURCE) ++refCount[h];
+                }
+            }
+            u32 retired = 0, keptShared = 0;
+            auto retireSources = [&](const std::vector<rhi::ResourceHandle>& sources) {
+                for (rhi::ResourceHandle h : sources) {
+                    if (h == rhi::handles::INVALID_RESOURCE) continue;
+                    const auto it = refCount.find(h);
+                    if (it != refCount.end() && it->second > 1) {
+                        ++keptShared;
+                        continue;
+                    }
+                    device->RetireTexture(h);
+                    ++retired;
+                }
+            };
+            retireSources(texCtx.uniqueAlbedo);
+            retireSources(texCtx.uniqueNormal);
+            retireSources(texCtx.uniqueORM);
+            if (vramDiag) {
+                PRIMAL_LOG_STREAM(Info, "Render") << "[GPUMaterialRegistry] R12-3.4 retired "
+                          << retired << " source textures via deferred retire ("
+                          << keptShared << " kept: shared by multiple instances)" << std::endl;
+            }
+        }
 
         // Mark build complete
         buildComplete_ = true;

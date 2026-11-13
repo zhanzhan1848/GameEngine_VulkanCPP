@@ -204,6 +204,81 @@ TestResult TestShutdownLeak() {
     return TestResult::Passed;
 }
 
+// R12-3.4: 句柄代际——槽位回收复用后 generation+1，旧句柄解析为 nullptr
+// 而不是槽位新对象（R11 taskC 的 id 别名 hazard 回归测试）。
+TestResult TestHandleGeneration() {
+    RHIAllocator<TestData> allocator;
+    allocator.Initialize();
+
+    uint32_t id = allocator.Allocate(1, 1.0f);
+    u64 h1 = allocator.MakeHandle(id);
+    TEST_ASSERT(h1 != 0, "Fresh slot encodes a non-zero handle (generation starts at 1)");
+    TEST_ASSERT_EQ(id, (uint32_t)h1, "Handle low 32 bits are the slot id");
+    TEST_ASSERT(allocator.GetChecked(h1) != nullptr, "Fresh handle resolves");
+    // 未编码句柄（gen=0）永不匹配活槽位：
+    TEST_ASSERT(allocator.GetChecked(static_cast<u64>(id)) == nullptr,
+                "Unencoded plain-id handle never resolves");
+
+    allocator.Free(id);
+    TEST_ASSERT(allocator.GetChecked(h1) == nullptr, "Freed-slot handle is stale");
+
+    uint32_t id2 = allocator.Allocate(2, 2.0f);
+    TEST_ASSERT_EQ(id, id2, "free_list recycles the slot id");
+    u64 h2 = allocator.MakeHandle(id2);
+    TEST_ASSERT(h2 != h1, "Recycled slot gets a new generation");
+    TEST_ASSERT(allocator.GetChecked(h2) != nullptr, "New-generation handle resolves");
+    TEST_ASSERT(allocator.GetChecked(h1) == nullptr,
+                "Stale handle does not alias the recycled slot's new object");
+    TestData* p2 = allocator.GetChecked(h2);
+    TEST_ASSERT(p2 != nullptr && p2->id == 2u, "Recycled slot holds the new object");
+
+    allocator.Free(id2);
+    allocator.Destroy();
+    return TestResult::Passed;
+}
+
+// R12-3.4: 延迟回收（retire 队列）——lag 到期前槽位保持存活（基线语义），
+// 到期后回收且代际推进；Shutdown 清空 retire 队列不泄漏。
+TestResult TestRetireDeferredReclaim() {
+    RHIAllocator<TestData> allocator;
+    allocator.Initialize();
+
+    uint32_t id = allocator.Allocate(1, 1.0f);
+    u64 h = allocator.MakeHandle(id);
+
+    allocator.Retire(id);
+    // 重复 Retire 幂等：
+    allocator.Retire(id);
+
+    // lag 到期前：槽位存活（与基线「从未释放」期间语义一致）
+    TEST_ASSERT(allocator.GetChecked(h) != nullptr, "Retired slot stays alive during the lag");
+    allocator.TickRetires(1);
+    allocator.TickRetires(2);
+    TEST_ASSERT(allocator.GetChecked(h) != nullptr, "Still alive before lag expires");
+
+    allocator.TickRetires(3);  // frame 3 >= retire_frame(0) + kRetireFreeLag(3)
+    TEST_ASSERT(allocator.GetChecked(h) == nullptr, "Reclaimed once the lag expires");
+
+    // 回收后：槽位可复用，旧代际句柄保持死亡
+    uint32_t id2 = allocator.Allocate(2, 2.0f);
+    TEST_ASSERT_EQ(id, id2, "Slot id recycled after reclaim");
+    TEST_ASSERT(allocator.GetChecked(allocator.MakeHandle(id2)) != nullptr,
+                "Next generation resolves");
+    TEST_ASSERT(allocator.GetChecked(h) == nullptr, "Old-generation handle stays dead");
+
+    // Retire 后又显式 Free：tick 侧 is_valid 复查跳过，不二次释放
+    uint32_t id3 = allocator.Allocate(3, 3.0f);
+    allocator.Retire(id3);
+    allocator.Free(id3);
+    allocator.TickRetires(4);
+    AllocatorStats stats = allocator.GetStats();
+    TEST_ASSERT_EQ(1ull, stats.activeAllocations.load(),
+                   "Retire+Free double path releases exactly once");
+
+    allocator.Shutdown();
+    return TestResult::Passed;
+}
+
 int main() {
     TestSuite suite("RHIAllocatorTests");
     suite.AddTestCase(TestCase("BasicAllocation", TestBasicAllocation, "Test basic allocate and free"));
@@ -212,7 +287,9 @@ int main() {
     suite.AddTestCase(TestCase("Defragment", TestDefragment, "Test defragmentation interface"));
     suite.AddTestCase(TestCase("MathCompatibility", TestMathTypesCompatibility, "Test math types compatibility"));
     suite.AddTestCase(TestCase("ShutdownLeak", TestShutdownLeak, "Test Shutdown mechanism"));
-    
+    suite.AddTestCase(TestCase("HandleGeneration", TestHandleGeneration, "R12-3.4 handle generation: stale handles never alias recycled slots"));
+    suite.AddTestCase(TestCase("RetireDeferredReclaim", TestRetireDeferredReclaim, "R12-3.4 retire queue: deferred reclaim + generation bump"));
+
     TestStats stats = suite.RunAllTests();
     return stats.failedTests > 0 ? 1 : 0;
 }

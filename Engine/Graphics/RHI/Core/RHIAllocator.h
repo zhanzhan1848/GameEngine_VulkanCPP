@@ -18,6 +18,9 @@
 #include <type_traits>
 #include <vector>
 #include <iostream>
+#include <cstdio>
+#include <cstdlib>
+#include <typeinfo>
 
 namespace primal::graphics::rhi {
 
@@ -116,6 +119,7 @@ public:
             }
         }
         _pending_frees.clear();   // shutdown releases everything immediately
+        _pending_retires.clear(); // R12-3.4: 已随上面全量 FreeInternal 释放
     }
 
     /**
@@ -129,13 +133,18 @@ public:
         std::unique_lock<std::shared_mutex> lock(_mutex);
         u32 id = _pool.add(std::forward<Args>(args)...);
 
+        // R12-3.4: 槽位代际登记（首生命周期 generation=1；0 保留给未编码句柄，
+        // 使裸 id 构造的旧式句柄永不匹配活槽位）。
+        if (id >= _generations.size()) _generations.resize(id + 1, 0);
+        if (_generations[id] == 0) _generations[id] = 1;
+
         // 如果是 RHIResource 的子类，自动设置 Handle
         if constexpr (std::is_base_of_v<RHIResource, T>) {
             _pool[id].SetHandle(ResourceHandle(id));
         } else if constexpr (std::is_base_of_v<RHICommandBuffer, T>) {
             _pool[id].SetHandle(CommandBufferHandle(id));
         }
-        
+
         _stats.totalAllocated++;
         _stats.activeAllocations++;
         _stats.totalBytesAllocated += sizeof(T);
@@ -183,6 +192,121 @@ public:
             } else {
                 ++it;
             }
+        }
+    }
+
+    // ====================================================================
+    // R12-3.4: 句柄代际（handle generation）+ 延迟回收（retire 队列）
+    //
+    // 背景（R11 taskC 复检结论）：DestroyTexture 走立即 Free 时，槽位 id 当场
+    // 回收；随后（场景加载尾/帧 0-1 的 GI 重初始化等）新分配拿到同一 id，已
+    // 捕获旧句柄值的既存结构把新对象解析成语义别名（20 条布局错配验证错误）。
+    // r11 的「id 不回池（永久毒化槽）」变体又被 utl::vector 增长搬移否决
+    // （毒化槽上的 std::string 拷贝构造崩溃）。本机制两条防线：
+    //   1. 代际：句柄 = (generation << 32) | slot id。槽位每次被回收复用
+    //      generation+1，过期句柄经 GetChecked 解析为 nullptr（+env 门控日志），
+    //      绝不解析成槽位的下一个对象。generation 存于独立平行数组，不触碰
+    //      free_list 的毒化/空闲链协议（避开 r11 v2 的搬移崩溃模式）。
+    //   2. retire 队列：Retire(id) 不立即释放——槽位对象保持存活（与基线
+    //      「从未释放」期间语义一致）直到 TickRetires 推进 kRetireFreeLag 帧
+    //      后才 FreeInternal（析构 → GC 延迟销毁原生资源）。in-flight 帧
+    //      （MAX_FRAMES_IN_FLIGHT=3 的 per-slot fence 界）与紧随其后的批量
+    //      分配都拿不到这些 id。独立于 PRIMAL_DEFERRED_FREE 的 Free() 延迟
+    //      （那条路径默认关，Metal 有已知崩溃不启用），不影响既有 Free 语义。
+    // ====================================================================
+
+    /**
+     * @brief 编码代际句柄 (generation << 32 | slot id)
+     * @return 槽位有效时返回编码句柄；无效/已释放槽位返回 0
+     * @note generation 从 1 起。0 保留 = 未编码句柄，永不匹配活槽位——
+     *       强制所有句柄生产者走本接口，杜绝裸 id 句柄。
+     */
+    u64 MakeHandle(u32 id) {
+        std::shared_lock<std::shared_mutex> lock(_mutex);
+        if (id >= _generations.size() || !_pool.is_valid(id)) return 0;
+        return (static_cast<u64>(_generations[id]) << 32) | static_cast<u64>(id);
+    }
+
+    /**
+     * @brief 代际校验解析
+     * @return 活对象指针；句柄过期（代际不符/槽位空/未编码 gen=0）返回 nullptr
+     * @note 过期命中在 PRIMAL_RHI_HANDLE_DIAG=1 时打 stderr 一行（默认关）。
+     */
+    T* GetChecked(u64 handle) {
+        const u32 id = static_cast<u32>(handle);
+        const u32 gen = static_cast<u32>(handle >> 32);
+        std::shared_lock<std::shared_mutex> lock(_mutex);
+        if (id >= _pool.capacity() || !_pool.is_valid(id)) return nullptr;
+        if (id >= _generations.size() || gen != _generations[id]) {
+            if (StaleHandleDiagEnabled()) {
+                std::fprintf(stderr,
+                    "[RHI-HANDLE] stale %s handle id=%u gen=%u currentGen=%u ra=%p — resolving null\n",
+                    typeid(T).name(), id, gen,
+                    (id < _generations.size()) ? _generations[id] : 0u,
+                    __builtin_return_address(0));
+            }
+            return nullptr;
+        }
+        return &_pool[id];
+    }
+
+    /**
+     * @brief 句柄代际有效性查询（不解析对象）
+     */
+    bool IsValidHandle(u64 handle) const {
+        const u32 id = static_cast<u32>(handle);
+        const u32 gen = static_cast<u32>(handle >> 32);
+        std::shared_lock<std::shared_mutex> lock(_mutex);
+        return id < _pool.capacity() && id < _generations.size() &&
+               _pool.is_valid(id) && gen == _generations[id];
+    }
+
+    /**
+     * @brief retire 队列长度（诊断用）
+     */
+    void PendingRetireCount(u64& outCount) const {
+        std::shared_lock<std::shared_mutex> lock(_mutex);
+        outCount = _pending_retires.size();
+    }
+
+    /**
+     * @brief R12-3.4: 延迟回收——把槽位排入 retire 队列
+     * @details 槽位对象在 lag 到期前保持存活（Get 仍返回原对象，与基线
+     *          「未释放」期间语义一致）；到期后由 TickRetires 执行
+     *          FreeInternal（析构 + generation 推进）。重复 Retire 与
+     *          Retire 后又显式 Free 均安全（tick 时 is_valid 复查）。
+     */
+    void Retire(u32 id) {
+        std::unique_lock<std::shared_mutex> lock(_mutex);
+        if (id >= _pool.capacity() || !_pool.is_valid(id)) return;
+        for (const auto& p : _pending_retires) {
+            if (p.id == id) return;
+        }
+        _pending_retires.push_back({id, _retire_frame_});
+    }
+
+    /**
+     * @brief 推进 retire 时钟并回收到期槽位（不 arm Free() 延迟）
+     * @param frame 单调递增的帧号（VulkanDevice::beginFrameImpl 每帧驱动）
+     */
+    void TickRetires(u64 frame) {
+        std::unique_lock<std::shared_mutex> lock(_mutex);
+        _retire_frame_ = frame;
+        u32 reclaimed = 0;
+        for (auto it = _pending_retires.begin(); it != _pending_retires.end();) {
+            if (frame >= it->frame + kRetireFreeLag) {
+                if (_pool.is_valid(it->id)) {
+                    FreeInternal(it->id);
+                    ++reclaimed;
+                }
+                it = _pending_retires.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (reclaimed > 0 && StaleHandleDiagEnabled()) {
+            std::fprintf(stderr, "[RHI-HANDLE] TickRetires frame=%llu reclaimed=%u pending=%zu\n",
+                         static_cast<unsigned long long>(frame), reclaimed, _pending_retires.size());
         }
     }
 
@@ -255,9 +379,17 @@ private:
         if (id >= _pool.capacity()) return;
 
         _pool.remove(id);
+        // R12-3.4: 槽位回收即推进代际——这一生命周期的所有句柄从现在起过期。
+        if (id < _generations.size()) ++_generations[id];
         _stats.totalFreed++;
         _stats.activeAllocations--;
         _stats.totalBytesAllocated -= sizeof(T);
+    }
+
+    /// R12-3.4: 过期句柄诊断开关（默认关；见 GetChecked）
+    static bool StaleHandleDiagEnabled() {
+        static const bool on = std::getenv("PRIMAL_RHI_HANDLE_DIAG") != nullptr;
+        return on;
     }
 
     // R1/T0.13: deferred slot release state
@@ -266,6 +398,12 @@ private:
     bool _deferred_release_armed_ = false;       // armed on first TickDeferredRelease
     u64 _deferred_frame_ = 0;
     std::vector<PendingFree> _pending_frees;     // guarded by _mutex
+
+    // R12-3.4: retire 队列（独立时钟，不 arm Free() 延迟）+ 槽位代际平行数组
+    static constexpr u64 kRetireFreeLag = 3;     // frames a retired slot stays alive
+    std::vector<PendingFree> _pending_retires;   // guarded by _mutex
+    u64 _retire_frame_ = 0;                      // retire 时钟（TickRetires 推进）
+    std::vector<u32> _generations;               // guarded by _mutex; slot id → generation
 
     primal::utl::free_list<T> _pool;
     mutable std::shared_mutex _mutex;

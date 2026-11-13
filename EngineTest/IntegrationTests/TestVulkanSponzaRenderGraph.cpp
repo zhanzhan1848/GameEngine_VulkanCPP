@@ -3444,7 +3444,20 @@ void TestVulkanSponzaRenderGraph::Run() {
     pipeline_->CommitVarianceFenceFrame(frameIdx,cmdHandle,submitInfo.signalFence,frameCount_,varianceSubmissionTicket,submitted && varianceCommandEnded);
     const double submitMs = timingEnabled ? std::chrono::duration<double,std::milli>(FrameClock::now()-submitStart).count() : 0.0;
     const auto presentStart = timingEnabled ? FrameClock::now() : FrameClock::time_point{};
-    { primal::graphics::cpu_stall_audit::Scope phase("frame.end");renderSystem_.EndFrame(renderDoneSem); }
+    // R12-3.2：submit 失败 fail-closed。此前 submitted 只被记账、从不检查——
+    // submitImpl 失败（device lost / 驱动错误）时 renderDoneSem 永不被 signal，
+    // EndFrame(renderDoneSem) 仍带着它去 Present（等待一个永远不会 signal 的
+    // semaphore，驱动侧行为未定义，是显存耗尽场景下的候选崩溃/挂死路径）。
+    // 失败帧改走无信号量 Present（旧 X1 前路径）：跳过 GPU-GPU 同步但不制造
+    // 悬空 semaphore 等待；槽位推进与 GC 照常。设备真实失效时后续帧的
+    // acquire/submit 会继续报错并最终由 watchdog 收口。
+    if (submitted) {
+        { primal::graphics::cpu_stall_audit::Scope phase("frame.end");renderSystem_.EndFrame(renderDoneSem); }
+    } else {
+        std::cerr << "[SponzaRun] frame " << frameCount_
+                  << " submit FAILED — presenting without render-done semaphore (fail-closed; check stderr above for the vkQueueSubmit error)" << std::endl;
+        { primal::graphics::cpu_stall_audit::Scope phase("frame.end");renderSystem_.EndFrame(); }
+    }
     const double presentMs = timingEnabled ? std::chrono::duration<double,std::milli>(FrameClock::now()-presentStart).count() : 0.0;
     if (timingEnabled) {
         const auto& f=renderSystem_.GetFrameTiming();const auto& s=pipeline_->GetStats();

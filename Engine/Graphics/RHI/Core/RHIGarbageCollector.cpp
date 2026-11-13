@@ -9,6 +9,8 @@
 #include "RHIGarbageCollector.h"
 #include <iostream>
 #include <vector>
+#include <cstdio>
+#include <cstdlib>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi {
@@ -66,7 +68,7 @@ void RHIGarbageCollector::Update(u64 completedFrame, double maxDurationMs) {
     // Must use std::vector, not utl::vector — std::function is non-trivially
     // copyable and utl::vector's realloc-based growth would corrupt it.
     std::vector<std::function<void()>> callbacksToRun;
-    
+
     // 1. Collect all valid candidates
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -75,7 +77,7 @@ void RHIGarbageCollector::Update(u64 completedFrame, double maxDurationMs) {
         // 队列是按时间顺序排列的，所以只需检查头部
         while (!garbageQueue_.empty()) {
             const auto& item = garbageQueue_.front();
-            
+
             // 如果项目的帧索引小于等于已完成的帧索引，说明可以安全销毁
             if (item.frameIndex <= completedFrame) {
                 if (item.callback) {
@@ -86,6 +88,16 @@ void RHIGarbageCollector::Update(u64 completedFrame, double maxDurationMs) {
             } else {
                 // 遇到第一个未完成的帧，后面的肯定也未完成（因为是按序插入）
                 break;
+            }
+        }
+        // R12-3.4 诊断（默认关）：批量销毁事件的弹出量/剩余量（单帧小批量不打，
+        // 避免逐帧刷屏；批量释放验证时 pop>=100 才落一行）。
+        {
+            static const bool s_gcDiag = std::getenv("PRIMAL_VK_VRAM_DIAG") != nullptr;
+            if (s_gcDiag && callbacksToRun.size() >= 100) {
+                std::fprintf(stderr, "[R12-3.4] GC Update completedFrame=%llu pop=%zu pending=%zu\n",
+                             static_cast<unsigned long long>(completedFrame),
+                             callbacksToRun.size(), garbageQueue_.size());
             }
         }
     }
