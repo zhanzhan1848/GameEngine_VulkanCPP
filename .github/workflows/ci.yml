@@ -575,7 +575,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential libc6-dev libvulkan-dev libx11-dev
+            build-essential libc6-dev libvulkan-dev libx11-dev glslang-tools
           ${{ matrix.compiler }} --version
 
       - name: 工具链健全性探测

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include "Components/ComponentsCommon.h"
 #include "Components/ComponentTraits.h"
 #include "TransformComponent.h"

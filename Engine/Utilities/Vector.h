@@ -1,5 +1,6 @@
 #pragma once
 #include "CommonHeaders.h"
+#include <cstdlib>
 #include <type_traits>
 
 namespace primal::utl
