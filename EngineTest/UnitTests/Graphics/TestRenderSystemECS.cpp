@@ -1,4 +1,5 @@
 #include "TestFramework.h"
+#include "../../Utils/TestEnv.h"
 #include "Graphics/RHI/Systems/RenderSystem.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
@@ -296,7 +297,12 @@ public:
 };
 
 int main() {
+    // R9：与 TestRenderSystem.cpp 同款 shader 根锚定（Windows 八测 draw call
+    // 计数失败的根因链：SSR/Blur shader 加载失败 → ForwardRenderer init 失败
+    // → 渲染路径空转）。PRIMAL_SHADER_ROOT 为 ResolveShaderPath 第一优先级；
+    // macOS 指向同一源码根，行为零变化。
+    primaltest::SetEnv("PRIMAL_SHADER_ROOT", PRIMAL_TEST_SHADER_ROOT);
     TestRenderSystemECS test;
-    test.RunAllTests();
-    return 0;
+    const auto runStats = test.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

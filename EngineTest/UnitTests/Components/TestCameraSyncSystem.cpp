@@ -60,7 +60,7 @@ static bool matrices_equal(const primal::math::m4x4& a, const primal::math::m4x4
 {
     for (u32 col = 0; col < 4; ++col) {
         for (u32 row = 0; row < 4; ++row) {
-            if (std::abs(a.columns[col][row] - b.columns[col][row]) > eps) return false;
+            if (std::abs(primal::math::elem(a, col, row) - primal::math::elem(b, col, row)) > eps) return false;
         }
     }
     return true;
@@ -71,20 +71,20 @@ static bool matrices_equal(const primal::math::m4x4& a, const primal::math::m4x4
 static primal::math::m4x4 make_baseline_view()
 {
     primal::math::m4x4 m{};
-    m.columns[0] = {2.0f, 0.0f, 0.0f, 0.0f};
-    m.columns[1] = {0.0f, 2.0f, 0.0f, 0.0f};
-    m.columns[2] = {0.0f, 0.0f, 2.0f, 0.0f};
-    m.columns[3] = {9.0f, 9.0f, 9.0f, 1.0f};
+    primal::math::set_column(m, 0, primal::math::v4{2.0f, 0.0f, 0.0f, 0.0f});
+    primal::math::set_column(m, 1, primal::math::v4{0.0f, 2.0f, 0.0f, 0.0f});
+    primal::math::set_column(m, 2, primal::math::v4{0.0f, 0.0f, 2.0f, 0.0f});
+    primal::math::set_column(m, 3, primal::math::v4{9.0f, 9.0f, 9.0f, 1.0f});
     return m;
 }
 
 static primal::math::m4x4 make_baseline_proj()
 {
     primal::math::m4x4 m{};
-    m.columns[0] = {3.0f, 0.0f, 0.0f, 0.0f};
-    m.columns[1] = {0.0f, 3.0f, 0.0f, 0.0f};
-    m.columns[2] = {0.0f, 0.0f, 3.0f, 0.0f};
-    m.columns[3] = {0.0f, 0.0f, 0.0f, 1.0f};
+    primal::math::set_column(m, 0, primal::math::v4{3.0f, 0.0f, 0.0f, 0.0f});
+    primal::math::set_column(m, 1, primal::math::v4{0.0f, 3.0f, 0.0f, 0.0f});
+    primal::math::set_column(m, 2, primal::math::v4{0.0f, 0.0f, 3.0f, 0.0f});
+    primal::math::set_column(m, 3, primal::math::v4{0.0f, 0.0f, 0.0f, 1.0f});
     return m;
 }
 
@@ -140,13 +140,13 @@ TestResult TestOneCameraOverwritesView()
     // after inversion. The convention depends on transform::get_transform_matrices —
     // inverse world places camera world position with negation in col 3 of view matrix.
     // Sanity check: col 3 z-component should be non-zero (translation present).
-    const f32 view_col3_z = view.GetViewMatrix().columns[3][2];
+    const f32 view_col3_z = primal::math::elem(view.GetViewMatrix(), 3, 2);
     TEST_ASSERT(std::abs(view_col3_z) > 0.001f, "View matrix translation should reflect camera position");
 
     // Projection matrix at (col 1, row 1) = f = 1/tan(fov/2). For fov=1.0:
     // f = 1/tan(0.5) ≈ 1.8305
     const f32 expected_f = 1.0f / std::tan(0.5f);
-    const f32 proj_11 = view.GetProjectionMatrix().columns[1][1];
+    const f32 proj_11 = primal::math::elem(view.GetProjectionMatrix(), 1, 1);
     TEST_ASSERT(std::abs(proj_11 - expected_f) < 0.001f,
                 "Proj [1][1] should be 1/tan(fov/2)");
 
@@ -185,7 +185,7 @@ TestResult TestMultipleCamerasFirstWins()
 
     // First camera's FOV=0.5 → f = 1/tan(0.25) ≈ 3.916
     const f32 expected_first_f = 1.0f / std::tan(0.25f);
-    const f32 proj_11 = view.GetProjectionMatrix().columns[1][1];
+    const f32 proj_11 = primal::math::elem(view.GetProjectionMatrix(), 1, 1);
     TEST_ASSERT(std::abs(proj_11 - expected_first_f) < 0.001f,
                 "Proj [1][1] should match FIRST camera's FOV (first wins)");
 

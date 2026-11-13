@@ -10,6 +10,11 @@
 //   - Static / Immutable / 其它 → DEFAULT heap，初始 COMMON（buffer 的
 //     COMMON→任意状态 promotion 规则使其读/写使用零显式 barrier，提交边界
 //     自动衰减回 COMMON——因此 buffer 不进 D3D12StateTracker）
+//   - UAV 路由（R19-1）：DEFAULT 堆 + bindFlags 显式 Storage/
+//     UnorderedAccess 位 → 资源 Flags 追加 ALLOW_UNORDERED_ACCESS
+//     （CreateUnorderedAccessView 契约）。UAV 标志与 UPLOAD/READBACK 堆
+//     互斥故不路由；带标志资源失去 simultaneous-access 隐式提升/衰减，
+//     其 UAV 写/拷贝源读取的状态转换由调用方经 StateTracker 显式化。
 //
 // UpdateData 路由：UPLOAD heap → 直接 memcpy；DEFAULT heap → 设备上传环
 // （帧内 QueueCopyBuffer 下一命令缓冲编码；帧外 FlushBlocking 阻塞）。

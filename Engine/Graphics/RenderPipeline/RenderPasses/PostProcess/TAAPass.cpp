@@ -46,11 +46,11 @@ static RasterHistory s_RasterHistory[MAX_FRAMES];
 static u64 s_ResetGeneration=0;
 
 static math::m4x4 ClipJitter(math::v2 jitter) {
-    math::m4x4 j{};
-    for (int i=0;i<4;++i) j.columns[i][i]=1.0f;
-    j.columns[3].x=jitter.x;
-    j.columns[3].y=jitter.y;
-    return j;
+    // Identity + jitter translation column（原实现：零矩阵→对角置 1→平移列写 jitter）。
+    return math::make_m4x4(math::v4{1.f, 0.f, 0.f, 0.f},
+                           math::v4{0.f, 1.f, 0.f, 0.f},
+                           math::v4{0.f, 0.f, 1.f, 0.f},
+                           math::v4{jitter.x, jitter.y, 0.f, 1.f});
 }
 static u32 s_TexWidth = 0;                  // dimensions the history textures were
 static u32 s_TexHeight = 0;                 // created with — recreate on resize
@@ -98,13 +98,17 @@ static std::string LoadShaderSource(const std::string& path) {
 
 // Platform-branched shader loader.
 //   Vulkan: load precompiled .comp.spv bytecode (hand-written GLSL).
+//   D3D12: load the DXIL .cso mirror (EngineTest/shaders/d3d12/Lumen/TAA.comp.cso,
+//          spirv-cross 包装入口恒 "main"——D3D12Shader 忽略 entry 名)。
 //   Metal/Dawn: load source text (.metal / .wgsl) for runtime compilation.
 static std::vector<u8> LoadShaderBytes(RHIPlatform platform, bool* outIsBinary) {
-    *outIsBinary = (platform == RHIPlatform::Vulkan);
+    *outIsBinary = (platform == RHIPlatform::Vulkan || platform == RHIPlatform::D3D12);
 
-    if (platform == RHIPlatform::Vulkan) {
+    if (platform == RHIPlatform::Vulkan || platform == RHIPlatform::D3D12) {
         // Hand-written GLSL compiled to Lumen/TAA.comp.spv
-        const std::string relPath = "Engine/Graphics/Vulkan/shaders/Lumen/TAA.comp.spv";
+        const std::string relPath = (platform == RHIPlatform::D3D12)
+            ? "EngineTest/shaders/d3d12/Lumen/TAA.comp.cso"
+            : "Engine/Graphics/Vulkan/shaders/Lumen/TAA.comp.spv";
         const std::vector<std::string> candidates = {
             relPath,
             utils::ShaderRegistry::ResolveShaderPath(relPath),
@@ -118,7 +122,7 @@ static std::vector<u8> LoadShaderBytes(RHIPlatform platform, bool* outIsBinary) 
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) continue;
             return bytecode;
         }
-        PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Failed to load SPIR-V: Lumen/TAA.comp.spv" << std::endl;
+        PRIMAL_LOG_STREAM(Error, "Render") << "[TAA] Failed to load bytecode: " << relPath << std::endl;
         return {};
     }
 
@@ -318,11 +322,14 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
     RGResourceHandle currDepthRG;
     RGResourceHandle prevDepthRG;
     if (depthActive) {
-        currDepthRG = graph.GetDevice().GetPlatform() == RHIPlatform::Vulkan && depth->current_depth_rg.IsValid()
+        const bool vkOrD3d12 = graph.GetDevice().GetPlatform() == RHIPlatform::Vulkan ||
+                               graph.GetDevice().GetPlatform() == RHIPlatform::D3D12;
+        currDepthRG = vkOrD3d12 && depth->current_depth_rg.IsValid()
             ? depth->current_depth_rg : graph.ImportResource("TAA_CurrDepth", depth->currDepth);
-        if (graph.GetDevice().GetPlatform() == RHIPlatform::Vulkan)
+        if (vkOrD3d12)
             prevDepthRG = graph.ImportResource("TAA_PrevDepth",depth->prevDepth);
-    } else if (depth && graph.GetDevice().GetPlatform() == RHIPlatform::Vulkan) {
+    } else if (depth && (graph.GetDevice().GetPlatform() == RHIPlatform::Vulkan ||
+                         graph.GetDevice().GetPlatform() == RHIPlatform::D3D12)) {
         currDepthRG = depth->current_depth_rg;
     }
 
@@ -399,7 +406,10 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
 
             auto& device = context.graph->GetDevice();
             auto* cmd = context.cmdBuffer;
-            const bool vulkan = device.GetPlatform() == RHIPlatform::Vulkan;
+            // D3D12 与 Vulkan 同形：raster-jitter 校验/ClipJitter 参数走同一
+            // 数值路径（仅 lumencompare 诊断受 env 门控，默认关）。
+            const bool vulkan = device.GetPlatform() == RHIPlatform::Vulkan ||
+                                device.GetPlatform() == RHIPlatform::D3D12;
             math::v2 actualJitter{};
             bool actualRasterValid = false;
             bool executionHistoryValid = histValid;

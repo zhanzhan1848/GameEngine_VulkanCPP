@@ -1262,7 +1262,7 @@ EDITOR_INTERFACE u32 GIGizmoGetSelectedVolume() {
     return (sel == gi_gizmo::kNoVolumeSelected) ? 0xFFFFFFFFu : sel;
 }
 
-// invViewProj: 16 个 float，列主序（m.columns[c] = 第 c 列）。
+// invViewProj: 16 个 float，列主序（math::column(m, c) = 第 c 列）。
 // viewOrigin: 3 个 float。outVolumeIndex/outTMin 可为 null。
 EDITOR_INTERFACE u32 GIGizmoPick(f32 screenX, f32 screenY,
                                  u32 viewportW, u32 viewportH,
@@ -1271,8 +1271,8 @@ EDITOR_INTERFACE u32 GIGizmoPick(f32 screenX, f32 screenY,
     if (!invViewProj || !viewOrigin) return 0;
     primal::math::m4x4 m{};
     for (u32 c = 0; c < 4; ++c)
-        m.columns[c] = primal::math::v4{invViewProj[c * 4 + 0], invViewProj[c * 4 + 1],
-                                invViewProj[c * 4 + 2], invViewProj[c * 4 + 3]};
+        primal::math::set_column(m, c, primal::math::v4{invViewProj[c * 4 + 0], invViewProj[c * 4 + 1],
+                                invViewProj[c * 4 + 2], invViewProj[c * 4 + 3]});
     const primal::math::v3 origin{viewOrigin[0], viewOrigin[1], viewOrigin[2]};
 
     auto* p = GetStdPipeline();

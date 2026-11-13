@@ -85,10 +85,10 @@ struct DeviceFixture {
 m4x4 make_identity_m4x4() {
     m4x4 r{};
     std::memset(&r, 0, sizeof(r));
-    r.columns[0][0] = 1.0f;
-    r.columns[1][1] = 1.0f;
-    r.columns[2][2] = 1.0f;
-    r.columns[3][3] = 1.0f;
+    set_elem(r, 0, 0, 1.0f);
+    set_elem(r, 1, 1, 1.0f);
+    set_elem(r, 2, 2, 1.0f);
+    set_elem(r, 3, 3, 1.0f);
     return r;
 }
 
@@ -97,24 +97,24 @@ m4x4 make_identity_m4x4() {
 /// Uses glm-style convention: zaxis = normalize(eye - target) (points backward).
 m4x4 make_view_m4x4(v3 eye, v3 target, v3 up) {
     // zaxis points from target toward eye (backward, +z in view space).
-    v3 diff = {eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]};
-    float zl = std::sqrt(diff[0]*diff[0] + diff[1]*diff[1] + diff[2]*diff[2]);
+    v3 diff = {eye.x - target.x, eye.y - target.y, eye.z - target.z};
+    float zl = std::sqrt(diff.x*diff.x + diff.y*diff.y + diff.z*diff.z);
     if (zl < 1e-8f) zl = 1.0f;
-    v3 zaxis = {diff[0]/zl, diff[1]/zl, diff[2]/zl};
+    v3 zaxis = {diff.x/zl, diff.y/zl, diff.z/zl};
     // xaxis = normalize(cross(up, zaxis))
     v3 x = {
-        up[1]*zaxis[2] - up[2]*zaxis[1],
-        up[2]*zaxis[0] - up[0]*zaxis[2],
-        up[0]*zaxis[1] - up[1]*zaxis[0],
+        up.y*zaxis.z - up.z*zaxis.y,
+        up.z*zaxis.x - up.x*zaxis.z,
+        up.x*zaxis.y - up.y*zaxis.x,
     };
-    float xl = std::sqrt(x[0]*x[0] + x[1]*x[1] + x[2]*x[2]);
+    float xl = std::sqrt(x.x*x.x + x.y*x.y + x.z*x.z);
     if (xl < 1e-8f) xl = 1.0f;
-    v3 xaxis = {x[0]/xl, x[1]/xl, x[2]/xl};
+    v3 xaxis = {x.x/xl, x.y/xl, x.z/xl};
     // yaxis = cross(zaxis, xaxis) (already unit-length by construction)
     v3 yaxis = {
-        zaxis[1]*xaxis[2] - zaxis[2]*xaxis[1],
-        zaxis[2]*xaxis[0] - zaxis[0]*xaxis[2],
-        zaxis[0]*xaxis[1] - zaxis[1]*xaxis[0],
+        zaxis.y*xaxis.z - zaxis.z*xaxis.y,
+        zaxis.z*xaxis.x - zaxis.x*xaxis.z,
+        zaxis.x*xaxis.y - zaxis.y*xaxis.x,
     };
 
     // View matrix (column-major, glm::lookAtRH)
@@ -123,25 +123,25 @@ m4x4 make_view_m4x4(v3 eye, v3 target, v3 up) {
     // Row 2: zaxis.x, zaxis.y, zaxis.z, -dot(zaxis, eye)
     // Row 3: 0,0,0,1
     m4x4 m = make_identity_m4x4();
-    m.columns[0][0] = xaxis[0];
-    m.columns[0][1] = yaxis[0];
-    m.columns[0][2] = zaxis[0];
-    m.columns[0][3] = 0.0f;
+    set_elem(m, 0, 0, xaxis.x);
+    set_elem(m, 0, 1, yaxis.x);
+    set_elem(m, 0, 2, zaxis.x);
+    set_elem(m, 0, 3, 0.0f);
 
-    m.columns[1][0] = xaxis[1];
-    m.columns[1][1] = yaxis[1];
-    m.columns[1][2] = zaxis[1];
-    m.columns[1][3] = 0.0f;
+    set_elem(m, 1, 0, xaxis.y);
+    set_elem(m, 1, 1, yaxis.y);
+    set_elem(m, 1, 2, zaxis.y);
+    set_elem(m, 1, 3, 0.0f);
 
-    m.columns[2][0] = xaxis[2];
-    m.columns[2][1] = yaxis[2];
-    m.columns[2][2] = zaxis[2];
-    m.columns[2][3] = 0.0f;
+    set_elem(m, 2, 0, xaxis.z);
+    set_elem(m, 2, 1, yaxis.z);
+    set_elem(m, 2, 2, zaxis.z);
+    set_elem(m, 2, 3, 0.0f);
 
-    m.columns[3][0] = -(xaxis[0]*eye[0] + xaxis[1]*eye[1] + xaxis[2]*eye[2]);
-    m.columns[3][1] = -(yaxis[0]*eye[0] + yaxis[1]*eye[1] + yaxis[2]*eye[2]);
-    m.columns[3][2] = -(zaxis[0]*eye[0] + zaxis[1]*eye[1] + zaxis[2]*eye[2]);
-    m.columns[3][3] = 1.0f;
+    set_elem(m, 3, 0, -(xaxis.x*eye.x + xaxis.y*eye.y + xaxis.z*eye.z));
+    set_elem(m, 3, 1, -(yaxis.x*eye.x + yaxis.y*eye.y + yaxis.z*eye.z));
+    set_elem(m, 3, 2, -(zaxis.x*eye.x + zaxis.y*eye.y + zaxis.z*eye.z));
+    set_elem(m, 3, 3, 1.0f);
     return m;
 }
 
@@ -151,11 +151,11 @@ m4x4 make_perspective_m4x4(float fov_y, float aspect, float zNear, float zFar) {
     float f = 1.0f / std::tan(fov_y * 0.5f);
     m4x4 r{};
     std::memset(&r, 0, sizeof(r));
-    r.columns[0][0] = f / aspect;
-    r.columns[1][1] = f;
-    r.columns[2][2] = (zFar + zNear) / (zNear - zFar);   // OpenGL convention
-    r.columns[2][3] = -1.0f;
-    r.columns[3][2] = (2.0f * zFar * zNear) / (zNear - zFar);
+    set_elem(r, 0, 0, f / aspect);
+    set_elem(r, 1, 1, f);
+    set_elem(r, 2, 2, (zFar + zNear) / (zNear - zFar));   // OpenGL convention
+    set_elem(r, 2, 3, -1.0f);
+    set_elem(r, 3, 2, (2.0f * zFar * zNear) / (zNear - zFar));
     return r;
 }
 

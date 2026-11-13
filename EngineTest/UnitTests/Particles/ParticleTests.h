@@ -101,7 +101,7 @@ inline void test_pool_data_access() {
     const particle_data& cp = pool.get(idx);
     assert(cp.position.x == 1.0f);
     assert(cp.velocity.w == 2.0f);
-    assert(cp.color.g == 0.5f);
+    assert(cp.color.y == 0.5f);
     
     std::cout << "  PASS: Particle data access" << std::endl;
 }

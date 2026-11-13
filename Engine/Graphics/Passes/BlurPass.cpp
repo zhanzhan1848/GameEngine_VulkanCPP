@@ -6,7 +6,20 @@
 
 namespace primal::graphics {
 
-BlurPass::BlurPass() {}
+BlurPass::BlurPass() {
+    // r9: Initialize() may fail before the per-frame resources are created
+    // (e.g. shader file missing on a fresh D3D12 tree); Shutdown() must then
+    // see INVALID handles instead of uninitialized garbage. Garbage handles
+    // that reach device_->Destroy*() poison free_list slots (double remove
+    // re-runs ~T() over 0xCC-stamped memory, clobbered vptr -> AV).
+    for (u32 i = 0; i < rhi::MAX_FRAMES_IN_FLIGHT; ++i) {
+        paramBuffer_[i] = rhi::handles::INVALID_RESOURCE;
+        paramBufferMapped_[i] = nullptr;
+        for (u32 j = 0; j < MAX_SETS_PER_FRAME; ++j) {
+            setPool_[i][j] = rhi::handles::INVALID_DESCRIPTOR_SET;
+        }
+    }
+}
 
 BlurPass::~BlurPass() {
     Shutdown();
@@ -21,12 +34,11 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     std::string shaderPath = utils::ShaderRegistry::GetShaderPath(platform, "BlurPass");
     std::ifstream file(shaderPath, std::ios::ate | std::ios::binary);
     if (!file.is_open()) {
+        // Portable fallback: $PRIMAL_SHADER_ROOT -> cwd ancestors -> exe
+        // ancestors (ShaderRegistry). No hardcoded machine-specific paths —
+        // on failure we report and bail so Shutdown() stays clean.
         shaderPath = utils::ShaderRegistry::ResolveShaderPath(shaderPath);
         file.open(shaderPath, std::ios::ate | std::ios::binary);
-        if (!file.is_open()) {
-            shaderPath = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/.worktrees/avalonia-migration/" + shaderPath;
-            file.open(shaderPath, std::ios::ate | std::ios::binary);
-        }
     }
 
     if (!file.is_open()) {
@@ -35,15 +47,30 @@ bool BlurPass::Initialize(rhi::RHIDeviceBase* device) {
     }
     
     size_t fileSize = (size_t)file.tellg();
-    // SPIR-V (Vulkan) is 4-byte-aligned binary — do NOT append a null byte
-    // (2344+1=2345 breaks the alignment and the driver rejects the module).
+    // Binary formats must be handed to CreateShader at their exact encoded
+    // size: SPIR-V (Vulkan) is 4-byte-aligned and rejects a trailing null
+    // byte; DXBC (.cso, D3D12) must match the container's encoded size —
+    // fileSize+1 fails CreateComputePipelineState with 0x80070057 ("Encoded
+    // Compute Shader size doesn't match specified size", r9-win BlurPass).
     // Metal/Dawn source text keeps the null terminator for runtime compile.
-    const bool isBinarySpirV = (platform == rhi::RHIPlatform::Vulkan);
-    size_t codeSize = isBinarySpirV ? fileSize : fileSize + 1;
+    // Sniff the leading magic so the branch follows the actual file content
+    // (03 02 23 07 = SPIR-V little-endian, "DXBC" = D3D12 container).
+    char magic[4] = {};
+    if (fileSize >= 4) {
+        file.seekg(0);
+        file.read(magic, sizeof(magic));
+        file.clear();
+    }
+    const bool isBinarySpirV = fileSize >= 4 &&
+        magic[0] == '\x03' && magic[1] == '\x02' && magic[2] == '\x23' && magic[3] == '\x07';
+    const bool isBinaryDxbc = fileSize >= 4 &&
+        magic[0] == 'D' && magic[1] == 'X' && magic[2] == 'B' && magic[3] == 'C';
+    const bool isBinaryShader = isBinarySpirV || isBinaryDxbc;
+    size_t codeSize = isBinaryShader ? fileSize : fileSize + 1;
     utl::vector<char> buffer(codeSize);
     file.seekg(0);
     file.read(buffer.data(), fileSize);
-    if (!isBinarySpirV) buffer[fileSize] = '\0';
+    if (!isBinaryShader) buffer[fileSize] = '\0';
     file.close();
 
     computeShader_ = device_->CreateShader(buffer.data(), codeSize, rhi::ShaderStage::Compute, "blurCS");

@@ -1,0 +1,527 @@
+ContentTools/ContentTools.cpp	ContentTools
+ContentTools/Geometry.cpp	ContentTools
+ContentTools/GltfImporter.cpp	ContentTools
+ContentTools/ObjImporter.cpp	ContentTools
+ContentTools/PrimitiveMesh.cpp	ContentTools
+ContentTools/common/CardBake.cpp	ContentTools
+ContentTools/common/CardSurfaceBake.cpp	ContentTools
+ContentTools/common/MeshConverters.cpp	ContentTools
+ContentTools/common/ProcessableMesh.cpp	ContentTools
+ContentTools/common/SDF.cpp	ContentTools
+ContentTools/common/VTBaker.cpp	EngineTest/integration
+Engine/Audio/AudioSpatial.cpp	Engine/common
+Engine/Audio/WavInfo.cpp	Engine/common
+Engine/Components/Camera.cpp	Engine/common
+Engine/Components/Cluster.cpp	Engine/common
+Engine/Components/Collider.cpp	Engine/common
+Engine/Components/CommandBuffer.cpp	Engine/common
+Engine/Components/Entity.cpp	Engine/common
+Engine/Components/Geometry.cpp	Engine/common
+Engine/Components/Light.cpp	Engine/common
+Engine/Components/Material.cpp	Engine/common
+Engine/Components/Mesh.cpp	Engine/common
+Engine/Components/Particle.cpp	Engine/common
+Engine/Components/Pipeline.cpp	Engine/common
+Engine/Components/RigidBody.cpp	Engine/common
+Engine/Components/Script.cpp	Engine/common
+Engine/Components/ScriptFilesystem.cpp	Engine/common
+Engine/Components/ScriptState.cpp	Engine/common
+Engine/Components/Transform.cpp	Engine/common
+Engine/Content/AsyncResourceLoader.cpp	Engine/common
+Engine/Content/ContentLoaderMac.cpp	Engine/common
+Engine/Content/ContentLoaderWin32.cpp	Engine/common
+Engine/Content/ContentToEngine.cpp	Engine/common
+Engine/Content/CookedMeshAdapter.cpp	Engine/common
+Engine/Content/MeshCPU.cpp	Engine/common
+Engine/Core/EngineWin32.cpp	Engine/common
+Engine/Core/MainWin32.cpp	Engine/common
+Engine/Gameplay/GameplayRuntime.cpp	Engine/common
+Engine/Geometry/Geometry.cpp	Engine/common
+Engine/Geometry/GeometryFieldRasterizer.cpp	Engine/common
+Engine/Graphics/Baking/LightmapAtlasPacker.cpp	Engine/graphics
+Engine/Graphics/Baking/LightmapBaker.cpp	Engine/graphics
+Engine/Graphics/Baking/LightmapContainer.cpp	Engine/graphics
+Engine/Graphics/Baking/LightmapPagePng.cpp	Engine/graphics
+Engine/Graphics/Baking/LightmapSceneCollector.cpp	Engine/graphics
+Engine/Graphics/Camera/RenderViewBuilder.cpp	Engine/graphics
+Engine/Graphics/DebugDraw/DebugDrawQueue.cpp	Engine/graphics
+Engine/Graphics/Field/FieldRegistry.cpp	Engine/graphics
+Engine/Graphics/Field/FieldView.cpp	Engine/graphics
+Engine/Graphics/Fluid/FluidRenderPass.cpp	Engine/graphics
+Engine/Graphics/ForwardRenderer.cpp	Engine/graphics
+Engine/Graphics/GraphicsPlatform.cpp	Engine/graphics
+Engine/Graphics/Lighting/LightProbeManager.cpp	Engine/graphics
+Engine/Graphics/Lumen/DDGI/LumenDDGIPass.cpp	Engine/graphics
+Engine/Graphics/Lumen/DDGI/LumenDDGIPassIO.cpp	Engine/graphics
+Engine/Graphics/Lumen/GIPlatformProfile.cpp	Engine/graphics
+Engine/Graphics/Lumen/Reflections/ReflSpecularTrace.cpp	Engine/graphics
+Engine/Graphics/Lumen/SSAO/LumenSSAOPass.cpp	Engine/graphics
+Engine/Graphics/Lumen/SSGI/LumenSSGIPass.cpp	Engine/graphics
+Engine/Graphics/Lumen/ScreenProbes/ScreenProbeGIPass.cpp	Engine/graphics
+Engine/Graphics/Lumen/StaticProbe/StaticProbeBaker.cpp	Engine/graphics
+Engine/Graphics/Lumen/StaticProbe/StaticProbeVolume.cpp	Engine/graphics
+Engine/Graphics/Lumen/SurfaceCache/CardGenerator.cpp	Engine/graphics
+Engine/Graphics/Lumen/SurfaceCache/SurfaceCachePass.cpp	Engine/graphics
+Engine/Graphics/Lumen/SurfaceCache/SurfaceStaticPages.cpp	Engine/graphics
+Engine/Graphics/Lumen/WRC/LumenWRCPass.cpp	Engine/graphics
+Engine/Graphics/Material.cpp	Engine/graphics
+Engine/Graphics/MaterialGraph/MaterialGraph.cpp	Engine/graphics
+Engine/Graphics/MaterialInstance.cpp	Engine/graphics
+Engine/Graphics/MaterialPreview/MaterialPreviewRenderer.cpp	Engine/graphics
+Engine/Graphics/Nanite/ColorHistoryManager.cpp	Engine/graphics
+Engine/Graphics/Nanite/DepthHistoryManager.cpp	Engine/graphics
+Engine/Graphics/Nanite/GPUCullingPipeline.cpp	Engine/graphics
+Engine/Graphics/Nanite/GPUDrivenDrawPipeline.cpp	Engine/graphics
+Engine/Graphics/Nanite/GPUMaterialRegistry.cpp	Engine/graphics
+Engine/Graphics/Nanite/GlobalSDF.cpp	Engine/graphics
+Engine/Graphics/Nanite/HZBSystem.cpp	Engine/graphics
+Engine/Graphics/Nanite/MaterialDataBuilder.cpp	Engine/graphics
+Engine/Graphics/Nanite/MeshletSynthesis.cpp	Engine/graphics
+Engine/Graphics/Nanite/NaniteResourceManager.cpp	Engine/graphics
+Engine/Graphics/Nanite/NaniteStreamingManager.cpp	Engine/graphics
+Engine/Graphics/Nanite/OfflineSDFMerger.cpp	Engine/graphics
+Engine/Graphics/Nanite/Providers/AnalyticSDFProvider.cpp	Engine/graphics
+Engine/Graphics/Nanite/VisibilityBufferSystem.cpp	Engine/graphics
+Engine/Graphics/Neural/NeuralFrameGenBackend.cpp	Engine/graphics
+Engine/Graphics/Neural/NeuralMLXBackend.cpp	Engine/graphics
+Engine/Graphics/Neural/NeuralNRBackend.cpp	Engine/graphics
+Engine/Graphics/Neural/NeuralRuntime.cpp	Engine/graphics
+Engine/Graphics/Neural/NeuralWeights.cpp	Engine/graphics
+Engine/Graphics/PCG/GPU/GPUMesher.cpp	Engine/graphics
+Engine/Graphics/PCG/MarchingCubes.cpp	Engine/graphics
+Engine/Graphics/PCG/PCGGraph.cpp	Engine/graphics
+Engine/Graphics/ParticleMaterial.cpp	Engine/graphics
+Engine/Graphics/Passes/BlurPass.cpp	Engine/graphics
+Engine/Graphics/Passes/ParticleFXDecalPass.cpp	Engine/graphics
+Engine/Graphics/Passes/ParticleFXLightPass.cpp	Engine/graphics
+Engine/Graphics/Passes/ParticleFXMeshPass.cpp	Engine/graphics
+Engine/Graphics/Passes/ParticleFXRibbonPass.cpp	Engine/graphics
+Engine/Graphics/Passes/ParticlePass.cpp	Engine/graphics
+Engine/Graphics/Passes/SSRPass.cpp	Engine/graphics
+Engine/Graphics/Passes/TAAPass.cpp	Engine/graphics
+Engine/Graphics/RHI/Components/MaterialComponent.cpp	Engine/graphics
+Engine/Graphics/RHI/Components/RenderLayerComponent.cpp	Engine/graphics
+Engine/Graphics/RHI/Components/TextureComponent.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIAdaptiveMemoryPool.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIAllocator.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIBatchRenderer.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHICommand.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIDebug.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIDeterministicPrefetch.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIDevice.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIDeviceFactory.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIEntityManager.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIGPUOptimizer.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIGarbageCollector.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIGpuMesh.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIMemoryPool.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIMpscQueue.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIMultiThreadedCommandGenerator.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIReadbackRing.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHIResource.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHISwapChain.cpp	Engine/graphics
+Engine/Graphics/RHI/Core/RHISystem.cpp	Engine/graphics
+Engine/Graphics/RHI/Platforms/D3D12/D3D12AbiChecks.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12BackendLinks.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12Buffer.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12CommandBuffer.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12DescriptorHeaps.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12Device.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12Fence.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12Format.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12MipGen.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12Pipeline.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12RootSignatureBudget.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12Shader.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12StateMapping.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12StateTracker.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12SwapChain.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12Sync.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12Texture.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/D3D12/D3D12Upload.cpp	Engine/rhi-d3d12
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanBuffer.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanCaptureBridge.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanCommandBuffer.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanDescriptorSet.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanDescriptorSetLayout.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanDevice.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanPassTimestampEntry.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanPipeline.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanPipelineLayout.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanQuery.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanRenderPass.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanSampler.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanShader.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanStagingAllocator.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanSurface_Linux.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanSurface_Win32.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanSurface_macOS.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanSwapChain.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanSync.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Platforms/Vulkan/VulkanTexture.cpp	Engine/rhi-vulkan
+Engine/Graphics/RHI/Systems/RHISceneSynchronizer.cpp	Engine/graphics
+Engine/Graphics/RHI/Systems/RenderSystem.cpp	Engine/graphics
+Engine/Graphics/RHI/Utils/IBLPrecomputer.cpp	Engine/graphics
+Engine/Graphics/RHI/Utils/SamplingUtils.cpp	Engine/graphics
+Engine/Graphics/RHI/Utils/ShadowUtils.cpp	Engine/graphics
+Engine/Graphics/RenderGraph/RenderGraph.cpp	Engine/graphics
+Engine/Graphics/RenderGraph/RenderGraphBuilder.cpp	Engine/graphics
+Engine/Graphics/RenderGraph/RenderGraphDebug.cpp	Engine/graphics
+Engine/Graphics/RenderMesh.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/GIEditorPanel.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/GIVolumeGizmo.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/DebugProbeSphereModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/DeferredLightingModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/EnvironmentVisibilityModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/FinalBlitModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/ForwardSceneRenderer.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/FusionCompositeModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/GIGatherModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/InstanceNormalCache.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/LightmapModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/LineBatchRenderer.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/NeuralCaptureModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/NeuralDebugModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/NeuralDenoiseModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/NeuralFrameGenModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/NeuralNRModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/PassDebugViewModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/PlanarReflectionModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/SCDDGIIntegrationModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/SDFVisualizationModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/Modules/ShadowMapModule.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/Debug/DebugPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/Debug/GeometryDebugPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/ForwardPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/BloomPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/HZBPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/LumenSSGIDawnPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/SSAOPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/SSDOPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/SSGIPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/SSRPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/TAAPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/ToneMappingPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/ToonPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/VelocityPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPasses/Visibility/VisibilityPass.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/RenderPipelineConfig.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/StandardRenderPipeline.cpp	Engine/graphics
+Engine/Graphics/RenderPipeline/StreamingMesh.cpp	Engine/graphics
+Engine/Graphics/RenderProxy.cpp	Engine/graphics
+Engine/Graphics/RenderScene.cpp	Engine/graphics
+Engine/Graphics/RenderTexture.cpp	Engine/graphics
+Engine/Graphics/RenderView.cpp	Engine/graphics
+Engine/Graphics/Renderer.cpp	Engine/graphics
+Engine/Graphics/Scene/CameraSyncSystem.cpp	Engine/graphics
+Engine/Graphics/Scene/LightSyncSystem.cpp	Engine/graphics
+Engine/Graphics/Scene/RenderSceneSnapshot.cpp	Engine/graphics
+Engine/Graphics/Scene/SceneExtractionSystem.cpp	Engine/graphics
+Engine/Graphics/SceneDataAdapter.cpp	Engine/graphics
+Engine/Graphics/ShaderIR/ShaderCompiler.cpp	Engine/graphics
+Engine/Graphics/Utilities/BVH.cpp	Engine/graphics
+Engine/Graphics/Utilities/GeometryBVHStore.cpp	Engine/graphics
+Engine/Graphics/Utilities/GeometryFirstHit.cpp	Engine/graphics
+Engine/Graphics/Utilities/PRTBaker.cpp	Engine/graphics
+Engine/Graphics/Utils/ShaderRegistry.cpp	Engine/graphics
+Engine/Graphics/VirtualTexture/RuntimeVTVolume.cpp	Engine/graphics
+Engine/Graphics/VirtualTexture/VirtualTextureSystem.cpp	Engine/graphics
+Engine/Graphics/Volume/FroxelFogPass.cpp	Engine/graphics
+Engine/Graphics/Volume/SparseParticleVolume.cpp	Engine/graphics
+Engine/Graphics/Volume/VolumePass.cpp	Engine/graphics
+Engine/Graphics/Volume/VolumeRenderer.cpp	Engine/graphics
+Engine/Graphics/WFC/AutoSocketClassifier.cpp	Engine/graphics
+Engine/Graphics/WFC/Nodes/ParametricTileNode.cpp	Engine/graphics
+Engine/Graphics/WFC/ProceduralRoomPack.cpp	Engine/graphics
+Engine/Graphics/WFC/RestartPolicy.cpp	Engine/graphics
+Engine/Graphics/WFC/RuinsMaterialPalette.cpp	Engine/graphics
+Engine/Graphics/WFC/Styles/ProceduralRoomPackStyle.cpp	Engine/graphics
+Engine/Graphics/WFC/Styles/RuinsStyle.cpp	Engine/graphics
+Engine/Graphics/WFC/TileAdjacency.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCConfig.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCDistanceObserver.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCMinEntropyObserver.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCOutput.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCPropagator.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCRandom.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCSocketOps.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCSolveBudget.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCSolver.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCStepBuffer.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCTileCatalog.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCTileRegistry.cpp	Engine/graphics
+Engine/Graphics/WFC/WFCTileStyleRegistry.cpp	Engine/graphics
+Engine/Graphics/WFC/WaveGrid.cpp	Engine/graphics
+Engine/Input/Input.cpp	Engine/platform
+Engine/Input/InputWin32.cpp	Engine/platform-win32
+Engine/JobSystem/JobScheduler.cpp	Engine/common
+Engine/JobSystem/JobSystem.cpp	Engine/common
+Engine/JobSystem/WorkStealingQueue.cpp	Engine/common
+Engine/Navigation/NavGrid.cpp	Engine/common
+Engine/Navigation/NavigationRuntime.cpp	Engine/common
+Engine/Navigation/NavigationService.cpp	Engine/common
+Engine/ParticleFX/core/AttributeStore.cpp	Engine/common
+Engine/ParticleFX/core/EmitterProgram.cpp	Engine/common
+Engine/ParticleFX/core/EventBus.cpp	Engine/common
+Engine/ParticleFX/core/FieldSystem.cpp	Engine/common
+Engine/ParticleFX/core/MeshGeometry.cpp	Engine/common
+Engine/ParticleFX/core/ModuleRegistry.cpp	Engine/common
+Engine/ParticleFX/core/PfxJson.cpp	Engine/common
+Engine/ParticleFX/core/PfxSystem.cpp	Engine/common
+Engine/ParticleFX/host/BudgetManager.cpp	Engine/common
+Engine/ParticleFX/interop/CacheConverters.cpp	Engine/common
+Engine/ParticleFX/interop/EmissiveGI.cpp	Engine/common
+Engine/ParticleFX/interop/GeometryCache.cpp	Engine/common
+Engine/ParticleFX/interop/LegacyPresetConvert.cpp	Engine/common
+Engine/ParticleFX/interop/PhysicsBindings.cpp	Engine/common
+Engine/ParticleFX/interop/PhysicsQuery.cpp	Engine/common
+Engine/ParticleFX/interop/RigidBodySpawner.cpp	Engine/common
+Engine/ParticleFX/modules/BuiltinModules.cpp	Engine/common
+Engine/ParticleFX/modules/FieldModules.cpp	Engine/common
+Engine/ParticleFX/modules/PhysicsCollisionModule.cpp	Engine/common
+Engine/ParticleFX/render/Bridges.cpp	Engine/common
+Engine/ParticleFX/render/Decals.cpp	Engine/common
+Engine/ParticleFX/render/FieldDebugOverlay.cpp	Engine/common
+Engine/ParticleFX/render/RibbonTrail.cpp	Engine/common
+Engine/Particles/CurveEditor.cpp	Engine/common
+Engine/Particles/GPUParticleEmitter.cpp	Engine/common
+Engine/Particles/GPUParticlePass.cpp	Engine/common
+Engine/Particles/GPUParticleSystem.cpp	Engine/common
+Engine/Particles/ParticleCPU.cpp	Engine/common
+Engine/Particles/ParticleCompute.cpp	Engine/common
+Engine/Particles/ParticleCurve.cpp	Engine/common
+Engine/Particles/ParticleEmitter.cpp	Engine/common
+Engine/Particles/ParticlePool.cpp	Engine/common
+Engine/Particles/ParticlePreset.cpp	Engine/common
+Engine/Particles/ParticleSorter.cpp	Engine/common
+Engine/Particles/ParticleSystem.cpp	Engine/common
+Engine/Particles/PresetBrowser.cpp	Engine/common
+Engine/Platform/PlatformWin32.cpp	Engine/platform-win32
+Engine/Platform/Window.cpp	Engine/platform
+Engine/Scripting/LuaBackend.cpp	Engine/common
+Engine/Simulation/BodyEntityMap.cpp	Engine/common
+Engine/Simulation/PhysicsWorld.cpp	Engine/common
+Engine/Simulation/ShapeFactory.cpp	Engine/common
+Engine/Simulation/SimulationDebugDraw.cpp	Engine/common
+Engine/Simulation/SimulationLayers.cpp	Engine/common
+EngineDLL/AssetAPI.cpp	EngineDLL
+EngineDLL/AudioAPI.cpp	EngineDLL
+EngineDLL/CameraAPI.cpp	EngineDLL
+EngineDLL/CaptureAPI.cpp	EngineDLL
+EngineDLL/DebugDrawAPI.cpp	EngineDLL
+EngineDLL/DiagnosticsAPI.cpp	EngineDLL
+EngineDLL/DllMain.cpp	EngineDLL
+EngineDLL/EngineAPI.cpp	EngineDLL
+EngineDLL/EngineAPI_win32.cpp	EngineDLL
+EngineDLL/EngineEventsAPI.cpp	EngineDLL
+EngineDLL/EntityAPI.cpp	EngineDLL
+EngineDLL/FrameAPI.cpp	EngineDLL
+EngineDLL/GameplayAPI.cpp	EngineDLL
+EngineDLL/GeometryAPI.cpp	EngineDLL
+EngineDLL/HeadlessRender.cpp	EngineDLL
+EngineDLL/LightAPI.cpp	EngineDLL
+EngineDLL/LightmapAPI.cpp	EngineDLL
+EngineDLL/MaterialAPI.cpp	EngineDLL
+EngineDLL/MaterialGraphAPI.cpp	EngineDLL
+EngineDLL/MaterialGraphReflectionAPI.cpp	EngineDLL
+EngineDLL/MaterialPreviewAPI.cpp	EngineDLL
+EngineDLL/NavigationAPI.cpp	EngineDLL
+EngineDLL/PCGAPI.cpp	EngineDLL
+EngineDLL/ParticleEmitterAPI.cpp	EngineDLL
+EngineDLL/ParticleFXAPI.cpp	EngineDLL
+EngineDLL/ParticleMaterialAPI.cpp	EngineDLL
+EngineDLL/PhysicsAPI.cpp	EngineDLL
+EngineDLL/PrintAPI.cpp	EngineDLL
+EngineDLL/ProceduralMeshAPI.cpp	EngineDLL
+EngineDLL/RenderPipelineAPI.cpp	EngineDLL
+EngineDLL/RenderTargetAPI.cpp	EngineDLL
+EngineDLL/ResourceAPI.cpp	EngineDLL
+EngineDLL/ScriptAPI.cpp	EngineDLL
+EngineDLL/ShaderCompilerAPI.cpp	EngineDLL
+EngineTest/IntegrationTests/ScriptSelfTestBackendCpp.cpp	EngineTest/unittests
+EngineTest/IntegrationTests/TestRHISponzaShared.cpp	EngineTest/integration
+EngineTest/IntegrationTests/TestSponzaVT.cpp	EngineTest/integration
+EngineTest/UnitTests/Components/TestCameraComponent.cpp	EngineTest/unittests
+EngineTest/UnitTests/Components/TestCameraSyncSystem.cpp	EngineTest/unittests
+EngineTest/UnitTests/Components/TestCommandBufferComponent.cpp	EngineTest/unittests
+EngineTest/UnitTests/Components/TestLightComponent.cpp	EngineTest/unittests
+EngineTest/UnitTests/Components/TestLightSyncSystem.cpp	EngineTest/unittests
+EngineTest/UnitTests/Components/TestPipelineComponent.cpp	EngineTest/unittests
+EngineTest/UnitTests/Content/TestContentMeshFormatRoundTrip.cpp	EngineTest/unittests
+EngineTest/UnitTests/Content/TestCookedMeshAdapter.cpp	EngineTest/unittests
+EngineTest/UnitTests/Content/TestCookedMeshImport.cpp	EngineTest/unittests
+EngineTest/UnitTests/Content/TestVTEXContainer.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/Graphics/RenderGraph/TestRenderGraph.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/RenderGraph/TestRenderGraphDebug.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestDDGIAnalyticHistoryPolicy.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestDDGIFarUpdatePolicy.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestDDGIFitGrid.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestDDGIVarianceFence.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestDebugDrawQueue.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestGeometryFirstHit.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestLightProbe.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestLightmapBaking.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestMaterialAPIExtended.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestMaterialReflection.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestPRTBaker.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestParticleMaterialAPI.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestRealTimePRT.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestRenderMesh.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestRenderProxy.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestRenderScene.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestRenderSceneLight.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestRenderSystem.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestRenderSystemECS.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestRenderSystemIntegration.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestRenderTexture.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestRenderView.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestSCSurfacePages.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestSamplingUtils.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestSceneDataAdapter.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestShadowUtils.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestSphericalHarmonics.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestTriangleNormal.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/TestVulkanPassTimestampTicket.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestAutoSocketClassifier.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestConflictSeedMemory.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestParametricTileNode.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestProceduralRoomPack.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestRestartPolicy.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestTileAdjacency.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestTileAdjacencyBuild.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCCandidateLayout.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCCategory.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCConfig.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCCornerMeshes.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCDistanceObserver.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCObserver.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCOutput.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCProceduralMeshesRuins.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCPropagator.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCRandom.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCRuinsMaterialPalette.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCSocketOps.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCSolveBudget.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCSolver.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCStepBuffer.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCStreamDrain.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCTileCatalog.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCTileLayout.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCTileRegistry.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWFCTileRegistryPacking.cpp	EngineTest/unittests
+EngineTest/UnitTests/Graphics/WFC/TestWaveGrid.cpp	EngineTest/unittests
+EngineTest/UnitTests/Math/TestMathDirectXParity.cpp	EngineTest/unittests
+EngineTest/UnitTests/MpscQueueSimpleTest.cpp	EngineTest/unittests
+EngineTest/UnitTests/Neural/TestNeuralFrameGen.cpp	EngineTest/unittests
+EngineTest/UnitTests/Neural/TestNeuralWeights.cpp	EngineTest/unittests
+EngineTest/UnitTests/ParticleFX/TestParticleFX.cpp	EngineTest/unittests
+EngineTest/UnitTests/Particles/TestParticles.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Components/TestGPUBufferComponent.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Components/TestMaterialComponent.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Components/TestRenderLayerComponent.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Components/TestTextureComponent.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/HashBenchmark.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestComputeWorkgroupExperiment.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestEnvironmentHybridCertificate.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestEnvironmentLeafCoverage.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestImageCompare.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHIAdaptiveMemoryPool.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHIAllocator.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHIBatchRenderer.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHIDeterministicPrefetch.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHIDevice.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHIDeviceFactory.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHIEntityManager.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHIGPUOptimizer.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHIGarbageCollector.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHIMultiThreadedCommandGenerator.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHIQueue.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHIResource.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestRHITypes.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/Core/TestVTSVTRuntime.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanAlbedoMipmaps.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanBloom.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanBlurPass.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanBuffer.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanCommandBuffer.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanComputeBytesLarge.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGICrossRayPairReplay.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGIEqualBoxReplay.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGIGatherConnections.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGIInstancePayloadReplay.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGIIrradianceHistory.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanDDGIMeasuredSampling.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanDepthAspect.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanDepthPrePass.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanDescriptorSet.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanDevice.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentArchivedReplay.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentCostAudit.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentCostTiming.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentCostTimingE.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentCostTimingF.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentLeafField.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentLeafFieldTiming.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentPairAudit.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentPairBoundary.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentRealQueryCapture.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanEnvironmentVisibility.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanFormatParity.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanForwardPBR_Lite.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanForwardRendererIntegration.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanGeometryBoxContainment.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanIBLPrecomputer.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanIBL_BRDFLUT.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanIBL_Equirect.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanIBL_IrradiancePrefilter.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanLayeredRendering.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanLumenSSAO.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanNaniteSmoke.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanPassTimestampAudit.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanPushConstants.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanSSRComposite.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanSSRPass.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanSSRTrace.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanScreenProbePlaceCenter.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanSecondaryCommandBuffer.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanShadowPass.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanSimplePBR.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanStagingUpload.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanStandardPipelineSmoke.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanStress.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanSwapChain.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanSync.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanTAA.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanTAAJitterContract.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanTangentFrame.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanTextureUpdate.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanTimestampNonblocking.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanToneMap.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanToon.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanTriangle.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanVTPrimitives.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/Core/TestVulkanVTPrototype.cpp	EngineTest/unittests undecidable-gate
+EngineTest/UnitTests/RHI/D3D12/TestD3D12BindSlotMirror.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/D3D12/TestD3D12DescriptorSlotPolicy.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/D3D12/TestD3D12Format.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/D3D12/TestD3D12RootSigBudget.cpp	EngineTest/unittests
+EngineTest/UnitTests/RHI/D3D12/TestD3D12StateTracker.cpp	EngineTest/unittests
+EngineTest/UnitTests/Script/TestScriptEventBus.cpp	EngineTest/unittests
+EngineTest/UnitTests/Script/TestScriptEventBusExternal.cpp	EngineTest/unittests
+EngineTest/UnitTests/Script/TestScriptExternal.cpp	EngineTest/unittests
+EngineTest/UnitTests/Script/TestScriptFoundation.cpp	EngineTest/unittests
+EngineTest/UnitTests/Script/TestScriptLifecycle.cpp	EngineTest/unittests
+EngineTest/UnitTests/Script/TestScriptPostMainThread.cpp	EngineTest/unittests
+EngineTest/UnitTests/Script/TestScriptReflection.cpp	EngineTest/unittests
+EngineTest/UnitTests/Script/TestScriptReload.cpp	EngineTest/unittests
+EngineTest/UnitTests/TestJobSystem.cpp	EngineTest/unittests
+EngineTest/UnitTests/TestMaterialGraphAPI.cpp	EngineTest/unittests
+EngineTest/UnitTests/TestPhysicsComponents.cpp	EngineTest/unittests
+EngineTest/UnitTests/TestPhysicsM4.cpp	EngineTest/unittests
+EngineTest/UnitTests/TestPhysicsSimulation.cpp	EngineTest/unittests
+EngineTest/UnitTests/TestScreenProbeCacheValidation.cpp	EngineTest/unittests
+EngineTest/UnitTests/TestSparseParticleVolume.cpp	EngineTest/unittests
+EngineTest/Utils/ImageCompare.cpp	EngineTest/unittests undecidable-gate
+Tools/NeuralMLXGate/NeuralMLXGateMain.cpp	EngineTest/unittests
+third_party/D3D12MemAlloc/src/D3D12MemAlloc.cpp	Engine/rhi-d3d12

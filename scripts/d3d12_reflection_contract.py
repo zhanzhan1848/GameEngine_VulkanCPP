@@ -136,12 +136,8 @@ EXPECTED = {
         (0, 2, "storage_image", "dstMip", None),
         (0, 3, "ubo", "MipParams", 16),
     ],
-    # D3D12 M6 F6-2: probe bake compute — writeonly rgba16f image3D (typed
-    # UAV store) + BakeParams UBO (32B). HLSL RWTexture3D u0.
-    "Forward/M6ProbeBake.comp": [
-        (0, 0, "storage_image_3d", "outGrid", None),
-        (0, 1, "ubo", "BakeParams", 32),
-    ],
+    # D3D12 M6 F6-2: probe bake compute — REMOVED (M6 GI rebuild replaces the
+    # analytic bake by M6ProbeInject; see below).
     # D3D12 M6 F6-2: probe accum compute — readonly image3D (typed UAV load,
     # HLSL RWTexture3D u0) + texture3D history pair (t1 + s2; texelFetch→Load
     # strips the sampler from DXIL — DXIL_OPTIONAL below) + writeonly image3D
@@ -152,6 +148,52 @@ EXPECTED = {
         (0, 2, "separate_sampler", "histSampler", None),
         (0, 3, "storage_image_3d", "outGrid", None),
         (0, 4, "ubo", "AccumParams", 16),
+    ],
+    # D3D12 M6 GI rebuild: direct-only deferred light FS — b0-b7 IDENTICAL to
+    # M4DeferredLight.frag (names/types/sizes) so the host reuses the M4 light
+    # set layout (11-binding superset; this shader declares/consumes b0-b7
+    # only). MRT×2 outputs see EXPECTED_TARGETS.
+    "Forward/M6DeferredDirect.frag": [
+        (0, 0, "ubo", "DeferredViewData", 80),
+        (0, 1, "ubo", "LightShadowData", 112),
+        (0, 2, "separate_image", "depthTexture", None),
+        (0, 3, "separate_image", "gbufferAlbedo", None),
+        (0, 4, "separate_image", "gbufferNormal", None),
+        (0, 5, "separate_image", "gbufferMaterial", None),
+        (0, 6, "separate_image", "shadowMap", None),
+        (0, 7, "comparison_sampler", "shadowSampler", None),
+    ],
+    # D3D12 M6 GI rebuild: SH-L1 probe inject compute (replaces analytic
+    # M6ProbeBake) — directDiffuse/depth/normal/material texelFetch pair +
+    # InjectParams UBO (std140 144B) + writeonly rgba16f image3D (typed UAV
+    # store, (8,8,24) SH grid). No gl_NumWorkGroups (dims via UBO).
+    "Forward/M6ProbeInject.comp": [
+        (0, 0, "separate_image", "directDiffuse", None),
+        (0, 1, "separate_image", "depthTexture", None),
+        (0, 2, "separate_image", "gbufferNormal", None),
+        (0, 3, "separate_image", "gbufferMaterial", None),
+        (0, 4, "ubo", "InjectParams", 144),
+        (0, 5, "storage_image_3d", "outSH", None),
+    ],
+    # D3D12 M6 GI rebuild: independent indirect resolve FS — GBuffer fetch
+    # pair + DeferredViewData UBO (80B, same block as M4) + SH probe Texture3D
+    # + sampler + ResolveParams UBO (std140 48B: gridMin.w=normalBias +
+    # gridInvExtent + gridDims).
+    "Forward/M6GIResolve.frag": [
+        (0, 0, "ubo", "DeferredViewData", 80),
+        (0, 1, "separate_image", "depthTexture", None),
+        (0, 2, "separate_image", "gbufferAlbedo", None),
+        (0, 3, "separate_image", "gbufferNormal", None),
+        (0, 4, "separate_image", "gbufferMaterial", None),
+        (0, 5, "separate_image_3d", "giProbeSH", None),
+        (0, 6, "separate_sampler", "giProbeSampler", None),
+        (0, 7, "ubo", "ResolveParams", 48),
+    ],
+    # D3D12 M6 GI rebuild: single direct+indirect composite FS — texelFetch
+    # pair only, no UBO/sampler.
+    "Forward/M6Composite.frag": [
+        (0, 0, "separate_image", "giDirect", None),
+        (0, 1, "separate_image", "giIndirect", None),
     ],
 }
 
@@ -178,6 +220,18 @@ EXPECTED_TARGETS = {
     ],
     "Forward/M4DeferredLight.frag": [
         (0, "outColor"),     # 单 RT（litRTFormat：RGBA16F 或 BGRA8）
+    ],
+    # D3D12 M6 GI rebuild MRT 输出：direct-only 直射双 RT（RT1 = GI 输入，
+    # alpha 携带诊断通道）与 resolve/composite 单 RT。
+    "Forward/M6DeferredDirect.frag": [
+        (0, "outDirect"),        # RGBA16F rgb=direct, a=ndl（诊断）
+        (1, "outDirectDiffuse"), # RGBA16F rgb=direct-diffuse (GI 输入), a=shadow
+    ],
+    "Forward/M6GIResolve.frag": [
+        (0, "outIndirect"),      # RGBA16F rgb=albedo·E_h(N), a=1
+    ],
+    "Forward/M6Composite.frag": [
+        (0, "outColor"),         # direct+indirect 恰一次合成（post 前最终）
     ],
 }
 

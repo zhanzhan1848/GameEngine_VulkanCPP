@@ -27,7 +27,7 @@ void gpu_emitter::set_scale(const math::v3& scale) {
 
 void gpu_emitter::set_transform(const math::m4x4& transform) {
     // Extract position from transform columns
-    position_ = math::v3{ transform.columns[3][0], transform.columns[3][1], transform.columns[3][2] };
+    position_ = math::v3{ math::elem(transform, 3, 0), math::elem(transform, 3, 1), math::elem(transform, 3, 2) };
     // TODO: Extract rotation and scale if needed
 }
 

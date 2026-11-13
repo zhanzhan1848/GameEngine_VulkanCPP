@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <array>
 #include <bit>
+// [R6] 自包含：PRIMAL_LOG_STREAM 不再依赖传递包含（形态与 TestModularPipeline.cpp 一致）。
+#include "Engine/Common/CoreLogStream.h"
 namespace sponza_rc {
 inline void check(bool ok,const char* what){if(!ok)throw std::runtime_error(what);}
 struct alignas(16) CB {

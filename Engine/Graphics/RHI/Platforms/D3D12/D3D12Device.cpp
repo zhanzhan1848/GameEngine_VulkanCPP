@@ -5,16 +5,35 @@
 
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
+#include <cassert>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 
 #include "D3D12Format.h"
 
-#include "Engine/Common/CoreDiag.h"
+#include "Engine/Common/CoreLogStream.h"
 
-#ifndef PRIMAL_LOG_STREAM
-#define PRIMAL_LOG_STREAM(level, channel) primal::diag::StreamProxy(level, channel)
+#if defined(PRIMAL_D3D12_AGILITY_RUNTIME) && PRIMAL_D3D12_AGILITY_RUNTIME
+// Agility SDK 运行时导出（Engine/CMakeLists.txt 动态接入链在场时定义）：
+// D3D12 系统运行时按二进制的 D3D12SDKVersion 导出值选择 side-load 的
+// <exe 目录>\D3D12\D3D12Core.dll（官方 Agility 集成约定；R9 起该 DLL 由
+// primal_stage_d3d12_agility() 逐 exe POST_BUILD 暂存到各自
+// $<TARGET_FILE_DIR>/D3D12/——见 Engine/CMakeLists 暂存钩子注释）。本 TU 经
+// RHIDeviceFactory（CreateRHIDevice → new D3D12Device）必然被静态库链接
+// 拉入，导出稳定可见。离线回退路径（PRIMAL_D3D12_AGILITY_RUNTIME=0）不
+// 导出——无 side-load DLL 时导出反而令 d3d12.dll 找 .\D3D12\ 失败。
+// R9：补齐官方契约的第二导出 D3D12SDKPath（D3D12 Redistributable 规范：
+// Agility side-load 需 D3D12SDKVersion + D3D12SDKPath 两个导出，缺 SDKPath
+// 时加载器只采样到系统 d3d12.dll——八测 dumpbin 实证本 TU 只导出了
+// SDKVersion）。窄字面量而非官方样例的 u8"..."：C++20 下 u8 字面量是
+// const char8_t[]，赋给 const char* 为 ill-formed（legacy D3D12Core.cpp 的
+// u8 版本自 F0-3 起已排除出构建）；字节内容与官方 u8 版逐字一致（纯 ASCII）。
+extern "C" {
+__declspec(dllexport) extern const UINT D3D12SDKVersion = D3D12_SDK_VERSION;
+__declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
+}
 #endif
 
 namespace primal::graphics::rhi {
@@ -27,6 +46,30 @@ bool EnvFlag(const char* name) {
     const char* v = std::getenv(name);
     return v && std::strcmp(v, "1") == 0;
 }
+
+/// R21-D：默认开启类 env 的显式关闭判定（"0"=关，未设/其他值=默认开）。
+bool EnvFlagDisabled(const char* name) {
+    const char* v = std::getenv(name);
+    return v && std::strcmp(v, "0") == 0;
+}
+
+/// R21-C 帧级埋点开关（默认关；PRIMAL_D3D12_FRAME_TRACE=1 开）。逐帧/
+/// 逐提交输出：描述符堆 bump/纪元/迁移、上传环 offset/fence、fence 目标
+/// 值、backbuffer 重建事件——Windows 侧黑帧帧号与设备侧事件对齐用。
+/// 日志走 PRIMAL_LOG（stderr），stdout 留给机器输出。
+bool FrameTraceEnabled() {
+    static const bool enabled = EnvFlag("PRIMAL_D3D12_FRAME_TRACE");
+    return enabled;
+}
+
+/// R21-D：InfoQueue 存储消息总数上限（SetMessageCountLimit 语义 = 队列总
+/// 容量而非每类上限；满后新消息把最旧消息挤出——MSDN）。512 → 65536
+/// （d3d12-blackfix）：真硬件 debug 层 init 期刷量可超 512，init 尾 drain
+/// 前 9 条消息被挤丢且内容永不可见；抬容量保 init 期全量可见。每次 drain
+/// 清空，正常轮次远低于此。
+constexpr u64 kInfoQueueMessageLimit = 65536;
+/// R21-D：单条验证消息文本截断上限（D3D12 消息偶有超长；截断保一行）。
+constexpr size_t kInfoQueueTextLimit = 400;
 
 /// DataFormat → 每 texel 字节数（与 D3D12Texture.cpp 的本地表一致；设备侧
 /// 上传路径使用）。
@@ -91,61 +134,84 @@ D3D12Device::~D3D12Device() {
 // ============================================================================
 
 bool D3D12Device::initializeImpl() {
+    // R8 分阶段埋点（八测定时超时定位用）：每阶段入口一行 Info 日志
+    //（stderr，PRIMAL_LOG_STREAM 自带缓冲；日志尾部最后一行 = 挂起阶段）。
+#if defined(PRIMAL_D3D12_AGILITY_RUNTIME) && PRIMAL_D3D12_AGILITY_RUNTIME
+    constexpr const char* kAgilityRuntime = "1";
+#else
+    constexpr const char* kAgilityRuntime = "0";
+#endif
+    // R7：debug/validation 打实际决策结果而非 desc_ 原始标志。决策链 =
+    // enableDebugLayer()：desc 双关全假不创建；PRIMAL_D3D12_VALIDATION=0
+    // 诊断 lane 完全跳过（debug 层/GBV/InfoQueue 一并缺席）。此前照抄
+    // desc_ 令 VALIDATION=0 时 stage 0 打 "debug=1, validation=1"，与下方
+    // lane 的 "NOT created" 口径矛盾。无独立 PRIMAL_D3D12_DEBUG 开关
+    //（debug/validation 共用 VALIDATION lane；GBV 另由 PRIMAL_D3D12_GBV
+    // opt-in），两标志同值 = "本次 init 是否创建 debug 层"。
+    const bool validationLaneOff = EnvFlagDisabled("PRIMAL_D3D12_VALIDATION");
+    const bool debugLayerEnabled =
+        (desc_.enableDebug || desc_.enableValidation) && !validationLaneOff;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+        << "[D3D12:init] stage 0 enter (agility_runtime=" << kAgilityRuntime
+        << ", debug=" << (debugLayerEnabled ? 1 : 0)
+        << ", validation=" << (debugLayerEnabled ? 1 : 0)
+        << ", warp_env=" << (EnvFlag("PRIMAL_D3D12_WARP") ? 1 : 0)
+        << ", gbv_env=" << (EnvFlag("PRIMAL_D3D12_GBV") ? 1 : 0) << ")" << std::endl;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 1 debug layer" << std::endl;
     if (!enableDebugLayer()) return false;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 2 adapter selection" << std::endl;
     if (!selectAdapter()) return false;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 3 device + queue" << std::endl;
     if (!createDeviceAndQueue()) return false;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 4 fence pool" << std::endl;
     if (!fencePool_.Initialize(device_.Get())) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] fence pool init failed" << std::endl;
         return false;
     }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 5 allocator" << std::endl;
     if (!createAllocator()) return false;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 6 resource subsystems" << std::endl;
     if (!createResourceSubsystems()) return false;
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 7 capability query" << std::endl;
 
     // M5 F5-3：descriptor indexing 能力真实查询（初始化期一次，缓存结果；
     // CheckFeatureSupport 失败=能力未知 → 按 tier0/不支持处理，不静默）。
+    // [R6/Windows] ①D3D12_FEATURE_DATA_D3D12_OPTIONS 无 MaxDescriptorHeapSize
+    // 字段（真头核对：vendored dxsdk d3d12.h L2095-2112 与官方 DirectX-Headers
+    // 均 0 命中）——bindless 规模上限改记 ResourceBindingTier（Tier>=2 即无界
+    // 数组；shader-visible 堆上限是 tier 决定的常量，非 feature 查询项），
+    // 删除该查询。②TypedUAVLoadAdditionalFormats 在 OPTIONS（v1）不在
+    // OPTIONS3（真头：OPTIONS v1 L2914 命中；OPTIONS3 五字段无此名）——
+    // 查询迁入本块合并，避免重复 CheckFeatureSupport。
     {
         D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
         if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS,
                                                    &options, sizeof(options)))) {
             resourceBindingTier_ = options.ResourceBindingTier;
-            maxDescriptorHeapSize_ = options.MaxDescriptorHeapSize;
             // 判定语义对齐 VulkanDevice（"引擎消费路径可用"而非 tier 透传）：
             // Tier>=2 = 无界描述符数组 + shader 内动态/非一致索引可用。
             // Tier 1 仅静态索引数组（等价 Vulkan 未开 descriptorIndexing）。
             descriptorIndexingSupported_ =
                 options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_2;
+            // M6 F6-2/F6-3：类型化 UAV 附加格式（RGBA16F/RG16F 等 typed UAV
+            // load/store 的先决能力；D3D12 仅保证 R32_FLOAT/UINT/SINT 三格式）。
+            // 消费点：D3D12Texture 对需附加格式的 UAV 纹理显式失败（fail 语义）。
+            typedUavAdditionalFormats_ = options.TypedUAVLoadAdditionalFormats != 0;
             PRIMAL_LOG_STREAM(Info, "RHI")
                 << "[D3D12Device] descriptor indexing (ResourceBindingTier="
                 << u32(options.ResourceBindingTier)
-                << ", MaxDescriptorHeapSize=" << options.MaxDescriptorHeapSize
+                << ", TypedUAVLoadAdditionalFormats="
+                << (typedUavAdditionalFormats_ ? "yes" : "no")
                 << ") — " << (descriptorIndexingSupported_ ? "enabled" : "NOT supported (tier<2)")
                 << std::endl;
         } else {
             resourceBindingTier_ = 0;
             descriptorIndexingSupported_ = false;
-            PRIMAL_LOG_STREAM(Warn, "RHI")
-                << "[D3D12Device] OPTIONS CheckFeatureSupport failed — "
-                   "descriptor indexing reported NOT supported" << std::endl;
-        }
-    }
-
-    // M6 F6-2/F6-3：类型化 UAV 附加格式能力真实查询（OPTIONS3。
-    // TypedUAVLoadAdditionalFormats——RGBA16F/RG16F 等 typed UAV load/store
-    // 的先决能力；D3D12 仅保证 R32_FLOAT/UINT/SINT 三格式）。查询失败=能力
-    // 未知 → 按不支持处理，不静默（M5 F5-3 同款纪律）。消费点：D3D12Texture
-    // 对需附加格式的 UAV 纹理显式失败（fail 语义，不降级）。
-    {
-        D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3{};
-        if (SUCCEEDED(device_->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3,
-                                                   &options3, sizeof(options3)))) {
-            typedUavAdditionalFormats_ =
-                options3.TypedUAVLoadAdditionalFormats != 0;
-        } else {
             typedUavAdditionalFormats_ = false;
             PRIMAL_LOG_STREAM(Warn, "RHI")
-                << "[D3D12Device] OPTIONS3 CheckFeatureSupport failed — "
-                   "TypedUAVLoadAdditionalFormats reported NOT supported"
-                << std::endl;
+                << "[D3D12Device] OPTIONS CheckFeatureSupport failed — "
+                   "descriptor indexing + typed UAV additional formats "
+                   "reported NOT supported" << std::endl;
         }
         PRIMAL_LOG_STREAM(Info, "RHI")
             << "[D3D12Device] typed UAV additional formats — "
@@ -158,6 +224,7 @@ bool D3D12Device::initializeImpl() {
     // M0 §5.1 教训：注册式桥的链接锚点（防静态库裁剪；幂等）。
     EnsureD3D12BackendLinksLinked();
 
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 8 device removal check" << std::endl;
     // 首次设备丢失检查：创建即失败时带原因上报。
     const HRESULT reason = device_->GetDeviceRemovedReason();
     if (reason != S_OK) {
@@ -166,23 +233,53 @@ bool D3D12Device::initializeImpl() {
     }
     PRIMAL_LOG_STREAM(Info, "RHI") << "[D3D12Device] initialized (M1 resource layer)"
         << (warp_ ? " (WARP)" : "") << std::endl;
+    // R21-D：init 尾 drain——宿主 init 期（纹理/buffer/管线创建）到达的
+    // 验证消息在首帧开始前落盘。
+    DrainInfoQueueMessages("init");
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 9 done" << std::endl;
     return true;
 }
 
 bool D3D12Device::enableDebugLayer() {
     if (!desc_.enableDebug && !desc_.enableValidation) return true;
 
+    // R21-D 诊断 lane：PRIMAL_D3D12_VALIDATION=0 完全跳过 debug 层创建
+    //（CPU 验证 + InfoQueue + GBV 一并缺席）。用途：`D3D12SDKLayers+0xf2d3e`
+    // 处层内 AV 跨二十测稳定复现时，区分"引擎野指针先行"（VALIDATION=0
+    // 仍崩=崩点在引擎侧）与"验证器对坏输入崩"（VALIDATION=0 不崩=层内
+    // 崩，靠 ERROR_LOG 收集的消息定位坏输入）。仅诊断 lane——默认仍创建
+    // 验证层（验证错误可见性是排障生命线）。
+    if (EnvFlagDisabled("PRIMAL_D3D12_VALIDATION")) {
+        PRIMAL_LOG_STREAM(Warn, "RHI")
+            << "[D3D12Device] PRIMAL_D3D12_VALIDATION=0 diagnostic lane: "
+               "debug layer/GBV/InfoQueue NOT created (no validation; stage 0 "
+               "debug/validation flags report 0 accordingly — R7)" << std::endl;
+        return true;
+    }
+
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 1.1 D3D12GetDebugInterface" << std::endl;
     ComPtr<ID3D12Debug> debug0;
     if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debug0)))) {
         debug0->EnableDebugLayer();
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 1.2 debug layer enabled" << std::endl;
     } else {
         PRIMAL_LOG_STREAM(Error, "RHI")
             << "[D3D12Device] D3D12GetDebugInterface failed (debug tools missing?)" << std::endl;
         return false;  // fail-fast：请求了 debug 但拿不到 → 初始化失败
     }
 
-    // GBV：仅显式 enableValidation（开销大）。
-    if (desc_.enableValidation) {
+    // GBV：仅显式 enableValidation 且 PRIMAL_D3D12_GBV=1（R19-4 默认翻转，
+    // 2026-11-05 十八测证据链）。十八测 M3/M4/M6 以 0xC0000005 退出，
+    // first-chance 调试器栈落在 **D3D12SDKLayers.dll 内部**
+    // （SetD3DDebugLayerStartupOptions+0xf2d3e——非引擎代码帧）；同一 exe
+    // 同一 init（宿主对六阶段一律 enableValidation=true → GBV on），仅
+    // RHI_TEST_POST=1 的阶段崩（m1/m2 无 POST 链跑到 #849 读回点；m5 有
+    // POST 但剔除链更早 #882 退出）——GBV 对 post 链 instrument 时
+    // SDKLayers 1.611.2 内部 AV（引擎侧该链输入经 R19-4 静态审查无越界，
+    // 见 runbook §28-4）。处置=GBV 改 opt-in：CPU 调试层（error 检出 +
+    // InfoQueue 断点，#849/#882/#654/#538 全靠它）默认不变；需要 GPU 侧
+    // 验证时显式 PRIMAL_D3D12_GBV=1 复现/定位。
+    if (desc_.enableValidation && EnvFlag("PRIMAL_D3D12_GBV")) {
         if (SUCCEEDED(debug0.As(&debugController_))) {  // ComPtr::As -> QI ID3D12Debug1
             debugController_->SetEnableGPUBasedValidation(TRUE);
             debugController_->SetEnableSynchronizedCommandQueueValidation(TRUE);
@@ -190,6 +287,11 @@ bool D3D12Device::enableDebugLayer() {
             PRIMAL_LOG_STREAM(Warn, "RHI")
                 << "[D3D12Device] ID3D12Debug1 unavailable: GBV off" << std::endl;
         }
+    } else if (desc_.enableValidation) {
+        PRIMAL_LOG_STREAM(Warn, "RHI")
+            << "[D3D12Device] GBV off (default; set PRIMAL_D3D12_GBV=1 to "
+               "force) — 18th-test M3/M4/M6 crashed inside D3D12SDKLayers.dll "
+               "with GBV on (R19-4; see runbook 28-4)" << std::endl;
     }
     return true;
 }
@@ -199,9 +301,11 @@ bool D3D12Device::selectAdapter() {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] CreateDXGIFactory2 failed" << std::endl;
         return false;
     }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 2.0 DXGI factory created" << std::endl;
 
     // WARP 回退：PRIMAL_D3D12_WARP=1 强制软件适配器（CI / 无 GPU 场景）。
     if (EnvFlag("PRIMAL_D3D12_WARP")) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 2.1w EnumWarpAdapter" << std::endl;
         ComPtr<IDXGIAdapter> warp;
         if (SUCCEEDED(dxgiFactory_->EnumWarpAdapter(IID_PPV_ARGS(&warp)))
             && SUCCEEDED(warp.As(&adapter_))) {
@@ -214,12 +318,17 @@ bool D3D12Device::selectAdapter() {
 
     // 硬件适配器：按 desc_.adapterIndex 选；越界/枚举耗尽 → 回退索引 0，
     // 仍失败 → WARP 兜底（显式记录，不静默）。
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+        << "[D3D12:init] stage 2.1 hardware adapter enum (want index "
+        << desc_.adapterIndex << ")" << std::endl;
     ComPtr<IDXGIAdapter1> candidate;
     u32 index = 0;
     bool found = false;
-    while (dxgiFactory_->EnumAdapterByGpuPreference(
-               index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&candidate))
-           != DXGI_ERROR_NOT_FOUND) {
+    // R8 修正：原循环条件 `hr != DXGI_ERROR_NOT_FOUND` 把任何非 NOT_FOUND 的
+    // 持续失败（INVALID_CALL/E_FAIL 等）当作"继续枚举" → 无限循环（八测
+    // 补 DLL 后定时超时的静态挂起嫌疑之一）。标准形式 = SUCCEEDED 终止。
+    while (SUCCEEDED(dxgiFactory_->EnumAdapterByGpuPreference(
+               index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, IID_PPV_ARGS(&candidate)))) {
         if (index == desc_.adapterIndex) {
             DXGI_ADAPTER_DESC1 desc1{};
             candidate->GetDesc1(&desc1);
@@ -230,6 +339,9 @@ bool D3D12Device::selectAdapter() {
         }
         ++index;
     }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+        << "[D3D12:init] stage 2.2 enum done (last_index=" << index
+        << ", found=" << (found ? 1 : 0) << ")" << std::endl;
     if (!found) {
         PRIMAL_LOG_STREAM(Warn, "RHI")
             << "[D3D12Device] adapter " << desc_.adapterIndex
@@ -252,6 +364,10 @@ bool D3D12Device::createDeviceAndQueue() {
     };
     HRESULT hr = E_FAIL;
     for (const D3D_FEATURE_LEVEL level : levels) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12:init] stage 3.1 D3D12CreateDevice (FL=0x"
+            << std::hex << static_cast<unsigned long>(level) << std::dec
+            << ", adapter=" << (warp_ ? "WARP" : "hw") << ")" << std::endl;
         hr = D3D12CreateDevice(adapter_.Get(), level, IID_PPV_ARGS(&device_));
         if (SUCCEEDED(hr)) break;
     }
@@ -261,13 +377,38 @@ bool D3D12Device::createDeviceAndQueue() {
             << std::hex << static_cast<unsigned long>(hr) << std::dec << std::endl;
         return false;
     }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 3.2 device created" << std::endl;
 
-    // InfoQueue fail-fast（debug/验证开启时）：腐蚀/错误级别直接断点 + 全量落日志。
-    if (desc_.enableDebug || desc_.enableValidation) {
+    // R21-D InfoQueue 消息通道（验证错误可见化）：debug/验证开启时建立
+    // 消息存储（允许 ERROR/WARNING 入队 + 上限 512 防刷爆），错误经
+    // DrainInfoQueueMessages 落 stderr（见该函数）。break-on-error 由原
+    // "恒开"改 env opt-in（PRIMAL_D3D12_BREAK_ON_ERROR=1）：无调试器的
+    // 正常跑里 break = SDKLayers RaiseException(0x87A) 直接杀进程且
+    // stdout/stderr 无任何 D3D12 ERROR 文本（debug 层走 OutputDebugString，
+    // 无人收集）——二十测 M3/M4/M6 的 0x87A 即此路径；默认不 break 让
+    // 消息进存储被 drain，调试器下需要断点时显式开。
+    // PRIMAL_D3D12_VALIDATION=0 诊断 lane 下跳过（无 debug 层 → QI 必败，
+    // 显式跳过避免误导性的设置尝试日志）。
+    if ((desc_.enableDebug || desc_.enableValidation)
+        && !EnvFlagDisabled("PRIMAL_D3D12_VALIDATION")) {
         if (SUCCEEDED(device_.As(&infoQueue_))) {
-            infoQueue_->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
-            infoQueue_->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
+            // 不动现有 OutputDebugString 输出（FALSE=默认值，显式声明意图）。
+            infoQueue_->SetMuteDebugOutput(FALSE);
+            // storage 允许层：空过滤（无 deny 项）= ERROR/WARNING/INFO 全入
+            // 存储；总量上限见 kInfoQueueMessageLimit（满后最旧被新消息挤出，
+            // 抬至 65536 防真硬件 init 期刷量挤丢——d3d12-blackfix）。
+            D3D12_INFO_QUEUE_FILTER allowAll{};
+            (void)infoQueue_->PushStorageFilter(&allowAll);
+            (void)infoQueue_->SetMessageCountLimit(kInfoQueueMessageLimit);
+            // break 语义：CORRUPTION/ERROR 同门（默认关）；WARNING 恒不 break。
+            const BOOL breakOnError = EnvFlag("PRIMAL_D3D12_BREAK_ON_ERROR") ? TRUE : FALSE;
+            infoQueue_->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, breakOnError);
+            infoQueue_->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, breakOnError);
             infoQueue_->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, FALSE);
+        } else {
+            PRIMAL_LOG_STREAM(Warn, "RHI")
+                << "[D3D12Device] ID3D12InfoQueue unavailable — validation "
+                   "errors will NOT be collected/logged" << std::endl;
         }
     }
 
@@ -280,13 +421,126 @@ bool D3D12Device::createDeviceAndQueue() {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] DIRECT queue creation failed" << std::endl;
         return false;
     }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 3.3 DIRECT queue created" << std::endl;
     return true;
+}
+
+void D3D12Device::DrainInfoQueueMessages(const char* context) {
+    // R21-D 验证错误可见化通道：把 debug 层 InfoQueue 已存储的
+    // ERROR/CORRUPTION 消息经 PRIMAL_LOG(Error) 落 stderr（含 message id
+    // ——定位锚，对齐 runbook 的 #849/#882/#654/#538 引用惯例 + 截断文本）。
+    // init drain（context=="init"）额外落 WARNING 全文 + INFO 计数（见下）。
+    // 默认开（PRIMAL_D3D12_ERROR_LOG=0 显式关——验证错误必须可见是排障
+    // 生命线）；infoQueue_ 为空（debug 层关 / VALIDATION=0 lane）零开销直返。
+    if (!infoQueue_ || EnvFlagDisabled("PRIMAL_D3D12_ERROR_LOG")) return;
+
+    // init 尾 drain（context=="init"）额外落 WARNING 全文 + INFO 计数摘要：
+    // init 期是资源/管线创建的刷量主窗口，WARNING 常是 ERROR 的前置线索
+    // （d3d12-blackfix：9 条 init 消息被挤出后永不可见）。热路径
+    // （beginFrame/pre+post-execute）维持只打 ERROR/CORRUPTION 不变。用
+    // context 判定而非加签名参数：本修复不动头文件。
+    const bool verboseInit = context && std::strcmp(context, "init") == 0;
+    u64 infoCount = 0;
+    const u64 count = infoQueue_->GetNumStoredMessages();
+    for (u64 i = 0; i < count; ++i) {
+        SIZE_T size = 0;
+        if (FAILED(infoQueue_->GetMessage(i, nullptr, &size)) || size == 0) continue;
+        std::string buffer(size, '\0');
+        if (FAILED(infoQueue_->GetMessage(
+                i, reinterpret_cast<D3D12_MESSAGE*>(buffer.data()), &size))) {
+            continue;
+        }
+        const auto* msg = reinterpret_cast<const D3D12_MESSAGE*>(buffer.data());
+        if (!msg) continue;
+        // ERROR/CORRUPTION 恒落；WARNING 仅 init drain 落（见上）；INFO 只
+        // 计数不打全文（防刷屏）。全部仍入存储（供设备丢失尾部诊断读）。
+        if (msg->Severity == D3D12_MESSAGE_SEVERITY_INFO) {
+            ++infoCount;
+            continue;
+        }
+        if (msg->Severity == D3D12_MESSAGE_SEVERITY_WARNING && !verboseInit) {
+            continue;
+        }
+        // 截断超长：按 NUL 实长（DescriptionByteLength 含结尾 NUL）取
+        // min(实长, 上限)，截断时标注。
+        size_t len = 0;
+        if (msg->pDescription) {
+            const void* nul = std::memchr(msg->pDescription, '\0', msg->DescriptionByteLength);
+            len = nul ? static_cast<size_t>(static_cast<const char*>(nul) - msg->pDescription)
+                      : msg->DescriptionByteLength;
+        }
+        const bool truncated = len > kInfoQueueTextLimit;
+        const size_t emitLen = truncated ? kInfoQueueTextLimit : len;
+        const bool isWarning = msg->Severity == D3D12_MESSAGE_SEVERITY_WARNING;
+        const char* severityLabel =
+            isWarning ? "WARNING"
+                      : (msg->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION
+                             ? "CORRUPTION" : "ERROR");
+        // WARNING 走 Warn 级（仅 init drain 到达此处）；ERROR/CORRUPTION 维持
+        // Error 级。级别 token 需编译期常量（kLevel##level），故分支两份同构。
+        if (isWarning) {
+            PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+                << "[D3D12:validation] " << (context ? context : "")
+                << " id=" << static_cast<unsigned long>(msg->ID)
+                << " severity=" << severityLabel
+                << ": " << std::string(msg->pDescription ? msg->pDescription : "", emitLen)
+                << (truncated ? " ...(truncated)" : "") << std::endl;
+        } else {
+            PRIMAL_LOG_STREAM(Error, "RHI.D3D12")
+                << "[D3D12:validation] " << (context ? context : "")
+                << " id=" << static_cast<unsigned long>(msg->ID)
+                << " severity=" << severityLabel
+                << ": " << std::string(msg->pDescription ? msg->pDescription : "", emitLen)
+                << (truncated ? " ...(truncated)" : "") << std::endl;
+        }
+        // 崩溃不丢：两条日志路径（ConsoleSink/无发射器回退）均为
+        // fprintf(stderr)（stderr 无缓冲），此处显式 flush 再兜底一次——
+        // 若下一条层内 AV 先于下一 drain 点发生，本行必已在盘上。
+        std::fflush(stderr);
+    }
+    // init drain 的 INFO 摘要（计数即可，不打全文防刷屏）。
+    if (verboseInit && infoCount > 0) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12:validation] " << (context ? context : "")
+            << " " << infoCount << " INFO messages stored (full text skipped)"
+            << std::endl;
+    }
+    // 两种"没落盘"分开归因（差分防重复报告；两 getter 均为 InfoQueue 生命
+    // 周期累计值，ClearStoredMessages 不清零，取基线差分 = 自上轮 drain 以来）：
+    // ① storage filter 拒收——消息根本没进存储（当前空 allow-all 过滤下正常
+    //    恒 0；非 0 = 过滤器被改动/失效）。被拒的可能含 ERROR——保留可见性。
+    // ② 消息总数上限挤出——进了队列但被新消息挤掉，内容永不可见
+    //    （d3d12-blackfix：原文案把 ① 的 getter 误标成 "limit 512" 归因）。
+    const u64 denied = infoQueue_->GetNumMessagesDeniedByStorageFilter();
+    if (denied != infoQueueLastDenied_) {
+        PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+            << "[D3D12:validation] " << (context ? context : "")
+            << " storage filter denied " << (denied - infoQueueLastDenied_)
+            << " messages since last drain (never stored)" << std::endl;
+        infoQueueLastDenied_ = denied;
+    }
+    // ② 的基线：进程级 static（实例级需头文件成员，本修复不动头文件；新
+    // InfoQueue 计数回落时静默重置基线，防无符号下溢误报）。
+    static u64 lastDiscardedByLimit = 0;
+    const u64 discarded = infoQueue_->GetNumMessagesDiscardedByMessageCountLimit();
+    if (discarded > lastDiscardedByLimit) {
+        PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+            << "[D3D12:validation] " << (context ? context : "")
+            << " message count limit dropped " << (discarded - lastDiscardedByLimit)
+            << " messages since last drain (queue limit " << kInfoQueueMessageLimit
+            << " — oldest messages lost)" << std::endl;
+    }
+    lastDiscardedByLimit = discarded;
+    infoQueue_->ClearStoredMessages();
 }
 
 bool D3D12Device::createAllocator() {
     // F0-4（M0 批次 B 接线）: D3D12MemAlloc v3.0.1。
     D3D12MA::ALLOCATOR_DESC allocDesc{};
-    allocDesc.Flags = D3D12MA_RECOMMENDED_ALLOCATOR_FLAGS;
+    // [R6/Windows] MSVC C2440：宏展开为 enum|enum（提升 int），int→enum
+    // 无隐式转换（D3D12MA v3.0.1 的 ALLOCATOR_FLAGS 是普通未限定作用域 enum，
+    // 头文件 L1060）。显式函数式转换收窄回枚举类型。
+    allocDesc.Flags = D3D12MA::ALLOCATOR_FLAGS(D3D12MA_RECOMMENDED_ALLOCATOR_FLAGS);
     allocDesc.pDevice = device_.Get();
     allocDesc.pAdapter = adapter_.Get();  // AddRef 由 allocator 内部管理
     allocDesc.PreferredBlockSize = 0;     // 0 = 默认 64 MiB 块
@@ -300,16 +554,49 @@ bool D3D12Device::createAllocator() {
         d3d12maAllocator_ = nullptr;
         return false;  // fail-fast：allocator 是资源层前置，创建失败=初始化失败
     }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 5.1 allocator created" << std::endl;
     return true;
 }
 
 bool D3D12Device::createResourceSubsystems() {
+    // R10-B（对齐 VulkanDevice.cpp "Per-type free_list 预留" 与
+    // MetalDevice.cpp Allocators reserved 惯例，此前 D3D12 独缺）：
+    // RHIAllocator 底层 utl::vector 扩容（1.5x reserve）会整体搬迁既有
+    // 槽位。CommandBufferManager 与 RenderSystem::cmdBuffers_ 缓存的是
+    // 创建期 Get() 返回的池内裸指针——池从 0 容量起步时，第 2 个命令缓冲
+    // 的分配（cap 1→3）即令第 1 个缓冲的缓存指针悬垂，Shutdown 期
+    // cmdBuffers_[0]->Destroy() 对已 free 内存做虚调用 → 0xC0000005
+    //（r8/r9 init 失败路径实测；Metal=256/Vulkan=32 预留故两端无此患）。
+    // 初始化期一次性预留，运行期槽位高水位不超预留值即不再扩容搬移。
+    // 数值逐池镜像 VulkanDevice（同一 harness 工作负载实测足够）；
+    // pipeline 池预留另防 D3D12CommandBufferImpl 绑定镜像
+    // bound{Graphics,Compute}Pipeline_（非拥有 D3D12Pipeline*）在
+    // bind→draw 之间因管线池扩容而悬垂的同族隐患。
+    commandBufferAllocator_.Reserve(32);
+    bufferAllocator_.Reserve(256);
+    textureAllocator_.Reserve(128);
+    shaderAllocator_.Reserve(256);
+    samplerAllocator_.Reserve(64);
+    descriptorSetLayoutAllocator_.Reserve(128);
+    pipelineLayoutAllocator_.Reserve(128);
+    descriptorSetAllocator_.Reserve(1024);
+    pipelineAllocator_.Reserve(256);
+    syncAllocator_.Reserve(64);
+
     if (!descriptorHeaps_.Initialize(device_.Get(),
                                      d3d12::D3D12DescriptorHeapManager::Config{})) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] descriptor heaps init failed" << std::endl;
         return false;
     }
     uploadRing_.Initialize(this);
+    // R13/T2：mip gen 根签名（失败不 fatal——GenerateMipmaps 按调用量降级
+    // 为 NOT-IMPLEMENTED Error；其余设备功能不受影响）。
+    if (!mipGenerator_.Initialize(device_.Get())) {
+        PRIMAL_LOG_STREAM(Warn, "RHI")
+            << "[D3D12Device] mip generator root signature init failed — "
+               "GenerateMipmaps will degrade to NOT-IMPLEMENTED" << std::endl;
+    }
+    PRIMAL_LOG_STREAM(Info, "RHI.D3D12") << "[D3D12:init] stage 6.1 descriptor heaps + upload ring ready" << std::endl;
     return true;
 }
 
@@ -356,12 +643,18 @@ void D3D12Device::shutdownImpl() {
     if (device_ && graphicsQueue_ && fencePool_.GetCompletedValue() != UINT64_MAX) {
         const u64 target = fencePool_.NextTarget();
         if (fencePool_.Signal(graphicsQueue_.Get(), target)) {
-            fencePool_.Wait(target, 5000);
+            if (!fencePool_.Wait(target, 5000)) {
+                // R8 埋点：关闭期 fence 等待有限超时（5s）可见化。
+                PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+                    << "[D3D12:shutdown] final fence wait TIMEOUT (5000ms, target="
+                    << target << ")" << std::endl;
+            }
         }
     }
 
     // M1 资源层子系统：逆初始化序（先 staging/描述符，再 allocator/device）。
     uploadRing_.Shutdown();
+    mipGenerator_.Shutdown();
     descriptorHeaps_.Shutdown();
 
     // 各类型分配器整队释放（触发资源析构 → GC 延迟入队），随后强制排干
@@ -416,15 +709,39 @@ void D3D12Device::waitIdleImpl() const {
     }
     const u64 target = self->fencePool_.NextTarget();
     if (self->fencePool_.Signal(graphicsQueue_.Get(), target)) {
-        self->fencePool_.Wait(target, 10000);
+        if (!self->fencePool_.Wait(target, 10000)) {
+            // R8 埋点：有限超时（10s）返回 false 而非挂起——日志可见即证
+            // "超时"类症状不在此路径的无限等待（区分挂起点用）。
+            PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+                << "[D3D12:init/wait] waitIdle fence wait TIMEOUT (10000ms, target="
+                << target << ")" << std::endl;
+        }
     }
 }
 
 void D3D12Device::beginFrameImpl() {
+    // R21-D：帧首 drain——上一帧提交后/完成期到达的验证消息先落盘。
+    DrainInfoQueueMessages("beginFrame");
     currentFrameIndex_ = static_cast<u32>(frameCount_ % desc_.maxFramesInFlight);
     // 帧槽推进：staging 环 + 描述符槽轮转（复用判定 = fence 完成值）。
     uploadRing_.BeginFrame();
     descriptorHeaps_.BeginFrame(currentFrameIndex_, fencePool_);
+    // R22-S1：首个 BeginFrame = init 期结算点（宿主资源加载在帧循环之前
+    // 完成——此处的唯一 sampler 内容数/高水位即 init 阶段总账）。无
+    // BeginFrame 宿主（M 系列测试 harness 形态）不经过本行，init 证据
+    // 由逐新内容日志 + Shutdown 统计补齐（见 LogSamplerSharingStats）。
+    if (!loggedInitSamplerStats_) {
+        loggedInitSamplerStats_ = true;
+        descriptorHeaps_.LogSamplerSharingStats("first beginFrame (init phase)");
+    }
+    // R21-C：帧序号推进 + 逐帧埋点（详情行在 DescriptorHeaps::BeginFrame）。
+    ++frameTraceBeginFrameSeq_;
+    if (FrameTraceEnabled()) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12FrameTrace] beginFrame: frameCount=" << frameCount_
+            << " frameIndex=" << currentFrameIndex_
+            << " submitSeq=" << frameTraceSubmitSeq_ << std::endl;
+    }
 }
 
 void D3D12Device::endFrameImpl() {
@@ -458,11 +775,15 @@ void D3D12Device::queryDeviceInfo(DeviceInfo& info) {
         D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT va{};
         D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5{};
         // 能力位按 Master Plan 功能面逐步填充；M0 仅记录 raytracing/mesh。
+        // [R6/Windows] 真名核对（官方 DirectX-Headers d3d12.h）：OPTIONS7 字段
+        // 是 MeshShaderTier（L3182），枚举是 D3D12_MESH_SHADER_TIER（L3166，
+        // D3D12_MESH_SHADER_TIER_NOT_SUPPORTED=0 / _TIER_1=10）——
+        // MeshShaderPipelineTier / D3D12_MESH_SHADER_PIPELINE_TIER_* 均不存在。
         D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7{};
         if (SUCCEEDED(device_->CheckFeatureSupport(
                 D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7)))) {
-            info.supportsMeshShaders = options7.MeshShaderPipelineTier
-                != D3D12_MESH_SHADER_PIPELINE_TIER_NOT_SUPPORTED;
+            info.supportsMeshShaders = options7.MeshShaderTier
+                != D3D12_MESH_SHADER_TIER_NOT_SUPPORTED;
         }
         (void)va; (void)options5;
     }
@@ -513,6 +834,28 @@ ID3D12CommandSignature* D3D12Device::GetDrawIndexedIndirectSignature() {
         return nullptr;
     }
     return drawIndexedIndirectSignature_.Get();
+}
+
+// [R6/Windows] M5 只交付了 DRAW/DRAW_INDEXED 两个签名；DispatchIndirect 误写为
+// 不存在的 ID3D12GraphicsCommandList::DispatchIndirect（MSVC C2039）。compute
+// indirect 的正规形态 = DISPATCH 类型 CommandSignature + ExecuteIndirect。
+// 布局=VkDispatchIndirectCommand 3×u32(x,y,z)=12B ≡ D3D12_DISPATCH_ARGUMENTS
+// 字段序（ThreadGroupCountX/Y/Z）——字节级一致，零翻译。
+ID3D12CommandSignature* D3D12Device::GetDispatchIndirectSignature() {
+    if (dispatchIndirectSignature_) return dispatchIndirectSignature_.Get();
+    D3D12_INDIRECT_ARGUMENT_DESC arg{};
+    arg.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+    D3D12_COMMAND_SIGNATURE_DESC desc{};
+    desc.ByteStride = kIndirectDispatchArgStride;  // 12
+    desc.NumArgumentDescs = 1;
+    desc.pArgumentDescs = &arg;
+    if (FAILED(device_->CreateCommandSignature(&desc, nullptr,
+                                               IID_PPV_ARGS(&dispatchIndirectSignature_)))) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] CreateCommandSignature(DISPATCH) failed" << std::endl;
+        return nullptr;
+    }
+    return dispatchIndirectSignature_.Get();
 }
 double D3D12Device::getTimestampPeriodImpl() const { return timestampPeriodNs_; }
 
@@ -615,6 +958,16 @@ void D3D12Device::destroySwapChainImpl(RHISwapChain* swapChain) {
 ResourceHandle D3D12Device::WrapSwapChainBuffer(RHISwapChain& /*owner*/,
                                                const TextureDesc& desc,
                                                ID3D12Resource* buffer) {
+    // R21-C 埋点：backbuffer wrap 重建 = swapchain Resize/创建路径事件
+    //（ResizeBuffers → destroyBackBuffers+createBackBuffers）——resize 事件
+    // 帧号与黑帧对齐（submitSeq 为设备侧帧代理；宿主不驱动 BeginFrame 时
+    // 无 frameCount 可用）。
+    if (FrameTraceEnabled()) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12FrameTrace] backbuffer wrap: id-new submitSeq="
+            << frameTraceSubmitSeq_ << " frameCount=" << frameCount_
+            << " (" << desc.size.x << "x" << desc.size.y << ")" << std::endl;
+    }
     const u32 id = textureAllocator_.Allocate(*this, desc, buffer);
     d3d12::D3D12Texture* tex = textureAllocator_.Get(id);
     if (!tex || !tex->Initialize()) {
@@ -623,15 +976,27 @@ ResourceHandle D3D12Device::WrapSwapChainBuffer(RHISwapChain& /*owner*/,
         return handles::INVALID_RESOURCE;
     }
     // tracker 注册：Present 初始态（D3D12 位值 = COMMON；渲染前经
-    // BeginRenderPass 显式转 RENDER_TARGET）。
-    stateTracker_.RegisterResource(ResourceHandle(id), true, desc.mipLevels,
-                                   desc.arraySize, 1, ResourceState::Present);
+    // BeginRenderPass 显式转 RENDER_TARGET）。R16-A：注册失败显式告警
+    // （仅同 (id,texture) 双注册会失败——同号 buffer 共存自 R16-A 起合法）。
+    if (!stateTracker_.RegisterResource(ResourceHandle(id), true, desc.mipLevels,
+                                         desc.arraySize, 1, ResourceState::Present)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] tracker register rejected (double-register) "
+               "backbuffer wrap id=" << id << std::endl;
+    }
     return ResourceHandle(id);
 }
 
 void D3D12Device::UnwrapSwapChainBuffer(ResourceHandle handle) {
     if (handle == handles::INVALID_RESOURCE) return;
-    stateTracker_.UnregisterResource(handle);
+    if (FrameTraceEnabled()) {  // R21-C：同 WrapSwapChainBuffer（resize 事件侧）
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12FrameTrace] backbuffer unwrap: id=" << u32(handle)
+            << " submitSeq=" << frameTraceSubmitSeq_
+            << " frameCount=" << frameCount_ << std::endl;
+    }
+    // R16-A：注销按 (id, isTexture=true)——不波及同号 buffer 条目。
+    stateTracker_.UnregisterResource(handle, true);
     textureAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -652,9 +1017,15 @@ ResourceHandle D3D12Device::createBufferImpl(const BufferDesc& desc) {
     // 注释仍成立——tracker 规则② COMMON→任意状态零 barrier 提升；注册后
     // UAV→INDIRECT_ARGUMENT 等 buffer 显式转换才能产出 op（F5-2 arg buffer
     // 状态流转，对齐 D3D12ExecuteIndirect 官方样例模式）。BufferDesc 无
-    // initialState → 恒按 COMMON（General）注册。
-    stateTracker_.RegisterResource(ResourceHandle(id), false, 1, 1, 1,
-                                   ResourceState::General);
+    // initialState → 恒按 COMMON（General）注册。R16-A：注册失败显式告警
+    //（仅同 (id,buffer) 双注册会失败；同号纹理共存自 R16-A 起合法——
+    // bufferAllocator_/textureAllocator_ 两池各自从 0 编号，同号必然重叠）。
+    if (!stateTracker_.RegisterResource(ResourceHandle(id), false, 1, 1, 1,
+                                        ResourceState::General)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] tracker register rejected (double-register) "
+               "buffer id=" << id << " name='" << desc.name << "'" << std::endl;
+    }
     return ResourceHandle(id);
 }
 
@@ -665,7 +1036,7 @@ void D3D12Device::destroyBufferImpl(ResourceHandle handle) {
             << "[D3D12Device] double-free buffer handle=" << handle << " — skipping" << std::endl;
         return;
     }
-    stateTracker_.UnregisterResource(handle);  // M5：与纹理对称
+    stateTracker_.UnregisterResource(handle, false);  // M5+R16-A：与纹理对称，按类型注销
     bufferAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -698,11 +1069,21 @@ ResourceHandle D3D12Device::createTextureImpl(const TextureDesc& desc) {
     // = mipLevels×1×plane）——arraySize 恒按 1 注册（防御误传 >1 时模型
     // 与 D3D12 实际子资源几何脱钩；单测 TestM6Texture3DSubresourceModel）。
     d3d12::D3D12Texture* stored = textureAllocator_.Get(id);
-    stateTracker_.RegisterResource(ResourceHandle(id), true, desc.mipLevels,
-                                   desc.type == TextureType::Texture3D
-                                       ? 1u : desc.arraySize,
-                                   stored->PlaneCount(),
-                                   ResourceState::General);
+    // R16-A：注册失败显式告警。这是 #538 根因链的静默点——M0 键空间下
+    // 同号 buffer 先注册即令本注册被"双注册防御"拒绝且无人知晓，此后该
+    // 纹理全部 Transition 返回空 op（无 barrier），GPU 态滞留 COMMON 直至
+    // mipgen 首个写类状态被 debug-layer #538 拦下（Windows 十五测实证）。
+    // 十六测若仍见本日志，属同 id 同纹理真双注册（生命周期 bug），不再是
+    // 同号冲突。
+    if (!stateTracker_.RegisterResource(ResourceHandle(id), true, desc.mipLevels,
+                                        desc.type == TextureType::Texture3D
+                                            ? 1u : desc.arraySize,
+                                        stored->PlaneCount(),
+                                        ResourceState::General)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] tracker register rejected (double-register) "
+               "texture id=" << id << " name='" << desc.name << "'" << std::endl;
+    }
     return ResourceHandle(id);
 }
 
@@ -713,7 +1094,7 @@ void D3D12Device::destroyTextureImpl(ResourceHandle handle) {
             << "[D3D12Device] double-free texture handle=" << handle << " — skipping" << std::endl;
         return;
     }
-    stateTracker_.UnregisterResource(handle);
+    stateTracker_.UnregisterResource(handle, true);  // R16-A：按 (id, texture) 注销
     textureAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -753,6 +1134,15 @@ ShaderHandle D3D12Device::createShaderImpl(const void* data, size_t size, Shader
 
 void D3D12Device::destroyShaderImpl(ShaderHandle handle) {
     if (handle == handles::INVALID_SHADER) return;
+    // r9 幂等防护：与 buffer/texture 同款 double-free 守卫。Free() 落到
+    // 已释放槽位时 free_list::remove 会二次跑 ~T()（Release 下 assert 死、
+    // 0xCC 毒化槽上 vptr 已被空闲链戳覆盖）——虚调用跳野地址即 0xC0000005
+    // （r9 Shutdown AV 根因族）。合法单次销毁不受影响。
+    if (!GetShader(handle)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] double-free shader handle=" << handle << " — skipping" << std::endl;
+        return;
+    }
     shaderAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -786,7 +1176,15 @@ PipelineHandle D3D12Device::createComputePipelineImpl(const ComputePipelineDesc&
 
 void D3D12Device::destroyPipelineImpl(PipelineHandle handle) {
     if (handle == handles::INVALID_PIPELINE) return;
-    if (d3d12::D3D12Pipeline* p = GetPipeline(handle)) p->Destroy();
+    // r9 幂等防护：同 buffer/texture 守卫（Free 落已释放槽位会二次 ~T()，
+    // 毒化 vptr 上虚调用 → AV；见 destroyShaderImpl 注）。
+    d3d12::D3D12Pipeline* p = GetPipeline(handle);
+    if (!p) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] double-free pipeline handle=" << handle << " — skipping" << std::endl;
+        return;
+    }
+    p->Destroy();
     pipelineAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -840,8 +1238,18 @@ void D3D12Device::destroyCommandBufferImpl(CommandBufferHandle handle) {
 
 u64 D3D12Device::ExecuteAndSignal(ID3D12GraphicsCommandList* list) {
     if (!list || !graphicsQueue_) return 0;
+    // R21-D：pre-execute drain——录制期验证消息（API 调用点即入存储）在
+    // ExecuteCommandLists 之前落盘。放在 ExecuteAndSignal（而非仅 submitImpl）
+    // 是因为共享测试宿主（M1-M6）走命令缓冲直连 Submit
+    //（D3D12CommandBufferImpl::submitImpl → 本函数），不经 submitImpl——
+    // 直连路径若缺 pre drain，层内在 ExecuteCommandLists 里 AV（二十测
+    // D3D12SDKLayers+0xf2d3e 崩溃形态）时录制期消息全部随进程丢失。
+    DrainInfoQueueMessages("pre-execute");
     ID3D12CommandList* lists[] = {list};
     graphicsQueue_->ExecuteCommandLists(1, lists);
+    // R21-D：post-execute drain——debug 层对命令列表的提交期验证
+    //（ExecuteCommandLists 内同步执行）在此已入存储。
+    DrainInfoQueueMessages("post-execute");
     const u64 target = fencePool_.NextTarget();
     if (!fencePool_.Signal(graphicsQueue_.Get(), target)) return 0;
     return target;
@@ -865,6 +1273,8 @@ bool D3D12Device::submitImpl(const QueueSubmitInfo& info) {
     // buffer 全衰减、提升态纹理衰减——tracker 在提交时点推进建模。
     (void)stateTracker_.OnSubmitBoundary();
 
+    // R21-D：pre/post-execute drain 均在 ExecuteAndSignal 内（直连 Submit
+    // 路径与 submitImpl 共享；见 ExecuteAndSignal 注释）。
     const u64 target = ExecuteAndSignal(cmd->GetCommandList());
     if (target == 0) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] ExecuteCommandLists/Signal failed" << std::endl;
@@ -874,6 +1284,45 @@ bool D3D12Device::submitImpl(const QueueSubmitInfo& info) {
     // 帧槽设施的护栏登记（该提交消费本槽描述符/staging 分配）。
     descriptorHeaps_.OnSubmit(target);
     uploadRing_.OnSubmitConsumed(target);
+
+    // R21-C 逐提交埋点 + 宿主帧生命周期探测器：连续多次提交而无
+    // BeginFrame（submitSeq 持续领先 beginFrameSeq）说明宿主不驱动设备帧
+    // 循环——此时帧槽轮转/上传环轮转/GC 全部静止（M 系列测试 harness 的
+    // 实测形态；黑帧排查先确认身处哪种宿主形态再谈轮转竞态）。
+    ++frameTraceSubmitSeq_;
+    if (frameTraceSubmitSeq_ > frameTraceBeginFrameSeq_ + 1
+        && !frameTraceWarnedNoBeginFrame_) {
+        frameTraceWarnedNoBeginFrame_ = true;
+        PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+            << "[D3D12FrameTrace] host submits without device BeginFrame ("
+            << frameTraceSubmitSeq_ << " submits / "
+            << frameTraceBeginFrameSeq_ << " beginFrames) — frame-slot "
+               "rotation / upload-ring rotation / GC are ALL INERT in this "
+               "session (per-slot bump is monotonic until capacity)"
+            << std::endl;
+    }
+    if (FrameTraceEnabled()) {
+        const u32 ringSlot = uploadRing_.TraceCurrentSlot();
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12FrameTrace] submit#" << frameTraceSubmitSeq_
+            << " target=" << target
+            << " completed=" << fencePool_.GetCompletedValue()
+            << " frameIndex=" << currentFrameIndex_
+            << " descMain=" << descriptorHeaps_.MainLinearBump()
+            << "/" << descriptorHeaps_.MainLinearCapacity()
+            << " descSampler=" << descriptorHeaps_.SamplerLinearBump()
+            << "/" << descriptorHeaps_.SamplerLinearCapacity()
+            << " migrations=" << frameTraceMigrations_
+            << " setCreates=" << frameTraceSetCreates_
+            << " ring[slot" << ringSlot << "]="
+            << uploadRing_.TraceSlotOffset(ringSlot)
+            << "/" << uploadRing_.TraceSlotCapacity(ringSlot)
+            << " ringPending=" << uploadRing_.TraceSlotPendingCount(ringSlot)
+            << " ringLastUse=" << uploadRing_.TraceSlotLastUseTarget(ringSlot)
+            << std::endl;
+    }
+    frameTraceMigrations_ = 0;
+    frameTraceSetCreates_ = 0;
 
     // signalFence（RenderSystem frameFences_）：目标值 = 该 sync 对象上次 +1，
     // 队列 Signal——WaitForSync 即 CPU 事件等待。无 signalFence 时同步等
@@ -980,6 +1429,13 @@ DescriptorSetLayoutHandle D3D12Device::createDescriptorSetLayoutImpl(
 
 void D3D12Device::destroyDescriptorSetLayoutImpl(DescriptorSetLayoutHandle handle) {
     if (handle == handles::INVALID_DESCRIPTOR_SET_LAYOUT) return;
+    // r9 幂等防护：同 buffer/texture 守卫（见 destroyShaderImpl 注）。
+    if (!GetDescriptorSetLayout(handle)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] double-free descriptor set layout handle=" << handle
+            << " — skipping" << std::endl;
+        return;
+    }
     descriptorSetLayoutAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -997,6 +1453,13 @@ PipelineLayoutHandle D3D12Device::createPipelineLayoutImpl(const PipelineLayoutD
 
 void D3D12Device::destroyPipelineLayoutImpl(PipelineLayoutHandle handle) {
     if (handle == handles::INVALID_PIPELINE_LAYOUT) return;
+    // r9 幂等防护：同 buffer/texture 守卫（见 destroyShaderImpl 注）。
+    if (!GetPipelineLayout(handle)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] double-free pipeline layout handle=" << handle
+            << " — skipping" << std::endl;
+        return;
+    }
     pipelineLayoutAllocator_.Free(static_cast<u32>(handle));
 }
 
@@ -1009,44 +1472,246 @@ DescriptorSetHandle D3D12Device::createDescriptorSetImpl(const DescriptorSetDesc
         descriptorSetAllocator_.Free(id);
         return handles::INVALID_DESCRIPTOR_SET;
     }
+    ++frameTraceSetCreates_;  // R21-C：FRAME_TRACE 逐提交计数
     return DescriptorSetHandle(id);
 }
 
 void D3D12Device::destroyDescriptorSetImpl(DescriptorSetHandle handle) {
     if (handle == handles::INVALID_DESCRIPTOR_SET) return;
+    // r9 幂等防护：同 buffer/texture 守卫（见 destroyShaderImpl 注）。
+    // BlurPass 早失败路径曾以未初始化的 setPool_ 垃圾句柄批量走到这里。
+    if (!GetDescriptorSet(handle)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] double-free descriptor set handle=" << handle
+            << " — skipping" << std::endl;
+        return;
+    }
     descriptorSetAllocator_.Free(static_cast<u32>(handle));
 }
 
 void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
     if (!set) return;
-    if (set->OwnerSlot() == currentFrameIndex_) return;  // 属主槽即当前槽
+    // R21-C 时效判定 = (帧槽, 纪元) 双键。旧判定只比 ownerSlot ==
+    // currentFrameIndex_：set 恰好隔一整个槽周期（3 帧）未被触碰后同槽
+    // 回归时通过判定，但其区段早已被该槽新一轮 BeginFrame 回收（bump 归零
+    // 后重分配给其他 set）→ 两个 set 共享同段槽位、描述符互踩（黑帧/错图
+    // 根因族）。纪元不匹配 → 走迁移路径重分配。注意迁移在绑定与写入两路
+    // 都触发（BindDescriptorSets / updateDescriptorSetsImpl 均调本函数）。
+    if (set->OwnerSlot() == currentFrameIndex_
+        && set->OwnerEpoch() == descriptorHeaps_.SlotEpoch(currentFrameIndex_)) {
+        return;  // 同槽同纪元——区段仍有效
+    }
+    // R22-S1：该早退对共享 sampler 区段同样安全——共享条目与 set 戳在写
+    // 入/解析路径上同帧落值（锁步；写路径物化不推 set 戳，但物化只发生在
+    // set 戳已然同帧的窗口内，详见 ResolveSamplerRegionForWrite 注）。
+    //
+    // R22-S1 结构变化：主堆区段照旧按 set 戳整体迁移；sampler 区段分两路
+    // ——共享区段（内容条目管辖）走 ResolveSharedSamplerRegion 按条目自身
+    // 的 (slot, epoch) 解析/重建，私有区段（未注册共享，如条目表满降级或
+    // 未写入内容的既有形态）保留原拷贝迁移。R19-4"先全部分配、后统一
+    // 提交"语义保留：任一分配/解析失败 = 整次放弃，set 时效戳零改动。
+    const u32 oldBase = set->BaseSlot();
+    const u32 oldOwnerSlot = set->OwnerSlot();
+    const u64 oldOwnerEpoch = set->OwnerEpoch();
     ID3D12Device* native = device_.Get();
     d3d12::D3D12DescriptorHeapManager& heaps = descriptorHeaps_;
 
+    // R19-4 迁移段断言布防（Windows Debug）：旧区段基槽+数量必须在堆容量内
+    //——十八测 SDKLayers 内部 0xC0000005 的容量冲突假说若成立，断言先崩
+    // 在本函数（调用栈直接给出 set 的基槽/数量），而非 D3D12 运行时内部。
+    // R22-S1：sampler 区段懒物化后可能尚未有区间（kInvalidSlot）——断言
+    // 仅在已有区间时上界检查。
+    assert(set->MainCount() == 0
+           || set->BaseSlot() < heaps.CbvSrvUavCapacity());
+    assert(set->MainCount() == 0
+           || set->MainCount() <= heaps.CbvSrvUavCapacity() - set->BaseSlot());
+    assert(set->SamplerCount() == 0
+           || set->SamplerBaseSlot() == d3d12::D3D12DescriptorHeapManager::kInvalidSlot
+           || set->SamplerBaseSlot() < heaps.SamplerCapacity());
+    assert(set->SamplerBaseSlot() == d3d12::D3D12DescriptorHeapManager::kInvalidSlot
+           || set->SamplerCount() <= heaps.SamplerCapacity() - set->SamplerBaseSlot());
+
+    // R19-4 半迁移修复语义（先分配后提交）：
+    //   - 主区段：AllocShaderVisible 先行（失败 = 整次放弃）；
+    //   - sampler 私有区段：AllocSamplerRange 先行（失败 = 整次放弃）；
+    //   - sampler 共享区段：无先行分配（ResolveSharedSamplerRegion 内部
+    //     物化时分配；失败同样整次放弃——set 戳不动，下次重试）。
+    u32 newBase = 0, newSamplerBase = 0;
+    const bool migrateMain = set->MainCount() > 0;
+    const bool samplerBaseValid = set->SamplerCount() > 0
+        && set->SamplerBaseSlot() != d3d12::D3D12DescriptorHeapManager::kInvalidSlot;
+    const bool resolveSharedSampler = samplerBaseValid && set->SamplerRegionShared();
+    const bool migratePrivateSampler = samplerBaseValid && !set->SamplerRegionShared();
+    if (migrateMain && !heaps.AllocShaderVisible(set->MainCount(), newBase)) return;
+    if (migratePrivateSampler
+        && !heaps.AllocSamplerRange(set->SamplerCount(), newSamplerBase)) return;
+
     // 主区段迁移（内容逐描述符拷贝——heap 描述符自包含）。
-    if (set->MainCount() > 0) {
-        u32 newBase = 0;
-        if (!heaps.AllocShaderVisible(set->MainCount(), newBase)) return;
-        for (u32 i = 0; i < set->MainCount(); ++i) {
-            native->CopyDescriptorsSimple(
-                1, heaps.CbvSrvUavCpuHandle(newBase + i),
-                heaps.CbvSrvUavCpuHandle(set->BaseSlot() + i),
-                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        }
+    // R13/T1：源改 shadow 堆（原实现读 visible 堆作源 = debug-layer
+    // #654 COPY_DESCRIPTORS_WRITE_ONLY_DESCRIPTOR，Windows 十二测全部
+    // exit 2170 的直接根因）；迁移同时维护镜像不变量（shadow(new) 先收
+    // 下旧内容，再 shadow(new)→visible(new) 合法方向下发）。
+    if (migrateMain) {
+        native->CopyDescriptorsSimple(
+            set->MainCount(), heaps.CbvSrvUavShadowCpuHandle(newBase),
+            heaps.CbvSrvUavShadowCpuHandle(set->BaseSlot()),
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        heaps.CopyCbvSrvUavShadowToVisible(newBase, set->MainCount());
         set->baseSlot_ = newBase;
     }
-    if (set->SamplerCount() > 0) {
-        u32 newSamplerBase = 0;
-        if (!heaps.AllocSamplerRange(set->SamplerCount(), newSamplerBase)) return;
-        for (u32 i = 0; i < set->SamplerCount(); ++i) {
-            native->CopyDescriptorsSimple(
-                1, heaps.SamplerCpuHandle(newSamplerBase + i),
-                heaps.SamplerCpuHandle(set->SamplerBaseSlot() + i),
-                D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
-        }
+    bool samplerResolved = true;
+    if (resolveSharedSampler) {
+        samplerResolved = ResolveSharedSamplerRegion(set);
+    } else if (migratePrivateSampler) {
+        native->CopyDescriptorsSimple(
+            set->SamplerCount(), heaps.SamplerShadowCpuHandle(newSamplerBase),
+            heaps.SamplerShadowCpuHandle(set->SamplerBaseSlot()),
+            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        heaps.CopySamplerShadowToVisible(newSamplerBase, set->SamplerCount());
         set->samplerBaseSlot_ = newSamplerBase;
     }
+    if (!samplerResolved) return;  // 共享解析失败：戳不推进（下次重试；主区段新段白烧随槽回收）
     set->ownerSlot_ = currentFrameIndex_;
+    set->ownerEpoch_ = descriptorHeaps_.SlotEpoch(currentFrameIndex_);  // R21C：新分配戳
+    ++frameTraceMigrations_;
+    if (FrameTraceEnabled()) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12FrameTrace] set migrate: oldBase=" << oldBase
+            << " oldOwner=(" << oldOwnerSlot << "," << oldOwnerEpoch << ")"
+            << " -> newBase=" << set->BaseSlot()
+            << " count=" << set->MainCount()
+            << " samplerBase=" << set->SamplerBaseSlot()
+            << " samplerShared=" << (resolveSharedSampler ? 1 : 0)
+            << " newOwner=(" << set->OwnerSlot() << "," << set->OwnerEpoch()
+            << ")" << std::endl;
+    }
+}
+
+bool D3D12Device::ResolveSharedSamplerRegion(d3d12::D3D12DescriptorSet* set) {
+    using d3d12::SamplerTableSharingPolicy;
+    d3d12::D3D12DescriptorHeapManager& heaps = descriptorHeaps_;
+    d3d12::SamplerTableSharingPolicy& sharing = heaps.SamplerSharing();
+    const u32 count = set->SamplerCount();
+    const u32 slot = currentFrameIndex_;
+    const u64 epoch = heaps.SlotEpoch(slot);
+    const u64 key = d3d12::HashSamplerTable(set->SamplerSrcSlots(), count);
+    const u32 hit = sharing.FindActive(key, slot, epoch, set->SamplerSrcSlots(), count);
+    if (hit != SamplerTableSharingPolicy::kInvalidIndex) {
+        set->samplerBaseSlot_ = sharing.EntryBaseSlot(hit);  // 刷新快照（条目可能已被重建到新基槽）
+        return true;
+    }
+    const u32 stale = sharing.FindByKey(key, set->SamplerSrcSlots(), count);
+    if (stale == SamplerTableSharingPolicy::kInvalidIndex) {
+        // 条目缺失：仅可能是 sampler 持久槽 purge（SamplerHandle 销毁，见
+        // FreeSampler）。不按处方重建——处方引用的持久槽可能已复用为不同
+        // 采样器；维持快照并告警（引用已销毁 sampler 的 set 属 Vulkan 同款
+        // UB：spec 禁止销毁仍被 descriptor set 引用的 sampler）。
+        // 告警一次性：轮转宿主里受影响的 set 每帧都会走到这里。
+        if (!warnedSharedSamplerRegionMissing_) {
+            warnedSharedSamplerRegionMissing_ = true;
+            PRIMAL_LOG_STREAM(Warn, "RHI")
+                << "[D3D12Device] shared sampler region missing for set prescription "
+                   "(sampler destroyed while sets still reference it?); keeping last "
+                   "resolved range (warned once)" << std::endl;
+        }
+        return true;  // 快照可用（本槽未被回收前内容未变）；不阻塞绑定
+    }
+    u32 base = 0;
+    if (!heaps.MaterializeSamplerRange(set->SamplerSrcSlots(), count, base)) {
+        return false;  // 耗尽日志已打；set 戳不推进，下次重试
+    }
+    sharing.Activate(stale, base, slot, epoch);
+    set->samplerBaseSlot_ = base;
+    return true;
+}
+
+u32 D3D12Device::ResolveSamplerRegionForWrite(d3d12::D3D12DescriptorSet* set,
+                                              const WriteDescriptorSet* writes,
+                                              u32 writeCount, u32 currentWrite) {
+    using d3d12::SamplerTableSharingPolicy;
+    d3d12::D3D12DescriptorHeapManager& heaps = descriptorHeaps_;
+    d3d12::SamplerTableSharingPolicy& sharing = heaps.SamplerSharing();
+    const u32 count = set->SamplerCount();
+    if (count == 0 || !writes) return d3d12::D3D12DescriptorHeapManager::kInvalidSlot;
+
+    // prescan：终态处方 = 当前处方 + 本调用内该 set 的全部 sampler 写入
+    //（含当前 write，前向窗口到调用尾；同 set 更早 write 的效果已在当前
+    // 处方里）。终态一次解析，跳过中间内容状态——宿主"binding 分多次
+    // Update 写入"时不会为中间态各占一段。同调用内逐 write 重复解析收敛
+    // 同一终态 → 同一基槽（幂等，无需跨 write 缓存）。
+    utl::vector<u32> finalSrc(set->SamplerSrcSlots(), set->SamplerSrcSlots() + count);
+    d3d12::D3D12DescriptorSetLayout* layout = GetDescriptorSetLayout(set->GetLayout());
+    if (!layout) return d3d12::D3D12DescriptorHeapManager::kInvalidSlot;
+    for (u32 scan = currentWrite; scan < writeCount; ++scan) {
+        const WriteDescriptorSet& pending = writes[scan];
+        if (pending.dstSet != writes[currentWrite].dstSet) continue;
+        d3d12::D3D12DescriptorSetLayout::BindingClass pendingInfo;
+        if (!layout->QueryBinding(pending.dstBinding, pendingInfo)
+            || !pendingInfo.hasSampler || !pending.imageInfo) {
+            continue;
+        }
+        // 以下跳过条件逐条镜像 updateDescriptorSetsImpl 的逐项分支次序
+        //（buffer 路径优先于 image 路径；Combined 绑定的纹理无效 = 整项
+        // 跳过，其 sampler 亦不写）——prescan 与"原逐项写入会落下的内容"
+        // 必须逐位一致，终态处方才是该 set 真实的 sampler 表内容。
+        if (pendingInfo.hasMain && pending.bufferInfo) continue;
+        for (u32 item = 0; item < pending.descriptorCount; ++item) {
+            const DescriptorImageInfo& pendingImage = pending.imageInfo[item];
+            if (pendingInfo.hasMain) {
+                d3d12::D3D12Texture* texture = GetTexture(pendingImage.imageView);
+                if (!texture) continue;
+                const u32 srcSlot = pendingInfo.mainType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+                    ? texture->UavSlot() : texture->SrvSlot();
+                if (srcSlot == d3d12::D3D12Texture::kInvalidDescriptorSlot) continue;
+            }
+            d3d12::D3D12Sampler* sampler = GetSampler(pendingImage.sampler);
+            if (!sampler) continue;
+            const u32 idx = pendingInfo.samplerOffset + pending.dstArrayElement + item;
+            // R19-4 断言布防延伸：写入项越出 sampler 表长（dstArrayElement/
+            // descriptorCount 超 layout 声明）。共享区间下越界 = 踩到相邻
+            // 内容的区间——Release 也必须拒绝（原实现此处只有堆容量断言）。
+            assert(idx < count);
+            if (idx >= count) continue;
+            finalSrc[idx] = sampler->Slot();
+        }
+    }
+
+    const u32 slot = currentFrameIndex_;
+    const u64 epoch = heaps.SlotEpoch(slot);
+    const u64 key = d3d12::HashSamplerTable(finalSrc.data(), count);
+    const u32 hit = sharing.FindActive(key, slot, epoch, finalSrc.data(), count);
+    if (hit != SamplerTableSharingPolicy::kInvalidIndex) {
+        // 内容已在本槽物化：直接共享——区间内容即终态处方，本 set 零写入。
+        set->samplerRegionShared_ = true;
+        set->samplerBaseSlot_ = sharing.EntryBaseSlot(hit);
+        set->samplerSrcSlots_.assign(finalSrc.data(), finalSrc.data() + count);
+        return set->samplerBaseSlot_;
+    }
+    u32 base = 0;
+    if (!heaps.MaterializeSamplerRange(finalSrc.data(), count, base)) {
+        // 耗尽日志已打。set 的处方/快照零改动（本次写入未生效，同原实现
+        // 对无效项的静默跳过口径；调用方跳过该 write 的 sampler 项）。
+        return d3d12::D3D12DescriptorHeapManager::kInvalidSlot;
+    }
+    const u32 stale = sharing.FindByKey(key, finalSrc.data(), count);
+    if (stale != SamplerTableSharingPolicy::kInvalidIndex) {
+        sharing.Activate(stale, base, slot, epoch);   // 过期条目复活（重建落位）
+        set->samplerRegionShared_ = true;
+    } else {
+        const bool registered =
+            sharing.Register(key, base, slot, epoch, finalSrc.data(), count)
+                != SamplerTableSharingPolicy::kInvalidIndex;
+        // 表满降级：私有区间（内容正确，仅不共享；随 set 戳拷贝迁移）。
+        set->samplerRegionShared_ = registered;
+        if (registered) {
+            // R22-S1 诊断（有界：每唯一内容一行）：新内容物化证据——init 期
+            // 的内容数与共享效果从日志直接可数。
+            heaps.LogSamplerSharingStats("new unique sampler content");
+        }
+    }
+    set->samplerBaseSlot_ = base;
+    set->samplerSrcSlots_.assign(finalSrc.data(), finalSrc.data() + count);
+    return base;
 }
 
 void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorSet* writes) {
@@ -1064,14 +1729,30 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
         d3d12::D3D12DescriptorSetLayout::BindingClass info;
         if (!layout->QueryBinding(write.dstBinding, info)) continue;
 
-        for (u32 e = 0; e < write.descriptorCount; ++e) {
-            // --- 主段（CBV/SRV/UAV）---
+        // R22-S1：sampler 写入的区间解析（内容级共享——每内容每槽一段）。
+        // 以"本调用内该 set 全部 sampler 写入应用后的终态处方"解析：命中
+        // 既有共享区间即复用，否则在当前槽物化一段并注册。触发条件与下方
+        // 逐项分支的可达条件严格一致（buffer 路径优先——hasMain 且带
+        // bufferInfo 的 write 不会落到 sampler 项）。解析失败（线性区耗尽，
+        // 已留日志）= 本 write 的 sampler 项跳过。
+        u32 samplerRangeBase = d3d12::D3D12DescriptorHeapManager::kInvalidSlot;
+        if (info.hasSampler && write.imageInfo && !(info.hasMain && write.bufferInfo)) {
+            samplerRangeBase = ResolveSamplerRegionForWrite(set, writes, writeCount, w);
+        }
+
+            for (u32 e = 0; e < write.descriptorCount; ++e) {
+                // --- 主段（CBV/SRV/UAV）---
             if (info.hasMain && write.bufferInfo) {
                 const DescriptorBufferInfo& bi = write.bufferInfo[e];
                 d3d12::D3D12Buffer* buffer = GetBuffer(bi.buffer);
                 if (!buffer) continue;
                 const u32 slot = set->BaseSlot() + info.mainOffset + write.dstArrayElement + e;
-                const D3D12_CPU_DESCRIPTOR_HANDLE dst = descriptorHeaps_.CbvSrvUavCpuHandle(slot);
+                // R19-4 断言布防：write 越出 set 区段/堆容量（dstArrayElement
+                // 或 descriptorCount 超 layout 声明）时崩在此行——堆写入槽位
+                // 无上界检查是本函数既有缺口（写越堆尾=CPU AV 于 D3D12 内部）。
+                assert(slot < descriptorHeaps_.CbvSrvUavCapacity());
+                // R13/T1 双写第一步：Create*View 落 shadow 堆（dst = shadow 槽）。
+                const D3D12_CPU_DESCRIPTOR_HANDLE dst = descriptorHeaps_.CbvSrvUavShadowCpuHandle(slot);
                 switch (info.mainType) {
                     case D3D12_DESCRIPTOR_RANGE_TYPE_CBV: {
                         // CBV 尺寸须 256 倍数；BufferLocation 256 对齐（烘焙偏移）。
@@ -1109,6 +1790,9 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                     }
                     default: break;
                 }
+                // 双写第二步：shadow → visible 同槽（ClassifyBinding 只产
+                // CBV/SRV/UAV 三值，default 分支不可达；三分支统一在此镜像）。
+                descriptorHeaps_.CopyCbvSrvUavShadowToVisible(slot);
             }
             // --- 图像/sampler 段（拷贝现成描述符——纹理创建时已建 SRV/UAV）---
             else if (write.imageInfo) {
@@ -1121,20 +1805,35 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                     if (srcSlot == d3d12::D3D12Texture::kInvalidDescriptorSlot) continue;
                     const u32 dstSlot = set->BaseSlot() + info.mainOffset
                                         + write.dstArrayElement + e;
+                    // R20-B 埋点（PRIMAL_D3D12_UPLOAD_TRACE 同门）：纹理 SRV
+                    // 持久槽→set 槽复制日志——宿主 albedo 材质集写入证据；
+                    // 十九测黑帧（硬件 M1，无 validation error=状态合法而
+                    // 数据未到位）的描述符错位排查用（mipgen 临时 SRV 槽在
+                    // D3D12CommandBuffer/D3D12MipGen 域——R20-A 线采集）。
+                    if (EnvFlag("PRIMAL_D3D12_UPLOAD_TRACE")) {
+                        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+                            << "[D3D12Device] desc write: texId=" << ii.imageView
+                            << " srcSlot=" << srcSlot << " -> dstSlot=" << dstSlot
+                            << " set=" << write.dstSet
+                            << " binding=" << write.dstBinding << std::endl;
+                    }
+                    assert(dstSlot < descriptorHeaps_.CbvSrvUavCapacity());  // R19-4 断言布防（同上）
+                    // R13/T1 双写：源读纹理持久槽的 shadow 副本（原实现读
+                    // visible 堆 = #654），先落 shadow(dst) 再镜像 visible(dst)。
                     native->CopyDescriptorsSimple(
-                        1, descriptorHeaps_.CbvSrvUavCpuHandle(dstSlot),
-                        descriptorHeaps_.CbvSrvUavCpuHandle(srcSlot),
+                        1, descriptorHeaps_.CbvSrvUavShadowCpuHandle(dstSlot),
+                        descriptorHeaps_.CbvSrvUavShadowCpuHandle(srcSlot),
                         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                    descriptorHeaps_.CopyCbvSrvUavShadowToVisible(dstSlot);
                 }
                 if (info.hasSampler) {
-                    d3d12::D3D12Sampler* sampler = GetSampler(ii.sampler);
-                    if (!sampler) continue;
-                    const u32 dstSlot = set->SamplerBaseSlot() + info.samplerOffset
-                                        + write.dstArrayElement + e;
-                    native->CopyDescriptorsSimple(
-                        1, descriptorHeaps_.SamplerCpuHandle(dstSlot),
-                        descriptorHeaps_.SamplerCpuHandle(sampler->Slot()),
-                        D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+                    // R22-S1：无逐项动作——sampler 区间内容已由写入级解析
+                    // 保证（MaterializeSamplerRange 按终态处方一次物化，或
+                    // 命中既有共享区间；共享区段只被物化写一次，杜绝逐项
+                    // 写入踩共享段）。处方也在解析时落定
+                    //（ResolveSamplerRegionForWrite），本分支保留仅为显式
+                    // 标注 CombinedImageSampler 的 sampler 半边归属。
+                    (void)samplerRangeBase;
                 }
             }
         }
@@ -1153,10 +1852,24 @@ bool D3D12Device::UploadBufferDataViaRing(ID3D12Resource* dst, const void* data,
         // 容量耗尽：排干在飞后重试一次（Vulkan/Metal 同款约定）。
         uploadRing_.FlushBlocking();
         alloc = uploadRing_.Allocate(size);
-        if (alloc.overflow) return false;
+        if (alloc.overflow) {
+            // R20-B：上传失败不再静默——调用方（如 RenderMesh::Create）可能
+            // 不查返回值，缓冲保持未初始化显存即黑资源/垃圾图元。
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12Device] ring upload FAILED (buffer): size=" << size
+                << " dstOffset=" << dstOffset << " (single shot > slot capacity?)"
+                << std::endl;
+            return false;
+        }
     }
     std::memcpy(alloc.cpuPtr, data, size);
     uploadRing_.QueueCopyBuffer(alloc, dst, dstOffset, size);
+    if (EnvFlag("PRIMAL_D3D12_UPLOAD_TRACE")) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12Device] ring upload (buffer): size=" << size
+            << " dstOffset=" << dstOffset << " stagingOffset=" << alloc.offset
+            << (IsFrameRecording() ? " [frame-queued]" : " [blocking]") << std::endl;
+    }
     if (!IsFrameRecording()) {
         uploadRing_.FlushBlocking();  // 资产加载期语义：立即落 GPU
     }
@@ -1176,21 +1889,57 @@ bool D3D12Device::UploadTextureDataViaRing(ID3D12Resource* texture, ResourceHand
         d3d12::D3D12UploadRing::ComputeRegionLayout(
             d3d12::ToDxgiFormat(format), static_cast<u32>(texelBytes),
             region.width, region.height, region.depth, 0);
-    if (layout.totalBytes == 0 || size < layout.totalBytes) return false;
+    // 源尺寸语义 = 紧密行主序 blob（每层 width×texel×height 紧凑，与
+    // D3D12Texture::updateRegion 的 expected 式、Vulkan/Metal updateRegion
+    // 的 tightly-packed 契约一致）：size ≥ width×texel×height×depth 即合法。
+    // 旧校验 size < layout.totalBytes（padded footprint 需求）把合法紧凑源
+    // 误拒——十九测可选 mipgen 四组合全灭即此（8×8 RGBA8 紧凑 256B <
+    // footprint 需求 1824B；#869 宿主半边，R19-1 改走 UpdateTextureRegion
+    // 后暴露）。staging 分配仍按 totalBytes（footprint 语义，R19-2 §28-2
+    // 已补 512 对齐），紧凑源在下方逐行展开进 padded 布局。
+    const u64 srcRowBytes = u64(region.width) * texelBytes;
+    const u64 srcSliceBytes = srcRowBytes * region.height;
+    const u64 minCompactBytes = srcSliceBytes * region.depth;
+    if (layout.totalBytes == 0 || size < minCompactBytes) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] texture region upload rejected: size " << size
+            << "B < tight-source minimum " << minCompactBytes << "B (region "
+            << region.width << "x" << region.height << "x" << region.depth
+            << " x " << texelBytes << "B/texel; staging footprint "
+            << layout.totalBytes << "B @ RowPitch " << layout.rowPitch << ")"
+            << std::endl;
+        return false;
+    }
 
-    d3d12::D3D12UploadRing::Allocation alloc = uploadRing_.Allocate(layout.totalBytes);
+    // 纹理 staging 分配尺寸=footprint 语义（totalBytes 含行距 padding），
+    // 对齐=512（D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT——footprint.Offset
+    // 硬性要求；R19-2 前默认 256，第二笔纹理分配可落 256 奇数倍偏移）。
+    // buffer staging（UploadBufferDataViaRing）维持默认 256 不受影响。
+    d3d12::D3D12UploadRing::Allocation alloc =
+        uploadRing_.Allocate(layout.totalBytes,
+                             d3d12::D3D12UploadRing::TEXTURE_STAGING_ALIGNMENT);
     if (alloc.overflow) {
         uploadRing_.FlushBlocking();
-        alloc = uploadRing_.Allocate(layout.totalBytes);
-        if (alloc.overflow) return false;
+        alloc = uploadRing_.Allocate(
+            layout.totalBytes,
+            d3d12::D3D12UploadRing::TEXTURE_STAGING_ALIGNMENT);
+        if (alloc.overflow) {
+            // R20-B：上传失败不再静默（同 UploadBufferDataViaRing）。
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12Device] ring upload FAILED (texture): totalBytes="
+                << layout.totalBytes << " region=" << region.width << "x"
+                << region.height << "x" << region.depth << " mip=" << region.mipLevel
+                << std::endl;
+            return false;
+        }
     }
     // 紧密行主序源 → footprint 行距布局（逐行拷贝；末行无 padding）。
     // M7 F7-7 静态终审修复：原实现只拷 depth 第 0 层——region.depth>1（M6
     // GI 3D 体积上传）时 staging 第 1..N-1 层保留上一轮脏数据，经
     // CopyTextureRegion 的全深度 BOX 上传到纹理即垃圾值。源布局=紧密深度
     // 平面（每层 w×texel×h 紧凑，与 updateRegion 的 expected 尺寸式一致）。
-    const u64 srcRowBytes = u64(region.width) * texelBytes;
-    const u64 srcSliceBytes = srcRowBytes * region.height;
+    // srcRowBytes/srcSliceBytes 已随上方紧凑源校验上移定义（源 stride=紧凑
+    // 行字节，dst stride=layout.rowPitch——stride 不等即依赖此逐行展开）。
     u8* dstPtr = static_cast<u8*>(alloc.cpuPtr);
     const u8* srcPtr = static_cast<const u8*>(data);
     for (u32 z = 0; z < region.depth; ++z) {
@@ -1208,6 +1957,13 @@ bool D3D12Device::UploadTextureDataViaRing(ID3D12Resource* texture, ResourceHand
                                  layout.footprint, region.offsetX, region.offsetY,
                                  region.offsetZ, region.width, region.height,
                                  region.depth, ResourceState::ShaderResource);
+    if (EnvFlag("PRIMAL_D3D12_UPLOAD_TRACE")) {
+        PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+            << "[D3D12Device] ring upload (texture): texId=" << textureId
+            << " subresource=" << subresource << " totalBytes=" << layout.totalBytes
+            << " stagingOffset=" << alloc.offset
+            << (IsFrameRecording() ? " [frame-queued]" : " [blocking]") << std::endl;
+    }
     if (!IsFrameRecording()) {
         uploadRing_.FlushBlocking();
     }

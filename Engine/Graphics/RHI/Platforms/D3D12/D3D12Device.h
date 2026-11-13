@@ -2,8 +2,14 @@
 //
 // D3D12Device.h — D3D12 设备（M0 F0-8 最小闭环 + M1 全资源层接线）。
 //
-// M0 闭环（保留）：debug layer + GBV + InfoQueue fail-fast / adapter + WARP /
-// DIRECT queue / D3D12MA allocator / WaitIdle / 设备丢失上报。
+// M0 闭环（保留，R21-D 修订）：debug layer + GBV（env opt-in）+ InfoQueue
+// 消息收集通道 / adapter + WARP / DIRECT queue / D3D12MA allocator /
+// WaitIdle / 设备丢失上报。R21-D 起 InfoQueue 语义：ERROR/CORRUPTION 消息
+// 经 DrainInfoQueueMessages 落 stderr（PRIMAL_D3D12_ERROR_LOG=0 关，默认
+// 开）；break-on-error 改 env opt-in（PRIMAL_D3D12_BREAK_ON_ERROR=1，
+// 默认关——无调试器的正常跑里 RaiseException 0x87A 直接杀进程且无人
+// 收集消息，二十测 M3-M6 证据链）；PRIMAL_D3D12_VALIDATION=0 诊断 lane
+// 完全跳过 debug 层创建（区分引擎野指针 vs SDKLayers 层内崩）。
 //
 // M1 新增（阶段文档 F1-1..F1-7）：
 //   - D3D12DescriptorHeapManager（F1-5：分帧槽描述符 + 持久槽位）
@@ -37,11 +43,17 @@
 #include "D3D12MemAlloc.h"
 
 #include "../../Core/RHIDevice.h"
+// R3（Windows 首编）：RHIAllocator<T> 按值成员（bufferAllocator_ 等 ×9）需要
+// 完整模板定义。此前仅经 RHIResource.h:19 / RHICommand.h:20 的前向声明传递
+// （"incomplete type" MSVC 报错源）——clang 下靠传递链侥幸可见。对齐兄弟后端
+// （MetalDevice.h:28 / VulkanDevice.h:23 / DawnDevice.h:8）直接 include。
+#include "../../Core/RHIAllocator.h"
 #include "D3D12BackendLinks.h"
 #include "D3D12Buffer.h"
 #include "D3D12CommandBuffer.h"
 #include "D3D12DescriptorHeaps.h"
 #include "D3D12Fence.h"
+#include "D3D12MipGen.h"
 #include "D3D12Pipeline.h"
 #include "D3D12Shader.h"
 #include "D3D12StateTracker.h"
@@ -64,6 +76,8 @@ public:
 
     // --- 原生访问（后端内部与诊断；共享代码禁 include——F0-12 门禁）---
     ID3D12Device* GetNativeDevice() const { return device_.Get(); }
+    /// R13/T2：GenerateMipmaps 渲染资产（根签名/按格式 PSO 缓存）。
+    d3d12::D3D12MipGenerator& GetMipGenerator() { return mipGenerator_; }
     ID3D12CommandQueue* GetGraphicsQueue() const { return graphicsQueue_.Get(); }
     IDXGIAdapter4* GetNativeAdapter() const { return adapter_.Get(); }
     bool IsWarp() const { return warp_; }
@@ -111,24 +125,28 @@ public:
     // 字段序字节级一致，CommandSignature 按该字节布局构造，零中间翻译。
     ID3D12CommandSignature* GetDrawIndirectSignature();        // DRAW        16B
     ID3D12CommandSignature* GetDrawIndexedIndirectSignature(); // DRAW_INDEXED 20B
+    ID3D12CommandSignature* GetDispatchIndirectSignature();    // DISPATCH    12B（R6 补）
     // 查询签名字节步长（CommandBuffer ExecuteIndirect 直译用；供单测断言）。
     static constexpr u32 kIndirectDrawArgStride = 16;
     static constexpr u32 kIndirectDrawIndexedArgStride = 20;
+    // D3D12_DISPATCH_ARGUMENTS = VkDispatchIndirectCommand = 3×u32(x,y,z) = 12B。
+    static constexpr u32 kIndirectDispatchArgStride = 12;
 
     // M5 F5-3：descriptor indexing 能力运行时真实查询（覆盖 RHIDeviceBase
     // 默认 false）。语义=VulkanDevice 同款（SupportsDescriptorIndexing 为
     // 引擎消费路径的"可用"判定，非原始 tier 透传）：ResourceBindingTier>=2
     // （无界描述符数组+shader 动态索引可用）。不按 shader model 假设。
     bool SupportsDescriptorIndexing() const override { return descriptorIndexingSupported_; }
-    // F5-3 记录用：原始 tier + DescriptorHeap 特性（MaxDescriptorHeapSize/
-    // MaxSamplerDescriptorHeapSize，Tier1 的 SRV 堆 100 万上限是 bindless
-    // 规模上限的决定项）。initializeImpl 时查询缓存。
+    // F5-3 记录用：原始 ResourceBindingTier（bindless 规模上限的决定项；
+    // [R6/Windows] D3D12 无 MaxDescriptorHeapSize feature 字段——真头核对
+    // OPTIONS v1 全字段无此名，tier 即规模语义，故只记 tier）。查询见
+    // initializeImpl。
     u32 GetResourceBindingTier() const { return resourceBindingTier_; }
-    u64 GetMaxDescriptorHeapSize() const { return maxDescriptorHeapSize_; }
-    // M6 F6-2/F6-3：类型化 UAV 附加格式（OPTIONS3.TypedUAVLoadAdditionalFormats）
-    // ——RGBA16F/RG16F 等 typed UAV load/store 的先决能力（D3D12 仅保证
-    // R32_FLOAT/UINT/SINT）。initializeImpl 期真实查询缓存；false 时
-    // D3D12Texture 对需附加格式的 UAV 纹理显式失败（fail 语义）。
+    // M6 F6-2/F6-3：类型化 UAV 附加格式（[R6] 字段在 OPTIONS v1，非 OPTIONS3
+    // ——真头核对；查询已并入 OPTIONS 块）——RGBA16F/RG16F 等 typed UAV
+    // load/store 的先决能力（D3D12 仅保证 R32_FLOAT/UINT/SINT）。initializeImpl
+    // 期真实查询缓存；false 时 D3D12Texture 对需附加格式的 UAV 纹理显式失败
+    // （fail 语义）。
     bool GetTypedUavAdditionalFormats() const { return typedUavAdditionalFormats_; }
 
     // ODR-bypass 上传虚接口（语义与 VulkanDevice 同名 override 对齐）
@@ -205,6 +223,14 @@ private:
     bool createAllocator();
     void reportDeviceRemoval(HRESULT reason);
 
+    /// R21-D：把 InfoQueue 已存储的 ERROR/CORRUPTION 消息经 PRIMAL_LOG(Error)
+    /// 落 stderr（含 message id + 截断文本），随后清空存储。 drainage 点：
+    /// beginFrame / ExecuteAndSignal（pre+post ExecuteCommandLists——直连
+    /// Submit 与 submitImpl 两路共享）/ init 尾。帧 0 首提交的录制期与
+    /// 提交期验证错误在下一次层内 AV 之前即可见。INFOQUEUE 不可用
+    ///（debug 层关 / VALIDATION=0 lane）时为 no-op。
+    void DrainInfoQueueMessages(const char* context);
+
     // M1：M0 地基之上的资源层子系统初始化（fence pool 之后、闭环检查之前）。
     bool createResourceSubsystems();
 
@@ -227,10 +253,29 @@ private:
 
     /// set 区段迁移（长寿命 set 的跨帧复用护栏）：set 区段属主槽 != 当前
     /// 帧槽 → 当前槽重分配 + CopyDescriptorsSimple 迁移内容 + 更新属主。
+    /// R22-S1：只迁移主堆区段与"私有"sampler 区段；共享 sampler 区段改由
+    /// ResolveSharedSamplerRegion 按内容条目自身的 (slot, epoch) 解析。
     void EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set);
+
+    /// R22-S1：写入路径的 sampler 区段解析——prescan 本调用内该 set 的全部
+    /// sampler 写入得到终态处方，命中共享区间直接复用；miss 则在当前槽按
+    /// 处方物化一段并注册（每内容每槽一次）。返回区间基槽（失败 =
+    /// kInvalidSlot，已留日志）。幂等：同调用内逐 write 重复解析收敛同基槽。
+    u32 ResolveSamplerRegionForWrite(d3d12::D3D12DescriptorSet* set,
+                                     const WriteDescriptorSet* writes,
+                                     u32 writeCount, u32 currentWrite);
+
+    /// R22-S1：绑定期共享 sampler 区段解析（EnsureSetRegionCurrent 内调）：
+    /// 条目当前有效 → 刷新快照；过期 → 按条目处方物化重建并 Activate
+    /// （谁发现过期谁重建，每内容每槽一次）；条目缺失（sampler 持久槽被
+    /// purge）→ 告警并维持快照（引用已销毁 sampler = Vulkan 同款 UB）。
+    /// 返回 false = 解析失败（耗尽/条目缺失），调用方不得推进 set 时效戳。
+    bool ResolveSharedSamplerRegion(d3d12::D3D12DescriptorSet* set);
 
     Microsoft::WRL::ComPtr<ID3D12Debug1> debugController_;
     Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue_;
+    /// R21-D：上轮 drain 的 storage 拒绝计数（差分防重复告警）。
+    u64 infoQueueLastDenied_ = 0;
     Microsoft::WRL::ComPtr<IDXGIFactory6> dxgiFactory_;
     Microsoft::WRL::ComPtr<IDXGIAdapter4> adapter_;
     Microsoft::WRL::ComPtr<ID3D12Device> device_;
@@ -244,6 +289,9 @@ private:
     d3d12::D3D12DescriptorHeapManager descriptorHeaps_;
     d3d12::D3D12UploadRing uploadRing_;
     d3d12::D3D12StateTracker stateTracker_;
+    // R13/T2：GenerateMipmaps 的设备级渲染资产（根签名 + 按格式惰性 PSO；
+    // shader 字节 = 构建期嵌入头，见 D3D12MipGen.h）。
+    d3d12::D3D12MipGenerator mipGenerator_;
 
     // === Per-type free_list 分配器（延迟释放与 Vulkan 同款护栏）===
     RHIAllocator<d3d12::D3D12Buffer> bufferAllocator_;
@@ -266,13 +314,29 @@ private:
     u32 currentFrameIndex_ = 0;
     double timestampPeriodNs_ = 1.0;  // D3D12 timestamp unit 恒 1 tick
 
+    // --- R21-C FRAME_TRACE 计数器（PRIMAL_D3D12_FRAME_TRACE 埋点用；
+    // 计数恒更新、输出 env 门控。宿主不驱动 BeginFrame 时 submitSeq 与
+    // beginFrameSeq 的差值即为"无帧生命周期"探测器（M 系列测试 harness
+    // 实测形态：帧槽/上传环/GC 全部静止，帧循环设备侧状态不推进））。---
+    u64 frameTraceSubmitSeq_ = 0;      ///< 提交序号（含 FlushBlocking 独立提交）
+    u64 frameTraceBeginFrameSeq_ = 0;  ///< BeginFrame 序号
+    u64 frameTraceMigrations_ = 0;     ///< 两次提交之间的 set 区段迁移次数
+    u64 frameTraceSetCreates_ = 0;     ///< 两次提交之间的 set 创建次数
+    bool frameTraceWarnedNoBeginFrame_ = false;  ///< 无 BeginFrame 宿主一次性告警
+    /// R22-S1：首次 BeginFrame 时打一次 sampler 共享 init 统计（无
+    /// BeginFrame 宿主依赖 Shutdown 侧统计与逐新内容日志，见实现注）。
+    bool loggedInitSamplerStats_ = false;
+    /// R22-S1：共享 sampler 条目缺失（set 引用已销毁 sampler）一次性告警。
+    bool warnedSharedSamplerRegionMissing_ = false;
+
     // --- M5 F5-2/F5-3 ---
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndirectSignature_;
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndexedIndirectSignature_;
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> dispatchIndirectSignature_;  // R6
     bool descriptorIndexingSupported_ = false;  // F5-3：tier>=2 判定结果
     u32 resourceBindingTier_ = 0;               // D3D12_RESOURCE_BINDING_TIER_*
-    u64 maxDescriptorHeapSize_ = 0;             // OPTIONS.MaxDescriptorHeapSize
-    bool typedUavAdditionalFormats_ = false;    // M6：OPTIONS3.TypedUAVLoadAdditionalFormats
+    // [R6/Windows] maxDescriptorHeapSize_ 已删除：OPTIONS 无该字段（真头核对）。
+    bool typedUavAdditionalFormats_ = false;    // M6：OPTIONS(v1).TypedUAVLoadAdditionalFormats
 };
 
 } // namespace primal::graphics::rhi

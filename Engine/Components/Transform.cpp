@@ -20,7 +20,7 @@ namespace primal::transform {
 			assert(rotations.size() >= index);
 			assert(positions.size() >= index);
 			assert(scales.size() >= index);
-#if defined(__APPLE__)
+#if defined(PRIMAL_MATH_BACKEND_SIMD)
 			using namespace simd;
 			// 构建四元数 (w, x, y, z)
 			simd::quatf r = simd_quaternion(rotations[index].x, rotations[index].y, rotations[index].z, rotations[index].w);
@@ -29,16 +29,16 @@ namespace primal::transform {
 
 			// 从四元数创建旋转矩阵
 			simd::float3x3 rotation_matrix = simd_matrix3x3(r);
-			
+
 			// 应用缩放
 			simd::float3x3 scale_matrix = simd_matrix(
 				simd_make_float3(s.x, 0.0f, 0.0f),
 				simd_make_float3(0.0f, s.y, 0.0f),
 				simd_make_float3(0.0f, 0.0f, s.z)
 			);
-			
+
 			simd::float3x3 rs_matrix = simd_mul(rotation_matrix, scale_matrix);
-			
+
 			// 构建4x4变换矩阵
 			simd::float4x4 world = simd_matrix(
 				simd_make_float4(rs_matrix.columns[0].x, rs_matrix.columns[0].y, rs_matrix.columns[0].z, 0.0f),
@@ -54,6 +54,28 @@ namespace primal::transform {
 			world_for_inverse.columns[3] = simd_make_float4(0.0f, 0.0f, 0.0f, 1.0f);
 			simd::float4x4 inverse_world = simd_inverse(world_for_inverse);
 			inv_world[index] = inverse_world;
+#elif defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+			// DirectXMath：XMMatrixAffineTransformation(S, 原点=0, Q, T) 在行向量
+			// 约定下构建 T*R*S，其行 i == 引擎列 i，与 simd/可移植分支的
+			// world.columns[i] = R_col_i * s_i 逐元素一致（四元数 (x,y,z,w) 同约定）。
+			// 逆矩阵与 simd 分支同语义：清零平移（DXM 底行 = 引擎列 3）后对线性
+			// 部分 R*S 求逆。注意可移植分支的逆矩阵含 -(R^T·t)/s 平移项，与本
+			// 分支不同——这是既有分支间分歧（simd 与本分支一致）。
+			// NOTE: (F. Luna) Intro to DirectX 12, section 8.2.2
+			{
+				using namespace DirectX;
+				XMVECTOR r{ XMLoadFloat4(&rotations[index]) };
+				XMVECTOR t{ XMLoadFloat3(&positions[index]) };
+				XMVECTOR s{ XMLoadFloat3(&scales[index]) };
+
+				XMMATRIX world{ XMMatrixAffineTransformation(s, XMQuaternionIdentity(), r, t) };
+				XMStoreFloat4x4(&to_world[index], world);
+
+				world.r[3] = XMVectorSet(0.f, 0.f, 0.f, 1.f);
+				XMVECTOR det;
+				XMMATRIX inverse_world{ XMMatrixInverse(&det, world) };
+				XMStoreFloat4x4(&inv_world[index], inverse_world);
+			}
 #else
 			// Portable fallback — also used by Emscripten/WASM (neither _WIN32
 			// nor __APPLE__ matches). Builds world = T*R*S and computes the
@@ -115,7 +137,7 @@ namespace primal::transform {
 
 		math::v3 calculate_orientation(math::v4 rotations)
 		{
-#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+#if defined(PRIMAL_MATH_BACKEND_SIMD)
 			using namespace simd;
 			// 构建四元数 (w, x, y, z)
 			simd::quatf r = simd_quaternion(rotations.x, rotations.y, rotations.z, rotations.w);
@@ -126,6 +148,17 @@ namespace primal::transform {
 			// 转换为math::v3类型
 			math::v3 orientation = simd_make_float3(rotated_front.x, rotated_front.y, rotated_front.z);
 			return orientation;
+#elif defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+			// XMVector3Rotate 为标准四元数旋转 v + 2w(q×v) + 2(q×(q×v))，
+			// 与可移植分支公式一致；front=(0,0,1) 的 w 分量被忽略。
+			{
+				using namespace DirectX;
+				XMVECTOR rotation_quat{ XMLoadFloat4(&rotations) };
+				XMVECTOR front{ XMVectorSet(0.f, 0.f, 1.f, 0.f) };
+				math::v3 orientation;
+				XMStoreFloat3(&orientation, XMVector3Rotate(front, rotation_quat));
+				return orientation;
+			}
 #else
 			// Portable fallback — also used by Emscripten/WASM build. Rotating
 			// front=(0,0,1) by quaternion (x,y,z,w). Without this branch the

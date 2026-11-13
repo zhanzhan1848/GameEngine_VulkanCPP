@@ -5,12 +5,17 @@ project(ContentTools)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-execute_process(
-        COMMAND xcrun --sdk macosx --show-sdk-path
-        OUTPUT_VARIABLE MACOSX_PREFIX
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-set(CMAKE_OSX_SYSROOT "${MACOSX_PREFIX}")
+# R3（Windows 首编）：xcrun 只在 Apple 工具链存在。此前无条件执行导致
+# Windows 上 MACOSX_PREFIX 为空、CMAKE_OSX_SYSROOT 被置空串、include 列表
+# 混入 "/usr/include" 等不存在路径。APPLE 门控后 Windows 分支零 macOS 残留。
+if(APPLE)
+    execute_process(
+            COMMAND xcrun --sdk macosx --show-sdk-path
+            OUTPUT_VARIABLE MACOSX_PREFIX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    set(CMAKE_OSX_SYSROOT "${MACOSX_PREFIX}")
+endif()
 
 # 添加源文件
 set(PROJECTION_SOURCES
@@ -315,32 +320,49 @@ endif()
 # =============================================================================
 # pfx_converter — PFX 离线缓存转换器（Alembic → .pcache；架构文档 §5/N4）
 # 离线工具：链接 vendored Alembic/Imath；运行时（libEngine）零第三方依赖。
+#
+# 2026-11-03 R2（Windows 首编）：pfx_converter 此前在所有平台无条件配置，
+# 而 find_package(TBB) 只给了 third_party/TBB/Mac 的 vendored 路径——
+# Windows 上 BUILD_CONTENT_TOOLS=ON 时 configure 直接失败（用户报告的
+# "TBB 配置引用了 macOS 路径"）。真正的平台约束比 TBB 更深：Alembic/
+# Imath/OpenVDB 只有 vendored Mac 预编译（third_party/{Alembic,OpenVDB}/Mac，
+# 按绝对路径链接 .dylib），Windows 没有对应二进制——本阶段 pfx_converter
+# 仅 APPLE 构建，其他平台显式跳过。Windows 侧 TBB/Alembic/OpenVDB 的
+# 接线方案（含已实测的 oneTBB Windows 预编译包版本+SHA256 pin）见
+# Docs/RHI/D3D12_Windows_Integration_Runbook.md 的 ContentTools 章节；
+# APPLE 分支行为零变化（同一路径、同一 REQUIRED、同一 RPATH）。
 # =============================================================================
-add_executable(pfx_converter
-    pipeline/PfxCacheConvert.cpp
-    pipeline/PfxCacheConvertVdb.cpp
-    pipeline/PfxCacheConvertMain.cpp
-)
-find_package(TBB CONFIG REQUIRED
-    PATHS ${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/lib/cmake/TBB
-    NO_DEFAULT_PATH)
-target_include_directories(pfx_converter PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/include
-    ${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/include/Imath
-    ${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/include
-    ${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/include
-    /opt/homebrew/include
-)
-target_link_libraries(pfx_converter PRIVATE
-    ${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib/libAlembic.dylib
-    ${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib/libImath-3_1.dylib
-    ${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/lib/libopenvdb.dylib
-    TBB::tbb
-)
-set_target_properties(pfx_converter PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/"
-    BUILD_RPATH "${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/lib"
-    INSTALL_RPATH "${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/lib"
-)
+if(APPLE)
+    add_executable(pfx_converter
+        pipeline/PfxCacheConvert.cpp
+        pipeline/PfxCacheConvertVdb.cpp
+        pipeline/PfxCacheConvertMain.cpp
+    )
+    find_package(TBB CONFIG REQUIRED
+        PATHS ${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/lib/cmake/TBB
+        NO_DEFAULT_PATH)
+    target_include_directories(pfx_converter PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/include
+        ${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/include/Imath
+        ${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/include
+        ${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/include
+        /opt/homebrew/include
+    )
+    target_link_libraries(pfx_converter PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib/libAlembic.dylib
+        ${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib/libImath-3_1.dylib
+        ${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/lib/libopenvdb.dylib
+        TBB::tbb
+    )
+    set_target_properties(pfx_converter PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/"
+        BUILD_RPATH "${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/lib"
+        INSTALL_RPATH "${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/lib"
+    )
+else()
+    message(STATUS "pfx_converter skipped on ${CMAKE_SYSTEM_NAME}: vendored "
+        "Alembic/Imath/OpenVDB binaries are macOS-only (see "
+        "Docs/RHI/D3D12_Windows_Integration_Runbook.md — ContentTools/TBB chapter)")
+endif()

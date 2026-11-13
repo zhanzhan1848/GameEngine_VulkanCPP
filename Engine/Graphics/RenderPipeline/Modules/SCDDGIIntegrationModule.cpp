@@ -80,7 +80,8 @@ bool SCDDGIIntegrationModule::Initialize(RHIDeviceBase* device,
 
     // Vulkan shaders declare flat bindings (image 0, UBO 1, SSBO 2-3); Metal
     // keeps the overlapping texture/buffer namespaces of the original kernels.
-    const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan;
+    const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan ||
+                      device->GetPlatform() == RHIPlatform::D3D12;
 
     if (card_radiance_shader != handles::INVALID_SHADER) {
         DescriptorSetLayoutBinding bindings[6];
@@ -581,7 +582,8 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
     // Vulkan's new measured-validity inputs participate in the same RG
     // identity as their real capture/LightEval producers, including layouts.
     rendergraph::RGResourceHandle albedoRG{}, depthRG{};
-    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+    if (device_->GetPlatform() == RHIPlatform::Vulkan ||
+        device_->GetPlatform() == RHIPlatform::D3D12) {
         albedoRG = graph.ImportResource("SCDDGI_SurfaceAlbedo", inputs.surface_cache_pass->GetAlbedoAtlas());
         depthRG = graph.ImportResource("SCDDGI_SurfaceDepth", inputs.surface_cache_pass->GetDepthAtlas());
     }
@@ -945,7 +947,8 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
             // --- Sub-pass 1: CardRadianceAvg ---
             {
                 DescriptorData params[6];
-                if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+                if (device_->GetPlatform() == RHIPlatform::Vulkan ||
+                    device_->GetPlatform() == RHIPlatform::D3D12) {
                     DescriptorData p[] = {
                         {0, DescriptorType::SampledImage,  sc->GetLightingAtlas(frameIdx)},
                         {1, DescriptorType::UniformBuffer, sc_params_cb_},
@@ -965,7 +968,8 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                     memcpy(params, p, sizeof(p));
                 }
                 UpdateDescriptorSet(device_, card_radiance_ds_[frameIdx], params,
-                    device_->GetPlatform() == RHIPlatform::Vulkan ? 6u : 4u);
+                    (device_->GetPlatform() == RHIPlatform::Vulkan ||
+                     device_->GetPlatform() == RHIPlatform::D3D12) ? 6u : 4u);
                 compare("SCDDGI.CardAvgInputs", "lighting", sc->GetLightingAtlas(frameIdx), false, ResourceState::ShaderResource);
                 compare("SCDDGI.CardAvgInputs", "albedo", sc->GetAlbedoAtlas(), false, ResourceState::ShaderResource);
                 compare("SCDDGI.CardAvgInputs", "depth", sc->GetDepthAtlas(), false, ResourceState::ShaderResource);

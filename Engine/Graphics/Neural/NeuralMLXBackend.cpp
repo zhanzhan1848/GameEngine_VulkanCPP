@@ -5,15 +5,29 @@
  * 默认探测序列刻意覆盖三种部署形态：仓库源树（swift build 产物）、
  * 可执行文件旁（安装/CI 布局）、显式 env（排障与 A/B）。找不到库不是
  * 错误——返回 false，调用方走 kernel fallback（计划 §6：裸 kernel 不删）。
+ *
+ * R3（Windows 首编）：MLX/CoreML shim 是 macOS 专属依赖，<dlfcn.h> 在 MSVC
+ * 下不存在。实现整体 APPLE 门控；非 Apple 平台编译降级 stub（Initialize 恒
+ * false → NeuralDenoiseModule 走 kernel fallback，与 shim 缺库时的运行时
+ * 降级同语义，见 NeuralDenoiseModule.cpp "降级 kernel" 分支）。头文件保持
+ * 全平台可编（NeuralDenoiseModule.h 按值持有本类成员）。CMake glob 不变。
  */
 #include "NeuralMLXBackend.h"
 
+#if defined(__APPLE__)
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
+#endif
 
+// R4（Windows 四测修复）：namespace 必须包裹真实现与 stub 两个分支——R3 版本
+// 把开括号放在 __APPLE__ 分支内、闭括号在 #endif 之后，非 Apple 编译时 stub
+// 定义裸露全局作用域（MSVC C2653 "NeuralMLXBackend 不是类或命名空间名称"
+// + 级联 C2059/C2143）。头文件 include 不能进 namespace，故拆两段 #if。
 namespace primal::graphics::neural {
+
+#if defined(__APPLE__)
 
 namespace {
 
@@ -151,5 +165,28 @@ bool NeuralMLXBackend::Infer(const f32* planes_in, u32 in_c, u32 width, u32 heig
     if (err) err->clear();
     return true;
 }
+
+#else  // !defined(__APPLE__)
+
+// 非 Apple 降级 stub：IsAvailable() 恒 false；NeuralDenoiseModule 按
+// Initialize 失败降级回裸 Metal/Vulkan kernel 路径。
+std::string NeuralMLXBackend::FindDylib() { return {}; }
+std::string NeuralMLXBackend::FindWeights() { return {}; }
+
+bool NeuralMLXBackend::Initialize(const std::string&, const std::string&,
+                                  std::string* err) {
+    if (err) *err = "NeuralMLXBackend: MLX shim is macOS-only (libNeuralMLXShim.dylib)";
+    return false;
+}
+
+void NeuralMLXBackend::Shutdown() {}
+
+bool NeuralMLXBackend::Infer(const f32*, u32, u32, u32, f32*, u32, u32,
+                             std::string* err) {
+    if (err) *err = "NeuralMLXBackend: not available on this platform";
+    return false;
+}
+
+#endif  // defined(__APPLE__)
 
 }  // namespace primal::graphics::neural

@@ -16,11 +16,25 @@
 #include <filesystem>
 #include <iostream>
 #include <cstring>
+// R4: unistd.h 不存在于 MSVC——getpid 仅用于临时文件名防撞，走可移植 shim
+// （Windows 的 process.h 提供 _getpid，语义相同）。
+#if defined(_WIN32)
+#include <process.h>
+static unsigned sc_test_pid() { return static_cast<unsigned>(_getpid()); }
+#else
 #include <unistd.h>
+static unsigned sc_test_pid() { return static_cast<unsigned>(getpid()); }
+#endif
 using namespace primal::graphics::lumen;
 namespace ray_geometry = primal::graphics::ray_geometry;
 int main() {
-    const auto path = std::filesystem::temp_directory_path() / ("sc-pages-" + std::to_string(getpid()) + ".scsurf");
+    // R6（Windows 五测）：path 曾是 std::filesystem::path——Windows 上
+    // path::c_str() 是 const wchar_t*，19 处 fopen/Attach 调用点全数 C2664。
+    // 改存 std::string（MSVC 的 path::string() 做宽→窄转换）：c_str() 恒
+    // const char*，调用点零改动；L563 remove(string) 经 path 的 Source 构造
+    // 隐式转换合法。
+    const std::string path =
+        (std::filesystem::temp_directory_path() / ("sc-pages-" + std::to_string(sc_test_pid()) + ".scsurf")).string();
     ScsHeaderRT h{};
     h.magic = SurfaceStaticPages::kScsMagic; h.version = 4; h.header_bytes = sizeof(h);
     h.capture_near=.05f; h.capture_far_scale=1.f; h.capture_far_bias=.5f;
@@ -144,7 +158,7 @@ int main() {
         std::memcpy(bad.data()+sizeof(header)+sizeof(duplicate),&duplicate,sizeof(duplicate));
         check(rejected(bad),"boundary duplicate directory rejected even with repaired checksum");
         check(!boundary::Encode({mesh,mesh},good) && good.empty(),"boundary duplicate identity rejected");
-        const auto oversized=path.string()+".scboundary";
+        const auto oversized=path+".scboundary"; // R6: path 已是 std::string
         FILE* file=std::fopen(oversized.c_str(),"wb");
         bool wrote=false;
         if (file) {
@@ -354,7 +368,7 @@ int main() {
         namespace boundary=primal::graphics::rhi::card_boundary;
         boundary::Mesh mesh; mesh.geometry_digest=1; mesh.layout_digest=2; mesh.material_digest=3; mesh.triangle_count=1;
         boundary::Sample sample; sample.triangle_id=0; sample.normal[1]=1; sample.albedo[3]=255; mesh.samples.push_back(sample);
-        const auto file=path.string()+".scboundary";
+        const auto file=path+".scboundary"; // R6: path 已是 std::string
         BoundaryStaticSamples auxiliary;
         check(boundary::Write(file.c_str(),{mesh}) && auxiliary.Attach(file.c_str(),pages) &&
               auxiliary.MeshCount()==1 && auxiliary.SampleCount()==1 && auxiliary.Find(0,pages),"boundary primary asset binding");

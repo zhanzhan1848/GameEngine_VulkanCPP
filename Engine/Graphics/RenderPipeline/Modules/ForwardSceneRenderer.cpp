@@ -793,7 +793,10 @@ void ForwardSceneRenderer::CreateDescriptorLayouts() {
         // the streaming_pipeline_ creation succeeds and an early-out in
         // RenderStreamingMeshes skips draws when streaming_material_ds_ is the
         // default white-fallback DS.
-        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        if (device_->GetPlatform() == RHIPlatform::Vulkan ||
+            device_->GetPlatform() == RHIPlatform::D3D12) {
+            // D3D12 与 Vulkan 同形：spirv-cross 产出的 HLSL 保持同一组 flat
+            // SSBO 绑定（set0 b2-b5），仅字节来源（.cso）不同。
             DescriptorSetLayoutBinding vkBindings[] = {
                 bindings[0],
                 bindings[1],
@@ -1088,7 +1091,10 @@ void ForwardSceneRenderer::CreatePipelines() {
     // [[buffer(N)]] auto-binding from the shader. StreamingGBuffer uses SoA
     // SSBOs (no vertex attributes); Skybox/Blit are procedural (cleared).
     auto applyGBufferVertexInput = [this](GraphicsPipelineDesc& desc) {
-        if (device_->GetPlatform() != RHIPlatform::Vulkan) return;
+        // D3D12 与 Vulkan 同形：spirv-cross HLSL 顶点输入走 TEXCOORDN 语义表，
+        // 需要同一份显式 location 声明；Metal 才依赖 [[buffer(N)]] 自动绑定。
+        if (device_->GetPlatform() != RHIPlatform::Vulkan &&
+            device_->GetPlatform() != RHIPlatform::D3D12) return;
         utl::vector<VertexInputAttribute> attrs(5);
         attrs[0] = {0, 0, DataFormat::RGB32_Float, 0};
         attrs[1] = {1, 0, DataFormat::R32_UInt,     12};
@@ -1128,7 +1134,8 @@ void ForwardSceneRenderer::CreatePipelines() {
         // to match GBuffer.vert's `uvec2` declaration (ForwardRenderer uses
         // R32_UInt because ForwardPBR_Lite reads them as u32; GBuffer.vert
         // declares uvec2 so we use the 2-component RG16_UInt format).
-        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        if (device_->GetPlatform() == RHIPlatform::Vulkan ||
+            device_->GetPlatform() == RHIPlatform::D3D12) {
             utl::vector<VertexInputAttribute> attrs(5);
             attrs[0] = {0, 0, DataFormat::RGB32_Float, 0};   // position
             attrs[1] = {1, 0, DataFormat::R32_UInt,     12};  // colorTSign
@@ -1163,7 +1170,8 @@ void ForwardSceneRenderer::CreatePipelines() {
         desc.depthFunc = ComparisonFunc::Less;
         desc.cullMode = CullMode::None;
         populateWasmVertexInput(desc);
-        if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+        if (device_->GetPlatform() == RHIPlatform::Vulkan ||
+            device_->GetPlatform() == RHIPlatform::D3D12) {
             utl::vector<VertexInputAttribute> attrs(5);
             attrs[0] = {0, 0, DataFormat::RGB32_Float, 0};   // position
             attrs[1] = {1, 0, DataFormat::R32_UInt,     12};  // colorTSign
@@ -3133,7 +3141,7 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
     // UBO layout that DeferredLighting.spv expects at bindings 9 and 10.
     if (device_->GetPlatform() == RHIPlatform::Vulkan) {
         math::m4x4 viewInv = Inverse(view_matrix);
-        math::v3 cameraDir = {viewInv.columns[2][0], viewInv.columns[2][1], viewInv.columns[2][2]};
+        math::v3 cameraDir = math::xyz(math::column(viewInv, 2));
 
         if (auto* frameData = static_cast<rhi::GlobalShaderData*>(lighting_global_mapped_[idx])) {
             frameData->view = view_matrix;

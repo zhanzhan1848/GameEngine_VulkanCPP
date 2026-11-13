@@ -5,7 +5,13 @@
 #include "../Graphics/Renderer.h"
 #include "../Graphics/EditorShaders.h"
 #include "../Content/ContentToEngine.h"
+// R13-B（Windows 十二测 MetalCommonHeaders.h:8 C1083）：MetalContent.h 无条件
+// include 拉入 <Metal/Metal.hpp>（仅 Apple 存在）。Metal 后端只在 APPLE 编译
+// （Engine/CMakeLists.txt 仅 APPLE 分支 glob Graphics/Metal），本 TU 的两处
+// metal::content::submesh::add 调用点同门控、非 Apple fail-closed（见下）。
+#if defined(__APPLE__)
 #include "../Graphics/Metal/MetalContent.h"
+#endif
 
 #include <cstdio>
 #include <atomic>
@@ -281,8 +287,16 @@ void build_default_material_once()
         g_default_material.compile_failed = true;
         return;
     }
+    // R15-2（Windows 十四测 C2039/C3861）：add_shader_function_name 是
+    // Metal entry-point 登记 API，声明与定义在 ContentToEngine.h/.cpp 内
+    // #if defined(__APPLE__) 门控（e0145d2c Metal 轮起即为 Apple-only，
+    // 唯一消费者是 MetalContent.cpp 的 create_pso）。本函数整链 Metal-only：
+    // 非 Apple 上 compile_msl_to_metallib 的 xcrun 必失败并在上方
+    // early-return（compile_failed），此处为不可达死代码，调用点同门控。
+#if defined(__APPLE__)
     primal::content::add_shader_function_name(
         static_cast<id_eng::id_type>(g_default_material.vs_group_id), "sphere_vs");
+#endif // defined(__APPLE__)
 
     const u8* ps_ptr = ps_blob.data();
     const u32 ps_key = 0xFFFFFFFFu; // u32_invalid_id sentinel
@@ -292,8 +306,10 @@ void build_default_material_once()
         g_default_material.compile_failed = true;
         return;
     }
+#if defined(__APPLE__)
     primal::content::add_shader_function_name(
         static_cast<id_eng::id_type>(g_default_material.ps_group_id), "sphere_ps");
+#endif // defined(__APPLE__)
 
     primal::graphics::material_init_info info{};
     info.type = primal::graphics::material_type::opauqe;
@@ -435,6 +451,7 @@ EDITOR_INTERFACE u64 RegisterProceduralMeshSubmesh(u64 rhi_geometry_content_id)
                 static_cast<std::size_t>(index_size) * index_count);
 
     const u8* blob_data = blob.data();
+#if defined(__APPLE__)
     const id_eng::id_type submesh_view_id =
         primal::graphics::metal::content::submesh::add(blob_data);
     if (submesh_view_id == id_eng::invalid_id) {
@@ -462,6 +479,14 @@ EDITOR_INTERFACE u64 RegisterProceduralMeshSubmesh(u64 rhi_geometry_content_id)
     }
 
     return static_cast<u64>(new_geometry_id);
+#else
+    // R13-B：非 Apple 编译域无 Metal submesh 注册器（D3D12/Vulkan 后端不经此
+    // 桥），fail-closed 返回 invalid_id；导出面保留（C# 桥按名 P/Invoke）。
+    // 尾段 fake_pointer 桥接编码 submesh_view_id（Apple 门内变量），一并入门。
+    (void)blob_data;
+    std::fprintf(stderr, "[RegisterProceduralMeshSubmesh] metal submesh registry unavailable on this platform\n");
+    return id_eng::invalid_id;
+#endif // defined(__APPLE__)
 }
 
 // Create a new sphere mesh with its vertices translated by (offset_x, offset_y,
@@ -549,6 +574,7 @@ EDITOR_INTERFACE u64 CreateTranslatedProceduralMesh(u64 rhi_geometry_content_id,
                 static_cast<std::size_t>(index_size) * index_count);
 
     const u8* blob_data = blob.data();
+#if defined(__APPLE__)
     const id_eng::id_type submesh_view_id =
         primal::graphics::metal::content::submesh::add(blob_data);
     if (submesh_view_id == id_eng::invalid_id) {
@@ -569,4 +595,11 @@ EDITOR_INTERFACE u64 CreateTranslatedProceduralMesh(u64 rhi_geometry_content_id,
     }
 
     return static_cast<u64>(new_geometry_id);
+#else
+    // R13-B：同 RegisterProceduralMeshSubmesh——非 Apple fail-closed（见上注，
+    // fake_pointer 尾段编码 submesh_view_id，一并入门）。
+    (void)blob_data;
+    std::fprintf(stderr, "[CreateTranslatedProceduralMesh] metal submesh registry unavailable on this platform\n");
+    return id_eng::invalid_id;
+#endif // defined(__APPLE__)
 }

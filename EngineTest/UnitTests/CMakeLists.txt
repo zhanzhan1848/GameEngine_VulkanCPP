@@ -108,9 +108,29 @@ set_target_properties(TestLightmapBaking PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 
+# R6（Windows 五测）：TestLightmapBaking.cpp(170) MSVC C1001 ICE（用户日志）。
+# 已做 Meshlet.cpp R4 同构微重构（CHECK 宏实参内联 path 聚合临时 → 命名
+# 局部）；本条 per-source /Od 为双保险兜底，对齐 LumenDDGIPass（R2-5）/
+# Meshlet（R4）先例：per-source 选项追加在 target 选项之后（非 Debug 的
+# /Ox 被压住；Debug 本就 /Od）；属性读回 + STATUS 凭证（Windows configure
+# 输出必须含下述行，空=未生效）。测试 TU 非热路径，/Od 零代价。
+if(MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/TestLightmapBaking.cpp"
+        PROPERTIES COMPILE_OPTIONS "/Od")
+    get_source_file_property(PRIMAL_LMAP_ICE_OD_FLAGS
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/TestLightmapBaking.cpp" COMPILE_OPTIONS)
+    message(STATUS "C1001 mitigation (lightmap): TestLightmapBaking.cpp='${PRIMAL_LMAP_ICE_OD_FLAGS}'")
+endif()
+
 # M1-a MLX 后端对拍门禁：shim 缺失 SKIP，库存在而对拍失败 FAIL。
 # 依赖 Tools/NeuralMLXShim 的构建产物（dylib + mlx.metallib），见
 # scripts/build_neural_mlx_metallib.sh 与 Docs/2026-09-15-neural-mlx-backend-plan.md。
+# R4（Windows 四测）：测试本体直接 dlopen libNeuralMLXShim.dylib（dlfcn.h +
+# Swift/MLX shim 均 macOS 专属）→ APPLE-only 门控，非 Apple 平台不编不注册。
+# 与 R3-2 的后端 stub 降级语义一致：Windows 的 NeuralMLXBackend 编 stub
+# （Initialize 恒 false），本对拍门禁在那边本就无意义。
+if(APPLE)
 add_executable(TestNeuralMLXShim
     Neural/TestNeuralMLXShim.cpp
     ${CMAKE_SOURCE_DIR}/Engine/Graphics/Neural/NeuralWeights.cpp
@@ -123,6 +143,7 @@ add_test(NAME TestNeuralMLXShim COMMAND TestNeuralMLXShim
 set_target_properties(TestNeuralMLXShim PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
+endif()
 
 # R2.1 神经帧生成机制门禁：shim 缺失 SKIP，插值机制失败 FAIL。
 add_executable(TestNeuralFrameGen
@@ -249,6 +270,49 @@ target_include_directories(UnitD3D12RootSigBudget PRIVATE
 target_link_libraries(UnitD3D12RootSigBudget PRIVATE Engine)
 add_test(NAME UnitD3D12RootSigBudget COMMAND UnitD3D12RootSigBudget)
 set_target_properties(UnitD3D12RootSigBudget PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+# R21-B：命令列表槽位绑定镜像（指针+世代）生命周期单测——纯 C++ 模型
+# （D3D12CommandBuffer.h Windows 守卫之外），macOS 直接编译运行。
+add_executable(UnitD3D12BindSlotMirror RHI/D3D12/TestD3D12BindSlotMirror.cpp)
+target_include_directories(UnitD3D12BindSlotMirror PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(UnitD3D12BindSlotMirror PRIVATE Engine)
+add_test(NAME UnitD3D12BindSlotMirror COMMAND UnitD3D12BindSlotMirror)
+set_target_properties(UnitD3D12BindSlotMirror PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+# R21-C：描述符帧槽线性分配 + 槽纪元策略（header-only 平台中立模型，
+# Windows 生产侧 D3D12DescriptorHeapManager 同源引用）——所有平台编译运行。
+add_executable(UnitD3D12DescriptorSlotPolicy RHI/D3D12/TestD3D12DescriptorSlotPolicy.cpp)
+target_include_directories(UnitD3D12DescriptorSlotPolicy PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(UnitD3D12DescriptorSlotPolicy PRIVATE Engine)
+add_test(NAME UnitD3D12DescriptorSlotPolicy COMMAND UnitD3D12DescriptorSlotPolicy)
+set_target_properties(UnitD3D12DescriptorSlotPolicy PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
+# DirectXMath 改造阶段 3：数学后端对比单测（642829c9 可移植分支冻结参考 vs
+# 当前后端公共 API）。UnitD3D12 前缀沿用"平台中立核、全平台编译运行"惯例
+# （Windows CI -R "UnitD3D12|..." 与本地 -R Unit 均可选中）；链接 Engine。
+add_executable(UnitD3D12MathDirectX Math/TestMathDirectXParity.cpp)
+target_include_directories(UnitD3D12MathDirectX PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/Engine
+    ${CMAKE_SOURCE_DIR}/Engine/Common
+)
+target_link_libraries(UnitD3D12MathDirectX PRIVATE Engine)
+add_test(NAME UnitD3D12MathDirectX COMMAND UnitD3D12MathDirectX)
+set_target_properties(UnitD3D12MathDirectX PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
 
@@ -825,7 +889,8 @@ if(ENABLE_VULKAN)
     )
     target_link_libraries(TestVulkanIBL_BRDFLUT PRIVATE Engine)
     target_compile_definitions(TestVulkanIBL_BRDFLUT PRIVATE ENABLE_VULKAN=1)
-    add_test(NAME TestVulkanIBL_BRDFLUT COMMAND TestVulkanIBL_BRDFLUT)
+    add_test(NAME TestVulkanIBL_BRDFLUT COMMAND TestVulkanIBL_BRDFLUT
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
     set_target_properties(TestVulkanIBL_BRDFLUT PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
@@ -961,7 +1026,14 @@ if(ENABLE_VULKAN)
     )
     target_link_libraries(TestVulkanIBL_Equirect PRIVATE Engine)
     target_compile_definitions(TestVulkanIBL_Equirect PRIVATE ENABLE_VULKAN=1)
-    add_test(NAME TestVulkanIBL_Equirect COMMAND TestVulkanIBL_Equirect)
+    # R11: 测试用相对路径 Assets/Shaders/*.spv 读 SPIR-V。CTest 默认 CWD 是
+    # CMAKE_CURRENT_BINARY_DIR(EngineTest/UnitTests)——该目录并无 Assets
+    # （assets 由 UnitTestAssetsCopy 部署到 Tests/UnitTests/Assets），此前仅
+    # 在手跑 exe 或个别 build 树遗留拷贝时侥幸通过（十测 Windows 上
+    # Equirect 过/Prefilter 挂、macOS ctest 两个都挂）。锚定部署目录使两侧
+    # 一致可复现。
+    add_test(NAME TestVulkanIBL_Equirect COMMAND TestVulkanIBL_Equirect
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
     set_target_properties(TestVulkanIBL_Equirect PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
@@ -982,7 +1054,8 @@ if(ENABLE_VULKAN)
     )
     target_link_libraries(TestVulkanIBL_IrradiancePrefilter PRIVATE Engine)
     target_compile_definitions(TestVulkanIBL_IrradiancePrefilter PRIVATE ENABLE_VULKAN=1)
-    add_test(NAME TestVulkanIBL_IrradiancePrefilter COMMAND TestVulkanIBL_IrradiancePrefilter)
+    add_test(NAME TestVulkanIBL_IrradiancePrefilter COMMAND TestVulkanIBL_IrradiancePrefilter
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
     set_target_properties(TestVulkanIBL_IrradiancePrefilter PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     )
@@ -1091,11 +1164,18 @@ if(BUILD_VTBAKE)
         ${CMAKE_SOURCE_DIR}/third_party/stb
         ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source
     )
-    find_package(ZLIB QUIET)
-    if(ZLIB_FOUND)
-        target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static ZLIB::ZLIB)
+    # R4：Windows 无系统 zlib——优先根 CMakeLists WIN32 段 FetchContent 的
+    # zlibstatic（ALIAS primal_zlib_static），否则保持原 find_package(QUIET)+z
+    # 回退（macOS/Linux 逐字不变）。
+    if(WIN32 AND TARGET primal_zlib_static)
+        target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static primal_zlib_static)
     else()
-        target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static z)
+        find_package(ZLIB QUIET)
+        if(ZLIB_FOUND)
+            target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static ZLIB::ZLIB)
+        else()
+            target_link_libraries(TestVTEXContainer PRIVATE astcenc-native-static z)
+        endif()
     endif()
     add_test(NAME TestVTEXContainer COMMAND TestVTEXContainer)
     set_target_properties(TestVTEXContainer PROPERTIES
@@ -1117,11 +1197,17 @@ if(BUILD_VTBAKE AND ENABLE_VULKAN)
         ${CMAKE_SOURCE_DIR}/third_party/stb
         ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source
     )
-    find_package(ZLIB QUIET)
-    if(ZLIB_FOUND)
-        target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static ZLIB::ZLIB)
+    # R4/R5：同上 TestVTEXContainer——Windows 走 FetchContent zlibstatic
+    # （ALIAS primal_zlib_static），其余平台原样。
+    if(WIN32 AND TARGET primal_zlib_static)
+        target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static primal_zlib_static)
     else()
-        target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static z)
+        find_package(ZLIB QUIET)
+        if(ZLIB_FOUND)
+            target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static ZLIB::ZLIB)
+        else()
+            target_link_libraries(TestVTSVTRuntime PRIVATE Engine astcenc-native-static z)
+        endif()
     endif()
     target_compile_definitions(TestVTSVTRuntime PRIVATE ENABLE_VULKAN=1)
     add_test(NAME TestVTSVTRuntime COMMAND TestVTSVTRuntime)
@@ -2315,7 +2401,11 @@ add_test(NAME StandaloneGraphics_RenderSystem_Test COMMAND StandaloneGraphics_Re
 set_target_properties(StandaloneGraphics_RenderSystem_Test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(StandaloneGraphics_RenderSystem_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
+target_compile_definitions(StandaloneGraphics_RenderSystem_Test PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>
+    # R9: 测试 main 里锚定 PRIMAL_SHADER_ROOT（源码根绝对路径），解除
+    # ShaderRegistry 源码树相对路径的 cwd 依赖（Windows build 树在源码
+    # 树外时上溯解析不到 → ForwardRenderer/SSR init 失败）。
+    PRIMAL_TEST_SHADER_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(StandaloneGraphics_RenderSystem_Test PROPERTIES FOLDER "Tests/Graphics")
 
 
@@ -2612,7 +2702,8 @@ set_target_properties(TestRenderSystemECS PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
     FOLDER "Tests/Graphics"
 )
-target_compile_definitions(TestRenderSystemECS PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
+target_compile_definitions(TestRenderSystemECS PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>
+    PRIMAL_TEST_SHADER_ROOT="${CMAKE_SOURCE_DIR}")
 
 ## 创建一个宏来运行所有RHI测试
 # Timestamp 测试仅 Apple 存在（Metal 绑定），聚合命令按平台条件注入
@@ -2839,7 +2930,8 @@ add_test(NAME TestRenderSystemIntegration COMMAND TestRenderSystemIntegration)
 set_target_properties(TestRenderSystemIntegration PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
-target_compile_definitions(TestRenderSystemIntegration PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>)
+target_compile_definitions(TestRenderSystemIntegration PRIVATE $<$<CONFIG:Debug>:DEBUG> $<$<CONFIG:Debug>:_DEBUG>
+    PRIMAL_TEST_SHADER_ROOT="${CMAKE_SOURCE_DIR}")
 set_target_properties(TestRenderSystemIntegration PROPERTIES FOLDER "Tests/Graphics")
 
 
@@ -4089,8 +4181,12 @@ if(ENABLE_VULKAN)
         add_test(NAME ${query_target} COMMAND ${query_target})
     endforeach()
     # Independent cache modules; existing SPVs are never outputs of this rule.
+    # Resolve the interpreter via the official module: a bare `python3` on
+    # Windows resolves to the Microsoft Store alias stub (MSB8066 exit 9009).
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    message(STATUS "Primal: GatherInstanceCacheTestShaders interpreter = ${Python3_EXECUTABLE}")
     add_custom_target(GatherInstanceCacheTestShaders
-        COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/build_ddgi_instance_cache_spv.py
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/build_ddgi_instance_cache_spv.py
         DEPENDS ${GG_CONNECTION_LUMEN}/DDGIInstanceNormalProduce.comp ${GG_CONNECTION_LUMEN}/DDGIInstanceNormalVerify.comp
             ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
     add_executable(TestVulkanDDGIInstanceNormalCache RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
@@ -4684,3 +4780,12 @@ if(ENABLE_VULKAN)
     endif()
     set_target_properties(TestEnvironmentHybridCertificate PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
 endif()
+
+# R9: Agility runtime DLL staging for every exe in this directory (per-exe
+# $<TARGET_FILE_DIR> follows the multi-config per-config subdirectory that
+# hard-coded roots missed; no-op on non-Windows trees). Defined in
+# Engine/CMakeLists.txt which configures before this directory.
+get_directory_property(PRIMAL_UNIT_TEST_TARGETS BUILDSYSTEM_TARGETS)
+foreach(_primal_ut ${PRIMAL_UNIT_TEST_TARGETS})
+    primal_stage_d3d12_agility(${_primal_ut})
+endforeach()

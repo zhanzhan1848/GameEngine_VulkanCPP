@@ -27,7 +27,11 @@ target_include_directories(contenttools_repair PUBLIC
 
 target_link_libraries(contenttools_repair PUBLIC pmp)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(contenttools_repair PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
@@ -35,6 +39,7 @@ target_compile_options(contenttools_repair PRIVATE
     -Wno-deprecated-copy
     -Wno-unknown-pragmas
     -Wno-unused-variable
+    >
 )
 
 # Suppress PMP's own warnings (it's a vendored third-party).

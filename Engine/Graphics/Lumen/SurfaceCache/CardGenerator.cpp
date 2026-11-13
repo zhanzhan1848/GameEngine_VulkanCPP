@@ -3,6 +3,12 @@
 #include "CoverageCardBudget.h"
 #include "Common/CoreLogStream.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
+// R3（Windows 首编 IWYU）：algorithm/cmath/cstring/limits 此前靠传递链。
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <vector>
 
 namespace primal::graphics::lumen {
 
@@ -55,7 +61,7 @@ void CardGenerator::RegisterMeshBaked(const rhi::RHICardBakeData& bake, const ma
     info.baked_card_count = 0;
     bool diagonal = true;
     for (u32 k = 0; k < 3; ++k) {
-        const auto& col = world.columns[k];
+        const auto col = math::column(world, k);
         const f32 xyz[3] = {col.x, col.y, col.z};
         for (u32 j = 0; j < 3; ++j)
             diagonal &= std::isfinite(xyz[j]) && (j == k ? std::abs(xyz[j]) > 1e-6f : std::abs(xyz[j]) < 1e-6f);
@@ -74,7 +80,7 @@ void CardGenerator::RegisterMeshBaked(const rhi::RHICardBakeData& bake, const ma
         for (u32 k = 0; k < 3; ++k) {
             // Axis-aligned box under rotation+scale: project each local
             // half-extent through the absolute column entries (column-major).
-            const math::v4& col = world.columns[k];
+            const math::v4 col = math::column(world, k);
             const f32 e = bc.extent[k];
             extent_w[0] += std::abs(col.x) * e;
             extent_w[1] += std::abs(col.y) * e;
@@ -86,7 +92,7 @@ void CardGenerator::RegisterMeshBaked(const rhi::RHICardBakeData& bake, const ma
         card.axis_direction = bc.axis_direction;
         if (diagonal) {
             const u32 a = bc.axis_direction & 0xFFu;
-            const auto& col = world.columns[a];
+            const auto col = math::column(world, a);
             const f32 scale = a == 0u ? col.x : a == 1u ? col.y : col.z;
             if (scale < 0.f) card.axis_direction ^= 1u << 8u;
         }
@@ -851,7 +857,12 @@ void CardGenerator::UploadToGPU() {
     if (!lookups_.empty()) {
         std::vector<SurfaceCacheCardLookup> directory;
         const char* requested=std::getenv("PRIMAL_SC_OWNER_CARD_DIRECTORY");
-        const bool built=device_->GetPlatform()==rhi::RHIPlatform::Vulkan && requested && std::strcmp(requested,"1")==0 &&
+        // r5w2: owner directory 是纯 CPU 侧 lookup 表重建（同一 buffer、同一
+        // SurfaceCacheCardLookup 48B 结构，下游 shader 只读数据内容、无布局
+        // 分叉）——向 D3D12 开放，Vulkan 行为不变。
+        const bool built=(device_->GetPlatform()==rhi::RHIPlatform::Vulkan ||
+                          device_->GetPlatform()==rhi::RHIPlatform::D3D12) &&
+            requested && std::strcmp(requested,"1")==0 &&
             lookups_.size()==meshes_.size() && BuildOwnerCardDirectory(cards_,lookups_,directory);
         const auto* source=built?directory.data():lookups_.data();
         auto* lookup_data = static_cast<SurfaceCacheCardLookup*>(device_->MapBuffer(card_lookup_buffer_));

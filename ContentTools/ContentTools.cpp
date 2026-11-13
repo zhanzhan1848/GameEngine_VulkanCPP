@@ -22,6 +22,14 @@
 #include <string>
 #include <utility>
 
+// R8（Windows 首编）：strcasecmp/strncasecmp 是 POSIX（<strings.h>），MSVC 无此
+// 符号（C3861）。映射到 MSVC CRT 等价物 _stricmp/_strnicmp（<string.h>，上面
+// <cstring> 已含）。macOS/Linux 分支零改动（原符号直接可用）。
+#if defined(_WIN32)
+#define strcasecmp _stricmp
+#define strncasecmp _strnicmp
+#endif
+
 // Phase 2 M12: ProcessAIAsset pipeline C ABI.
 //
 // ai_asset_pipeline_params is a POD wrapper consumed by the Editor via

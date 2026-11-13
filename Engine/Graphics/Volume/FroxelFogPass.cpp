@@ -975,10 +975,10 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                     // /Forward 的 proj*view 契约相反），反投影出的世界位置不
                     // 对应 GBuffer——雾的坐标/阴影/相位全部被污染。
                     math::m4x4 invViewProj = rhi::math::Inverse(viewProj);
-                    fp.InvViewProj[0] = invViewProj.columns[0];
-                    fp.InvViewProj[1] = invViewProj.columns[1];
-                    fp.InvViewProj[2] = invViewProj.columns[2];
-                    fp.InvViewProj[3] = invViewProj.columns[3];
+                    fp.InvViewProj[0] = math::column(invViewProj, 0);
+                    fp.InvViewProj[1] = math::column(invViewProj, 1);
+                    fp.InvViewProj[2] = math::column(invViewProj, 2);
+                    fp.InvViewProj[3] = math::column(invViewProj, 3);
 
                     // Frustum（雾体自身范围——只定义 froxel 切片分布，不参与
                     // scene depth 解码）
@@ -991,8 +991,8 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                     // 深度投影：P[2].z=f/(f-n)，P[3].z=-nf/(f-n)。
                     {
                         const math::m4x4& P = inputs.camera_data.proj_matrix;
-                        float a = P.columns[2].z;
-                        float b = -P.columns[3].z; // = n*f/(f-n) > 0
+                        float a = math::elem(P, 2, 2);
+                        float b = -math::elem(P, 3, 2); // = n*f/(f-n) > 0
                         float camNear = (a > 1e-6f) ? b / a : 0.1f;
                         float camFar = (a > 1.000001f) ? b / (a - 1.0f) : 1000.0f;
                         fp.FrustumParams2 = {camNear, camFar,
@@ -1031,20 +1031,20 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                     }
 
                     // WP2: 当前帧 view-projection（世界→屏幕采 SPGI 辐照）
-                    fp.ViewProj[0] = viewProj.columns[0];
-                    fp.ViewProj[1] = viewProj.columns[1];
-                    fp.ViewProj[2] = viewProj.columns[2];
-                    fp.ViewProj[3] = viewProj.columns[3];
+                    fp.ViewProj[0] = math::column(viewProj, 0);
+                    fp.ViewProj[1] = math::column(viewProj, 1);
+                    fp.ViewProj[2] = math::column(viewProj, 2);
+                    fp.ViewProj[3] = math::column(viewProj, 3);
 
                     // WP3: 上一帧 inverse view-projection（首帧用当前帧 =
                     // 恒等重投影；体积雾低频 + 邻域钳制兜底切镜鬼影）
                     {
                         const math::m4x4& prev = has_prev_camera_
                             ? prev_inv_view_proj_ : invViewProj;
-                        fp.PrevInvViewProj[0] = prev.columns[0];
-                        fp.PrevInvViewProj[1] = prev.columns[1];
-                        fp.PrevInvViewProj[2] = prev.columns[2];
-                        fp.PrevInvViewProj[3] = prev.columns[3];
+                        fp.PrevInvViewProj[0] = math::column(prev, 0);
+                        fp.PrevInvViewProj[1] = math::column(prev, 1);
+                        fp.PrevInvViewProj[2] = math::column(prev, 2);
+                        fp.PrevInvViewProj[3] = math::column(prev, 3);
                     }
 
                     // WP5 云原语：局部云体密度源（config 默认关）
@@ -1097,15 +1097,15 @@ FroxelOutput FroxelFogPass::AddPass(RenderGraph& graph, const FroxelInputs& inpu
                     for (u32 c = 0; c < 4; ++c) {
                         const math::m4x4* src = &inputs.shadow_matrices[c];
                         const bool unpopulated =
-                            src->columns[0].x == 0.0f && src->columns[1].y == 0.0f &&
-                            src->columns[2].z == 0.0f && src->columns[3].w == 0.0f;
+                            math::elem(*src, 0, 0) == 0.0f && math::elem(*src, 1, 1) == 0.0f &&
+                            math::elem(*src, 2, 2) == 0.0f && math::elem(*src, 3, 3) == 0.0f;
                         if (unpopulated && c < 2) {
                             src = (c == 0) ? &inputs.shadow_matrix0 : &inputs.shadow_matrix1;
                         }
-                        fp.ShadowVP[c][0] = src->columns[0];
-                        fp.ShadowVP[c][1] = src->columns[1];
-                        fp.ShadowVP[c][2] = src->columns[2];
-                        fp.ShadowVP[c][3] = src->columns[3];
+                        fp.ShadowVP[c][0] = math::column(*src, 0);
+                        fp.ShadowVP[c][1] = math::column(*src, 1);
+                        fp.ShadowVP[c][2] = math::column(*src, 2);
+                        fp.ShadowVP[c][3] = math::column(*src, 3);
                     }
 
                     *mapped = fp;

@@ -65,18 +65,18 @@ void SyncLightsFromECS(RenderScene& scene) {
 
         // Position = translation column of world matrix.
         const math::v3 position{
-            world.columns[3][0],
-            world.columns[3][1],
-            world.columns[3][2]
+            math::elem(world, 3, 0),
+            math::elem(world, 3, 1),
+            math::elem(world, 3, 2)
         };
 
         // Forward = Z axis of world matrix (column 2).
         // Includes scale; users should keep Light entity scale=(1,1,1).
         // Normalize defensively.
         math::v3 direction{
-            world.columns[2][0],
-            world.columns[2][1],
-            world.columns[2][2]
+            math::elem(world, 2, 0),
+            math::elem(world, 2, 1),
+            math::elem(world, 2, 2)
         };
         const f32 dlen = std::sqrt(direction.x * direction.x +
                                    direction.y * direction.y +

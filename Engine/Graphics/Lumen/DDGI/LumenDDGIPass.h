@@ -62,7 +62,7 @@ struct DDGIRuntimeParams {
     // Scene-fit grids (Docs/completed/2026-09-18-ddgi-scene-fit-probe-grid-plan.md §5.2):
     // false = legacy centered origin (default), true = probe_origin is the
     // grid's min corner (probe[0] world position).
-    math::v3 probe_origin{0.0f};
+    math::v3 probe_origin = math::splat3(0.0f);
     bool     use_probe_origin = false;
 };
 
@@ -689,8 +689,8 @@ private:
     rhi::RHIDeviceBase* device_{ nullptr };
     DDGIRuntimeParams params_{};
     DDGIVolumeData    volume_data_{};
-    math::v3          probe_origin_{ 0.0f };
-    math::v3          last_snapped_cam_{ 0.0f };  // last camera position snapped to grid
+    math::v3          probe_origin_ = math::splat3(0.0f);
+    math::v3          last_snapped_cam_ = math::splat3(0.0f);  // last camera position snapped to grid
     int               relocation_shift_[3]{ 0, 0, 0 };  // current frame grid shift (probe cells)
     u32               ray_sample_mode_{ 0 };            // DDGI_RAY_SAMPLE env: 0 uniform / 1 jitter / 2 cosine
     rhi::ResourceHandle probe_positions_{ rhi::handles::INVALID_RESOURCE };  // float4 per probe, filled once at Initialize

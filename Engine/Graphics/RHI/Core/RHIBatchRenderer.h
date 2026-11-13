@@ -150,7 +150,7 @@ struct RenderBatch {
         totalInstances += item.instanceCount;
         
         // 更新包围半径（简化计算）
-        math::v3 translation{item.worldMatrix.columns[3][0], item.worldMatrix.columns[3][1], item.worldMatrix.columns[3][2]};
+        math::v3 translation = math::xyz(math::column(item.worldMatrix, 3));
         f32 itemRadius = std::sqrt(math::dot(translation, translation));
         boundingRadius = std::max(boundingRadius, itemRadius);
         

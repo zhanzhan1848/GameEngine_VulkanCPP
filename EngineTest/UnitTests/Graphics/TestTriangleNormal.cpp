@@ -46,8 +46,8 @@ int main(){
     const float largest=std::numeric_limits<float>::max();
     const float big0[]={-largest,0,0},big1[]={largest,0,0},big2[]={0,largest,0};
     expected(big0,big1,big2,0,0,1,"large finite input avoids float edge overflow");
-    const float far[]={1e30f,1e30f,0},near0[]={0,1,0},near1[]={1,0,0};
-    expected(far,near0,near1,0,0,1,"short edge preserved next to very large coordinate");
+    const float farPts[]={1e30f,1e30f,0},near0[]={0,1,0},near1[]={1,0,0};   // R4: far 避开 rpcndr.h 空宏
+    expected(farPts,near0,near1,0,0,1,"short edge preserved next to very large coordinate");
     std::cout<<checks-failures<<'/'<<checks<<" triangle normal checks passed\n";
     return failures?1:0;
 }

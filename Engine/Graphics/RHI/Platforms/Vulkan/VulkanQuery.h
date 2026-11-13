@@ -37,8 +37,13 @@ public:
      * @param stride 每条结果的字节步长
      * @return true 全部就绪并写出；false 表示结果不可用或参数/设备错误，不能当零耗时
      *
-     * @details 默认使用 WAIT bit，无额外 1 秒超时；实验环境变量
-     *          PRIMAL_VK_QUERY_NONBLOCKING=1 仅对 Timestamp 取消 WAIT。
+     * @details 默认非阻塞 availability 读（R11 taskB：不带 WAIT bit——原生
+     *          NVIDIA 驱动对不可用 query 的 WAIT_BIT 读无 timeout 无限阻塞，
+     *          Windows 第 2 帧死锁根因；MoltenVK 本就按 NOT_READY 返回，
+     *          返回值行为不变，像素输出实测无漂移）。VK_NOT_READY 时返回
+     *          false（不可用数据）。
+     *          实验环境变量 PRIMAL_VK_QUERY_NONBLOCKING=1 保留：查询侧现与
+     *          默认一致，RenderGraph 侧仍按它门控暂存数据发布。
      *          非阻塞读取不可代替 frame fence 或授权任何 host 资源复用。
      *          Timestamp/PipelineStatistics:每条 u64;
      *          Occlusion:每条 u64(可见 sample 数)。

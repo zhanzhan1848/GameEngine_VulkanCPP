@@ -24,12 +24,11 @@ namespace {
 math::m4x4 MakePlanarReflectionMatrix(math::v3 N, math::v3 P) {
     float d = -dot(N, P);
     float nx = N.x, ny = N.y, nz = N.z;
-    math::m4x4 m;
-    m.columns[0] = {1.0f - 2.0f*nx*nx, -2.0f*ny*nx, -2.0f*nz*nx, 0.0f};
-    m.columns[1] = {-2.0f*nx*ny, 1.0f - 2.0f*ny*ny, -2.0f*nz*ny, 0.0f};
-    m.columns[2] = {-2.0f*nx*nz, -2.0f*ny*nz, 1.0f - 2.0f*nz*nz, 0.0f};
-    m.columns[3] = {-2.0f*nx*d, -2.0f*ny*d, -2.0f*nz*d, 1.0f};
-    return m;
+    return math::make_m4x4(
+        math::v4{1.0f - 2.0f*nx*nx, -2.0f*ny*nx, -2.0f*nz*nx, 0.0f},
+        math::v4{-2.0f*nx*ny, 1.0f - 2.0f*ny*ny, -2.0f*nz*ny, 0.0f},
+        math::v4{-2.0f*nx*nz, -2.0f*ny*nz, 1.0f - 2.0f*nz*nz, 0.0f},
+        math::v4{-2.0f*nx*d, -2.0f*ny*d, -2.0f*nz*d, 1.0f});
 }
 
 bool ReadShaderBytes(const std::string& relPath, std::vector<u8>& out) {

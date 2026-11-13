@@ -18,8 +18,10 @@
 //   - 纹理上传：区域级 upload heap 布局由 ComputeRegionLayout 计算
 //     （RowPitch 对齐 D3D12_TEXTURE_DATA_PITCH_ALIGNMENT=256；源 footprint
 //     宽 = 区域宽，CopyTextureRegion 的 BOX 选区）；CopyTextureRegion 以
-//     PLACED_FOOTPRINT 源执行；目标纹理的 →COPY_DEST→回置 状态转换经
-//     M0 D3D12StateTracker（集成点在 EncodePendingCopies）。
+//     PLACED_FOOTPRINT 源执行（Offset 必须 512 对齐——纹理 staging 分配
+//     用 TEXTURE_STAGING_ALIGNMENT，见常量处注释）；目标纹理的
+//     →COPY_DEST→回置 状态转换经 M0 D3D12StateTracker（集成点在
+//     EncodePendingCopies）。
 //   - FlushBlocking()：无帧上下文（资产加载期）的一次性提交 +
 //     fence 目标值 CPU 等待。
 #pragma once
@@ -49,7 +51,17 @@ class D3D12UploadRing {
 public:
     static constexpr u32 FRAME_SLOTS = MAX_FRAMES_IN_FLIGHT + 1;  // 4
     static constexpr u64 DEFAULT_POOL_SIZE = 16ULL * 1024ULL * 1024ULL;  // 16MB/帧槽
-    static constexpr u64 DEFAULT_ALIGNMENT = 256;  // texture copy RowPitch 对齐下限
+    // buffer staging 默认对齐（无 footprint 语义；256 为 RHI 通用下限）。
+    static constexpr u64 DEFAULT_ALIGNMENT = 256;
+    // 纹理 staging 对齐：PLACED_FOOTPRINT.Offset 必须为
+    // D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT=512 的倍数（vendor d3d12.h
+    // L1115）；与 RowPitch 的 D3D12_TEXTURE_DATA_PITCH_ALIGNMENT=256 是两个
+    // 独立要求——R19-2 前本环默认 256，同帧槽第二个纹理分配落在 256 奇数
+    // 倍偏移时 EncodePoolCopies 源 footprint 违例（R18-A §27-A.6-3 登记）。
+    static constexpr u64 TEXTURE_STAGING_ALIGNMENT = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    static_assert(TEXTURE_STAGING_ALIGNMENT != 0 &&
+                      (TEXTURE_STAGING_ALIGNMENT & (TEXTURE_STAGING_ALIGNMENT - 1)) == 0,
+                  "Allocate 的 bump 掩码 ~(align-1) 要求对齐值为 2 的幂");
 
     struct Allocation {
         void* cpuPtr = nullptr;              ///< 持久映射写入目标
@@ -114,6 +126,22 @@ public:
 
     bool HasPendingCopies() const { return !pools_[currentSlot_].pending.empty(); }
     bool IsInitialized() const { return device_ != nullptr; }
+
+    // --- R21-C FRAME_TRACE 观察器（PRIMAL_D3D12_FRAME_TRACE 埋点读环状态；
+    // 纯只读，无行为变化。越界槽返回零值。）---
+    u32 TraceCurrentSlot() const { return currentSlot_; }
+    u64 TraceSlotOffset(u32 slot) const {
+        return slot < FRAME_SLOTS ? pools_[slot].offset : 0;
+    }
+    u64 TraceSlotCapacity(u32 slot) const {
+        return slot < FRAME_SLOTS ? pools_[slot].capacity : 0;
+    }
+    u64 TraceSlotLastUseTarget(u32 slot) const {
+        return slot < FRAME_SLOTS ? pools_[slot].lastUseTarget : 0;
+    }
+    size_t TraceSlotPendingCount(u32 slot) const {
+        return slot < FRAME_SLOTS ? pools_[slot].pending.size() : 0;
+    }
 
 private:
     struct PendingCopy {

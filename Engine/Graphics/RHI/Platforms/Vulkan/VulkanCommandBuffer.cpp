@@ -18,6 +18,7 @@
 #include "VulkanPipeline.h"
 #include "VulkanDescriptorSet.h"
 #include "VulkanMath.h"
+#include "VulkanHangDiag.h"
 #include "Engine/Common/CoreLogStream.h"
 #include "VulkanDDGIAuditPrefix.h"
 
@@ -161,6 +162,7 @@ void VulkanCommandBuffer::destroyImpl() {
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
     VkDevice dev = vk.GetNativeDevice();
     if (submitFence_ != VK_NULL_HANDLE) {
+        hangdiag::RetireFence(submitFence_);
         vkDestroyFence(dev, submitFence_, nullptr);
         submitFence_ = VK_NULL_HANDLE;
     }
@@ -280,11 +282,34 @@ bool VulkanCommandBuffer::submitImpl(u32 /*waitFlags*/) {
     si.signalSemaphoreCount = 0;
     si.pSignalSemaphores = nullptr;
 
-    VkResult res = vkQueueSubmit(queue, 1, &si, submitFence_);
+    // Fence 生命周期修复（VUID-vkQueueSubmit-fence-00063）：基类状态机允许
+    // Executed → Begin → End → Submit 直接复用同一 cmd buffer 而不经 Reset()
+    // （RHICommand.h Begin 接受 Executed 态），而 submitFence_ 此前只在
+    // resetImpl 里 reset——该复用路径上它停留在上一次提交留下的 SIGNALED
+    // 态，构成违规重复提交；且随后 WaitForCompletion 对已 signaled 的 fence
+    // 立即返回，不再真正等待本次提交（场景加载期逐纹理上传即此序列）。
+    // 与 VulkanDevice::submitImpl 内部 fence 分支同一语义：提交前 reset。
+    // 此处 fence 必不 pending——到达 RecordingEnded 的前驱只有 Reset（已
+    // reset）或 Executed（已等到完成）；对未 signaled 的 fence，vkResetFences
+    // 按 spec 为 no-op。
+    if (submitFence_ != VK_NULL_HANDLE) {
+        vkResetFences(vk.GetNativeDevice(), 1, &submitFence_);
+    }
+
+    VkResult res;
+    {
+        // R10 taskC：门控看门狗 + 提交追踪（此为 VulkanDevice::submitImpl 之外
+        // 的第二个提交入口——一次性 cmd buffer 路径）。
+        hangdiag::ScopedHangWatch watch("queueSubmit", "VulkanCommandBuffer::submit");
+        res = vkQueueSubmit(queue, 1, &si, submitFence_);
+    }
     if (res != VK_SUCCESS) {
+        if (res == VK_ERROR_DEVICE_LOST) hangdiag::ReportDeviceLost("VulkanCommandBuffer::submit", res);
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkQueueSubmit failed: " << res << std::endl;
         return false;
     }
+    hangdiag::NoteSignalFence(submitFence_);
+    hangdiag::NoteSubmitOk(1);
     return true;
 }
 
@@ -300,21 +325,29 @@ bool VulkanCommandBuffer::waitForCompletionImpl() {
     if (externalFenceSignaled_) {
         if (externalFence_ == VK_NULL_HANDLE) return true;
         VkDevice extDev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
+        // R10 taskC：门控时改用有界轮询（超时/lost 在内部终止进程），
+        // 门控关闭时保持原 5s 超时单次调用逐字节不变。
+        if (hangdiag::Enabled())
+            return hangdiag::BoundedWaitFence(extDev, "VulkanCommandBuffer::WaitForCompletion(external)", externalFence_);
         VkResult extRes = vkWaitForFences(extDev, 1, &externalFence_, VK_TRUE, 5ULL * 1000ULL * 1000ULL * 1000ULL);
         if (extRes == VK_TIMEOUT) {
             PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] External fence WaitForCompletion TIMEOUT (5s)" << std::endl;
         }
+        if (extRes == VK_ERROR_DEVICE_LOST) hangdiag::ReportDeviceLost("VulkanCommandBuffer::WaitForCompletion(external)", extRes);
         return extRes == VK_SUCCESS;
     }
 
     VkDevice dev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
     if (submitFence_ == VK_NULL_HANDLE) return false;
+    if (hangdiag::Enabled())
+        return hangdiag::BoundedWaitFence(dev, "VulkanCommandBuffer::WaitForCompletion", submitFence_);
     VkResult res = vkWaitForFences(dev, 1, &submitFence_, VK_TRUE, 5ULL * 1000ULL * 1000ULL * 1000ULL);
     if (res == VK_SUCCESS) return true;
     if (res == VK_TIMEOUT) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] WaitForCompletion TIMEOUT (5s)" << std::endl;
         return false;
     }
+    if (res == VK_ERROR_DEVICE_LOST) hangdiag::ReportDeviceLost("VulkanCommandBuffer::WaitForCompletion", res);
     PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkWaitForFences failed: " << res << std::endl;
     return false;
 }
@@ -418,10 +451,12 @@ void VulkanCommandBuffer::CopyTextureToBuffer(ResourceHandle srcTexture, Resourc
                            buf->GetNativeBuffer(),
                            regionCount, copies.data());
     // P0-B（validation 预热瞬态收尾）: 拷贝完成后把源纹理收敛回
-    // SHADER_READ_ONLY—— sampled 用例（历史环/调试读回）远多于继续 TRANSFER
-    // 的用例；updateData 的 backLayout 惯例与此一致。truth-based，已 SRO 时
-    // 后续 barrier 自然 no-op。
-    TransitionImageLayout(tex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // 采样态—— sampled 用例（历史环/调试读回）远多于继续 TRANSFER
+    // 的用例；updateData 的 backLayout 惯例与此一致。truth-based，已
+    // 落定时后续 barrier 自然 no-op。R11: 回落目标按用途位选择
+    // (GetRestingLayout)——无 SAMPLED 位的深度图回 SRO 触发 VUID-01211
+    // (十测 TestVulkanDepthAspect 实锤)。
+    TransitionImageLayout(tex, tex->GetRestingLayout());
     UpdateStats(CommandType::CopyTextureToBuffer);
 }
 
@@ -465,11 +500,12 @@ void VulkanCommandBuffer::BlitTexture(ResourceHandle src, ResourceHandle dst,
                    srcTex->GetNativeImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    dstTex->GetNativeImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    regionCount, blits.data(), vkFilter);
-    // P0-B: blit 完成后把两端收敛回 SHADER_READ_ONLY（与上面 CopyTextureTo
+    // P0-B: blit 完成后把两端收敛回采样态（与上面 CopyTextureTo
     // Buffer 的收尾同理）。调用方既有的回置 barrier（TAA histBarrier、
     // ColorHistory restore 等）由 InsertBarrier 的同布局 skip 变为 no-op。
-    TransitionImageLayout(srcTex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    TransitionImageLayout(dstTex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    // R11: 回落目标按用途位选择（GetRestingLayout，VUID-01211）。
+    TransitionImageLayout(srcTex, srcTex->GetRestingLayout());
+    TransitionImageLayout(dstTex, dstTex->GetRestingLayout());
     UpdateStats(CommandType::BlitTexture);
 }
 
@@ -928,6 +964,14 @@ void VulkanCommandBuffer::TransitionImageLayout(VulkanTexture* tex, VkImageLayou
         case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
             b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
             break;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            // R11: GetRestingLayout 会把无 SAMPLED 位的深度图回落到 DS
+            // attachment 布局;与下方 dstStage 的 EARLY/LATE_FRAGMENT_TESTS
+            // 配对的显式 access 组合,避免 default 的 MEMORY_* 与 fragment
+            // stage 搭配触发 VUID-02819 类 stage/access 不匹配。
+            b.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            break;
         default:
             b.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
             break;
@@ -941,6 +985,11 @@ void VulkanCommandBuffer::TransitionImageLayout(VulkanTexture* tex, VkImageLayou
             break;
         case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
             b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            // R11: 同上 srcAccess 注释——DS 布局的显式 access/stage 配对。
+            b.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
             break;
         default:
             b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;

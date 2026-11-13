@@ -15,8 +15,49 @@
 
 #include <iostream>
 #include <cstring>
+#include <string>
 
 namespace primal::graphics::rhi {
+
+namespace detail {
+
+// R7-WIN 诊断:非 SPIR-V 字节判类 + 前 32 字节 hex 预览。纯日志辅助,
+// 不改任何加载行为。分类优先级:DXBC 魔数(Windows .cso 镜像被
+// platform 分支误喂)→ 全零 → 可打印文本(GLSL/WGSL/Metal 源文件被
+// 当作字节码加载)→ 其余归"未识别二进制"。
+std::string DescribeBadSpirvBytes(const void* data, size_t size) {
+    if (!data || size == 0) return std::string("(empty payload)");
+    const u8* p = static_cast<const u8*>(data);
+    const size_t previewN = (size < 32) ? size : 32;
+    static const char* kHexDigits = "0123456789abcdef";
+    std::string hex;
+    hex.reserve(previewN * 2);
+    bool allZero = true;
+    bool printable = true;
+    for (size_t i = 0; i < previewN; ++i) {
+        const u8 c = p[i];
+        hex += kHexDigits[c >> 4];
+        hex += kHexDigits[c & 0xF];
+        if (c != 0) allZero = false;
+        const bool isTextByte = (c >= 0x20 && c <= 0x7E) || c == '\n' || c == '\r' || c == '\t';
+        if (!isTextByte) printable = false;
+    }
+    std::string kind;
+    if (size >= 4 && p[0] == 'D' && p[1] == 'X' && p[2] == 'B' && p[3] == 'C') {
+        kind = "looks like D3D12 DXIL .cso mirror (platform branching bug?)";
+    } else if (allZero) {
+        kind = "all-zero bytes";
+    } else if (printable) {
+        kind = "looks like text source (WGSL/GLSL/Metal) - a source path was fed to the bytecode loader";
+    } else {
+        kind = "unrecognized binary";
+    }
+    std::string out = "(" + kind + ") first32=0x" + hex + " (first " +
+                      std::to_string(previewN) + " of " + std::to_string(size) + " bytes)";
+    return out;
+}
+
+} // namespace detail
 
 VulkanShader::VulkanShader(VulkanDevice& device, const void* data, size_t size,
                            ShaderStage stage, const char* entryPoint)
@@ -71,6 +112,47 @@ bool VulkanShader::Initialize() {
                   << " not multiple of 4" << std::endl;
         return false;
     }
+    // R9-WIN 防御：完整 5-dword 头校验（magic/version/generator/bound/schema，
+    // 共 20 字节）。r7 的 createShaderImpl 预检只查 magic+4 对齐——Windows 实测
+    // （2026-11-12 GTX1060）12 字节截断载荷（text-mode ifstream 在 0x1A 处停读，
+    // ToneMapping.spv 第 13 字节恰为 0x1A）能穿过该预检、把拒绝推迟到
+    // vkCreateShaderModule（01379）。这里提前拒绝并给出「截断」级别的明确诊断；
+    // 失败语义与驱动拒绝一致（返回 false → 上游 INVALID_SHADER）。本函数是所有
+    // Vulkan 模块创建的漏斗（createShaderImpl / Reload / 直接构造都经此），
+    // 合法 .spv 头 5 项恒过，行为零变化。
+    if (spirv_.size() < 20) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[VulkanShader] SPIR-V truncated: entryPoint=" << entryPoint_
+            << " size=" << spirv_.size() << " < 20-byte header (5 dwords: "
+               "magic+version+generator+bound+schema) "
+            << detail::DescribeBadSpirvBytes(spirv_.data(), spirv_.size())
+            << " — truncated file or text-mode read stopped at 0x1A" << std::endl;
+        return false;
+    }
+    {
+        u32 header[5] = {0, 0, 0, 0, 0};
+        std::memcpy(header, spirv_.data(), sizeof(header));
+        const bool magicOk = header[0] == 0x07230203u;
+        // version 高字节必须为 0，主版本 1..2（SPIR-V 1.0-2.0，涵盖 naga/glslang
+        // 现役产出；0 = 缺省/损坏）。
+        const u32 version = header[1];
+        const bool versionOk = version != 0 && (version >> 24) == 0 &&
+                               (version >> 16) >= 1 && (version >> 16) <= 2;
+        // 现行规范只定义 schema 0。
+        const bool schemaOk = header[4] == 0;
+        if (!magicOk || !versionOk || !schemaOk) {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[VulkanShader] SPIR-V header invalid: entryPoint=" << entryPoint_
+                << " size=" << spirv_.size() << " magic=0x" << std::hex << header[0]
+                << " version=0x" << version << " schema=" << header[4] << std::dec
+                << (!magicOk ? " (bad magic)" : "")
+                << (!versionOk ? " (bad version)" : "")
+                << (!schemaOk ? " (bad schema)" : "") << " "
+                << detail::DescribeBadSpirvBytes(spirv_.data(), spirv_.size())
+                << std::endl;
+            return false;
+        }
+    }
 
     VkShaderModuleCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
@@ -80,6 +162,13 @@ bool VulkanShader::Initialize() {
     VkDevice dev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
     if (vkCreateShaderModule(dev, &ci, nullptr, &module_) != VK_SUCCESS) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanShader] vkCreateShaderModule failed" << std::endl;
+        // R7-WIN 双保险:绕过 createShaderImpl 预检的路径(Reload/直接
+        // 构造)同样给出 entryPoint + 判类 + hex 预览,把 01379 定位到
+        // 具体入口。纯日志,失败路径本来就失败,合法 .spv 不经过本分支。
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[VulkanShader] reject non-SPIR-V bytes: entryPoint=" << entryPoint_
+            << " size=" << spirv_.size() << " "
+            << detail::DescribeBadSpirvBytes(spirv_.data(), spirv_.size()) << std::endl;
         return false;
     }
 

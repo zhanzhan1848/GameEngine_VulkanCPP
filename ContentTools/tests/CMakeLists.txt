@@ -19,11 +19,16 @@ target_include_directories(TestMeshConverters PRIVATE
 
 target_link_libraries(TestMeshConverters PRIVATE ContentTools)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestMeshConverters PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
+    >
 )
 
 add_test(NAME TestMeshConverters COMMAND TestMeshConverters)
@@ -47,12 +52,17 @@ target_include_directories(TestRepair PRIVATE
 
 target_link_libraries(TestRepair PRIVATE ContentTools contenttools_repair)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestRepair PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
     -Wno-unused-variable
+    >
 )
 
 add_test(NAME TestRepair COMMAND TestRepair)
@@ -74,12 +84,17 @@ target_include_directories(TestRemesh PRIVATE
 
 target_link_libraries(TestRemesh PRIVATE ContentTools contenttools_remesh)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestRemesh PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
     -Wno-unused-variable
+    >
 )
 
 add_test(NAME TestRemesh COMMAND TestRemesh)
@@ -101,12 +116,17 @@ target_include_directories(TestSubdivide PRIVATE
 
 target_link_libraries(TestSubdivide PRIVATE ContentTools contenttools_subdivide)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestSubdivide PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
     -Wno-unused-variable
+    >
 )
 
 add_test(NAME TestSubdivide COMMAND TestSubdivide)
@@ -128,12 +148,17 @@ target_include_directories(TestUvAtlas PRIVATE
 
 target_link_libraries(TestUvAtlas PRIVATE ContentTools contenttools_uvatlas)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestUvAtlas PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
     -Wno-unused-variable
+    >
 )
 
 add_test(NAME TestUvAtlas COMMAND TestUvAtlas)
@@ -155,12 +180,17 @@ target_include_directories(TestLod PRIVATE
 
 target_link_libraries(TestLod PRIVATE ContentTools contenttools_lod)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestLod PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
     -Wno-unused-variable
+    >
 )
 
 add_test(NAME TestLod COMMAND TestLod)
@@ -182,12 +212,17 @@ target_include_directories(TestMeshlet PRIVATE
 
 target_link_libraries(TestMeshlet PRIVATE ContentTools contenttools_meshlet)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestMeshlet PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
     -Wno-unused-variable
+    >
 )
 
 add_test(NAME TestMeshlet COMMAND TestMeshlet)
@@ -209,12 +244,17 @@ target_include_directories(TestCollision PRIVATE
 
 target_link_libraries(TestCollision PRIVATE ContentTools contenttools_collision)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestCollision PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
     -Wno-unused-variable
+    >
 )
 
 add_test(NAME TestCollision COMMAND TestCollision)
@@ -236,12 +276,17 @@ target_include_directories(TestSceneBlobWriter PRIVATE
 
 target_link_libraries(TestSceneBlobWriter PRIVATE ContentTools contenttools_pipeline)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestSceneBlobWriter PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
     -Wno-unused-variable
+    >
 )
 
 add_test(NAME TestSceneBlobWriter COMMAND TestSceneBlobWriter)
@@ -263,12 +308,17 @@ target_include_directories(TestAssetPipeline PRIVATE
 
 target_link_libraries(TestAssetPipeline PRIVATE ContentTools contenttools_pipeline)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestAssetPipeline PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
     -Wno-unused-variable
+    >
 )
 
 add_test(NAME TestAssetPipeline COMMAND TestAssetPipeline)
@@ -292,12 +342,17 @@ target_include_directories(TestSceneBlobReader PRIVATE
 
 target_link_libraries(TestSceneBlobReader PRIVATE ContentTools contenttools_pipeline)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestSceneBlobReader PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
     -Wno-unused-variable
+    >
 )
 
 add_test(NAME TestSceneBlobReader COMMAND TestSceneBlobReader)
@@ -319,12 +374,17 @@ target_include_directories(TestDeriveAttributes PRIVATE
 
 target_link_libraries(TestDeriveAttributes PRIVATE ContentTools contenttools_derive)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestDeriveAttributes PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
     -Wno-unused-variable
+    >
 )
 
 add_test(NAME TestDeriveAttributes COMMAND TestDeriveAttributes)
@@ -348,12 +408,17 @@ target_include_directories(TestPackedMeshDecoder PRIVATE
 
 target_link_libraries(TestPackedMeshDecoder PRIVATE ContentTools contenttools_pipeline)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestPackedMeshDecoder PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
     -Wno-unused-variable
+    >
 )
 
 add_test(NAME TestPackedMeshDecoder COMMAND TestPackedMeshDecoder)
@@ -374,13 +439,26 @@ target_include_directories(TestCardBake PRIVATE
     ${CMAKE_SOURCE_DIR}/OSAPI/MAC
 )
 
-target_link_libraries(TestCardBake PRIVATE ContentTools)
+# R13-C/T2（2026-11-04 Windows 十一测 LNK2019）：GetSceneSize/SerializeScene
+# 定义于 SceneBlobWriter.cpp、WalkSceneBlob 定义于 SceneBlobReader.cpp，两者
+# 只编入 contenttools_pipeline 静态库。macOS 上 ContentTools 为 SHARED dylib
+# 且默认导出 PRIVATE 链入的静态库符号（nm -gU 实证三符号导出），故仅链
+# ContentTools 也能解析；Windows DLL 只导出 __declspec(dllexport) 符号，
+# pipeline 全体无 dllexport，导入库不含三符号 → LNK2019。补链静态库与
+# TestSceneBlobWriter/TestAssetPipeline/TestPackedMeshDecoder/TestGltfImporter
+# 同模式（对齐本文件既有惯例）。
+target_link_libraries(TestCardBake PRIVATE ContentTools contenttools_pipeline)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestCardBake PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
+    >
 )
 
 add_test(NAME TestCardBake COMMAND TestCardBake)
@@ -402,11 +480,16 @@ target_include_directories(TestGltfImporter PRIVATE
 
 target_link_libraries(TestGltfImporter PRIVATE ContentTools contenttools_pipeline)
 
+# R3（Windows 首编）：-Wno-*/-stdlib=libc++ 等 GCC/clang 专属选项经
+# MSVC 解析为 /W + 非数字参数 → D8021 致命错误。非 MSVC 编译器才下发
+# （对齐父目录 ContentTools/CMakeLists.txt 的 genexp 分支先例）。
 target_compile_options(TestGltfImporter PRIVATE
+    $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:
     -std=c++17
     -stdlib=libc++
     -Wno-deprecated-declarations
     -Wno-unused-parameter
+    >
 )
 
 add_test(NAME TestGltfImporter COMMAND TestGltfImporter)

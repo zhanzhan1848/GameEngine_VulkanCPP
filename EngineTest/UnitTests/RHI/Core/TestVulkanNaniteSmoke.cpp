@@ -84,10 +84,10 @@ struct DeviceFixture {
 m4x4 make_identity_m4x4() {
     m4x4 r{};
     std::memset(&r, 0, sizeof(r));
-    r.columns[0][0] = 1.0f;
-    r.columns[1][1] = 1.0f;
-    r.columns[2][2] = 1.0f;
-    r.columns[3][3] = 1.0f;
+    set_elem(r, 0, 0, 1.0f);
+    set_elem(r, 1, 1, 1.0f);
+    set_elem(r, 2, 2, 1.0f);
+    set_elem(r, 3, 3, 1.0f);
     return r;
 }
 
@@ -391,7 +391,7 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
     // prior +5 sign the sphere landed behind the camera, Stage1 correctly
     // marked is_visible=0, and Stage4 with ForcePassAll=false skipped it.
     m4x4 viewMat = make_identity_m4x4();
-    viewMat.columns[3][2] = -5.0f;
+    set_elem(viewMat, 3, 2, -5.0f);
     // T4.6.5 part 22.1: projection uses right-handed Vulkan/Metal convention
     // (NDC z [0,1], camera looks down -Z). P[3][2] = -1 so clip.w = -view.z,
     // which is positive for visible points (view.z negative). The prior
@@ -406,11 +406,11 @@ TestResult TestVulkanGPUCullingPipeline_Smoke() {
     float fov = 60.0f * (pi / 180.0f);
     float aspect = float(W) / float(H);
     float f = 1.0f / std::tan(fov * 0.5f);
-    projMat.columns[0][0] = f / aspect;
-    projMat.columns[1][1] = f;
-    projMat.columns[2][2] = 50.0f / (0.1f - 100.0f);
-    projMat.columns[2][3] = -1.0f;
-    projMat.columns[3][2] = -(0.1f * 100.0f) / (0.1f - 100.0f);
+    set_elem(projMat, 0, 0, f / aspect);
+    set_elem(projMat, 1, 1, f);
+    set_elem(projMat, 2, 2, 50.0f / (0.1f - 100.0f));
+    set_elem(projMat, 2, 3, -1.0f);
+    set_elem(projMat, 3, 2, -(0.1f * 100.0f) / (0.1f - 100.0f));
 
     // 6. RenderSceneSnapshot — walks proxies, resolves cluster components,
     // builds InstanceData + ClusterRef GPU buffers.

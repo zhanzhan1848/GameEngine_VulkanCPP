@@ -5,13 +5,9 @@
 
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
-#include "Engine/Common/CoreDiag.h"
+#include "Engine/Common/CoreLogStream.h"
 #include "Graphics/RHI/Core/RHIPassTimestampAudit.h"
 #include "Graphics/RenderGraph/RHICaptureBridge.h"
-
-#ifndef PRIMAL_LOG_STREAM
-#define PRIMAL_LOG_STREAM(level, channel) primal::diag::StreamProxy(level, channel)
-#endif
 
 namespace primal::graphics::rhi {
 

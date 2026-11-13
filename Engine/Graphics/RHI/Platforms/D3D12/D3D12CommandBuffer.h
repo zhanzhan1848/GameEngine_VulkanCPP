@@ -21,15 +21,81 @@
 //   - BlitTexture：M7 F7-3 起支持同格式 1:1 拷贝（CopyTextureRegion 直译，
 //     整资源 CopySource/CopyDest 收敛模型与 Vulkan BlitTexture 同构）；
 //     格式转换与缩放 blit 显式 NOT-IMPLEMENTED（登记）。
-//   - GenerateMipmaps：维持 NOT-IMPLEMENTED——M5 工具 shader（M5Mipmap.comp，
-//     整数 box）已交付，接线（cso 嵌入 + 逐 mip dispatch + UAV barrier）
-//     按 M7 移交协议登记至 Windows 集成会话（runbook §7）。
+//   - GenerateMipmaps（R13/T2）：Texture2D 单 slice + RTV 能力格式的
+//     PS downsample 全 mip 链（每 mip：src SRV + dst RTV + 全屏三角形
+//     双线性=2x2 box；shader=MipGen.hlsl 构建期嵌入，见 D3D12MipGen.h）。
+//     BC 压缩/深度/TYPELESS 与非 2D 类型保持 NOT-IMPLEMENTED Error（登记）。
 //
-// 视口契约（阶段文档 §7.2-1）：SetViewport 以负高度 {0, H, W, -H} 下发——
-// D3D12 官方 Y 翻转手段；使原始帧与 Vulkan 原始读回同向（共享对比免
-// FlipYInPlace）。绕序翻转由 PSO 的 cull 取反补偿（D3D12Pipeline.h）。
+// 视口契约（阶段文档 §7.2-1，H2 后真实契约）：SetViewport 以负高度
+// {0, H, W, -H} 下发——D3D12 官方 Y 翻转手段，使 NDC y=-1 映到 RT 第 0
+// 行，与 Vulkan 正高度视口同映射、原始读回同向（共享对比免 FlipYInPlace）。
+// PSO cull 直译（D3D12Pipeline::ToCullMode；FrontCounterClockwise=FALSE 与
+// Vulkan frontFace=CW 同义，负视口已补偿 NDC Y 语义差）。Y 朝向由调用方
+// 投影负责（harness F2：投影 y 行取反，RT 本身正立）。
 // Scissor 不翻转：它是屏幕空间矩形，与光栅化绕序无关。
+//
+// 绑定状态机（R20-A，Windows 十九测 #709/#952）：
+//   - D3D12 的根签名是命令列表状态（graphics/compute 各一槽，PSO 单槽
+//     共用），且 commandList_->Reset（beginImpl）全清——不像 Vulkan 绑
+//     管线自动携带 layout。本类维护与命令列表对齐的镜像：
+//       bound{Graphics,Compute}{Pipeline,Layout}_ —— 各 bind point 最近
+//       Bind*Pipeline 的 RHI 侧镜像（GenerateMipmaps 直设原生态时置空
+//       该侧布局镜像——mipgen 非 RHI 管线，无映射布局）；
+//       effectivePso_ / {graphics,compute}RootSigSet_ —— 命令列表三槽
+//     （PSO、graphics RS、compute RS）当前值镜像；begin/reset 全清。
+//   - 消费方前置自愈（Ensure{Graphics,Compute}State）：Draw/Dispatch/
+//     ExecuteIndirect/PushConstants/BindDescriptorSets 下发前按镜像核对
+//     对应槽位，缺/错则补设（SetPipelineState/Set*RootSignature）；
+//     会话内从未 Bind* 的 bind point → Error 日志 + 跳过录制（不把必错
+//     命令发给 debug layer）。
+//   - PushConstants 契约对齐 Vulkan（VulkanCommandBuffer::PushConstants
+//     L1538-1556）：layout 句柄优先解析（constantsParam 与 RS 同源自此，
+//     保证参数索引恒与命令列表当前签名一致——#709 双子句根治），
+//     Graphics/Compute 前缀按 stageFlags 路由（歧义回退单侧已绑侧）。
+//   - R21-B（Windows 二十测黑帧回归）：三槽镜像从裸指针升级为"指针+命令
+//     列表世代"（D3D12BindSlotMirror，本文件 Windows 守卫之外——纯 C++，
+//     macOS 单测可直接包含建模验证）。幂等跳过必须指针与世代同时相等：
+//     跨 Reset/Begin 后同指针不再被判"已绑定"，强制真实重下发——D3D12 的
+//     SetPipelineState/Set{Graphics,Compute}RootSignature/SetDescriptorHeaps
+//     均为命令列表状态、list Reset 全清；裸指针等值判定缺世代参与时，任何
+//     "镜像未与 Reset 同步清空"的路径都会把空绑定误判为已绑定 → 黑帧
+//     （本类缺陷的机械化防御，不再依赖各清空点手工不漏）。Ensure 失败
+//     路径全部显式 Error（原 null RS/PSO 静默 return false = 无日志黑帧）。
 #pragma once
+#include <cstdint>
+
+namespace primal::graphics::rhi {
+namespace d3d12 {
+
+/// 命令列表槽位绑定镜像小模型（R21-B；纯 C++，无 D3D12 类型——macOS 单测
+/// 直接包含本文件验证生命周期语义，见 TestD3D12BindSlotMirror.cpp）。
+/// 语义：ptr = 槽位当前值镜像；generation = ptr 置入时的命令列表世代。
+/// Matches 要求指针与世代同时相等（且非空）——跨 Reset（世代递增）后
+/// 同指针不再命中，幂等跳过被强制退化为真实重下发。
+template <typename PtrT>
+struct D3D12BindSlotMirror {
+    PtrT ptr = nullptr;            ///< 槽位当前值镜像（非拥有）
+    std::uint64_t generation = 0;  ///< ptr 置入时的命令列表世代（0 = 未置入）
+
+    /// 幂等跳过判定：候选指针与当前世代一致且非空才视为"命令列表已持有"。
+    bool Matches(const PtrT& candidate, std::uint64_t currentGeneration) const {
+        return ptr != nullptr && ptr == candidate && generation == currentGeneration;
+    }
+    /// 记录一次真实下发后的槽位值。
+    void Set(const PtrT& candidate, std::uint64_t currentGeneration) {
+        ptr = candidate;
+        generation = currentGeneration;
+    }
+    /// 列表 Reset/Begin：镜像与置入世代一起失效。
+    void Invalidate() {
+        ptr = nullptr;
+        generation = 0;
+    }
+};
+
+} // namespace d3d12
+} // namespace primal::graphics::rhi
+
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
 #include <d3d12.h>
@@ -42,10 +108,16 @@
 namespace primal::graphics::rhi {
 
 class D3D12Device;
-class D3D12Pipeline;
-class D3D12PipelineLayout;
 
 namespace d3d12 {
+
+// [R6/Windows] 真类在 rhi::d3d12（D3D12Pipeline.h）。此前这两个前置声明
+// 误放在外层 rhi 命名空间，制造了与真类无关的影子不完整类型
+// rhi::D3D12Pipeline / rhi::D3D12PipelineLayout，导致 CommandBuffer 成员
+// boundPipeline_/boundLayout_ 与 Device::GetPipeline 返回的
+// rhi::d3d12::D3D12Pipeline* 之间 C2440/C2027 双向断裂。
+class D3D12Pipeline;
+class D3D12PipelineLayout;
 
 class D3D12Texture;
 
@@ -132,6 +204,21 @@ private:
                            ResourceState target, u32 subresource);
     /// 帧首一次 SetDescriptorHeaps。
     void EnsureDescriptorHeapsBound();
+    /// Bind{Graphics,Compute}Pipeline 共用落点：更新对应 bind point 的
+    /// RHI 镜像 + 幂等下发 PSO/根签名（槽位镜像指针比对跳过冗余 Set；
+    /// 管线无根签名 = 创建期异常态，Error 显式记录不静默）。graphics 侧
+    /// 附带 IASetPrimitiveTopology（原行为）。
+    void ApplyPipelineBind(D3D12Pipeline* pipe);
+    /// Dispatch 族前置：compute 槽（PSO+根签名）按镜像自愈；本会话从未
+    /// BindComputePipeline → false（调用方跳过录制并已记 Error）。
+    bool EnsureComputeState();
+    /// Draw 族 / ExecuteIndirect(DRAW*) / PushConstants(graphics) /
+    /// BindDescriptorSets(Graphics) 前置：graphics 槽同款自愈。
+    bool EnsureGraphicsState();
+    /// R21-B：绑定镜像全清 + listGeneration_ 递增——beginImpl/resetImpl/
+    /// move/destroy 的单一落点（原三处手工清空列表的漂移面收口；任何未来
+    /// 新增的 list Reset 路径必须经由本函数，世代递增保证旧镜像全部失效）。
+    void ClearBindingMirrors();
 
     static constexpr u32 kAllocatorSlots = MAX_FRAMES_IN_FLIGHT + 1;  // 4 池轮转
     Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocators_[kAllocatorSlots];
@@ -139,12 +226,33 @@ private:
     u32 currentAllocator_ = 0;
     Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> commandList_;
 
-    D3D12Pipeline* boundPipeline_ = nullptr;         // 非拥有
-    D3D12PipelineLayout* boundLayout_ = nullptr;     // 非拥有
+    // === 绑定状态机镜像（R20-A；与命令列表三槽对齐，begin/reset 全清。
+    //     R21-B：三槽镜像升级为 D3D12BindSlotMirror"指针+世代"——清空与
+    //     幂等判定都以 listGeneration_ 为锚，单一函数收口）===
+    D3D12Pipeline* boundGraphicsPipeline_ = nullptr;      // 非拥有
+    // 布局镜像存句柄不存指针：pipeline layout pool 扩容会整体搬迁槽位
+    // （RHIAllocator::Get 返回的地址仅单次调用内有效），bind→draw 之间
+    // 新建布局即可让缓存的 D3D12PipelineLayout* 悬垂——使用点
+    // （BindDescriptorSets / PushConstants 回退）经 device 现查取新地址。
+    PipelineLayoutHandle boundGraphicsLayout_{handles::INVALID_PIPELINE_LAYOUT};
+    D3D12Pipeline* boundComputePipeline_ = nullptr;       // 非拥有
+    PipelineLayoutHandle boundComputeLayout_{handles::INVALID_PIPELINE_LAYOUT};
+    D3D12BindSlotMirror<ID3D12PipelineState*> effectivePso_;    // PSO 槽镜像（gfx/compute 共用）
+    D3D12BindSlotMirror<ID3D12RootSignature*> graphicsRootSigSet_;  // graphics 根签名槽镜像
+    D3D12BindSlotMirror<ID3D12RootSignature*> computeRootSigSet_;   // compute 根签名槽镜像
+
     bool descriptorHeapsBound_ = false;
+    /// 命令列表世代：ClearBindingMirrors（Reset/Begin/move/destroy 落点）
+    /// 每次递增；三槽镜像的幂等跳过必须在本世代内成立。
+    std::uint64_t listGeneration_ = 0;
     u64 lastExecuteTarget_ = 0;                      // submitImpl/waitForSync 依据
     bool warnedDynamicOffsets_ = false;
     bool warnedComputeBytes_ = false;
+    bool warnedPushNoLayout_ = false;      // PushConstants 无可用布局（一次性）
+    bool warnedSetsNoLayout_ = false;      // BindDescriptorSets 目标侧无布局（一次性）
+    bool warnedEnsureNullRs_ = false;      // Ensure* 撞空根签名管线（一次性，R21-B）
+    bool warnedEnsureNullPso_ = false;     // Ensure* 撞空 PSO 管线（一次性，R21-B）
+    bool warnedPushRsDiverge_ = false;     // PushConstants 布局签名与槽位分歧（一次性，R21-B）
     bool isRecording_ = false;                       // 设备 IsFrameRecording 镜像
 };
 

@@ -6,6 +6,10 @@
 #include <Windows.h>
 #include <crtdbg.h>
 
+// RegisterCoreEmitter/InstallCrashHandler 的声明（两者都在此头，L74/L98）。
+// R13-B：MSVC 分支此前未包含任何声明头 → C2653/C3861；clang 分支本就包含。
+#include "DiagnosticsAPI.h"
+
 BOOL APIENTRY DllMain( HMODULE hModule,
                        DWORD  ul_reason_for_call,
                        LPVOID lpReserved

@@ -182,10 +182,32 @@ else()
 endif()
 
 # 链接依赖项
-target_link_libraries(${PROJECT_NAME} PRIVATE
-    Engine
-    ContentTools
-)
+# 2026-11-03 R2（Windows 首编）：ContentTools 链接按目标存在性门控——
+# BUILD_CONTENT_TOOLS=OFF 时该目标不存在，无条件链接导致 libEngineDLL
+# 链接失败（NoCT 实测：ld: library 'ContentTools' not found）。EngineDLL
+# 源级零 ContentTools 符号使用（CaptureAPI.cpp 的 Geometry 匹配是
+# CoreGraphics/CGGeometry.h 框架头；GeometryAPI.cpp include 的是引擎自身
+# Geometry/Geometry.h）——此前的无条件链接是残留依赖，OFF 路径去掉后若
+# 有隐藏符号需求会在链接期显式暴露（fail-closed）。
+target_link_libraries(${PROJECT_NAME} PRIVATE Engine)
+if(TARGET ContentTools)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ContentTools)
+endif()
+
+# R13-B（Windows 十二测）：HeadlessRender.cpp 用 zlib.h/z_stream/deflate/crc32
+# 写 PNG——Windows 无系统 zlib（C1083），接 R5 的 vendored primal_zlib_static
+# （root CMakeLists WIN32 FetchContent，ALIAS zlibstatic；PUBLIC include 含
+# source+binary 两目录，zlibstatic 链接即得 zlib.h 与生成的 zconf.h）。
+# 非 WIN32 维持现状：macOS libSystem 自带 zlib 符号（EngineDLL 一直无显式链接）。
+# 注意 Engine 的 primal_zlib_static 是 PRIVATE 链接——include 路径不传递，
+# 本目标必须自己链接才能拿到头文件路径。
+if(WIN32)
+    if(TARGET primal_zlib_static)
+        target_link_libraries(${PROJECT_NAME} PRIVATE primal_zlib_static)
+    else()
+        message(FATAL_ERROR "EngineDLL(WIN32): primal_zlib_static target missing — root CMakeLists zlib FetchContent block did not run")
+    endif()
+endif()
 
 # EngineDLL.dll 部署到测试输出目录：TestMaterialGraphAPI / TestParticleMaterialAPI /
 # TestMaterialAPIExtended 直接链接本 DLL。此前 DLL 只输出到源码树 Windows/，exe

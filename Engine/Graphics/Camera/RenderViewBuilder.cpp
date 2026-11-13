@@ -52,11 +52,12 @@ RenderView BuildRenderViewFromCameraId(camera_id id, const rhi::ViewportDesc& vi
             auto mToStr = [](const math::m4x4& m) {
                 std::string s;
                 for (int c = 0; c < 4; ++c) {
+                    const math::v4 col = math::column(m, c);
                     s += " c" + std::to_string(c) + "=(" +
-                         std::to_string(m.columns[c].x) + "," +
-                         std::to_string(m.columns[c].y) + "," +
-                         std::to_string(m.columns[c].z) + "," +
-                         std::to_string(m.columns[c].w) + ")";
+                         std::to_string(col.x) + "," +
+                         std::to_string(col.y) + "," +
+                         std::to_string(col.z) + "," +
+                         std::to_string(col.w) + ")";
                 }
                 return s;
             };

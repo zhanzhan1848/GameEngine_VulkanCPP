@@ -18,8 +18,8 @@ TestResult TestRenderViewCreation() {
     
     const m4x4& viewMat = view.GetViewMatrix();
     // Assuming identity is diagonal 1s
-    TEST_ASSERT(std::abs(viewMat.columns[0][0] - 1.f) < 0.001f, "Default View Matrix [0][0] should be 1");
-    TEST_ASSERT(std::abs(viewMat.columns[3][0] - 0.f) < 0.001f, "Default View Matrix [3][0] should be 0");
+    TEST_ASSERT(std::abs(primal::math::elem(viewMat, 0, 0) - 1.f) < 0.001f, "Default View Matrix [0][0] should be 1");
+    TEST_ASSERT(std::abs(primal::math::elem(viewMat, 3, 0) - 0.f) < 0.001f, "Default View Matrix [3][0] should be 0");
     
     return TestResult::Passed;
 }
@@ -40,17 +40,17 @@ TestResult TestRenderViewMatrices() {
     
     // Check View Matrix
     const m4x4& currView = view.GetViewMatrix();
-    TEST_ASSERT(std::abs(currView.columns[3][2] - (-10.f)) < 0.001f, "View Matrix not updated correctly");
+    TEST_ASSERT(std::abs(primal::math::elem(currView, 3, 2) - (-10.f)) < 0.001f, "View Matrix not updated correctly");
     
     // Check Projection Matrix
     const m4x4& currProj = view.GetProjectionMatrix();
-    TEST_ASSERT(std::abs(currProj.columns[3][0] - 1.f) < 0.001f, "Projection Matrix not updated correctly");
+    TEST_ASSERT(std::abs(primal::math::elem(currProj, 3, 0) - 1.f) < 0.001f, "Projection Matrix not updated correctly");
     
     // Check VP Matrix
     const m4x4& currVP = view.GetViewProjectionMatrix();
     // VP = P * V
     // Translation(1,2,3) * Translation(0,0,-10) = Translation(1,2,-7)
-    TEST_ASSERT(std::abs(currVP.columns[3][2] - (-7.f)) < 0.001f, "ViewProjection Matrix not updated correctly");
+    TEST_ASSERT(std::abs(primal::math::elem(currVP, 3, 2) - (-7.f)) < 0.001f, "ViewProjection Matrix not updated correctly");
     
     return TestResult::Passed;
 }

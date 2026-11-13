@@ -25,7 +25,8 @@ inline math::v3 cross(const math::v3& a, const math::v3& b) {
 }
 
 // Transform a point (w=1) by a 4x4 matrix. Uses simd::float4x4 multiplication
-// on Apple (math::m4x4 aliases to simd::float4x4). Falls back to component-wise
+// on Apple (math::m4x4 aliases to simd::float4x4). Falls back to math::elem
+// component-wise
 // math on other platforms.
 inline math::v3 TransformPoint(const math::m4x4& m, const math::v3& p) {
 #if defined(__APPLE__)
@@ -34,9 +35,9 @@ inline math::v3 TransformPoint(const math::m4x4& m, const math::v3& p) {
     return math::v3{homo.x, homo.y, homo.z};
 #else
     return math::v3{
-        m.columns[0][0] * p.x + m.columns[1][0] * p.y + m.columns[2][0] * p.z + m.columns[3][0],
-        m.columns[0][1] * p.x + m.columns[1][1] * p.y + m.columns[2][1] * p.z + m.columns[3][1],
-        m.columns[0][2] * p.x + m.columns[1][2] * p.y + m.columns[2][2] * p.z + m.columns[3][2]};
+        math::elem(m, 0, 0) * p.x + math::elem(m, 1, 0) * p.y + math::elem(m, 2, 0) * p.z + math::elem(m, 3, 0),
+        math::elem(m, 0, 1) * p.x + math::elem(m, 1, 1) * p.y + math::elem(m, 2, 1) * p.z + math::elem(m, 3, 1),
+        math::elem(m, 0, 2) * p.x + math::elem(m, 1, 2) * p.y + math::elem(m, 2, 2) * p.z + math::elem(m, 3, 2)};
 #endif
 }
 
@@ -48,9 +49,9 @@ inline math::v3 TransformDirection(const math::m4x4& m, const math::v3& d) {
     return math::v3{homo.x, homo.y, homo.z};
 #else
     return math::v3{
-        m.columns[0][0] * d.x + m.columns[1][0] * d.y + m.columns[2][0] * d.z,
-        m.columns[0][1] * d.x + m.columns[1][1] * d.y + m.columns[2][1] * d.z,
-        m.columns[0][2] * d.x + m.columns[1][2] * d.y + m.columns[2][2] * d.z};
+        math::elem(m, 0, 0) * d.x + math::elem(m, 1, 0) * d.y + math::elem(m, 2, 0) * d.z,
+        math::elem(m, 0, 1) * d.x + math::elem(m, 1, 1) * d.y + math::elem(m, 2, 1) * d.z,
+        math::elem(m, 0, 2) * d.x + math::elem(m, 1, 2) * d.y + math::elem(m, 2, 2) * d.z};
 #endif
 }
 

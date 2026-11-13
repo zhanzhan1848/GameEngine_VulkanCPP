@@ -1,0 +1,162 @@
+#version 450 core
+
+// M6 Probe Inject (D3D12 M6 GI 重构 P3) — 探针 SH-L1 注入 compute。
+// 顶替旧 M6ProbeBake（解析天空梯度 + 泛光的假 GI）：本 pass 真实消费
+// 直射漫反射缓冲（M6DeferredDirect RT1 = giDirectDiffuse），把屏幕上每个
+// 采样像素当作一个 Lambert 发射体（L_j = 该像素的直射漫反射显示值，
+// harness 单位、无 1/π），向探针累积 SH-L1 入射辐射系数——GI 输入由此
+// 只由 GBuffer + 阴影 + 光参数构成，从不包含 indirect/最终图像（无光
+// 反馈回路；唯一时间递归 = 下游 M6ProbeAccum 对探针纹理的 EMA）。
+//
+// SH 存储（M6 §4，RGBA16F 3D 纹理 (Nx,Ny,3·Nz)=(8,8,24)，slab s∈{0,1,2}
+// = 颜色通道 {R,G,B}）：
+//   texel (i, j, s·Nz + k) = vec4(c00, c1-1, c10, c11) —— 探针 (i,j,k)、
+//   通道 s 的 SH-L1 实基系数（Y00=0.282095, Y1-1=0.488603·y, Y10=0.488603·z,
+//   Y11=0.488603·x，方向 ω = normalize(发射体位置 − 探针位置)）：
+//   c_lm = Σ_j L_j · ΔΩ_j · Y_lm(ω_j)。消费侧 M6GIResolve 以基向量
+//   (0.282095, 0.325735·n.y, 0.325735·n.z, 0.325735·n.x) 点积重建 E_h
+//   （Â0=π, Â1=2π/3，再 /π —— 0.325735=(2/3)·0.488603，M6 §3 公式）。
+//
+// ΔΩ 正则化（disk 形状因子，防近距发射体发散/除零）：
+//   area = 像素世界面积（相邻 stride 重建的 xr/xu 边长积 / 视线角修正
+//          max(|dot(nj, viewDir)|, 0.2)）；
+//   ΔΩ_j = area·cosθ_j / (r² + area/π)，cosθ_j = max(0, n_j·(−ω_j))，
+//   cosθ_j ≤ 0（背向探针的发射体）跳过；r² 下限 1e-6。
+//   直射漫反射为精确 0 的像素（L.r+L.g+L.b ≤ 0，含完全阴影面/背景
+//   depth ≥ 1 早退）贡献恰好 0——ε_occ=0 契约在注入侧的对应保证。
+//
+// 线程组织：local_size (64,1,1)，一个 workgroup = 一个探针（probe =
+// gl_WorkGroupID），宿主 dispatch (Nx,Ny,Nz)=(8,8,8)。屏幕 8×8 stride
+// 均匀采样 + 线程束树归约（shared sR/sG/sB[64]，memoryBarrierShared +
+// barrier，s=32..1 二分归并），invocation 0 落盘三 slab。
+// 不使用 gl_NumWorkGroups（spirv-cross HLSL 会把它变成宿主从不绑定的
+// 额外 cbuffer）——一切维度（含 Nz slab 偏移）经 InjectParams UBO 传入。
+//
+// 绑定布局（set0 单 set；反射契约冻结）：
+//   set 0 binding 0 = directDiffuse（texture2D = ft.giDirectDiffuse，只用
+//                     .rgb；texelFetch 精确纹素）
+//   set 0 binding 1 = depthTexture（D32 → R32F）
+//   set 0 binding 2 = gbufferNormal（RT1 RG16F）
+//   set 0 binding 3 = gbufferMaterial（RT2 RGBA8；a=N.z 符号）
+//   set 0 binding 4 = InjectParams UBO（std140 144B：invViewProjection @0
+//                     (= M4 同一 Inverse(proj*view))、cameraPos @64、
+//                     gridMin @80、cellSize @96、gridDims @112=(Nx,Ny,Nz)、
+//                     screen @128=(W,H,stride=8)——float 载荷、精确整数值）
+//   set 0 binding 5 = outSH（rgba16f writeonly image3D = 类型化 UAV store，
+//                     尺寸 (8,8,24)）
+// 世界重建/法线解码与 M4DeferredLight 逐字同源约定：ndc = uv*2−1（无
+// Y 翻转）；nxy + material.a*2−1 符号重建 sqrt(1−x²−y²)。
+
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform texture2D directDiffuse;
+layout(set = 0, binding = 1) uniform texture2D depthTexture;
+layout(set = 0, binding = 2) uniform texture2D gbufferNormal;
+layout(set = 0, binding = 3) uniform texture2D gbufferMaterial;
+
+layout(set = 0, binding = 4) uniform InjectParams {
+    mat4 invViewProjection;   // @0   主相机 VP 的逆（同 M4 light pass）
+    vec4 cameraPos;           // @64  xyz = 相机世界坐标
+    vec4 gridMin;             // @80  xyz = 探针网格世界盒 min
+    vec4 cellSize;            // @96  xyz = 单元尺寸
+    vec4 gridDims;            // @112 xyz = (Nx,Ny,Nz)
+    vec4 screen;              // @128 x=W y=H z=stride(8)
+} params;
+
+layout(set = 0, binding = 5, rgba16f) writeonly uniform image3D outSH;
+
+shared vec4 sR[64];
+shared vec4 sG[64];
+shared vec4 sB[64];
+
+// 深度反投影世界位（M4DeferredLight 同式：h = invVP*ndc4; xyz/max(w,1e-6)）。
+vec3 unproject(vec2 ndcXY, float depth) {
+    vec4 h = params.invViewProjection * vec4(ndcXY, depth, 1.0);
+    return h.xyz / max(h.w, 1e-6);
+}
+
+void main() {
+    ivec3 probe = ivec3(gl_WorkGroupID);
+    vec3 p = params.gridMin.xyz + (vec3(gl_WorkGroupID) + 0.5) * params.cellSize.xyz;
+
+    int W = int(params.screen.x);
+    int H = int(params.screen.y);
+    int S = int(params.screen.z);
+    int nx = (W + S - 1) / S;
+    int ny = (H + S - 1) / S;
+
+    vec4 accR = vec4(0.0);
+    vec4 accG = vec4(0.0);
+    vec4 accB = vec4(0.0);
+
+    // stride 网格均匀采样：块索引 i → (bx,by)=(i%nx, i/nx)，取样像素 =
+    // 块起点 + S/2（块中心），边界钳制到最后一有效像素。
+    for (int i = int(gl_LocalInvocationIndex); i < nx * ny; i += 64) {
+        ivec2 px = min(ivec2((i % nx) * S + S / 2, (i / nx) * S + S / 2),
+                       ivec2(W - 1, H - 1));
+
+        float depth = texelFetch(depthTexture, px, 0).r;
+        if (depth >= 1.0) continue;                       // 背景：非发射体
+
+        vec3 L = texelFetch(directDiffuse, px, 0).rgb;
+        if (L.r + L.g + L.b <= 0.0) continue;             // 精确 0 贡献恰 0
+
+        // ndc = uv*2-1（SAME 约定 as M4DeferredLight：inUV*2-1，无 Y 翻转）。
+        vec2 uv = (vec2(px) + 0.5) / vec2(W, H);
+        vec2 ndc = uv * 2.0 - 1.0;
+
+        vec3 x  = unproject(ndc, depth);
+        // 相邻 stride 角点的世界位移 → 像素块世界面积（角修正见 ΔΩ 公式）。
+        vec3 xr = unproject(ndc + vec2(2.0 * float(S) / float(W), 0.0), depth);
+        vec3 xu = unproject(ndc + vec2(0.0, 2.0 * float(S) / float(H)), depth);
+
+        // 法线解码 = M4 逐字同源（RG16F xy + material.a 符号）。
+        vec2 nxy = texelFetch(gbufferNormal, px, 0).xy;
+        float zSign = texelFetch(gbufferMaterial, px, 0).a * 2.0 - 1.0;
+        vec3 nj = normalize(vec3(nxy, zSign * sqrt(max(0.0, 1.0 - dot(nxy, nxy)))));
+
+        // 像素块世界面积：边长积 / 视线角（发射面法线与视线夹角）修正，
+        // 分母下限 0.2 防掠射角放大发散。
+        float area = length(xr - x) * length(xu - x)
+                   / max(abs(dot(nj, normalize(params.cameraPos.xyz - x))), 0.2);
+
+        vec3 d = x - p;
+        float r2 = max(dot(d, d), 1e-6);
+        vec3 w = d * inversesqrt(r2);                     // ω = 指向发射体
+        float cosj = dot(nj, -w);
+        if (cosj <= 0.0) continue;                        // 背向探针：不可见
+
+        // ΔΩ 正则化（disk 形状因子；1/π = 0.318309886…）。
+        float dOmega = area * cosj / (r2 + area * 0.318309886);
+
+        // SH-L1 实基（Y00, Y1-1=y, Y10=z, Y11=x 分量序）。
+        vec4 Y = vec4(0.282095, 0.488603 * w.y, 0.488603 * w.z, 0.488603 * w.x);
+        accR += (L.r * dOmega) * Y;
+        accG += (L.g * dOmega) * Y;
+        accB += (L.b * dOmega) * Y;
+    }
+
+    // shared 树归约（64 → 1；memoryBarrierShared + barrier 各步同步）。
+    sR[gl_LocalInvocationIndex] = accR;
+    sG[gl_LocalInvocationIndex] = accG;
+    sB[gl_LocalInvocationIndex] = accB;
+    memoryBarrierShared();
+    barrier();
+    for (int s = 32; s > 0; s >>= 1) {
+        if (int(gl_LocalInvocationIndex) < s) {
+            sR[gl_LocalInvocationIndex] += sR[gl_LocalInvocationIndex + s];
+            sG[gl_LocalInvocationIndex] += sG[gl_LocalInvocationIndex + s];
+            sB[gl_LocalInvocationIndex] += sB[gl_LocalInvocationIndex + s];
+        }
+        barrier();
+    }
+
+    if (gl_LocalInvocationIndex == 0u) {
+        int Nz = int(params.gridDims.z);
+        imageStore(outSH, ivec3(probe.xy, probe.z),        sR[0]);  // slab 0 = R
+        imageStore(outSH, ivec3(probe.xy, probe.z + Nz),    sG[0]);  // slab 1 = G
+        imageStore(outSH, ivec3(probe.xy, probe.z + 2 * Nz), sB[0]); // slab 2 = B
+    }
+}

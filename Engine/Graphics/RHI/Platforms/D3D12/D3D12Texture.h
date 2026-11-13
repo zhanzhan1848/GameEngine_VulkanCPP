@@ -9,8 +9,9 @@
 // 描述符策略（view 信息折叠进描述符——Parity Matrix 决策）：
 //   - usage 含 RenderTarget  → 创建时即分配 RTV 槽 + CreateRenderTargetView
 //   - usage 含 DepthStencil  → DSV 槽 + CreateDepthStencilView
-//   - usage 含 ShaderResource→ SRV 槽（shader-visible 主堆）+ CreateShaderResourceView
-//   - usage 含 UnorderedAccess→ UAV 槽 + CreateUnorderedAccessView
+//   - usage 含 ShaderResource→ SRV 槽（shader-visible 主堆持久区）+
+//     CreateShaderResourceView 落 shadow 堆后镜像 visible（R13/T1 双写）
+//   - usage 含 UnorderedAccess→ UAV 槽 + CreateUnorderedAccessView（同双写）
 //   槽位持有者为本对象；释放经 destroyImpl（GC 延迟）。
 //
 // 构造模式（对齐 VulkanTexture 三构造）：

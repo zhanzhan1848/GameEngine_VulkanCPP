@@ -21,6 +21,9 @@ function(setup_test_target target_name)
     set_target_properties(${target_name} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/"
     )
+    # R9: Agility runtime DLL staging per exe (no-op outside Windows+D3D12
+    # trees; defined in Engine/CMakeLists.txt which configures first).
+    primal_stage_d3d12_agility(${target_name})
     target_include_directories(${target_name} PUBLIC
         "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine"
         "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Common"
@@ -59,6 +62,15 @@ function(setup_test_target target_name)
             "-framework AppKit"
         )
     elseif(WIN32)
+        # R13-C/T1（2026-11-04 Windows 十一测）：全部集成测试宿主都是 main()
+        # 入口（TestRHISponzaShared.cpp L4151 等），而旧 /SUBSYSTEM:WINDOWS 让
+        # 链接器默认入口=WinMainCRTStartup——找 WinMain 而非 main，产生
+        # "无 main 入口符号"（用户实测 /ENTRY:mainCRTStartup 可绕过）。
+        # 正规修法：控制台子系统（CONSOLE 默认入口即 mainCRTStartup，与
+        # main() 匹配，stdout/ctest 输出可见）。显式 WIN32_EXECUTABLE OFF
+        # 属性双保险：即使日后有人删掉显式 /SUBSYSTEM 选项，CMake 也不会
+        # 再注入 GUI 子系统。对 APPLE 无副作用（本分支仅 WIN32 进入）。
+        set_target_properties(${target_name} PROPERTIES WIN32_EXECUTABLE OFF)
         target_compile_definitions(${target_name} PRIVATE
             "_CONSOLE"
             "_HAS_EXCEPTIONS=0"
@@ -73,7 +85,7 @@ function(setup_test_target target_name)
             $<$<CONFIG:Release>:/O2>
         )
         target_link_options(${target_name} PRIVATE
-            /SUBSYSTEM:WINDOWS
+            /SUBSYSTEM:CONSOLE
             /IGNORE:4099
             $<$<CONFIG:Debug>:/DEBUG>
             $<$<CONFIG:Release>:/INCREMENTAL:NO /OPT:REF /OPT:ICF>
@@ -135,15 +147,30 @@ add_executable(TestSponzaVT
     ${CMAKE_SOURCE_DIR}/ContentTools/common/VTBaker.cpp
 )
 setup_test_target(TestSponzaVT)
+# R11/T5: 测试按相对路径读 EngineTest/assets/Sponza.model、Engine/Graphics/
+# Vulkan/shaders/*.spv、EngineTest/assets/models/Sponza/*.png——此前 add_test 无
+# WORKING_DIRECTORY（CWD=CMAKE_CURRENT_BINARY_DIR），十测 Windows 30s 超时零
+# 输出、macOS ctest 亦复现失败；锚定源码根后三类路径全部可解析（BakeSubset
+# 的 png 路径已同步改为源码根相对+旧形态回退）。仅对本测试设置，不影响
+# setup_test_target 的其余集成测试。
+set_tests_properties(Engine_Integration_Tests_TestSponzaVT PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 target_include_directories(TestSponzaVT PRIVATE
     ${CMAKE_SOURCE_DIR}/ContentTools/common
     ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source
 )
-find_package(ZLIB QUIET)
-if(ZLIB_FOUND)
-    target_link_libraries(TestSponzaVT PRIVATE Engine astcenc-native-static ZLIB::ZLIB)
+# R5：Windows 无系统 zlib——优先根 CMakeLists WIN32 段 FetchContent 的
+# zlibstatic（ALIAS primal_zlib_static），否则保持原 find_package(QUIET)+z
+# 回退（macOS/Linux 逐字不变）。
+if(WIN32 AND TARGET primal_zlib_static)
+    target_link_libraries(TestSponzaVT PRIVATE Engine astcenc-native-static primal_zlib_static)
 else()
-    target_link_libraries(TestSponzaVT PRIVATE Engine astcenc-native-static z)
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        target_link_libraries(TestSponzaVT PRIVATE Engine astcenc-native-static ZLIB::ZLIB)
+    else()
+        target_link_libraries(TestSponzaVT PRIVATE Engine astcenc-native-static z)
+    endif()
 endif()
 target_compile_definitions(TestSponzaVT PRIVATE "ENABLE_VULKAN=1")
 
@@ -328,7 +355,14 @@ if(APPLE)
     )
     setup_test_target(TestVulkanSponzaRenderGraph)
     # Diagnostic-only live-SC 2..256-ray witness. Never overwrites production modules.
-    find_program(SC_BOUND_WITNESS_GLSLANG NAMES glslangValidator REQUIRED)
+    # R3 agent T (Windows 构建面): REQUIRED → 探测式——无 glslangValidator 的
+    # 机器 configure 不再硬失败。工具缺失时跳过两个 custom_command/target/
+    # add_dependencies；编译宏以空串定义（SCBoundGeometryWitness.inl 无条件
+    # 引用宏名，无定义即语法错误；空串使 LoadSpvBytes("") 空字节 → 运行期
+    # if(spv.empty()) return false 优雅失败＝同等的"诊断可缺"语义）。工具
+    # 存在时（Apple/装了 glslang 的 Windows）行为与旧 REQUIRED 版逐项一致。
+    find_program(SC_BOUND_WITNESS_GLSLANG NAMES glslangValidator)
+    if(SC_BOUND_WITNESS_GLSLANG)
     set(SC_BOUND_WITNESS_SPV ${CMAKE_BINARY_DIR}/Tests/SCBoundGeometryWitness.comp.spv)
     add_custom_command(OUTPUT ${SC_BOUND_WITNESS_SPV}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/Tests
@@ -346,29 +380,20 @@ if(APPLE)
     add_custom_target(SCBoundGeometryWitnessShader DEPENDS ${SC_BOUND_WITNESS_SPV} ${SC_BOUND_WITNESS_REPLACE_SPV})
     add_dependencies(TestVulkanSponzaRenderGraph SCBoundGeometryWitnessShader)
     target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE SC_BOUND_GEOMETRY_WITNESS_SPV="${SC_BOUND_WITNESS_SPV}" SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV="${SC_BOUND_WITNESS_REPLACE_SPV}")
+    else()
+    message(STATUS "glslangValidator not found - SCBoundGeometryWitness diagnostic shaders skipped (macros defined empty)")
+    add_custom_target(SCBoundGeometryWitnessShader)
+    target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE SC_BOUND_GEOMETRY_WITNESS_SPV="" SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV="")
+    endif()
 
     target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE "TEST_VULKAN_SPONZA_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1")
     endif() # ENABLE_VULKAN gate for TestVulkanSponzaRenderGraph
 
-    # 10d. TestRHISponzaShared (D3D12 M1 F1-8 共享测试宿主)
-    # 参数化 platform（env RHI_TEST_PLATFORM=vulkan|d3d12）：同一份中立 RHI
-    # 调用代码驱动 Sponza forward 轨迹（M1Forward 管线、离屏 readback PPM、
-    # resize 段、资源账本）。本文件零后端 include/cast（F0-12 门禁）——
-    # d3d12 在无 D3D12 后端的构建上由工厂返回 nullptr → SKIP exit 42。
-    # ENABLE_VULKAN 门控（对齐 10b 先例）：macOS 只进 DebugVulkan 树；
-    # Windows 集成会话（ENABLE_D3D12=ON）复用同一二进制跑 d3d12 侧。
-    if(ENABLE_VULKAN)
-    add_executable(TestRHISponzaShared
-        "TestRHISponzaShared.cpp"
-    )
-    setup_test_target(TestRHISponzaShared)
-    target_compile_definitions(TestRHISponzaShared PRIVATE "ENABLE_VULKAN=1")
-    # ctest 入口 = 冒烟帧数版（3 帧，独立 capture 目录，不污染正式证据目录）；
-    # 完整 240 帧轨迹由 D3D12 M1 交付流程显式 env 驱动（见 PhaseDoc §5）。
-    set_tests_properties(Engine_Integration_Tests_TestRHISponzaShared PROPERTIES
-        TIMEOUT 300 LABELS "Vulkan;RHI;D3D12M1"
-        ENVIRONMENT "RHI_TEST_FRAMES=3;RHI_CAPTURE_DIR=/tmp/d3d12_m1_evidence/ctest_smoke_frames")
-    endif() # ENABLE_VULKAN gate for TestRHISponzaShared
+    # 10d. TestRHISponzaShared 于 2026-11-03 移出 APPLE 门（原位置）：
+    # 见本文件平台 if 链 endif 之后的正式注册块（Windows/ENABLE_D3D12
+    # 构建不再因 APPLE 包裹而缺失该测试目标）。
+
+
 
     option(PRIMAL_BUILD_RC_INTEGRATION_TEST "Build isolated Vulkan Sponza RC experiment" OFF)
     if(PRIMAL_BUILD_RC_INTEGRATION_TEST AND ENABLE_VULKAN)
@@ -1001,19 +1026,17 @@ if(APPLE)
     endif()
 
 elseif(WIN32)
-    # Windows下使用 TestRenderer
-    add_executable(TestRenderer
-        "Lights.cpp"
-        "Main.cpp"
-        "RenderItem.cpp"
-        "Scripts.cpp"
-        "ShaderCompilation.cpp"
-        "TestRenderer.cpp"
-        ${COMMON_HEADERS}
-    )
-    setup_test_target(TestRenderer)
-
-    add_custom_target(IntegrationTests DEPENDS TestRenderer)
+    # R13-C/T3（用户指示 2026-11-04）：旧集成测试不再迭代，失败不阻塞验收。
+    # legacy TestRenderer 的 28 项 MSVC 编译错误不修（Main.cpp C1189 无启用
+    # 测试 / RenderItem.cpp add_shader_function_name / Scripts.cpp 数学向量
+    # 类型 / D3D12Helpers.h sampler_state 重定义 / ShaderCompilation.cpp
+    # 硬编码 dxcapi.h 缺失——十二测报告，详见
+    # Docs/RHI/D3D12_Windows_Integration_Runbook.md §22-C）。
+    # 该 target 从 Windows 构建移除；保留空 IntegrationTests 聚合目标供
+    # run_integration_tests / run_all_tests 的 DEPENDS 引用（与下方
+    # BUILD_CONTENT_TOOLS=OFF 分支同模式）。macOS 零影响：本分支仅 WIN32
+    # 进入，macOS 走上方 APPLE 分支，TestRenderer 本就不在 macOS 生成。
+    add_custom_target(IntegrationTests)
 
 elseif(LINUX)
     # Linux下使用 TestRenderer (假设兼容)
@@ -1030,7 +1053,92 @@ elseif(LINUX)
 
     add_custom_target(IntegrationTests DEPENDS TestRenderer)
 endif()
+
+# 10d. TestRHISponzaShared (D3D12 M1 F1-8 共享测试宿主) —— 2026-11-03 移出
+# APPLE 门：注册条件 = ENABLE_VULKAN（任意平台）。参数化 platform（env
+# RHI_TEST_PLATFORM=vulkan|d3d12）：同一份中立 RHI 调用代码驱动 Sponza
+# forward 轨迹（M1Forward 管线、离屏 readback PPM、resize 段、资源账本）。
+# 本文件零后端 include/cast（F0-12 门禁）——d3d12 在无 D3D12 后端的构建上
+# 由工厂返回 nullptr → SKIP exit 42。宿主离屏无窗口依赖：macOS 只进
+# DebugVulkan 树（Metal 树 ENABLE_VULKAN=OFF 不生成）；Windows 双后端构建
+# （ENABLE_VULKAN+ENABLE_D3D12）生成同一二进制，d3d12 侧运行时切换。
+# 仍在 TARGET ContentTools 门内：setup_test_target 链接 Engine+ContentTools。
+if(ENABLE_VULKAN)
+    add_executable(TestRHISponzaShared
+        "TestRHISponzaShared.cpp"
+    )
+    setup_test_target(TestRHISponzaShared)
+    target_compile_definitions(TestRHISponzaShared PRIVATE "ENABLE_VULKAN=1")
+    # ctest 入口 = 冒烟帧数版（3 帧，独立 capture 目录，不污染正式证据目录）；
+    # 完整 240 帧轨迹由 D3D12 M1 交付流程显式 env 驱动（见 PhaseDoc §5）。
+    set_tests_properties(Engine_Integration_Tests_TestRHISponzaShared PROPERTIES
+        TIMEOUT 300 LABELS "Vulkan;RHI;D3D12M1"
+        ENVIRONMENT "RHI_TEST_FRAMES=3;RHI_CAPTURE_DIR=/tmp/d3d12_m1_evidence/ctest_smoke_frames")
+endif() # ENABLE_VULKAN gate for TestRHISponzaShared (platform-agnostic)
+
+# 10e. TestVulkanSponzaRenderGraph Windows 注册（R3 agent T，2026-11-11）：
+# 生产 RenderGraph 参照程序（RHI_TEST_PLATFORM=vulkan|d3d12 参数化）的
+# Windows 侧入口——同一份 Main.cpp + TestVulkanSponzaRenderGraph.cpp（cpp 内
+# Apple 专属 AppKit/NS:: 已 __APPLE__ 守卫）。与 Apple 块（:348 起）的差异：
+#   ① 源表不含 MacKeyboard.mm/InputMac.mm——两者只服务 Main.cpp 的 Apple
+#     分支（monitorKeyboardInput），WinMain 分支不引用；引擎级键盘输入由
+#     Engine 目标按平台编译（Engine/Input/InputWin32.cpp）。SPGI_CAM_LOCK
+#     固定相机验证跑法无键鼠需求。
+#   ② SCBoundGeometryWitness 见证 shader：glslangValidator 存在时构建真实
+#     spv（与 Apple 同款两 command + target）；缺失时宏空串定义（.inl 无条件
+#     引用宏名，运行期 LoadSpvBytes("") 优雅失败）。
+#   ③ freshness gate（build_spv.sh 为 sh 脚本）不挂；着色器束 POST_BUILD
+#     与 Apple 同款（相对路径 walk-up 的稳健供给）。
+if(WIN32 AND ENABLE_VULKAN)
+    find_program(SC_BOUND_WITNESS_GLSLANG_WIN NAMES glslangValidator)
+    set(TVSRG_WIN_SC_DEFS "SC_BOUND_GEOMETRY_WITNESS_SPV=\"\"" "SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV=\"\"")
+    if(SC_BOUND_WITNESS_GLSLANG_WIN)
+        set(SC_BOUND_WITNESS_SPV_WIN ${CMAKE_BINARY_DIR}/Tests/SCBoundGeometryWitness.comp.spv)
+        add_custom_command(OUTPUT ${SC_BOUND_WITNESS_SPV_WIN}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/Tests
+            COMMAND ${SC_BOUND_WITNESS_GLSLANG_WIN} -V -I${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen
+                ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp -o ${SC_BOUND_WITNESS_SPV_WIN}
+            DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl VERBATIM)
+        set(SC_BOUND_WITNESS_REPLACE_SPV_WIN ${CMAKE_BINARY_DIR}/Tests/SCBoundGeometryWitnessReplace.comp.spv)
+        add_custom_command(OUTPUT ${SC_BOUND_WITNESS_REPLACE_SPV_WIN}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/Tests
+            COMMAND ${SC_BOUND_WITNESS_GLSLANG_WIN} -V -DDDGI_GEOMETRY_REPLACE -I${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen
+                ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp -o ${SC_BOUND_WITNESS_REPLACE_SPV_WIN}
+            DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl VERBATIM)
+        add_custom_target(SCBoundGeometryWitnessShaderWin DEPENDS ${SC_BOUND_WITNESS_SPV_WIN} ${SC_BOUND_WITNESS_REPLACE_SPV_WIN})
+        set(TVSRG_WIN_SC_DEFS "SC_BOUND_GEOMETRY_WITNESS_SPV=\"${SC_BOUND_WITNESS_SPV_WIN}\"" "SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV=\"${SC_BOUND_WITNESS_REPLACE_SPV_WIN}\"")
+    else()
+        message(STATUS "glslangValidator not found - SCBoundGeometryWitness diagnostic shaders skipped on Windows (macros defined empty)")
+    endif()
+    add_executable(TestVulkanSponzaRenderGraph
+        "Main.cpp"
+        "TestVulkanSponzaRenderGraph.cpp"
+        ${COMMON_HEADERS}
+    )
+    setup_test_target(TestVulkanSponzaRenderGraph)
+    target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE
+        "TEST_VULKAN_SPONZA_RENDERGRAPH=1" "TEST_RENDERER=0" "ENABLE_VULKAN=1" ${TVSRG_WIN_SC_DEFS})
+    if(TARGET SCBoundGeometryWitnessShaderWin)
+        add_dependencies(TestVulkanSponzaRenderGraph SCBoundGeometryWitnessShaderWin)
+    endif()
+    add_custom_command(TARGET TestVulkanSponzaRenderGraph POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders
+        $<TARGET_FILE_DIR:TestVulkanSponzaRenderGraph>/Engine/Graphics/Vulkan/shaders
+    )
+endif() # WIN32 AND ENABLE_VULKAN gate for TestVulkanSponzaRenderGraph (Windows)
+
 else()
     message(STATUS "Integration tests skipped: ContentTools disabled (BUILD_CONTENT_TOOLS=OFF)")
     add_custom_target(IntegrationTests)
 endif()
+
+# R9: Agility runtime DLL staging for every exe defined in this directory
+# (covers the six WFC targets that bypass setup_test_target; the function is
+# idempotent via PRIMAL_AGILITY_STAGED). No-op on non-Windows trees.
+get_directory_property(PRIMAL_INTEG_TEST_TARGETS BUILDSYSTEM_TARGETS)
+foreach(_primal_it ${PRIMAL_INTEG_TEST_TARGETS})
+    primal_stage_d3d12_agility(${_primal_it})
+endforeach()

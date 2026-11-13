@@ -4250,8 +4250,8 @@ void TestNaniteStreamingPipeline::BuildRenderGraph(
 
                     const auto& inst = instances[instanceIdx];
 
-                    uint axis = card.axis_direction & 0xFF;
-                    uint dir = (card.axis_direction >> 8) & 0xFF;
+                    u32 axis = card.axis_direction & 0xFF;   // R4: 裸 uint → u32（MSVC 无 POSIX uint）
+                    u32 dir = (card.axis_direction >> 8) & 0xFF;
                     float sign = dir ? 1.0f : -1.0f;
 
                     v3 cardUp;

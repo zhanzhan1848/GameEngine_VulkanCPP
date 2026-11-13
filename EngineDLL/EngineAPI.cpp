@@ -335,6 +335,8 @@ EDITOR_INTERFACE void ResizeRenderSurface(u32 id, u32 width, u32 height)
 	surfaces[id].surface.resize(width, height);
 }
 
+#endif
+
 // === Phase 1 Sub-step 1.2.5': Engine lifecycle entry for Editor ===
 // 一站式封装 Editor 启动/关闭引擎的标准序列：
 //   initialize_with_device → bind_rhi_device_to_legacy → initialize(<mapped platform>)
@@ -343,6 +345,22 @@ EDITOR_INTERFACE void ResizeRenderSurface(u32 id, u32 width, u32 height)
 // rhiPlatform: RHIPlatform 枚举值（u32）。
 // enableDebug: 0=false, 非 0=true。
 // 返回 1=成功，0=失败（任何一步失败都会回滚已初始化的部分）。
+//
+// R17-B（Windows 十六测）：以下五个引擎生命周期导出是平台无关的纯 RHI
+// 调用，原先整体位于上方 __clang__ 分支——MSVC 下 EngineDLL.dll 缺这些
+// 导出，PrimalPlayer（R16-B 激活 Windows 无窗口路径）链接即 LNK2019
+// （InitializeEngine/ShutdownEngine/GetEngineDeviceHandle 三符号）。
+// 移出门控全平台编译，函数体零改动（仅弃用警告抑制补 MSVC 形态——
+// #pragma GCC 在 MSVC 是未知 pragma）。
+// FlushGPU/IsEngineInitialized 同门控同根因（Windows 消费者 PrimalEngineCli
+// 此前以 _WIN32 NOT_SUPPORTED 桩绕开，见 runbook §9 #21），一并补齐。
+// 门控取 _MSC_VER||__clang__ 而非裸 #else：Common.h 对 GCC 不定义
+// EDITOR_INTERFACE，GCC 维持本 TU 不编译生命周期导出的既有现状。
+#if defined(_MSC_VER) || defined(__clang__)
+#include "../Graphics/RHI/Core/RHIDevice.h"
+#include "DiagnosticsAPI.h"
+
+using namespace primal;
 
 namespace {
 graphics::graphics_platform MapRHIPlatformToGraphicsPlatform(graphics::rhi::RHIPlatform p)
@@ -384,10 +402,19 @@ EDITOR_INTERFACE u32 InitializeEngine(u32 rhiPlatform, u32 enableDebug)
 	// Vulkan/Dawn 是 self-contained RHI,不经 legacy platform_interface,跳过这一步。
 	if (desc.platform == graphics::rhi::RHIPlatform::Metal) {
 		const auto legacyPlatform = MapRHIPlatformToGraphicsPlatform(desc.platform);
+#if defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#else
+#pragma warning(push)
+#pragma warning(disable : 4996) // graphics::initialize/shutdown [[deprecated]]：三步拆装顺序刻意保留（见本函数注释）
+#endif
 		if (!graphics::initialize(legacyPlatform)) {
+#if defined(__clang__)
 #pragma GCC diagnostic pop
+#else
+#pragma warning(pop)
+#endif
 			Emit(kLevelError, "Engine", "[InitializeEngine] graphics::initialize(metal) failed (often shader blob path issue)");
 			graphics::shutdown_rhi();
 			return 0;
@@ -401,10 +428,19 @@ EDITOR_INTERFACE void ShutdownEngine()
 {
 	// 先 graphics::shutdown() 释放 metal::core 对 _external_device 的 retain + 所有 Metal 资源
 	// 再 shutdown_rhi() 释放 rhi::MetalDevice 对 mtlDevice_ 的所有权
+#if defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#else
+#pragma warning(push)
+#pragma warning(disable : 4996) // 同上：graphics::shutdown() 弃用为刻意的逆序三步拆装
+#endif
 	graphics::shutdown();
+#if defined(__clang__)
 #pragma GCC diagnostic pop
+#else
+#pragma warning(pop)
+#endif
 	graphics::shutdown_rhi();
 }
 
@@ -428,4 +464,4 @@ EDITOR_INTERFACE u64 GetEngineDeviceHandle()
 	// 返回 RHIDeviceBase* 的整数值。Editor 传给 MaterialPreviewAPI 等需要 device 的子模块。
 	return reinterpret_cast<u64>(graphics::get_rhi_device());
 }
-#endif
+#endif // defined(_MSC_VER) || defined(__clang__)

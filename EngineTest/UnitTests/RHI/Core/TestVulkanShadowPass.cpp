@@ -58,10 +58,10 @@ constexpr u32 kVertexStride = 32;
 m4x4 make_identity_m4x4() {
     m4x4 r{};
     std::memset(&r, 0, sizeof(r));
-    r.columns[0][0] = 1.0f;
-    r.columns[1][1] = 1.0f;
-    r.columns[2][2] = 1.0f;
-    r.columns[3][3] = 1.0f;
+    set_elem(r, 0, 0, 1.0f);
+    set_elem(r, 1, 1, 1.0f);
+    set_elem(r, 2, 2, 1.0f);
+    set_elem(r, 3, 3, 1.0f);
     return r;
 }
 
@@ -71,9 +71,9 @@ m4x4 make_view_m4x4(v3 eye, v3 target, v3 up) {
     // produces a corrupted middle component when simd::float3 is passed by
     // value (works for axis-aligned inputs like T3.1 eye=(0,0,3), breaks for
     // diagonal eye=(5,5,5)). Extract to scalars before arithmetic.
-    float ex = eye[0],    ey = eye[1],    ez = eye[2];
-    float tx = target[0], ty = target[1], tz = target[2];
-    float ux = up[0],     uy = up[1],     uz = up[2];
+    float ex = eye.x,     ey = eye.y,     ez = eye.z;
+    float tx = target.x,  ty = target.y,  tz = target.z;
+    float ux = up.x,      uy = up.y,      uz = up.z;
 
     float dx = ex - tx, dy = ey - ty, dz = ez - tz;
     float zl = std::sqrt(dx*dx + dy*dy + dz*dz);
@@ -92,13 +92,13 @@ m4x4 make_view_m4x4(v3 eye, v3 target, v3 up) {
     float ayz = zx*axy - zy*axx;
 
     m4x4 m = make_identity_m4x4();
-    m.columns[0][0] = axx; m.columns[0][1] = ayx; m.columns[0][2] = zx;
-    m.columns[1][0] = axy; m.columns[1][1] = ayy; m.columns[1][2] = zy;
-    m.columns[2][0] = axz; m.columns[2][1] = ayz; m.columns[2][2] = zz;
-    m.columns[3][0] = -(axx*ex + axy*ey + axz*ez);
-    m.columns[3][1] = -(ayx*ex + ayy*ey + ayz*ez);
-    m.columns[3][2] = -(zx*ex + zy*ey + zz*ez);
-    m.columns[3][3] = 1.0f;
+    set_elem(m, 0, 0, axx); set_elem(m, 0, 1, ayx); set_elem(m, 0, 2, zx);
+    set_elem(m, 1, 0, axy); set_elem(m, 1, 1, ayy); set_elem(m, 1, 2, zy);
+    set_elem(m, 2, 0, axz); set_elem(m, 2, 1, ayz); set_elem(m, 2, 2, zz);
+    set_elem(m, 3, 0, -(axx*ex + axy*ey + axz*ez));
+    set_elem(m, 3, 1, -(ayx*ex + ayy*ey + ayz*ez));
+    set_elem(m, 3, 2, -(zx*ex + zy*ey + zz*ez));
+    set_elem(m, 3, 3, 1.0f);
     return m;
 }
 // Orthographic projection for directional lights.
@@ -110,13 +110,13 @@ m4x4 make_ortho_m4x4(float left, float right, float bottom, float top,
                      float zNear, float zFar) {
     m4x4 r{};
     std::memset(&r, 0, sizeof(r));
-    r.columns[0][0] = 2.0f / (right - left);
-    r.columns[1][1] = 2.0f / (top - bottom);
-    r.columns[2][2] = -1.0f / (zFar - zNear);
-    r.columns[3][0] = -(right + left) / (right - left);
-    r.columns[3][1] = -(top + bottom) / (top - bottom);
-    r.columns[3][2] = -zNear / (zFar - zNear);
-    r.columns[3][3] = 1.0f;
+    set_elem(r, 0, 0, 2.0f / (right - left));
+    set_elem(r, 1, 1, 2.0f / (top - bottom));
+    set_elem(r, 2, 2, -1.0f / (zFar - zNear));
+    set_elem(r, 3, 0, -(right + left) / (right - left));
+    set_elem(r, 3, 1, -(top + bottom) / (top - bottom));
+    set_elem(r, 3, 2, -zNear / (zFar - zNear));
+    set_elem(r, 3, 3, 1.0f);
     return r;
 }
 
@@ -283,10 +283,10 @@ TestResult TestShadowPass_RenderSphere() {
 
     std::cout << "[DBG] worldLightVP rows:\n";
     for (int r = 0; r < 4; ++r) {
-        std::cout << "  [" << uboBytes.worldLightVP.columns[0][r] << " "
-                  << uboBytes.worldLightVP.columns[1][r] << " "
-                  << uboBytes.worldLightVP.columns[2][r] << " "
-                  << uboBytes.worldLightVP.columns[3][r] << "]\n";
+        std::cout << "  [" << elem(uboBytes.worldLightVP, 0, r) << " "
+                  << elem(uboBytes.worldLightVP, 1, r) << " "
+                  << elem(uboBytes.worldLightVP, 2, r) << " "
+                  << elem(uboBytes.worldLightVP, 3, r) << "]\n";
     }
 
 

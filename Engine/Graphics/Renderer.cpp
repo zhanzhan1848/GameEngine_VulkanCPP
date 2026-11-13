@@ -6,9 +6,13 @@
 #include "Metal/MetalInterface.h"
 #endif
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
+// [R6/Windows] CoreLogStream.h 不能包在 __APPLE__ 里：PRIMAL_LOG_STREAM 在
+// add_material（L490/496）等非平台分支也使用，Windows 构建曾因此报
+// "Error 未声明 / PRIMAL_LOG_STREAM 找不到 / endl 不是 std 的成员"。
+// 形态与 D3D12Buffer.cpp（本轮零日志错误）一致：仓库根相对路径。
+#include "Engine/Common/CoreLogStream.h"
 #if defined(__APPLE__)
 #include "Metal/MetalCore.h"
-#include "Engine/Common/CoreLogStream.h"
 #include "Graphics/RHI/Platforms/Metal/MetalDevice.h"
 #endif
 

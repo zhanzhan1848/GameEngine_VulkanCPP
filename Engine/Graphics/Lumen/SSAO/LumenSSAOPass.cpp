@@ -133,9 +133,12 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
     //   Dawn:   falls through to Metal path (WGSL variant handled elsewhere).
     const auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
 
-    if (platform == rhi::RHIPlatform::Vulkan) {
+    if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
+        // D3D12: 同相对路径的 .cso 镜像（spirv-cross 入口恒 "main"）。
+        const std::string suffix =
+            (platform == rhi::RHIPlatform::D3D12) ? ".comp.cso" : ".comp.spv";
         const std::string relPath =
-            utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + ".comp.spv";
+            utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + suffix;
         // CWD-relative first (works when shaders bundled next to test binary),
         // then worktree source root (matches GPUDrivenDrawPipeline.cpp:85-88).
         const std::vector<std::string> candidates = {
@@ -246,7 +249,9 @@ void LumenSSAOPass::Shutdown() {
 // ============================================================================
 
 void LumenSSAOPass::CreateDescriptorSetLayouts() {
-    const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+    // D3D12 与 Vulkan 同形：flat 绑定 0..4（depth 为 SampledDepthImage 独立类型）。
+    const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                      device_->GetPlatform() == rhi::RHIPlatform::D3D12;
 
     // --- Trace: textures + storage + UBOs ---
     // Vulkan: flat bindings 0..4 (depth as SampledDepthImage — separate type
@@ -434,7 +439,8 @@ LumenSSAOOutput LumenSSAOPass::AddPass(
             auto cmd = context.cmdBuffer;
             if (!cmd) return;
 
-            const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+            const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                              device_->GetPlatform() == rhi::RHIPlatform::D3D12;
             u32 frameIdx = current_frame_index % 3;
             u32 half_w = render_width_ / 2;
             u32 half_h = render_height_ / 2;
@@ -477,14 +483,14 @@ LumenSSAOOutput LumenSSAOPass::AddPass(
 
                     math::m4x4 invView = rhi::math::Inverse(camera_data.view_matrix);
                     mapped->CameraPositionAndViewWidth = {
-                        invView.columns[3][0], invView.columns[3][1],
-                        invView.columns[3][2], (float)render_width_
+                        math::elem(invView, 3, 0), math::elem(invView, 3, 1),
+                        math::elem(invView, 3, 2), (float)render_width_
                     };
 
                     auto& vm = camera_data.view_matrix;
                     mapped->CameraDirectionAndViewHeight = {
-                        -vm.columns[2][0], -vm.columns[2][1],
-                        -vm.columns[2][2], (float)render_height_
+                        -math::elem(vm, 2, 0), -math::elem(vm, 2, 1),
+                        -math::elem(vm, 2, 2), (float)render_height_
                     };
 
                     mapped->NumDirectionalLights = 0;

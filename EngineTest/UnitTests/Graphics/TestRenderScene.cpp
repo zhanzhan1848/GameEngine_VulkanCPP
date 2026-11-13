@@ -46,7 +46,7 @@ TestResult TestRenderSceneUpdate() {
     
     TEST_ASSERT(scene.GetProxies().size() == 1, "Count should remain 1");
     // Verify transform update (check translation x)
-    TEST_ASSERT(scene.GetProxies()[0].transform.columns[3][0] == 10.f, "Transform should be updated");
+    TEST_ASSERT(math::elem(scene.GetProxies()[0].transform, 3, 0) == 10.f, "Transform should be updated");
     
     return TestResult::Passed;
 }
@@ -77,10 +77,10 @@ TestResult TestRenderSceneCulling() {
     // Construct a ViewProjection matrix that covers [-10, 10] in X, Y, Z
     math::m4x4 vp;
     // Identity * 0.1 scale
-    vp.columns[0] = math::v4{0.1f, 0.f, 0.f, 0.f};
-    vp.columns[1] = math::v4{0.f, 0.1f, 0.f, 0.f};
-    vp.columns[2] = math::v4{0.f, 0.f, 0.1f, 0.f};
-    vp.columns[3] = math::v4{0.f, 0.f, 0.f, 1.f};
+    math::set_column(vp, 0, math::v4{0.1f, 0.f, 0.f, 0.f});
+    math::set_column(vp, 1, math::v4{0.f, 0.1f, 0.f, 0.f});
+    math::set_column(vp, 2, math::v4{0.f, 0.f, 0.1f, 0.f});
+    math::set_column(vp, 3, math::v4{0.f, 0.f, 0.f, 1.f});
 
     frustum.FromMatrix(vp);
 

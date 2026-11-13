@@ -452,10 +452,10 @@ void VolumeRenderer::Render(rhi::RHICommandBuffer* cmd,
 
         viewProj = camera_data.proj_matrix * camera_data.view_matrix;
         math::m4x4 invViewProj = rhi::math::Inverse(viewProj);
-        p.InvViewProj[0] = invViewProj.columns[0];
-        p.InvViewProj[1] = invViewProj.columns[1];
-        p.InvViewProj[2] = invViewProj.columns[2];
-        p.InvViewProj[3] = invViewProj.columns[3];
+        p.InvViewProj[0] = math::column(invViewProj, 0);
+        p.InvViewProj[1] = math::column(invViewProj, 1);
+        p.InvViewProj[2] = math::column(invViewProj, 2);
+        p.InvViewProj[3] = math::column(invViewProj, 3);
 
         p.StepSize         = 0.5f;
         p.MaxDistance       = 200.0f;
@@ -499,12 +499,12 @@ void VolumeRenderer::Render(rhi::RHICommandBuffer* cmd,
         if (!mapped) return;
 
         math::v3 center = test_volume_origin_ + test_volume_extent_ * 0.5f;
-        mapped->WorldMatrix = math::m4x4{
+        mapped->WorldMatrix = math::make_m4x4(
             math::v4{test_volume_extent_.x, 0, 0, 0},
             math::v4{0, test_volume_extent_.y, 0, 0},
             math::v4{0, 0, test_volume_extent_.z, 0},
             math::v4{center.x, center.y, center.z, 1}
-        };
+        );
         mapped->ViewProjMatrix = viewProj;
 
         device_->UnmapBuffer(transform_cb_[outIdx]);

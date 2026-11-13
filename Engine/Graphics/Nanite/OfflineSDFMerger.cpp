@@ -392,8 +392,8 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath, bool signed_en
         }
         if (!plausible) continue;
         for (int j = 0; j < 3; ++j) {
-            origin_[j] = std::min(origin_[j], sdf.bounds_min[j]);
-            maxPt[j]   = std::max(maxPt[j],   sdf.bounds_max[j]);
+            math::set_component(origin_, j, std::min(math::component(origin_, j), sdf.bounds_min[j]));
+            math::set_component(maxPt, j, std::max(math::component(maxPt, j), sdf.bounds_max[j]));
         }
     }
     // Add small margin
@@ -401,11 +401,11 @@ u32 OfflineSDFMerger::LoadFromPipelineModel(const char* filePath, bool signed_en
     origin_ -= margin;
     maxPt += margin;
     extent_ = maxPt - origin_;
-    voxel_size_ = std::max({extent_[0], extent_[1], extent_[2]}) / (f32)GLOBAL_RES;
+    voxel_size_ = std::max({math::component(extent_, 0), math::component(extent_, 1), math::component(extent_, 2)}) / (f32)GLOBAL_RES;
 
     PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Loaded " << sdfFound << " mesh SDFs"
-              << ", global bounds: (" << origin_[0] << "," << origin_[1] << "," << origin_[2]
-              << ") extent=(" << extent_[0] << "," << extent_[1] << "," << extent_[2] << ")"
+              << ", global bounds: (" << math::component(origin_, 0) << "," << math::component(origin_, 1) << "," << math::component(origin_, 2)
+              << ") extent=(" << math::component(extent_, 0) << "," << math::component(extent_, 1) << "," << math::component(extent_, 2) << ")"
               << " voxel_size=" << voxel_size_ << std::endl;
 
     return sdfFound;
@@ -826,9 +826,9 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* ca
     const u32 channels=hit_evidence_?2u:1u;
     std::vector<u16> globalData(totalVoxels*channels, 0x3C00);
 
-    f32 stepX = extent_[0] / (f32)res;
-    f32 stepY = extent_[1] / (f32)res;
-    f32 stepZ = extent_[2] / (f32)res;
+    f32 stepX = math::component(extent_, 0) / (f32)res;
+    f32 stepY = math::component(extent_, 1) / (f32)res;
+    f32 stepZ = math::component(extent_, 2) / (f32)res;
 
     // Convert f32 to f16 (IEEE 754 half).
     auto f32toF16 = [](f32 f) -> u16 {
@@ -875,26 +875,26 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* ca
             for (;;) {
                 const u32 gz = nextSlice.fetch_add(1);
                 if (gz >= res) break;
-                const f32 wz = origin_[2] + ((f32)gz + 0.5f) * stepZ;
+                const f32 wz = math::component(origin_, 2) + ((f32)gz + 0.5f) * stepZ;
                 std::fill(best.begin(), best.end(), 1e10f);
                 std::fill(measured.begin(), measured.end(), 1e10f);
 
                 for (const auto& sdf : mesh_sdfs_) {
                     if (wz < sdf.bounds_min[2] - 0.01f || wz > sdf.bounds_max[2] + 0.01f)
                         continue;
-                    const f32 wy0 = (sdf.bounds_min[1] - 0.01f - origin_[1]) / stepY - 0.5f;
-                    const f32 wy1 = (sdf.bounds_max[1] + 0.01f - origin_[1]) / stepY - 0.5f;
-                    const f32 wx0 = (sdf.bounds_min[0] - 0.01f - origin_[0]) / stepX - 0.5f;
-                    const f32 wx1 = (sdf.bounds_max[0] + 0.01f - origin_[0]) / stepX - 0.5f;
+                    const f32 wy0 = (sdf.bounds_min[1] - 0.01f - math::component(origin_, 1)) / stepY - 0.5f;
+                    const f32 wy1 = (sdf.bounds_max[1] + 0.01f - math::component(origin_, 1)) / stepY - 0.5f;
+                    const f32 wx0 = (sdf.bounds_min[0] - 0.01f - math::component(origin_, 0)) / stepX - 0.5f;
+                    const f32 wx1 = (sdf.bounds_max[0] + 0.01f - math::component(origin_, 0)) / stepX - 0.5f;
                     const int32_t gy0 = std::max(0, (int32_t)std::floor(wy0));
                     const int32_t gy1 = std::min((int32_t)res - 1, (int32_t)std::ceil(wy1));
                     const int32_t gx0 = std::max(0, (int32_t)std::floor(wx0));
                     const int32_t gx1 = std::min((int32_t)res - 1, (int32_t)std::ceil(wx1));
 
                     for (int32_t gy = gy0; gy <= gy1; ++gy) {
-                        const f32 wy = origin_[1] + ((f32)gy + 0.5f) * stepY;
+                        const f32 wy = math::component(origin_, 1) + ((f32)gy + 0.5f) * stepY;
                         for (int32_t gx = gx0; gx <= gx1; ++gx) {
-                            const f32 wx = origin_[0] + ((f32)gx + 0.5f) * stepX;
+                            const f32 wx = math::component(origin_, 0) + ((f32)gx + 0.5f) * stepX;
                             const f32 d = SampleMeshSDF(sdf, wx, wy, wz);
                             // T8.10b: reject sentinel/garbage candidates —
                             // anything beyond ±1e4 (the 1e10 out-of-grid
@@ -1032,8 +1032,8 @@ bool OfflineSDFMerger::BuildAndUpload(rhi::RHIDeviceBase* device, const char* ca
         CacheHeader hdr{};
         std::memcpy(hdr.magic, geometry_decode_?"PGSDFG01":(hit_evidence_?"PGSDFE01":"PGSDFC02"), 8);
         hdr.res = res;
-        hdr.origin[0] = origin_[0]; hdr.origin[1] = origin_[1]; hdr.origin[2] = origin_[2];
-        hdr.extent[0] = extent_[0]; hdr.extent[1] = extent_[1]; hdr.extent[2] = extent_[2];
+        hdr.origin[0] = math::component(origin_, 0); hdr.origin[1] = math::component(origin_, 1); hdr.origin[2] = math::component(origin_, 2);
+        hdr.extent[0] = math::component(extent_, 0); hdr.extent[1] = math::component(extent_, 1); hdr.extent[2] = math::component(extent_, 2);
         hdr.voxel = voxel_size_;
         hdr.flags = signed_encoding_ ? 1u : 0u;
         hdr._pad = hit_evidence_?1u:0u; // evidence algorithm v1, propagation must be enabled
@@ -1096,8 +1096,8 @@ bool OfflineSDFMerger::LoadFromCache(rhi::RHIDeviceBase* device, const char* cac
         return false;
     }
 
-    origin_[0] = hdr.origin[0]; origin_[1] = hdr.origin[1]; origin_[2] = hdr.origin[2];
-    extent_[0] = hdr.extent[0]; extent_[1] = hdr.extent[1]; extent_[2] = hdr.extent[2];
+    math::set_component(origin_, 0, hdr.origin[0]); math::set_component(origin_, 1, hdr.origin[1]); math::set_component(origin_, 2, hdr.origin[2]);
+    math::set_component(extent_, 0, hdr.extent[0]); math::set_component(extent_, 1, hdr.extent[1]); math::set_component(extent_, 2, hdr.extent[2]);
     voxel_size_ = hdr.voxel;
 
     PRIMAL_LOG_STREAM(Error, "Render") << "[OfflineSDFMerger] Loaded cache: " << cachePath << " ("
@@ -1325,7 +1325,7 @@ bool OfflineSDFMerger::AuditTraceEvidence(const char* raysCsv, const char* cache
         h.count!=u64(GLOBAL_RES)*GLOBAL_RES*GLOBAL_RES || ((h.flags&1u)!=0u)!=signed_encoding_) return false;
     float step[3];
     for (int k=0;k<3;++k) {
-        if (!(h.extent[k]>0.f) || std::abs(h.origin[k]-origin_[k])>.001f || std::abs(h.extent[k]-extent_[k])>.001f) return false;
+        if (!(h.extent[k]>0.f) || std::abs(h.origin[k]-math::component(origin_, k))>.001f || std::abs(h.extent[k]-math::component(extent_, k))>.001f) return false;
         step[k]=h.extent[k]/float(h.res);
     }
     std::vector<u16> texels(h.count);
@@ -1474,8 +1474,8 @@ bool OfflineSDFMerger::AuditCacheVoxels(const char* voxelsCsv, const char* cache
     float step[3];
     for (int k=0; k<3; ++k) {
         if (!std::isfinite(h.extent[k]) || !(h.extent[k]>0.f) ||
-            !std::isfinite(h.origin[k]) || std::abs(h.origin[k]-origin_[k])>.001f ||
-            std::abs(h.extent[k]-extent_[k])>.001f) return false;
+            !std::isfinite(h.origin[k]) || std::abs(h.origin[k]-math::component(origin_, k))>.001f ||
+            std::abs(h.extent[k]-math::component(extent_, k))>.001f) return false;
         step[k]=h.extent[k]/float(h.res);
     }
     std::ifstream input(voxelsCsv);
@@ -1576,7 +1576,7 @@ bool OfflineSDFMerger::AuditCachePoints(const char* raysCsv, const char* cachePa
     for (int k=0;k<3;++k) {
         if (!(header.extent[k]>0.f)) return false;
         step[k]=header.extent[k]/float(header.res);
-        if (std::abs(header.origin[k]-origin_[k])>.001f || std::abs(header.extent[k]-extent_[k])>.001f) {
+        if (std::abs(header.origin[k]-math::component(origin_, k))>.001f || std::abs(header.extent[k]-math::component(extent_, k))>.001f) {
             PRIMAL_LOG_STREAM(Error,"Render") << "[SDFProvenance] model/cache bounds differ; cannot replay" << std::endl;
             return false;
         }

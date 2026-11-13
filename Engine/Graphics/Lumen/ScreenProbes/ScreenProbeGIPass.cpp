@@ -159,10 +159,13 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
         return std::vector<u8>(src.begin(), src.end());
     }
 
-    if (platform == rhi::RHIPlatform::Vulkan) {
-        // Load precompiled SPIR-V (.comp.spv) from Vulkan/shaders/Lumen/
+    if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
+        // Load precompiled SPIR-V (.comp.spv) from Vulkan/shaders/Lumen/;
+        // D3D12 loads the .cso mirror at the same relative path (entry "main").
+        const std::string suffix =
+            (platform == rhi::RHIPlatform::D3D12) ? ".comp.cso" : ".comp.spv";
         const std::string relPath =
-            utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + ".comp.spv";
+            utils::ShaderRegistry::GetShaderBaseDir(platform) + "Lumen/" + shaderName + suffix;
         const std::vector<std::string> candidates = {
             relPath,
             utils::ShaderRegistry::ResolveShaderPath(relPath),
@@ -357,7 +360,8 @@ void ScreenProbeGIPass::Shutdown() {
 // ============================================================================
 
 void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
-    const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan;
+    const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                      device_->GetPlatform() == rhi::RHIPlatform::D3D12;
 
     // --- Place: 2 textures (depth, normal) + 2 SSBO (positions, normals) + 1 UBO ---
     if (isVk) {
@@ -811,7 +815,9 @@ void ScreenProbeGIPass::CreatePipelines() {
     // T5.1 hybrid split trace — HZB near (2a) + SDF far (2b) + finalize (2c).
     // Vulkan: separate SPIR-V files per kernel; Metal: entries in
     // ScreenProbeTraceRays.metal (single source file, multiple kernels).
-    const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+    // D3D12 与 Vulkan 同形：split 三件套各自的 .cso 镜像。
+    const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan ||
+                      device_->GetPlatform() == RHIPlatform::D3D12;
     ShaderHandle hzbTraceShader = handles::INVALID_SHADER;
     ShaderHandle sdfTraceShader = handles::INVALID_SHADER;
     ShaderHandle finalizeShader = handles::INVALID_SHADER;
@@ -1385,11 +1391,12 @@ void ScreenProbeGIPass::CreateBuffers() {
         device_->PrimeTextureLayout(dummy_texture_2d_);  // P0-B 首帧 priming
     }
 
-    // P1（sponza-gap-reaudit §4.1/4.2）: finalize 分支统计缓冲。仅 Vulkan
-    // （trace split/finalize 是 Vulkan-only 链）。host-visible 便于测试直接
+    // P1（sponza-gap-reaudit §4.1/4.2）: finalize 分支统计缓冲。仅 Vulkan/D3D12
+    // （trace split/finalize 是 flat 链；Metal 不经此路径）。host-visible 便于测试直接
     // 读回；布局必须始终含 binding 18（shader 静态使用），atomic 写由
     // diag_params.x 门控，默认路径只多绑约 2KB 空缓冲。
-    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+    if (device_->GetPlatform() == RHIPlatform::Vulkan ||
+        device_->GetPlatform() == RHIPlatform::D3D12) {
         BufferDesc desc{};
         desc.size = 16 * (7 * 17 + 36 * 4 + 36 * 8 * 2 + 6 * 4 + 36 * 8 * 3); // stats + samples + ROIs + DDGI neighbours
         desc.type = BufferType::Structured;
@@ -1564,7 +1571,9 @@ void ScreenProbeGIPass::CreateBuffers() {
 // ============================================================================
 
 void ScreenProbeGIPass::CreateRadianceCascade() {
-    const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+    // D3D12 与 Vulkan 同形：cascade shader 入口 "main"（cso 约定）+ flat 10-binding。
+    const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan ||
+                      device_->GetPlatform() == RHIPlatform::D3D12;
 
     // 2 × 32³ RGBA16F double-buffered cascade volumes (L0 + 3 × L1 per slot
     // since the SH-L1 upgrade). Extent/origin derive from the DDGI volume per
@@ -1715,7 +1724,8 @@ void ScreenProbeGIPass::DispatchCascadeUpdate(RHICommandBuffer* cmd, u32 frameId
     if (!ddgi_fallback_available_ || ddgi_irradiance_buffer_ == handles::INVALID_RESOURCE) {
         return;
     }
-    const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+    const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan ||
+                      device_->GetPlatform() == RHIPlatform::D3D12;
 
     // Extent derivation — the finalize consumers repeat this exact formula
     // from ddgi_fb constants, so CPU and shader never drift.
@@ -1802,7 +1812,10 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
     u32 frameIdx = current_frame_index % 3;
     u32 histIdx = (current_frame_index + 2) % 3;
-    const bool splitIsVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+    // D3D12 与 Vulkan 同形：split trace（HZB/SDF/finalize 三件套）+ flat 绑定
+    // 写入 + 显式内存屏障；Metal 才走统一入口 + SetComputeBytes 回退。
+    const bool splitIsVk = device_->GetPlatform() == RHIPlatform::Vulkan ||
+                           device_->GetPlatform() == RHIPlatform::D3D12;
 
     // Import persistent output textures into render graph
     auto giOutputHandle = graph.ImportResource("ScreenProbeGI_Output", output_texture_);
@@ -1877,7 +1890,8 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
     }
 
     RGResourceHandle ddgiDepthRG, ddgiOriginsRG;
-    if (device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+    if ((device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+         device_->GetPlatform() == rhi::RHIPlatform::D3D12) &&
         ddgi_depth_buffer_ != handles::INVALID_RESOURCE &&
         ddgi_relocated_origins_ != handles::INVALID_RESOURCE) {
         ddgiDepthRG = graph.ImportResource("SPGI_DDGI_DepthHistory", ddgi_depth_buffer_);

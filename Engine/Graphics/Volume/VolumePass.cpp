@@ -573,10 +573,10 @@ VolumeOutput VolumePass::AddPass(RenderGraph& graph, const VolumeInputs& inputs)
                     // Inverse view-projection
                     math::m4x4 viewProj = inputs.camera_data.view_matrix * inputs.camera_data.proj_matrix;
                     math::m4x4 invViewProj = rhi::math::Inverse(viewProj);
-                    vp.InvViewProj[0] = invViewProj.columns[0];
-                    vp.InvViewProj[1] = invViewProj.columns[1];
-                    vp.InvViewProj[2] = invViewProj.columns[2];
-                    vp.InvViewProj[3] = invViewProj.columns[3];
+                    vp.InvViewProj[0] = math::column(invViewProj, 0);
+                    vp.InvViewProj[1] = math::column(invViewProj, 1);
+                    vp.InvViewProj[2] = math::column(invViewProj, 2);
+                    vp.InvViewProj[3] = math::column(invViewProj, 3);
 
                     // Ray march params
                     vp.StepSize         = params_.step_size;

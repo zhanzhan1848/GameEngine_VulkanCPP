@@ -14,6 +14,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -142,7 +143,12 @@ void TestContainerRoundtrip() {
     e.rect_x = 512; e.rect_y = 256; e.rect_w = 128; e.rect_h = 64;
     c.entries.push_back(e);
 
-    const std::string path = "/tmp/lmap_roundtrip_test.lmap";
+    // R3（Windows 崩溃修复）：此前硬编码 "/tmp/..."——Windows 上解析为当前盘
+    // 根（如 C:\tmp，通常不存在）→ Save/Load 失败 → 下方无守卫的
+    // loaded.pages[0]/entries[0] 解引用空 vector → 崩溃。改用平台临时目录，
+    // 并对失败路径早退（macOS 行为零变化：/tmp 恒存在，原逻辑恒走成功路径）。
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "lmap_roundtrip_test.lmap").string();
     CHECK(SaveLightmapContainer(path, c), "save");
 
     LightmapContainer loaded;
@@ -150,12 +156,14 @@ void TestContainerRoundtrip() {
     CHECK(loaded.atlas_count == 1, "atlas count");
     CHECK(loaded.pages.size() == 1 && loaded.pages[0].width == 8 &&
               loaded.pages[0].height == 8, "page dims");
-    CHECK(loaded.pages[0].texels_rgba16f == page.texels_rgba16f, "texel bytes identical");
     CHECK(loaded.entries.size() == 1, "entry count");
-    const auto& le = loaded.entries[0];
-    CHECK(le.GetName() == "sponza/pillar_03", "name roundtrip");
-    CHECK(le.scale_x == 0.25f && le.bias_y == 0.125f, "scale/bias roundtrip");
-    CHECK(le.rect_w == 128 && le.rect_h == 64, "rect roundtrip");
+    if (loaded.pages.size() == 1 && loaded.entries.size() == 1) {
+        CHECK(loaded.pages[0].texels_rgba16f == page.texels_rgba16f, "texel bytes identical");
+        const auto& le = loaded.entries[0];
+        CHECK(le.GetName() == "sponza/pillar_03", "name roundtrip");
+        CHECK(le.scale_x == 0.25f && le.bias_y == 0.125f, "scale/bias roundtrip");
+        CHECK(le.rect_w == 128 && le.rect_h == 64, "rect roundtrip");
+    }
     std::remove(path.c_str());
 }
 
@@ -167,7 +175,10 @@ void TestContainerRejects() {
     p.texels_rgba16f.resize(4 * 4 * 4, 0x3C00);
     bad.pages.push_back(p);
 
-    const std::string path = "/tmp/lmap_reject_test.lmap";
+    // R3：同上——/tmp 硬编码改平台临时目录（Windows 上原路径写失败会让后续
+    // "bad magic rejected" 断言语义漂移：文件缺失 Load 也返回 false，测试假绿）。
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "lmap_reject_test.lmap").string();
     CHECK(SaveLightmapContainer(path, bad), "save valid first");
 
     // 坏 magic。
@@ -196,9 +207,15 @@ void TestContainerRejects() {
     std::remove(path.c_str());
 
     // 尺寸不符拒绝写。
+    // [R6/Windows] MSVC C1001 ICE 规避（Meshlet.cpp R4 同构修法）：宏实参里
+    // 的内联 path 聚合临时（temp_directory_path() / "..."）.string() 改命名
+    // 局部，降低前端实例化压力。
+    const std::string neverPath =
+        (std::filesystem::temp_directory_path() / "lmap_never.lmap").string();
     LightmapContainer mismatch = bad;
     mismatch.pages[0].texels_rgba16f.resize(10);  // 与 4×4×4 不符
-    CHECK(!SaveLightmapContainer("/tmp/lmap_never.lmap", mismatch), "mismatched texels rejected on save");
+    CHECK(!SaveLightmapContainer(neverPath, mismatch),
+          "mismatched texels rejected on save");
 }
 
 void TestContractSizes() {
@@ -296,7 +313,8 @@ void TestBakerAnalytic() {
     s.texel_density = 16.0f;
     s.denoise = 0;
     s.dilation_px = 0;
-    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_bake_test");
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s",
+            (std::filesystem::temp_directory_path() / "lmap_bake_test").string().c_str());  // R3: /tmp 硬编码 → 平台临时目录;
 
     const auto r = BakeLightmaps(scene, s);
     CHECK(r.ok, "bake ok" + (r.ok ? "" : " err=" + r.error));
@@ -354,9 +372,11 @@ void TestBakerDeterministic() {
     s.texel_density = 12.0f;
     s.denoise = 0;
     s.dilation_px = 0;
-    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_det_a");
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s",
+            (std::filesystem::temp_directory_path() / "lmap_det_a").string().c_str());  // R3: /tmp 硬编码 → 平台临时目录;
     const auto a = BakeLightmaps(scene, s);
-    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_det_b");
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s",
+            (std::filesystem::temp_directory_path() / "lmap_det_b").string().c_str());  // R3: /tmp 硬编码 → 平台临时目录;
     const auto b = BakeLightmaps(scene, s);
     CHECK(a.ok && b.ok, "both bakes ok");
     if (!(a.ok && b.ok)) return;
@@ -383,7 +403,8 @@ void TestBakerDilation() {
     s.texel_density = 16.0f;
     s.denoise = 0;
     s.dilation_px = 3;
-    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_dilate");
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s",
+            (std::filesystem::temp_directory_path() / "lmap_dilate").string().c_str());  // R3: /tmp 硬编码 → 平台临时目录;
     const auto r = BakeLightmaps(scene, s);
     CHECK(r.ok, "dilate bake ok");
     if (!r.ok) return;
@@ -437,7 +458,8 @@ void TestBakerTraceOnly() {
     s.texel_density = 16.0f;
     s.denoise = 0;
     s.dilation_px = 0;
-    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_traceonly");
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s",
+            (std::filesystem::temp_directory_path() / "lmap_traceonly").string().c_str());  // R3: /tmp 硬编码 → 平台临时目录;
     const auto r = BakeLightmaps(scene, s);
     CHECK(r.ok, "trace-only bake ok" + (r.ok ? "" : " err=" + r.error));
     if (!r.ok) return;
@@ -471,7 +493,8 @@ void TestBakerSkyDirect() {
     s.texel_density = 8.0f;
     s.denoise = 0;
     s.dilation_px = 0;
-    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_skydirect");
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s",
+            (std::filesystem::temp_directory_path() / "lmap_skydirect").string().c_str());  // R3: /tmp 硬编码 → 平台临时目录;
     const auto r = BakeLightmaps(scene, s);
     CHECK(r.ok, "sky direct bake ok" + (r.ok ? "" : " err=" + r.error));
     if (!r.ok) return;
@@ -512,7 +535,8 @@ void TestBakerBlockerBounce() {
     s.texel_density = 16.0f;
     s.denoise = 0;
     s.dilation_px = 0;
-    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_blockerbounce");
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s",
+            (std::filesystem::temp_directory_path() / "lmap_blockerbounce").string().c_str());  // R3: /tmp 硬编码 → 平台临时目录;
     const auto r = BakeLightmaps(scene, s);
     CHECK(r.ok, "blocker bounce bake ok" + (r.ok ? "" : " err=" + r.error));
     if (!r.ok) return;
@@ -564,7 +588,8 @@ void TestBakerTexelAlbedoVariance() {
     s.texel_density = 16.0f;
     s.denoise = 0;
     s.dilation_px = 0;
-    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s", "/tmp/lmap_texelalbedo");
+    std::snprintf(s.output_dir, sizeof(s.output_dir), "%s",
+            (std::filesystem::temp_directory_path() / "lmap_texelalbedo").string().c_str());  // R3: /tmp 硬编码 → 平台临时目录;
     const auto r = BakeLightmaps(scene, s);
     CHECK(r.ok, "texel albedo bake ok" + (r.ok ? "" : " err=" + r.error));
     if (!r.ok) return;

@@ -112,14 +112,26 @@ namespace {
 #endif
         }
 
-        if (platform == rhi::RHIPlatform::Vulkan) {
+        if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
             // T4.6.5 part 35.3: CWD-relative first (works when shaders are
             // bundled next to the test binary), then worktree source root.
             // The previous single fallback resolved to the MAIN repo
             // (feat/wfc-pcg branch) which has stale .spv files.
+            // D3D12 与 Vulkan 同形：GetNaniteShaderPath 按 platform 解析到
+            // EngineTest/shaders/d3d12/Nanite/<name>.cso（入口恒 "main"，
+            // 后端忽略 entry 名）。
+            // r5w2: 双入口单模块（GPUDrivenDraw 家族 VS/FS 同名不同 stage）
+            // 在 D3D12 按 stage 分件，产物名带入口中缀
+            // <name>.<entry>.cso（build_d3d12_shaders.py R3b 约定）——直拼
+            // 名之后追加中缀候选。Vulkan .spv 单模块双入口直拼可载，不受
+            // 影响；单入口中缀产物（GPUCullingPipeline stage*）装载名本身
+            // 带中缀，直拼即命中，回退候选不触发。
             const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
             std::vector<std::string> candidates;
             candidates.push_back(relPath);
+            if (platform == rhi::RHIPlatform::D3D12)
+                candidates.push_back(utils::ShaderRegistry::GetShaderBaseDir(platform) +
+                                     "Nanite/" + shaderName + "." + entryPoint + ".cso");
             candidates.push_back(utils::ShaderRegistry::ResolveShaderPath(relPath));
 
             std::ifstream file;
@@ -756,7 +768,13 @@ u32 GPUDrivenDrawPipeline::RegisterEditorMaterial(rhi::ResourceHandle albedo_tex
 
     // [PassDebugView 排查] 回读 albedo 层 4×4 像素验证拷贝落地；写 /tmp 文件
     //（open 启动的 .app stderr 不落盘，CLI 日志环被刷屏）。
-    {
+    // R11: 该诊断块无条件 WaitIdle()→gc_.Flush()——它在 UpdateGeometryData
+    //（Execute 期间）执行，主 command buffer 仍在录制，Flush 会把
+    // EndRenderPass 延迟销毁的临时 framebuffer 提前释放，后续 barrier 录制
+    // 进已失效 cmdbuf（十测 TestVulkanNaniteSmoke 420 条
+    // InvalidCommandBuffer-VkFramebuffer destroyed 实锤）。默认关闭，
+    // 仅 PRIMAL_NANITE_DIAG=1 时启用。
+    if (const char* diag=std::getenv("PRIMAL_NANITE_DIAG"); diag && diag[0]=='1') {
         rhi::BufferDesc rbDesc{};
         rbDesc.size = 4 * 4 * 4;
         rbDesc.bindFlags = (u32)(rhi::BufferUsageFlags::TransferDst);
@@ -1114,7 +1132,9 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
             // Build a 4-binding DSL (clusters/config/bins/bin_counter) on Vulkan
             // to match ClusterBinning.comp.
             rhi::PipelineLayoutHandle binningLayout = rhi::handles::INVALID_PIPELINE_LAYOUT;
-            const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+            // D3D12 与 Vulkan 同形：root signature 同样要求显式声明 flat 绑定。
+            const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                                   device_->GetPlatform() == rhi::RHIPlatform::D3D12);
             if (isVulkan) {
                 rhi::DescriptorSetLayoutBinding binningBindings[4]{};
                 binningBindings[0].binding = 0;
@@ -1306,8 +1326,13 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
     }
     
     // The tangent-frame variant requires qualified tangent.z and handedness data.
+    // r5w2: 变体是 naga WGSL→SPIR-V 双入口单模块（与基础 GPUDrivenDraw 同
+    // 形），D3D12 走 build_d3d12_shaders.py R3b spv 旁路链的 .cso 镜像
+    //（LoadShaderBytecode 的 D3D12 中缀回退解析 <name>.<entry>.cso）——
+    // 门向 D3D12 开放，Vulkan 行为不变。
     const char* tangentFrameSetting = std::getenv("PRIMAL_VK_TANGENT_FRAME");
-    const bool tangentFrame = device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+    const bool tangentFrame = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                               device_->GetPlatform() == rhi::RHIPlatform::D3D12) &&
                               tangentFrameSetting && std::strcmp(tangentFrameSetting, "1") == 0;
     if (tangentFrame && LegacyNormalSignsEnabled(device_)) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[VK_TANGENT_FRAME] incompatible with PRIMAL_RASTER_LEGACY_NORMAL_SIGNS; refusing uncertified combination" << std::endl;
@@ -1316,7 +1341,8 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
 
     const char* albedoMips = std::getenv("PRIMAL_VK_ALBEDO_MIPS");
     const char* forceAlbedoLod0 = std::getenv("PRIMAL_VK_ALBEDO_SAMPLE_LOD0");
-    const bool useAlbedoMips = device_->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+    const bool useAlbedoMips = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                                device_->GetPlatform() == rhi::RHIPlatform::D3D12) &&
         albedoMips && std::strcmp(albedoMips, "1") == 0 &&
         !(forceAlbedoLod0 && std::strcmp(forceAlbedoLod0, "1") == 0);
     std::vector<u8> gpuDrawVertexShaderCode = LoadShaderBytecode(
@@ -2272,7 +2298,11 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     total_meshlet_count_ = totalMeshlets;
 
     // [PassDebugView 排查] 一次性回读材质数据缓冲头 48B，验证记录 0（白模默认）落地。
-    if (global_material_data_buffer_ != rhi::handles::INVALID_RESOURCE) {
+    // R11: 同上——无条件 WaitIdle()→gc_.Flush() 会把录制中 cmdbuf 引用的临时
+    // framebuffer 提前销毁（VUID InvalidCommandBuffer-VkFramebuffer destroyed），
+    // 默认关闭，仅 PRIMAL_NANITE_DIAG=1 时启用。
+    if (const char* diag=std::getenv("PRIMAL_NANITE_DIAG");
+        diag && diag[0]=='1' && global_material_data_buffer_ != rhi::handles::INVALID_RESOURCE) {
         rhi::BufferDesc rbDesc2{};
         rbDesc2.size = 48;
         rbDesc2.bindFlags = (u32)(rhi::BufferUsageFlags::TransferDst);
@@ -3611,7 +3641,8 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
     // uniformly via SampledImage.
     {
         bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
-                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                   device_->GetPlatform() == rhi::RHIPlatform::D3D12);
         rhi::DescriptorSetLayoutBinding blitBindings[3];
         blitBindings[0].binding = 0;
         blitBindings[0].descriptorType = isDawn ? rhi::DescriptorType::SampledDepthImage
@@ -3847,45 +3878,45 @@ namespace {
     void ExtractFrustumPlanes(const math::m4x4& vp, math::v4 planes[6]) {
         // Left
         planes[0] = math::v4{
-            vp.columns[0][3] + vp.columns[0][0],
-            vp.columns[1][3] + vp.columns[1][0],
-            vp.columns[2][3] + vp.columns[2][0],
-            vp.columns[3][3] + vp.columns[3][0]
+            math::elem(vp, 0, 3) + math::elem(vp, 0, 0),
+            math::elem(vp, 1, 3) + math::elem(vp, 1, 0),
+            math::elem(vp, 2, 3) + math::elem(vp, 2, 0),
+            math::elem(vp, 3, 3) + math::elem(vp, 3, 0)
         };
         // Right
         planes[1] = math::v4{
-            vp.columns[0][3] - vp.columns[0][0],
-            vp.columns[1][3] - vp.columns[1][0],
-            vp.columns[2][3] - vp.columns[2][0],
-            vp.columns[3][3] - vp.columns[3][0]
+            math::elem(vp, 0, 3) - math::elem(vp, 0, 0),
+            math::elem(vp, 1, 3) - math::elem(vp, 1, 0),
+            math::elem(vp, 2, 3) - math::elem(vp, 2, 0),
+            math::elem(vp, 3, 3) - math::elem(vp, 3, 0)
         };
         // Bottom
         planes[2] = math::v4{
-            vp.columns[0][3] + vp.columns[0][1],
-            vp.columns[1][3] + vp.columns[1][1],
-            vp.columns[2][3] + vp.columns[2][1],
-            vp.columns[3][3] + vp.columns[3][1]
+            math::elem(vp, 0, 3) + math::elem(vp, 0, 1),
+            math::elem(vp, 1, 3) + math::elem(vp, 1, 1),
+            math::elem(vp, 2, 3) + math::elem(vp, 2, 1),
+            math::elem(vp, 3, 3) + math::elem(vp, 3, 1)
         };
         // Top
         planes[3] = math::v4{
-            vp.columns[0][3] - vp.columns[0][1],
-            vp.columns[1][3] - vp.columns[1][1],
-            vp.columns[2][3] - vp.columns[2][1],
-            vp.columns[3][3] - vp.columns[3][1]
+            math::elem(vp, 0, 3) - math::elem(vp, 0, 1),
+            math::elem(vp, 1, 3) - math::elem(vp, 1, 1),
+            math::elem(vp, 2, 3) - math::elem(vp, 2, 1),
+            math::elem(vp, 3, 3) - math::elem(vp, 3, 1)
         };
         // Near
         planes[4] = math::v4{
-            vp.columns[0][2],
-            vp.columns[1][2],
-            vp.columns[2][2],
-            vp.columns[3][2]
+            math::elem(vp, 0, 2),
+            math::elem(vp, 1, 2),
+            math::elem(vp, 2, 2),
+            math::elem(vp, 3, 2)
         };
         // Far
         planes[5] = math::v4{
-            vp.columns[0][3] - vp.columns[0][2],
-            vp.columns[1][3] - vp.columns[1][2],
-            vp.columns[2][3] - vp.columns[2][2],
-            vp.columns[3][3] - vp.columns[3][2]
+            math::elem(vp, 0, 3) - math::elem(vp, 0, 2),
+            math::elem(vp, 1, 3) - math::elem(vp, 1, 2),
+            math::elem(vp, 2, 3) - math::elem(vp, 2, 2),
+            math::elem(vp, 3, 3) - math::elem(vp, 3, 2)
         };
 
         // Normalize
@@ -3984,15 +4015,15 @@ bool GPUDrivenDrawPipeline::ExecuteShadowCulling(rhi::RHICommandBuffer* cmd_buff
                 // Uniform-ish scale estimate = max abs component over the 3x3
                 // (same convention as RenderSceneSnapshot's bounds_radius).
                 f32 instScale = std::max({
-                    std::abs(inst.world_matrix.columns[0].x),
-                    std::abs(inst.world_matrix.columns[0].y),
-                    std::abs(inst.world_matrix.columns[0].z),
-                    std::abs(inst.world_matrix.columns[1].x),
-                    std::abs(inst.world_matrix.columns[1].y),
-                    std::abs(inst.world_matrix.columns[1].z),
-                    std::abs(inst.world_matrix.columns[2].x),
-                    std::abs(inst.world_matrix.columns[2].y),
-                    std::abs(inst.world_matrix.columns[2].z) });
+                    std::abs(math::elem(inst.world_matrix, 0, 0)),
+                    std::abs(math::elem(inst.world_matrix, 0, 1)),
+                    std::abs(math::elem(inst.world_matrix, 0, 2)),
+                    std::abs(math::elem(inst.world_matrix, 1, 0)),
+                    std::abs(math::elem(inst.world_matrix, 1, 1)),
+                    std::abs(math::elem(inst.world_matrix, 1, 2)),
+                    std::abs(math::elem(inst.world_matrix, 2, 0)),
+                    std::abs(math::elem(inst.world_matrix, 2, 1)),
+                    std::abs(math::elem(inst.world_matrix, 2, 2)) });
                 if (cullDiag17) {
                     diagMaxScale = std::max(diagMaxScale, instScale);
                     diagMinScale = std::min(diagMinScale, instScale);
@@ -4373,7 +4404,8 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
     rhi::DescriptorBufferInfo resInfo{ frame.blit_resolution_cb[cascade_index], 0, 8 };
 
     bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
-                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                   device_->GetPlatform() == rhi::RHIPlatform::D3D12);
     rhi::DescriptorType srcType = isDawn ? rhi::DescriptorType::SampledDepthImage
                                          : rhi::DescriptorType::SampledImage;
 
@@ -5308,7 +5340,8 @@ bool GPUDrivenDrawPipeline::ExecuteGBufferDepthBlit(rhi::RHICommandBuffer* cmd_b
     rhi::DescriptorBufferInfo resInfo{ gbuffer_depth_blit_cb_, 0, 8 };
 
     bool isDawn = (device_->GetPlatform() == rhi::RHIPlatform::Dawn ||
-                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
+                   device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                   device_->GetPlatform() == rhi::RHIPlatform::D3D12);
     rhi::DescriptorType srcType = isDawn ? rhi::DescriptorType::SampledDepthImage
                                          : rhi::DescriptorType::SampledImage;
 

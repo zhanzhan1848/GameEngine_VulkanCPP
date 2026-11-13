@@ -234,6 +234,7 @@ u32 GetTypelessDxgiFormat(DataFormat format) {
         case DataFormat::R16_UNorm: case DataFormat::R16_SNorm:
         case DataFormat::R16_UInt: case DataFormat::R16_SInt:
         case DataFormat::R16_Float:
+        case DataFormat::D16_UNorm:  // D16 纯深度的 TYPELESS 父格式（SRV 视图走 R16_UNorm）
             return kDXGIFormat_R16_Typeless;
         case DataFormat::RG16_UNorm: case DataFormat::RG16_SNorm:
         case DataFormat::RG16_UInt: case DataFormat::RG16_SInt:

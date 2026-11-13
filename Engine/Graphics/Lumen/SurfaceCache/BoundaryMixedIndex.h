@@ -13,10 +13,10 @@ bool AppendBoundaryAtlasPoints(const Card& card,const Matrix& matrix,uint32_t ci
     if(!r || r>4096 || pageResolution!=r || axis>2 || (card.axis_direction>>8)>1 || localAxis!=card.axis_direction ||
        triangles.size()!=n || depths.size()!=n || albedo.size()!=n*4 ||
        uint64_t(card.atlas_offset_x)+r>65536 || uint64_t(card.atlas_offset_y)+r>32768)return false;
-    const auto& m=matrix.columns;
-    const float diagonal[]={m[0].x,m[1].y,m[2].z};
-    if(m[0].y!=0 || m[0].z!=0 || m[1].x!=0 || m[1].z!=0 || m[2].x!=0 || m[2].y!=0 ||
-       m[0].w!=0 || m[1].w!=0 || m[2].w!=0 || m[3].w!=1)return false;
+    const auto m0=math::column_of(matrix,0),m1=math::column_of(matrix,1),m2=math::column_of(matrix,2),m3=math::column_of(matrix,3);
+    const float diagonal[]={m0.x,m1.y,m2.z};
+    if(m0.y!=0 || m0.z!=0 || m1.x!=0 || m1.z!=0 || m2.x!=0 || m2.y!=0 ||
+       m0.w!=0 || m1.w!=0 || m2.w!=0 || m3.w!=1)return false;
     const float center[]={card.center.x,card.center.y,card.center.z},extent[]={card.extent.x,card.extent.y,card.extent.z};
     for(uint32_t k=0;k<3;++k)if(!BoundaryPointIndex::Finite(diagonal[k]) || diagonal[k]<=0 ||
         !BoundaryPointIndex::Finite(center[k]) || !BoundaryPointIndex::Finite(extent[k]) || extent[k]<=0)return false;

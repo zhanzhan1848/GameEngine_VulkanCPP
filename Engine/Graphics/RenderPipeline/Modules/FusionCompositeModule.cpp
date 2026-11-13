@@ -130,7 +130,8 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
 
     // Vulkan needs an explicit Sampler descriptor (Metal uses implicit samplers).
     // Create a linear-clamp sampler for the Fusion passes.
-    const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan;
+    const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan ||
+                      device->GetPlatform() == RHIPlatform::D3D12;
     if (isVk) {
         SamplerDesc sDesc{};
         sDesc.minFilter = FilterMode::Linear;
@@ -425,7 +426,7 @@ void GiLadderXform(const math::m4x4& m, float x, float y, float z, float out[4])
     for (int rr = 0; rr < 4; ++rr) out[rr] = 0.0f;
     for (int cc = 0; cc < 4; ++cc)
         for (int rr = 0; rr < 4; ++rr)
-            out[rr] += m.columns[cc][rr] * xs[cc];
+            out[rr] += math::elem(m, cc, rr) * xs[cc];
 }
 
 void RunGiLadderDump(RHIDeviceBase* device, const FusionInputs& in,
@@ -908,7 +909,8 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 
-            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan ||
+                              device_->GetPlatform() == RHIPlatform::D3D12;
             u32 paramCount = isVk ? 6 : 5;
 
             // Resolve SSGI/DDGI/SPGI from RG handles when physical tex is INVALID.
@@ -1215,7 +1217,8 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
             ResourceHandle albedoTex = inputs.gbuffer_albedo;
             if (albedoTex == handles::INVALID_RESOURCE) albedoTex = inputs.black_texture;
 
-            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan ||
+                              device_->GetPlatform() == RHIPlatform::D3D12;
             const u32 paramCount = isVk ? 12 : 7;
             // [R4/R5] 屏幕外 specular 输入（ReflSpecularTrace）；缺席 → black
             //（合成式退化为 v1：SSR + glossy relay）。

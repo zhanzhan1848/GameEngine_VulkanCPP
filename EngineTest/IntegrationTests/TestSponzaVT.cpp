@@ -60,9 +60,17 @@ bool BakeSubset(const std::string& outDir) {
         {"Sponza_Ceiling_diffuse.png", "color"},
     };
     for (auto& [png, kind] : names) {
-        std::string src = "../../../EngineTest/assets/models/Sponza/" + std::string(png);
+        // R11/T5: ctest 现锚定 WORKING_DIRECTORY=源码根（见 IntegrationTests/
+        // CMakeLists），源码根相对是主路径；保留旧 "../../../" 形态回退，
+        // 手动从 Darwin/<Config> 目录直跑时仍可用。两处都打不开则按既有
+        // 语义跳过该贴图（asset not found）。
+        std::string src = "EngineTest/assets/models/Sponza/" + std::string(png);
         int w = 0, h = 0, comp = 0;
         stbi_uc* px = stbi_load(src.c_str(), &w, &h, &comp, 4);
+        if (!px) {
+            src = "../../../EngineTest/assets/models/Sponza/" + std::string(png);
+            px = stbi_load(src.c_str(), &w, &h, &comp, 4);
+        }
         if (!px) {
             std::cerr << "[SponzaVT] skip " << png << " (asset not found)" << std::endl;
             continue;
@@ -289,8 +297,8 @@ void RegisterSponzaVTTests() {
 
 int main() {
     RegisterSponzaVTTests();
-    TestRunner::RunAllSuites();
-    return 0;
+    const auto runStats = TestRunner::RunAllSuites();
+    return runStats.failedTests == 0 ? 0 : 1;
 }
 
 #else

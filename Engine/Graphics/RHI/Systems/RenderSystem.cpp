@@ -120,6 +120,16 @@ bool RenderSystem::Initialize(const RenderSystemInitInfo& info) {
 }
 
 void RenderSystem::Shutdown() {
+    // R10-B 幂等守卫：device_ 为空 = 从未初始化（Initialize 第一步即失败）
+    // 或已完成过一次 Shutdown（末尾置空 device_）——两种状态都没有待清理
+    // 资源，直接返回。二次 Shutdown 不再空跑 forwardRenderer_/容器循环；
+    // 成功路径首次 Shutdown 的行为不变。
+    if (!device_) {
+        PRIMAL_LOG_STREAM(Info, "RHI")
+            << "[RenderSystem] Shutdown skipped (no device — already shut down or never initialized)"
+            << std::endl;
+        return;
+    }
     PRIMAL_LOG_STREAM(Info, "RHI") << "[RenderSystem] Shutdown Start" << std::endl;
     forwardRenderer_.Shutdown();
     PRIMAL_LOG_STREAM(Info, "RHI") << "[RenderSystem] ForwardRenderer Shutdown Done" << std::endl;
@@ -149,7 +159,9 @@ void RenderSystem::Shutdown() {
 
     PRIMAL_LOG_STREAM(Info, "RHI") << "[RenderSystem] Destroying Fences" << std::endl;
     for (auto fence : frameFences_) {
-        device_->DestroySync(fence);
+        // R10-B：部分初始化路径（fence 创建循环中途失败）残留 INVALID_SYNC，
+        // 与下方 imageSemaphores 循环同款守卫；成功路径句柄全有效，行为不变。
+        if (fence != rhi::handles::INVALID_SYNC) device_->DestroySync(fence);
     }
     frameFences_.clear();
 

@@ -164,9 +164,9 @@ namespace primal::math
 //#endif
 //	}
 
-#if defined(__APPLE__)
-	/**
-	 * @brief 创建左手坐标系的LookTo视图矩阵
+	#if defined(PRIMAL_MATH_BACKEND_SIMD)
+		/**
+		 * @brief 创建左手坐标系的LookTo视图矩阵
 	 * @param eyePosition 摄像机位置
 	 * @param eyeDirection 摄像机朝向（已归一化）
 	 * @param upDirection 上方向向量
@@ -271,8 +271,80 @@ namespace primal::math
 
         return proj;
     }
-#else
-	// 可移植实现（Windows / Emscripten）：与上方 Apple 分支逐列对应（列主序，
+	#elif defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+	// DirectXMath 分支（左手系相机函数）。DXM 行向量约定下矩阵的行 i ==
+	// 引擎列主序矩阵的列 i，字节一致。投影/正交两个函数与可移植分支逐元素
+	// 等价；createLookToLH 的平移列与 Apple simd 分支一致，与可移植分支不同
+	// （见该函数注释）。
+	/**
+	 * @brief 创建左手坐标系的LookTo视图矩阵（DirectXMath 后端）
+	 * @details XMMatrixLookToLH：zaxis=normalize(eyeDirection)、
+	 * xaxis=normalize(cross(up,zaxis))、yaxis=cross(zaxis,xaxis)，
+	 * 平移 = (-dot(xaxis,eye), -dot(yaxis,eye), -dot(zaxis,eye))，行 i == 引擎列 i。
+	 * 平移与 Apple simd 分支（rotation_transpose * -eye）一致。可移植分支
+	 * （Linux/Emscripten）自 a7b3f1fa 起按转置下标求平移
+	 * （-(xaxis[i]*eye.x + yaxis[i]*eye.y + zaxis[i]*eye.z)），与另两个后端不同；
+	 * 这是既有问题，本分支不跟随。Windows 下该函数目前只有 Metal 代码与
+	 * Apple 专属集成测试调用，实际无调用方。
+	 * XMMatrixLookToLH 本身没有 eyeDirection 与 up 平行时的回退，这里按
+	 * 可移植分支的同一阈值（叉积长度平方 < 1e-6）与替代向量选择先算出
+	 * 有效 up，再交给 DXM 构建。
+	 */
+	[[nodiscard]] inline math::m4x4 createLookToLH(
+        const math::v3& eyePosition,
+        const math::v3& eyeDirection,
+        const math::v3& upDirection)
+    {
+		auto cross = [](const math::v3& a, const math::v3& b) {
+			return math::v3{ a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x };
+		};
+
+		math::v3 zAxis = eyeDirection;
+		const f32 zlen = std::sqrt(zAxis.x * zAxis.x + zAxis.y * zAxis.y + zAxis.z * zAxis.z);
+		const f32 zinv = 1.0f / zlen;
+		zAxis = math::v3{ zAxis.x * zinv, zAxis.y * zinv, zAxis.z * zinv };
+
+		math::v3 up = upDirection;
+		math::v3 c = cross(up, zAxis);
+		if (c.x * c.x + c.y * c.y + c.z * c.z < 1e-6f) {
+			up = (std::abs(zAxis.y) > 0.9f) ? math::v3{ 1.0f, 0.0f, 0.0f } : math::v3{ 0.0f, 1.0f, 0.0f };
+		}
+
+		math::m4x4 result;
+		using namespace DirectX;
+		XMStoreFloat4x4(&result, XMMatrixLookToLH(
+			XMLoadFloat3(&eyePosition), XMLoadFloat3(&eyeDirection), XMLoadFloat3(&up)));
+		return result;
+    }
+
+    /**
+     * @brief 创建左手坐标系透视投影矩阵（DirectXMath 后端）
+     * @details XMMatrixPerspectiveFovLH 的
+     * 行2=(0,0,zf/(zf-zn),1)、行3=(0,0,-zn*zf/(zf-zn),0) 与可移植分支的
+     * 列2/列3 逐元素一致；yScale=cot(fovY/2)、xScale=yScale/aspect。
+     */
+    [[nodiscard]] inline math::m4x4 createPerspectiveFovLH(float fovY, float aspectRatio, float nearZ, float farZ)
+    {
+		math::m4x4 result;
+		using namespace DirectX;
+		XMStoreFloat4x4(&result, XMMatrixPerspectiveFovLH(fovY, aspectRatio, nearZ, farZ));
+		return result;
+    }
+
+    /**
+     * @brief 创建左手坐标系正交投影矩阵（DirectXMath 后端）
+     * @details XMMatrixOrthographicLH 的对角 2/w、2/h、1/(zf-zn) 与平移
+     * -zn/(zf-zn) 与可移植分支逐元素一致。
+     */
+    [[nodiscard]] inline math::m4x4 createOrthographicLH(float width, float height, float nearZ, float farZ)
+    {
+		math::m4x4 result;
+		using namespace DirectX;
+		XMStoreFloat4x4(&result, XMMatrixOrthographicLH(width, height, nearZ, farZ));
+		return result;
+    }
+	#else
+		// 可移植实现（Emscripten / Linux）：与上方 Apple 分支逐列对应（列主序，
 	// columns[i] 为第 i 列），语义与数值完全一致。
 	[[nodiscard]] inline math::m4x4 createLookToLH(
         const math::v3& eyePosition,

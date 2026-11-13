@@ -23,6 +23,8 @@
 #include <wrl/client.h>
 #include <cstdint>
 
+#include "Common/PrimitiveTypes.h"  // u64/u32（本头不经 RHI Core 头传递链，须自含）
+
 namespace primal::graphics::rhi::d3d12 {
 
 class D3D12SyncObject {

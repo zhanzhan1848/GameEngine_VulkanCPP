@@ -10,6 +10,14 @@
 //   → resize 段（中途换一次 RT 尺寸重走创建，若干帧后换回）
 //   → 全量销毁 + 泄漏计数 sanity + 关闭。
 //
+// F2 Y 契约（2026-11-05，d3d12-blackfix 批）：主相机投影在
+// CreatePerspectiveMatrix 后对 y 行整行取反（Y-down clip，与生产 naga 对
+// gl_Position.y 取反同效）→ 两端视口下世界 +Y 落 RT 小行号、帧正立
+//（§7.2-1 旧叙述"两端原始读回同向"仍成立，但方向由倒立改正立）。投影
+// 取反使帧缓冲空间绕序变号，主相机光栅化管线 cull Back→Front 对换
+//（M1 lit / M2 lit / M4 GBuffer / M5 复用 M1；depth 与全屏 pass Cull
+// None 不动）。两端 frontFace 均硬编码 CW、不可配置，故对换在管线侧。
+//
 // M2 F2-6 阴影段（RHI_TEST_SHADOWS=1 启用，默认 0 = M1 行为不变，
 // M1 回归门禁照跑）：每帧先录单级联 shadow depth pass（离屏 D32 2048²，
 // M2ShadowDepth.vert，depth-only/Cull None/Less——生产 ExecuteShadowRaster
@@ -49,6 +57,37 @@
 // 光参数由轨迹 config 驱动按帧切换——确定性纪律（无时变项）；缺省无
 // 关键帧 = 静态光（M1-M3 行为逐位不变）。
 //
+// M6 GI 段（RHI_TEST_GI=1 启用，需 RHI_TEST_DEFERRED=1；默认 0 = M1-M5 与
+// GI-off 延迟路径逐位不变）：单次反弹、屏幕空间直射光注入的 SH-L1 探针
+// 网格。不是完整物理场景 GI——传输无可见性项（注入不测探针→发射体遮挡）、
+// 发射体只有相机可见像素（屏外/被挡表面不发光）、无自发光/天空/IBL。
+// 每帧链（GBuffer 之后，GI 模式替换 M4 延迟光照 pass）：
+//   P2 直射 pass（M3Post.vert + M6DeferredDirect.frag，MRT×2 RGBA16F）：
+//      giDirect = 光色×(漫反射+高光)×阴影（a=ndl 诊断）；giDirectDiffuse =
+//      光色×漫反射×阴影（a=shadow 诊断，GI 唯一输入）。完全阴影面两者恰为
+//      0——无 ambient 常数、无旧 GI、无 IBL（线性 HDR，预曝光）。
+//   P3 注入（M6ProbeInject.comp，一 workgroup 64 线程 = 一探针，dispatch
+//      8×8×8）：屏幕 8px 步长读 giDirectDiffuse+深度+法线，像素当 Lambert
+//      发射体累积 SH-L1 入射辐射 → 注入输出纹理 M6ProbeInjectOut（RGBA16F
+//      3D (8,8,24)，slab=R/G/B）。
+//   P4 累积（M6ProbeAccum.comp 原样）：grid = hist*0.9 + injectOut*0.1，光事件/
+//      首帧 reset ⇒ history 清零——全链唯一时间递归（GI 输入不含间接/前帧
+//      输出 ⇒ 无光反馈回路）。
+//   P5 解析（M3Post.vert + M6GIResolve.frag）：giIndirect = albedo×E_h(N)
+//      ——独立间接缓冲（无强度旋钮）。
+//   P6 合成（M3Post.vert + M6Composite.frag）：direct + indirect 恰一次
+//      → post on 写 hdr / off 写 color；P7 post 原样。
+// 探针盒 = 全部 mesh 局部 AABB 并集各向外扩 0.5m（model=identity，同 M5
+// 包围球源）。[GI_MEAN] 阶梯 = 512 探针 0.282095·c00 逐通道均值（各向同性
+// 平均入射辐射）。RHI_GI_EXPORT_FRAMES=<csv>（+RHI_GI_EXPORT_DIR）：DEFERRED=1
+// 时（GI on/off 均可）在指定帧原始浮点导出 giexp_f<N>_<name>.bin（紧密行
+// 落盘——GPU 读回行距 256 对齐，填充字节不写出，逐位可复现）+ giexp_f<N>.json
+// 清单（数值验证用，见 M6 spec §6.5）。
+// GI 模式黑帧守卫（F1-10）改测几何覆盖率（逐帧深度读回，深度<1 占比 ≥2%）：
+// 完全阴影几何按契约恰为黑，"非黑比例=几何覆盖"前提在 GI 模式失效；单帧
+// 颜色暗帧合法（数量如实输出于 [GI] black-frame guard 行），但全部帧颜色暗
+// = 颜色链（direct/indirect/composite）无出光证据 → 判失败。
+//
 // 纪律（D3D12 M0 F0-12 静态依赖门禁）：本文件零后端分支、零后端
 // include/static_cast——全部经 RHI Core 中立接口（命令录制走
 // rhi::GetCommandBuffer 中立自由函数）。d3d12 分支在 macOS 上由工厂
@@ -84,6 +123,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -161,6 +201,288 @@ std::vector<u8> ReadFileRel(const std::string& rel) {
     return bytes;
 }
 
+// ======================= D3D12 cso SHA 门禁（错位护盾，2026-11-08） =======
+// 背景：M6 D3D12 shader 组（cso/hlsl + manifest）是未提交工作产物，
+// Windows 树曾拿到中间迭代 cso → M6Composite 管线创建 E_INVALIDARG
+// (0x80070057) 且无任何先兆。本门禁在 CreateShader 前对 cso 字节做
+// SHA-256 校验，期望值取自 EngineTest/shaders/D3D12/manifest.json 的
+// cso_sha256（生成链单一事实源）。仅 wantD3D12 路径调用——Vulkan 分支
+// 零新读盘、零行为变化。路径前缀照抄 loadShader 调用点拼写
+//（"EngineTest/shaders/D3D12/"——磁盘目录大小写以两端文件系统实际
+// 解析为准，macOS/Windows 均大小写不敏感，已实测解析）。
+namespace sha_gate {
+
+// 纯函数 SHA-256（FIPS 180-4；仓库内无现成可复用实现——Engine/ 仅有
+// CMake 侧 file(SHA256) 与注释字符串，故 harness 内自带最小实现，
+// 无新依赖）。正确性已与 shasum -a 256 对真实 cso 文件核对（同码文本
+// 独立编译验证 + 本机树 cso/manifest 自洽实测）。
+struct Sha256Digest {
+    u32 h[8];
+};
+
+inline u32 Rotr(u32 x, u32 n) { return (x >> n) | (x << (32 - n)); }
+
+inline void Sha256Block(const u32* const k, Sha256Digest& st, const u8* p) {
+    u32 w[64];
+    for (int i = 0; i < 16; ++i)
+        w[i] = (u32(p[i * 4]) << 24) | (u32(p[i * 4 + 1]) << 16) |
+               (u32(p[i * 4 + 2]) << 8) | u32(p[i * 4 + 3]);
+    for (int i = 16; i < 64; ++i) {
+        const u32 s0 = Rotr(w[i - 15], 7) ^ Rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        const u32 s1 = Rotr(w[i - 2], 17) ^ Rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    u32 a = st.h[0], b = st.h[1], c = st.h[2], d = st.h[3];
+    u32 e = st.h[4], f = st.h[5], g = st.h[6], h = st.h[7];
+    for (int i = 0; i < 64; ++i) {
+        const u32 S1 = Rotr(e, 6) ^ Rotr(e, 11) ^ Rotr(e, 25);
+        const u32 ch = (e & f) ^ (~e & g);
+        const u32 t1 = h + S1 + ch + k[i] + w[i];
+        const u32 S0 = Rotr(a, 2) ^ Rotr(a, 13) ^ Rotr(a, 22);
+        const u32 maj = (a & b) ^ (a & c) ^ (b & c);
+        const u32 t2 = S0 + maj;
+        h = g; g = f; f = e; e = d + t1;
+        d = c; c = b; b = a; a = t1 + t2;
+    }
+    st.h[0] += a; st.h[1] += b; st.h[2] += c; st.h[3] += d;
+    st.h[4] += e; st.h[5] += f; st.h[6] += g; st.h[7] += h;
+}
+
+inline Sha256Digest Sha256(const u8* data, size_t len) {
+    static const u32 k[64] = {
+        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu,
+        0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u, 0xd807aa98u, 0x12835b01u,
+        0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u,
+        0xc19bf174u, 0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu,
+        0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau, 0x983e5152u,
+        0xa831c66du, 0xb00327c8u, 0xbf597fc7u, 0xc6e00bf3u, 0xd5a79147u,
+        0x06ca6351u, 0x14292967u, 0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu,
+        0x53380d13u, 0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u, 0xd192e819u,
+        0xd6990624u, 0xf40e3585u, 0x106aa070u, 0x19a4c116u, 0x1e376c08u,
+        0x2748774cu, 0x34b0bcb5u, 0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu,
+        0x682e6ff3u, 0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u,
+        0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u};
+    Sha256Digest st{{0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+                     0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u}};
+    const size_t total = len;
+    size_t off = 0;
+    while (off + 64 <= total) {
+        Sha256Block(k, st, data + off);
+        off += 64;
+    }
+    // 尾块 + padding（0x80 + 0 填充 + 8 字节大端 bit 长度）。
+    u8 tail[128];
+    const size_t rem = total - off;
+    for (size_t i = 0; i < rem; ++i) tail[i] = data[off + i];
+    tail[rem] = 0x80;
+    size_t padded = (rem + 1 + 8 <= 64) ? 64 : 128;
+    for (size_t i = rem + 1; i < padded; ++i) tail[i] = 0;
+    const u64 bits = u64(total) * 8;
+    for (int i = 0; i < 8; ++i)
+        tail[padded - 1 - i] = u8((bits >> (8 * i)) & 0xFF);
+    Sha256Block(k, st, tail);
+    if (padded == 128) Sha256Block(k, st, tail + 64);
+    return st;
+}
+
+inline std::string ToHex32(const u32* h) {
+    static const char* hex = "0123456789abcdef";
+    std::string s;
+    s.reserve(64);
+    for (int i = 0; i < 8; ++i)
+        for (int shift = 28; shift >= 0; shift -= 4)
+            s += hex[(h[i] >> shift) & 0xF];
+    return s;
+}
+
+// ---- manifest 解析（固定形状最小扫描，非通用 JSON）----
+// manifest.shaders[] 每条目：{... "cso": "Forward/X.cso",
+// "cso_sha256": "<hex64>" ...}。按花括号对象配对两键，键序无关；
+// 仅扫描 "shaders" 数组区间。条目数与配对数一致才接受。
+struct Manifest {
+    bool ok{false};
+    std::string error;
+    std::unordered_map<std::string, std::string> csoToSha;
+};
+
+inline bool ExtractJsonString(const std::string& text, size_t from,
+                              std::string& out, size_t& after) {
+    if (from >= text.size() || text[from] != '"') return false;
+    const size_t start = from + 1;
+    size_t i = start;
+    while (i < text.size() && text[i] != '"') {
+        if (text[i] == '\\') ++i;   // 跳过转义（本 manifest 无转义，防御）
+        ++i;
+    }
+    if (i >= text.size()) return false;
+    out = text.substr(start, i - start);
+    after = i + 1;
+    return true;
+}
+
+// 在 [from,to) 内找 "key": "value"（key 为精确引号串），返回 value。
+inline bool FindKeyValue(const std::string& text, size_t from, size_t to,
+                         const std::string& key, std::string& value,
+                         size_t& after) {
+    const std::string pat = "\"" + key + "\"";
+    size_t pos = from;
+    while (true) {
+        const size_t hit = text.find(pat, pos);
+        if (hit == std::string::npos || hit + pat.size() > to) return false;
+        size_t i = hit + pat.size();
+        while (i < to && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
+                          text[i] == '\r'))
+            ++i;
+        if (i < to && text[i] == ':') ++i;
+        else { pos = hit + 1; continue; }
+        while (i < to && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
+                          text[i] == '\r'))
+            ++i;
+        if (ExtractJsonString(text, i, value, after)) return true;
+        pos = hit + 1;
+    }
+}
+
+inline Manifest ParseManifest(const std::vector<u8>& bytes) {
+    Manifest m;
+    const std::string text(reinterpret_cast<const char*>(bytes.data()),
+                           bytes.size());
+    // "shaders" 数组区间：键 → 下一个 '[' → 匹配的 ']'（不嵌套数组）。
+    const size_t shadersKey = text.find("\"shaders\"");
+    if (shadersKey == std::string::npos) {
+        m.error = "no \"shaders\" array";
+        return m;
+    }
+    const size_t arrStart = text.find('[', shadersKey);
+    if (arrStart == std::string::npos) {
+        m.error = "shaders array '[' not found";
+        return m;
+    }
+    size_t depth = 0;
+    size_t arrEnd = std::string::npos;
+    for (size_t i = arrStart; i < text.size(); ++i) {
+        if (text[i] == '[') ++depth;
+        else if (text[i] == ']') {
+            --depth;
+            if (depth == 0) { arrEnd = i; break; }
+        }
+    }
+    if (arrEnd == std::string::npos) {
+        m.error = "shaders array ']' not found";
+        return m;
+    }
+    // 逐对象 {..} 扫描（花括号配对），每对象提取 cso / cso_sha256。
+    size_t i = arrStart + 1;
+    size_t objCount = 0, pairCount = 0;
+    while (i < arrEnd) {
+        if (text[i] != '{') { ++i; continue; }
+        size_t objDepth = 0;
+        size_t objEnd = std::string::npos;
+        for (size_t j = i; j < arrEnd; ++j) {
+            if (text[j] == '{') ++objDepth;
+            else if (text[j] == '}') {
+                --objDepth;
+                if (objDepth == 0) { objEnd = j; break; }
+            }
+        }
+        if (objEnd == std::string::npos) {
+            m.error = "unbalanced object braces in shaders[]";
+            return m;
+        }
+        ++objCount;
+        std::string cso, sha;
+        size_t dummy = 0;
+        const bool gotCso =
+            FindKeyValue(text, i, objEnd, "cso", cso, dummy);
+        const bool gotSha =
+            FindKeyValue(text, i, objEnd, "cso_sha256", sha, dummy);
+        if (gotCso && gotSha && sha.size() == 64) {
+            m.csoToSha[cso] = sha;
+            ++pairCount;
+        }
+        i = objEnd + 1;
+    }
+    if (objCount == 0) {
+        m.error = "shaders array has no entries";
+        return m;
+    }
+    if (pairCount != objCount) {
+        m.error = "incomplete entries: " + std::to_string(pairCount) + "/" +
+                  std::to_string(objCount) + " objects carry cso+cso_sha256";
+        return m;
+    }
+    m.ok = true;
+    return m;
+}
+
+// 门禁主体：校验单次 cso 装载。失败时 Fail 一次并带齐修复信息；
+// 成功时 stdout 一行 [SHADER_GATE]（机器输出走 stdout，日志纪律）。
+// 返回 false = 门禁未过（调用方应中止装载）。
+inline const char* kGatePrefix = "EngineTest/shaders/D3D12/";
+
+inline bool GateD3D12Cso(const char* rel, const std::vector<u8>& bytes,
+                         const char* tag) {
+    // manifest 惰性加载 + 进程内缓存（一次解析，静态局部）。
+    static const Manifest manifest = [] {
+        const std::vector<u8> mb =
+            ReadFileRel("EngineTest/shaders/D3D12/manifest.json");
+        if (mb.empty()) {
+            Manifest bad;
+            bad.error = "manifest.json unreadable (missing or empty)";
+            return bad;
+        }
+        return ParseManifest(mb);
+    }();
+    const std::string path(rel);
+    if (path.rfind(kGatePrefix, 0) != 0) {
+        Fail(std::string("[SHADER_GATE] ") + tag +
+             " unexpected path form (expected prefix " + kGatePrefix +
+             "): " + path + " — gate cannot key into manifest");
+        return false;
+    }
+    const std::string key = path.substr(std::strlen(kGatePrefix));
+    if (!manifest.ok) {
+        Fail(std::string("[SHADER_GATE] ") + tag +
+             " manifest unusable: " + manifest.error +
+             " (manifest.json is the single source of truth for cso sha256; "
+             "sync the whole tree or rerun python3 scripts/build_d3d12_shaders.py "
+             "and ship manifest+cso together)");
+        return false;
+    }
+    const auto it = manifest.csoToSha.find(key);
+    if (it == manifest.csoToSha.end()) {
+        Fail(std::string("[SHADER_GATE] ") + tag + " manifest has no entry for " +
+             key + " (loaded " + path +
+             ") — stale harness vs newer manifest, or renamed shader; sync "
+             "tree or rerun python3 scripts/build_d3d12_shaders.py");
+        return false;
+    }
+    const std::string& want = it->second;
+    if (bytes.empty()) {
+        Fail(std::string("[SHADER_GATE] ") + tag + " cso missing on disk: " +
+             path + " expected sha256(manifest)=" + want +
+             " actual=missing — sync the whole tree or rerun python3 "
+             "scripts/build_d3d12_shaders.py and ship manifest+cso together");
+        return false;
+    }
+    const Sha256Digest d = Sha256(bytes.data(), bytes.size());
+    const std::string got = ToHex32(d.h);
+    if (got != want) {
+        Fail(std::string("[SHADER_GATE] ") + tag + " cso sha256 MISMATCH: " +
+             path + " expected(manifest)=" + want + " actual=" + got +
+             " — stale/intermediate cso reached this tree (typical symptom: "
+             "CreateGraphicsPipeline E_INVALIDARG 0x80070057 with no prior "
+             "hint); sync the whole tree or rerun python3 "
+             "scripts/build_d3d12_shaders.py, then ship manifest+cso together");
+        return false;
+    }
+    std::cout << "[SHADER_GATE] " << path << " cso sha256 ok" << std::endl;
+    return true;
+}
+
+}   // namespace sha_gate
+
 // ======================= 泄漏计数账本（F1-12 sanity） =======================
 // 只登记宿主自建/自毁的 RHI 资源；RenderMesh 内部顶点/索引缓冲经
 // mesh->Destroy 释放（device 无句柄计数查询接口，记录在案为已知边界）。
@@ -219,6 +541,8 @@ struct Trajectory {
     u32 version{0};
     std::string name;
     std::string assetPath;
+    // scene.asset_sha256（hex64；声明值，供资产门禁校验。空 = 未声明）
+    std::string assetSha256;
     double dt{1.0 / 60.0};
     u32 totalFrames{240};
     u32 warmupFrames{30};
@@ -250,6 +574,10 @@ bool ParseTrajectory(const pfxjson::value& root, Trajectory& t, std::string& err
     if (!scene || !scene->is_object()) { err = "scene missing"; return false; }
     if (auto* a = scene->find("asset")) t.assetPath = a->as_string();
     if (t.assetPath.empty()) { err = "scene.asset empty"; return false; }
+    // 资产 SHA 声明（键名沿本解析器 snake_case 实际风格，与轨迹文件
+    // "asset_sha256" 一致；非字符串/缺失保持空，由资产门禁硬失败）
+    if (auto* s = scene->find("asset_sha256"); s && s->is_string())
+        t.assetSha256 = s->as_string();
 
     const pfxjson::value* timing = root.find("timing");
     if (!timing || !timing->is_object()) { err = "timing missing"; return false; }
@@ -356,6 +684,78 @@ bool ParseTrajectory(const pfxjson::value& root, Trajectory& t, std::string& err
         if (auto* f = k->find("fov_deg")) kf.fovDeg = f->as_number();
         t.keyframes.push_back(kf);
     }
+    return true;
+}
+
+// ======================= 资产 SHA 门禁（防静默错资产，2026-11-10） =======
+// 背景：轨迹 JSON 声明 scene.asset_sha256，但 harness 此前从不校验——
+// Windows 集成轮次曾静默使用错误 Sponza.model（SHA 302DC6DA…，25
+// meshes，非索引）而非声明的 b0c1f2d5…（393 meshes），视觉对比整体
+// 错位且无任何先兆。本门禁在 main 轨迹装载后、任何设备/纹理/网格
+// 资源创建之前校验磁盘资产与声明 SHA（大小写无关）：声明缺失、资产
+// 读不出、SHA 不匹配一律非零码（2，配置错误惯例）终止，绝不带错
+// 资产继续渲染。SHA 复用 sha_gate 最小实现（cso 门禁同源，正确性已
+// 与 shasum -a 256 核对）；资产 ~7.5MB 一次性读入内存计算，不流式。
+bool VerifyTrajectoryAssetSha(const Trajectory& t, const std::string& trajRel) {
+    auto diag = [&]() {
+        std::cerr << "[ASSET_GATE] trajectory=" << trajRel
+                  << " scene.asset=" << t.assetPath << std::endl;
+    };
+    // 声明归一化到小写 hex（手工 A-F→a-f，不引入 <cctype>）。
+    std::string declared = t.assetSha256;
+    for (char& c : declared)
+        if (c >= 'A' && c <= 'F') c = char(c + ('a' - 'A'));
+    const auto isHex64 = [](const std::string& s) {
+        if (s.size() != 64) return false;
+        for (char c : s)
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+        return true;
+    };
+    // 1) 声明字段必须存在且为 64 位 hex——防静默错跑的硬门禁，不放宽。
+    if (declared.empty()) {
+        diag();
+        std::cerr << "[ASSET_GATE] FAIL: trajectory does not declare "
+                     "scene.asset_sha256 — refusing to run. Fix: add "
+                     "\"asset_sha256\": \"<hex64>\" to the scene object."
+                  << std::endl;
+        return false;
+    }
+    if (!isHex64(declared)) {
+        diag();
+        std::cerr << "[ASSET_GATE] FAIL: scene.asset_sha256 is not 64 hex "
+                     "digits (got '" << t.assetSha256 << "') — refusing to run."
+                  << std::endl;
+        return false;
+    }
+    // 2) 资产文件必须可读（与场景加载处同款 ReadFileRel 路径解析）。
+    const std::vector<u8> bytes = ReadFileRel(t.assetPath);
+    if (bytes.empty()) {
+        diag();
+        std::cerr << "[ASSET_GATE] FAIL: cannot read asset file: "
+                  << t.assetPath << " (not found / unreadable / empty)"
+                  << std::endl;
+        return false;
+    }
+    // 3) 实测 SHA 与声明比较（大小写无关：实测恒小写，声明已归一）。
+    const std::string actual =
+        sha_gate::ToHex32(sha_gate::Sha256(bytes.data(), bytes.size()).h);
+    if (actual != declared) {
+        diag();
+        std::cerr << "[ASSET_GATE] FAIL: asset sha256 MISMATCH — refusing to "
+                     "render with wrong asset." << std::endl;
+        std::cerr << "[ASSET_GATE]   declared (trajectory): " << declared
+                  << std::endl;
+        std::cerr << "[ASSET_GATE]   actual   (on disk)   : " << actual
+                  << std::endl;
+        std::cerr << "[ASSET_GATE]   actual file size     : " << bytes.size()
+                  << " bytes (resolved: " << FindFileRel(t.assetPath) << ")"
+                  << std::endl;
+        std::cerr << "[ASSET_GATE]   Fix: place the declared asset (sha256 "
+                  << declared << ") at " << t.assetPath << std::endl;
+        return false;
+    }
+    std::cout << "[ASSET_GATE] " << t.assetPath << " sha256 ok ("
+              << declared << ", " << bytes.size() << " bytes)" << std::endl;
     return true;
 }
 
@@ -475,7 +875,7 @@ static_assert(sizeof(LightShadowDataGPU) == 112, "LightShadowData = 32 + 80");
 // 覆盖 Sponza 场景包围盒的保守盒（中心/半宽/光照侧退距/近平面/远平面）。
 constexpr float kShadowCenter[3] = {0.0f, 5.0f, 10.0f};
 constexpr float kShadowHalfExtent = 40.0f;    // 光空间 XY 半宽（世界单位）
-constexpr float kShadowEyeDistance = 80.0f;   // 沿 -L 退到 eye
+constexpr float kShadowEyeDistance = 80.0f;   // 沿 +L（光源侧）退到 eye
 constexpr float kShadowNear = 20.0f, kShadowFar = 150.0f;
 constexpr u32 kShadowMapSize = 2048;
 
@@ -562,8 +962,8 @@ ResourceHandle CreateTextureFromPixels(RHIDeviceBase* device, RHICommandBuffer* 
     return tex;
 }
 
-// PPM 写出：BGRA8 → P6 RGB，无 Y 翻转（M1 §7.2-1：两端原始读回同向；
-// D3D12 负 viewport 高度对齐；Vulkan 生产离屏对比亦无翻转）。
+// PPM 写出：BGRA8 → P6 RGB，无 Y 翻转（F2 后 RT 本身正立：投影 Y-down
+// clip + 两端视口 NDC y=-1→RT 第 0 行；读回链路两端保序）。
 bool WritePPM(const std::string& path, const u8* bgra, u32 w, u32 h) {
     std::ofstream f(path, std::ios::binary);
     if (!f) return false;
@@ -589,11 +989,22 @@ struct FrameTargets {
     ResourceHandle gAlbedo{handles::INVALID_RESOURCE};
     ResourceHandle gNormal{handles::INVALID_RESOURCE};
     ResourceHandle gMaterial{handles::INVALID_RESOURCE};
+    // M6（GI on 才建）：P2 直射 MRT 两 RT + P5 独立间接 RT（RGBA16F 线性
+    // HDR；RT 写 → SRV 采样 → 导出拷贝源）。GI off 时保持无效句柄——
+    // 默认路径资源集不变。
+    ResourceHandle giDirect{handles::INVALID_RESOURCE};
+    ResourceHandle giDirectDiffuse{handles::INVALID_RESOURCE};
+    ResourceHandle giIndirect{handles::INVALID_RESOURCE};
+    // M6（GI on）：逐帧深度读回 → 几何覆盖率（深度<1 像素占比）。GI 模式黑帧
+    // 守卫用：直射-only 语义下完全阴影几何恰为黑，"清屏黑→非黑比例即几何
+    // 覆盖"前提失效，守卫改测几何覆盖（颜色非黑比例照常统计输出）。
+    ResourceHandle giCoverageReadback{handles::INVALID_RESOURCE};
+    u32 giCoveragePitch{0};   // 字节行距（align(W*4, 256)）
     u32 w{0}, h{0};
 };
 
 bool CreateFrameTargets(RHIDeviceBase* device, FrameTargets& ft, u32 w, u32 h,
-                        bool wantPost, bool wantDeferred) {
+                        bool wantPost, bool wantDeferred, bool wantGI) {
     ft.w = w; ft.h = h;
     TextureDesc colorDesc{};
     colorDesc.size = {w, h, 1};
@@ -643,6 +1054,39 @@ bool CreateFrameTargets(RHIDeviceBase* device, FrameTargets& ft, u32 w, u32 h,
         g_ledger.textures.insert(ft.gMaterial);
     }
 
+    // M6 GI（spec §6.1）：直射/直射漫反射/独立间接三 RT（RGBA16F；resize 同路
+    // 重建）。仅 GI on 创建——GI off 路径资源形状不变纪律（同 M4 depth usage）。
+    if (wantGI) {
+        TextureDesc giDesc = colorDesc;
+        giDesc.format = DataFormat::RGBA16_Float;
+        giDesc.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource |
+                       TextureUsage::CopySource;
+        giDesc.name = "M6GIDirect";
+        ft.giDirect = device->CreateTexture(giDesc);
+        giDesc.name = "M6GIDirectDiffuse";
+        ft.giDirectDiffuse = device->CreateTexture(giDesc);
+        giDesc.name = "M6GIIndirect";
+        ft.giIndirect = device->CreateTexture(giDesc);
+        if (ft.giDirect == handles::INVALID_RESOURCE ||
+            ft.giDirectDiffuse == handles::INVALID_RESOURCE ||
+            ft.giIndirect == handles::INVALID_RESOURCE) return false;
+        g_ledger.textures.insert(ft.giDirect);
+        g_ledger.textures.insert(ft.giDirectDiffuse);
+        g_ledger.textures.insert(ft.giIndirect);
+        // 几何覆盖率读回缓冲（D32 4B/px，行距 256 对齐——两端同布局）
+        BufferDesc cbd{};
+        ft.giCoveragePitch = (w * 4u + 255u) & ~255u;
+        cbd.size = u64(ft.giCoveragePitch) * h;
+        cbd.type = BufferType::Raw;
+        // R19-1：同 M1Readback——CopyTextureToBuffer 的 GPU 写目标须 Readback 位。
+        cbd.usage = GPUMemoryUsage::Readback;
+        cbd.memoryUsage = GPUMemoryUsage::Readback;
+        cbd.name = "M6GICoverageReadback";
+        ft.giCoverageReadback = device->CreateBuffer(cbd);
+        if (ft.giCoverageReadback == handles::INVALID_RESOURCE) return false;
+        g_ledger.buffers.insert(ft.giCoverageReadback);
+    }
+
     TextureDesc depthDesc = colorDesc;
     depthDesc.format = DataFormat::D32_Float;     // M1 §7.2-2：[0,1] 正向 Z
     depthDesc.usage = TextureUsage::DepthStencil;
@@ -658,8 +1102,12 @@ bool CreateFrameTargets(RHIDeviceBase* device, FrameTargets& ft, u32 w, u32 h,
     BufferDesc rbDesc{};
     rbDesc.size = u64(w) * h * 4;
     rbDesc.type = BufferType::Raw;
-    rbDesc.usage = GPUMemoryUsage::Staging;
-    rbDesc.memoryUsage = GPUMemoryUsage::Staging;
+    // R19-1：读回意图用 Readback 位（GPU 写 → CPU 读）。原 Staging 位在
+    // D3D12 落 UPLOAD 堆（CPU 写/GPU 读），CopyTextureRegion 的 GPU 写目标
+    // 必须在 READBACK 堆——十八测 M1/M2 退出 #849 根因。Vulkan/Metal 侧
+    // Readback 与 Staging 同落 host-visible，行为等价（零回归见 runbook §28-1）。
+    rbDesc.usage = GPUMemoryUsage::Readback;
+    rbDesc.memoryUsage = GPUMemoryUsage::Readback;
     rbDesc.name = "M1Readback";
     ft.readback = device->CreateBuffer(rbDesc);
     if (ft.readback == handles::INVALID_RESOURCE) return false;
@@ -670,6 +1118,16 @@ bool CreateFrameTargets(RHIDeviceBase* device, FrameTargets& ft, u32 w, u32 h,
 void DestroyFrameTargets(RHIDeviceBase* device, FrameTargets& ft) {
     if (ft.readback != handles::INVALID_RESOURCE) {
         device->DestroyBuffer(ft.readback); g_ledger.buffers.erase(ft.readback);
+    }
+    // M6 GI 三 RT + 覆盖率读回（GI off 时为无效句柄，跳过）
+    if (ft.giCoverageReadback != handles::INVALID_RESOURCE) {
+        device->DestroyBuffer(ft.giCoverageReadback);
+        g_ledger.buffers.erase(ft.giCoverageReadback);
+    }
+    for (ResourceHandle h : {ft.giIndirect, ft.giDirectDiffuse, ft.giDirect}) {
+        if (h != handles::INVALID_RESOURCE) {
+            device->DestroyTexture(h); g_ledger.textures.erase(h);
+        }
     }
     if (ft.gMaterial != handles::INVALID_RESOURCE) {
         device->DestroyTexture(ft.gMaterial); g_ledger.textures.erase(ft.gMaterial);
@@ -744,11 +1202,17 @@ bool M2ShadowInit(RHIDeviceBase* device, M2ShadowState& s, bool ablationLitAll,
     g_ledger.textures.insert(s.shadowMap);
 
     // ---- 光照 VP / shadowData（静态光 + 静态场景 → 帧常数）----
-    // 近似生产 ComputeCascadeVP 的结构（中心对齐 + 沿 -L 退 eye），
+    // 近似生产 ComputeCascadeVP 的结构（中心对齐 + 从光源侧退距观察），
     // 单级联取保守盒覆盖场景（生产第 4 级 extent=270 的角色）。
+    // 注意方向约定：生产 lightDir=光行进方向故 lightEye=-lightDir*dist；
+    // 此处 L 是 dir_to_light（表面指向光源，与 LightData 同一语义），
+    // 光相机必须在 +L 侧（=中心+L*dist）朝 -L 看，Less 深度测试保留的才是
+    // 离光最近的遮挡面。旧写法 eye=center-L*dist 把相机放在反光侧，
+    // 深度图记录的是离光最远的背面（Sponza 外壳盒），接收端 ref 恒大于
+    // stored → SampleCmp 恒 0 → M2 只有 ambient（2026-11-07 五探针定位）。
     math::v3 L = rhimath::Normalize(math::v3{g_trajDirToLight.x, g_trajDirToLight.y, g_trajDirToLight.z});
     math::v3 center{kShadowCenter[0], kShadowCenter[1], kShadowCenter[2]};
-    math::v3 eye = center - L * kShadowEyeDistance;
+    math::v3 eye = center + L * kShadowEyeDistance;
     math::v3 up = (std::abs(L.y) < 0.99f) ? math::v3{0.0f, 1.0f, 0.0f}
                                           : math::v3{1.0f, 0.0f, 0.0f};
     math::m4x4 lightView = rhimath::CreateLookAtMatrix(eye, center, up);
@@ -1009,17 +1473,17 @@ struct M4DeferredState {
     ResourceHandle lightShadowUbo{handles::INVALID_RESOURCE}; // 112B 逐帧
 };
 
-constexpr u32 kM6GridDim = 8;                 // 8x8x8 探针网格
-constexpr float kM6GridMin[3] = {-40.0f, -10.0f, -30.0f};   // 世界盒（覆盖
-constexpr float kM6GridMax[3] = {40.0f, 30.0f, 50.0f};      // Sponza 包围盒）
+constexpr u32 kM6GridDim = 8;                 // 8x8x8 探针网格（Nx=Ny=Nz）
+constexpr u32 kM6ShSlabs = 3;                 // SH 纹理 z 向三 slab = R/G/B 通道
+// GI-off 占位 GIParams（延迟光照 b10）的世界盒常数：仅 GI=0 的 M4 路径上传
+//（giScale=0 不进入数值路径；常数保留 = 上传字节不变）。GI 模式探针盒由
+// mesh AABB 并集派生（M6ComputeGridBox），不用此常数。
+constexpr float kM6GridMin[3] = {-40.0f, -10.0f, -30.0f};
+constexpr float kM6GridMax[3] = {40.0f, 30.0f, 50.0f};
 constexpr u32 kM6ReadbackRowTexels = 32;      // 32 texel * 8B = 256B 行距
-
-// 与 M6ProbeBake.comp BakeParams 一源（std140 = 32B）。
-struct M6BakeParamsGPU {
-    math::v4 dirAndIntensity;   // xyz=dirToLight w=intensity（同 LightData）
-    math::v4 lightColor;        // rgb=光色 w=0
-};
-static_assert(sizeof(M6BakeParamsGPU) == 32, "M6BakeParams std140 = 32");
+constexpr u32 kM6InjectStride = 8;            // 注入屏幕采样步长（像素，spec §5.2）
+constexpr float kM6BoxPad = 0.5f;             // 探针盒各向外扩（米，spec §4）
+constexpr double kM6ShY00 = 0.282095;         // SH 实基 Y00（各向同性均值换算）
 
 // 与 M6ProbeAccum.comp AccumParams 一源（16B：flags.x bit0=reset）。
 struct M6AccumParamsGPU {
@@ -1027,22 +1491,50 @@ struct M6AccumParamsGPU {
 };
 static_assert(sizeof(M6AccumParamsGPU) == 16, "M6AccumParams std140 = 16");
 
-// 与 M4DeferredLight.frag GIParams 一源（32B）。
+// 与 M4DeferredLight.frag GIParams 一源（32B）——仅 GI-off 占位路径消费
+//（GI 模式不跑 M4 light pass，b10 只保持指向存活资源）。
 struct M6GIParamsGPU {
     math::v4 gridMinAndScale;   // xyz=网格世界盒 min w=giScale（0/1）
     math::v4 gridInvExtent;     // xyz=1/(max-min)
 };
 static_assert(sizeof(M6GIParamsGPU) == 32, "M6GIParams std140 = 32");
 
+// 与 M6ProbeInject.comp InjectParams 一源（std140 144B，逐帧上传）。
+struct M6InjectParamsGPU {
+    math::m4x4 invViewProjection;  // @0   主相机 VP 之逆（= M4 同一 Inverse(proj*view)）
+    math::v4 cameraPos;            // @64  xyz = 相机世界坐标
+    math::v4 gridMin;              // @80  xyz = 探针盒 min
+    math::v4 cellSize;             // @96  xyz = (max-min)/Nx
+    math::v4 gridDims;             // @112 xyz = (Nx,Ny,Nz)（精确整数的浮点）
+    math::v4 screen;               // @128 x=W y=H z=stride（精确整数的浮点）
+};
+static_assert(sizeof(M6InjectParamsGPU) == 144, "M6InjectParams std140 = 64 + 5*16");
+static_assert(offsetof(M6InjectParamsGPU, cameraPos) == 64, "InjectParams cameraPos @64");
+static_assert(offsetof(M6InjectParamsGPU, screen) == 128, "InjectParams screen @128");
+
+// 与 M6GIResolve.frag ResolveParams 一源（std140 48B，探针盒确定后一次上传）。
+struct M6ResolveParamsGPU {
+    math::v4 gridMin;              // @0  xyz = 探针盒 min，w = normalBias（米）
+    math::v4 gridInvExtent;        // @16 xyz = 1/(max-min)
+    math::v4 gridDims;             // @32 xyz = (Nx,Ny,Nz)
+};
+static_assert(sizeof(M6ResolveParamsGPU) == 48, "M6ResolveParams std140 = 3*16");
+static_assert(offsetof(M6ResolveParamsGPU, gridDims) == 32, "ResolveParams gridDims @32");
+
 struct M6GIState {
-    // bake 链（writeonly image3D + BakeParams UBO）
-    ShaderHandle bakeCs{handles::INVALID_SHADER};
-    DescriptorSetLayoutHandle bakeSetLayout{handles::INVALID_DESCRIPTOR_SET_LAYOUT};
-    PipelineLayoutHandle bakeLayout{handles::INVALID_PIPELINE_LAYOUT};
-    PipelineHandle bakePipeline{handles::INVALID_PIPELINE};
-    DescriptorSetHandle bakeSet{handles::INVALID_DESCRIPTOR_SET};
-    ResourceHandle bakeUbo{handles::INVALID_RESOURCE};        // 32B 逐帧
-    // accum 链（readonly image3D + sampler3D hist 对 + writeonly image3D +
+    // 全屏三角 VS（M3Post.vert 字节；direct/resolve/composite 三管线共享）
+    ShaderHandle fsVs{handles::INVALID_SHADER};
+    // P2 直射 pass（M6DeferredDirect.frag；布局/集复用 M4 lightLayout/lightSet）
+    ShaderHandle directFs{handles::INVALID_SHADER};
+    PipelineHandle directPipeline{handles::INVALID_PIPELINE};
+    // P3 注入链（b0-b3 SampledImage + b4 InjectParams UBO + b5 writeonly image3D）
+    ShaderHandle injectCs{handles::INVALID_SHADER};
+    DescriptorSetLayoutHandle injectSetLayout{handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    PipelineLayoutHandle injectLayout{handles::INVALID_PIPELINE_LAYOUT};
+    PipelineHandle injectPipeline{handles::INVALID_PIPELINE};
+    DescriptorSetHandle injectSet{handles::INVALID_DESCRIPTOR_SET};
+    ResourceHandle injectUbo{handles::INVALID_RESOURCE};      // 144B 逐帧
+    // P4 accum 链（readonly image3D + sampler3D hist 对 + writeonly image3D +
     // AccumParams UBO）
     ShaderHandle accumCs{handles::INVALID_SHADER};
     DescriptorSetLayoutHandle accumSetLayout{handles::INVALID_DESCRIPTOR_SET_LAYOUT};
@@ -1050,22 +1542,44 @@ struct M6GIState {
     PipelineHandle accumPipeline{handles::INVALID_PIPELINE};
     DescriptorSetHandle accumSet{handles::INVALID_DESCRIPTOR_SET};
     ResourceHandle accumUbo{handles::INVALID_RESOURCE};       // 16B 逐帧
-    // 3D 纹理面（首次入共享宿主）：grid[2] ping-pong + baked + 黑占位
+    // P5 解析链（b0 UBO + b1-b4 SampledImage + b5 texture3D + b6 sampler + b7 UBO）
+    ShaderHandle resolveFs{handles::INVALID_SHADER};
+    DescriptorSetLayoutHandle resolveSetLayout{handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    PipelineLayoutHandle resolveLayout{handles::INVALID_PIPELINE_LAYOUT};
+    PipelineHandle resolvePipeline{handles::INVALID_PIPELINE};
+    DescriptorSetHandle resolveSet{handles::INVALID_DESCRIPTOR_SET};
+    ResourceHandle resolveUbo{handles::INVALID_RESOURCE};     // 48B 一次
+    // P6 合成链（b0/b1 SampledImage）
+    ShaderHandle compFs{handles::INVALID_SHADER};
+    DescriptorSetLayoutHandle compSetLayout{handles::INVALID_DESCRIPTOR_SET_LAYOUT};
+    PipelineLayoutHandle compLayout{handles::INVALID_PIPELINE_LAYOUT};
+    PipelineHandle compPipeline{handles::INVALID_PIPELINE};
+    DescriptorSetHandle compSet{handles::INVALID_DESCRIPTOR_SET};
+    // 3D 纹理面：grid[2] SH ping-pong + 注入输出 + 黑占位（GI=0）
     ResourceHandle grid[2]{handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
-    ResourceHandle baked{handles::INVALID_RESOURCE};          // bake 目标（复用）
+    // P3 注入输出（资源名 M6ProbeInjectOut；= P4 accum 的 newGrid 输入）。
+    // 成员名 baked 沿用旧 bake 链命名（不改名以免牵动 accum 绑定代码），
+    // 内容是本帧屏幕空间直射注入的 SH-L1 系数，不是解析烘焙值。
+    ResourceHandle baked{handles::INVALID_RESOURCE};
     ResourceHandle blackTex{handles::INVALID_RESOURCE};       // GI=0 时 b8 占位
     SamplerHandle histSampler{handles::INVALID_SAMPLER};      // Nearest/Clamp（texelFetch）
     SamplerHandle probeSampler{handles::INVALID_SAMPLER};     // Linear/Clamp（tri-linear）
-    // 延迟光照 b10 GIParams UBO（常量一次上传）
+    // 延迟光照 b10 GIParams UBO（常量一次上传；GI-off 占位路径消费）
     ResourceHandle giParamsUbo{handles::INVALID_RESOURCE};
-    ResourceHandle readbackBuf{handles::INVALID_RESOURCE};    // 16KB（8*2048）
+    ResourceHandle readbackBuf{handles::INVALID_RESOURCE};    // 48KB（24*8*256）
+    // 探针盒（GI on：mesh AABB 并集外扩 kM6BoxPad；M6ComputeGridBox 填）
+    math::v4 boxMin{0, 0, 0, 0}, boxMax{0, 0, 0, 0}, cell{0, 0, 0, 0};
+    float normalBias{0.0f};
     u32 cur{0};                       // ping-pong：grid[cur]=history grid[1-cur]=out
     bool havePrevLight{false};        // 重置检测（帧 0 恒 reset——history 未定义）
     LightState prevLight{};
     bool readbackPending{false};      // 本帧已录读回拷贝（提交后 M6VerifyGI 消费）
+    bool lastReset{false};            // 本帧是否 reset（导出清单 reset_this_frame）
+    u32 framesSinceReset{0};          // 本帧距最近 reset 的帧数（reset 帧 = 0）
     u32 resetCount{0};
     u32 readbackFrames{0};
     u32 dumpCount{0};
+    u32 exportFrames{0};              // RHI_GI_EXPORT_FRAMES 实际导出帧数
 };
 
 void M6GIDestroy(RHIDeviceBase* device, M6GIState& s) {
@@ -1077,24 +1591,44 @@ void M6GIDestroy(RHIDeviceBase* device, M6GIState& s) {
     if (s.baked != handles::INVALID_RESOURCE) { device->DestroyTexture(s.baked); g_ledger.textures.erase(s.baked); }
     for (int i = 0; i < 2; ++i)
         if (s.grid[i] != handles::INVALID_RESOURCE) { device->DestroyTexture(s.grid[i]); g_ledger.textures.erase(s.grid[i]); }
+    // P6 合成链
+    if (s.compSet != handles::INVALID_DESCRIPTOR_SET) { device->DestroyDescriptorSet(s.compSet); g_ledger.sets.erase(s.compSet); }
+    if (s.compPipeline != handles::INVALID_PIPELINE) { device->DestroyPipeline(s.compPipeline); g_ledger.pipelines.erase(s.compPipeline); }
+    if (s.compLayout != handles::INVALID_PIPELINE_LAYOUT) { device->DestroyPipelineLayout(s.compLayout); g_ledger.layouts.erase(s.compLayout); }
+    if (s.compSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) { device->DestroyDescriptorSetLayout(s.compSetLayout); g_ledger.setLayouts.erase(s.compSetLayout); }
+    if (s.compFs != handles::INVALID_SHADER) { device->DestroyShader(s.compFs); g_ledger.shaders.erase(s.compFs); }
+    // P5 解析链
+    if (s.resolveUbo != handles::INVALID_RESOURCE) { device->DestroyBuffer(s.resolveUbo); g_ledger.buffers.erase(s.resolveUbo); }
+    if (s.resolveSet != handles::INVALID_DESCRIPTOR_SET) { device->DestroyDescriptorSet(s.resolveSet); g_ledger.sets.erase(s.resolveSet); }
+    if (s.resolvePipeline != handles::INVALID_PIPELINE) { device->DestroyPipeline(s.resolvePipeline); g_ledger.pipelines.erase(s.resolvePipeline); }
+    if (s.resolveLayout != handles::INVALID_PIPELINE_LAYOUT) { device->DestroyPipelineLayout(s.resolveLayout); g_ledger.layouts.erase(s.resolveLayout); }
+    if (s.resolveSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) { device->DestroyDescriptorSetLayout(s.resolveSetLayout); g_ledger.setLayouts.erase(s.resolveSetLayout); }
+    if (s.resolveFs != handles::INVALID_SHADER) { device->DestroyShader(s.resolveFs); g_ledger.shaders.erase(s.resolveFs); }
+    // P4 accum 链
     if (s.accumUbo != handles::INVALID_RESOURCE) { device->DestroyBuffer(s.accumUbo); g_ledger.buffers.erase(s.accumUbo); }
     if (s.accumSet != handles::INVALID_DESCRIPTOR_SET) { device->DestroyDescriptorSet(s.accumSet); g_ledger.sets.erase(s.accumSet); }
     if (s.accumPipeline != handles::INVALID_PIPELINE) { device->DestroyPipeline(s.accumPipeline); g_ledger.pipelines.erase(s.accumPipeline); }
     if (s.accumLayout != handles::INVALID_PIPELINE_LAYOUT) { device->DestroyPipelineLayout(s.accumLayout); g_ledger.layouts.erase(s.accumLayout); }
     if (s.accumSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) { device->DestroyDescriptorSetLayout(s.accumSetLayout); g_ledger.setLayouts.erase(s.accumSetLayout); }
     if (s.accumCs != handles::INVALID_SHADER) { device->DestroyShader(s.accumCs); g_ledger.shaders.erase(s.accumCs); }
-    if (s.bakeUbo != handles::INVALID_RESOURCE) { device->DestroyBuffer(s.bakeUbo); g_ledger.buffers.erase(s.bakeUbo); }
-    if (s.bakeSet != handles::INVALID_DESCRIPTOR_SET) { device->DestroyDescriptorSet(s.bakeSet); g_ledger.sets.erase(s.bakeSet); }
-    if (s.bakePipeline != handles::INVALID_PIPELINE) { device->DestroyPipeline(s.bakePipeline); g_ledger.pipelines.erase(s.bakePipeline); }
-    if (s.bakeLayout != handles::INVALID_PIPELINE_LAYOUT) { device->DestroyPipelineLayout(s.bakeLayout); g_ledger.layouts.erase(s.bakeLayout); }
-    if (s.bakeSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) { device->DestroyDescriptorSetLayout(s.bakeSetLayout); g_ledger.setLayouts.erase(s.bakeSetLayout); }
-    if (s.bakeCs != handles::INVALID_SHADER) { device->DestroyShader(s.bakeCs); g_ledger.shaders.erase(s.bakeCs); }
+    // P3 注入链
+    if (s.injectUbo != handles::INVALID_RESOURCE) { device->DestroyBuffer(s.injectUbo); g_ledger.buffers.erase(s.injectUbo); }
+    if (s.injectSet != handles::INVALID_DESCRIPTOR_SET) { device->DestroyDescriptorSet(s.injectSet); g_ledger.sets.erase(s.injectSet); }
+    if (s.injectPipeline != handles::INVALID_PIPELINE) { device->DestroyPipeline(s.injectPipeline); g_ledger.pipelines.erase(s.injectPipeline); }
+    if (s.injectLayout != handles::INVALID_PIPELINE_LAYOUT) { device->DestroyPipelineLayout(s.injectLayout); g_ledger.layouts.erase(s.injectLayout); }
+    if (s.injectSetLayout != handles::INVALID_DESCRIPTOR_SET_LAYOUT) { device->DestroyDescriptorSetLayout(s.injectSetLayout); g_ledger.setLayouts.erase(s.injectSetLayout); }
+    if (s.injectCs != handles::INVALID_SHADER) { device->DestroyShader(s.injectCs); g_ledger.shaders.erase(s.injectCs); }
+    // P2 直射（布局/集属 M4，此处只毁自有管线与 shader）
+    if (s.directPipeline != handles::INVALID_PIPELINE) { device->DestroyPipeline(s.directPipeline); g_ledger.pipelines.erase(s.directPipeline); }
+    if (s.directFs != handles::INVALID_SHADER) { device->DestroyShader(s.directFs); g_ledger.shaders.erase(s.directFs); }
+    if (s.fsVs != handles::INVALID_SHADER) { device->DestroyShader(s.fsVs); g_ledger.shaders.erase(s.fsVs); }
     s = M6GIState{};
 }
 
 // 延迟光照描述符集回填（帧目标/shadow map 句柄就绪后；resize 重建后重绑）。
 // M6：b8-b10 GI 面一并回填（GI=0 时 gi.grid 无效 → 走 black 占位；GI=1 时
-// b8 初绑 grid[0]，此后 M6BindDeferredProbe 逐帧 ping-pong 重绑）。
+// b8 恒绑 grid[0]——GI 模式 M4 light pass 不运行，P2 直射 pass 复用本集但
+// 只消费 b0-b7；b8-b10 仅保持指向存活资源，从不留悬空描述符）。
 void BindM4DeferredSet(RHIDeviceBase* device, const M4DeferredState& s,
                        const FrameTargets& ft, const M2ShadowState& shadow,
                        const M6GIState& gi) {
@@ -1162,29 +1696,39 @@ void M4DeferredDestroy(RHIDeviceBase* device, M4DeferredState& s) {
 // ======================= M6 GI 段（F6-2/F6-3/F6-5/F6-6）=====================
 
 // 共同最小 GI 切片（RHI_TEST_GI=1 门控，默认 0 = M1-M5 行为不变；组合前置
-// RHI_TEST_DEFERRED=1——GI ambient 消费在延迟光照 pass）。GICharacterization
-// 命名纪律：解析烘焙函数非真实场景 GI（资源机制表征，不冒充 Lumen 物理）。
-// 链（每帧、cmd Begin 后 M5 剔除链之后）：
-//   ①M6ProbeBake.comp：writeonly rgba16f image3D（类型化 UAV store），
-//     解析天空+方向光泛光+uint 哈希抖动（确定性；光 keyframe 步进→目标阶跃）
-//   ②compute→compute 显式 MemoryBarrier（bake store → accum load）
-//   ③M6ProbeAccum.comp：EMA（hist*0.9+new*0.1；reset 帧 history 清零——
-//     GIHistoryValidity/SC tile 清零先例，parity matrix #8）；new=readonly
-//     image3D（类型化 UAV load）+ hist=sampler3D SRV + out=writeonly image3D
-//   ④out UAV→SRV → 延迟光照 b8 tri-linear 采样（ambient += albedo*gi*scale）
-//   ping-pong：grid[2] 8x8x8 RGBA16F 3D 纹理（D3D12 TEXTURE3D / Vulkan
-//   VK_IMAGE_TYPE_3D；首次在共享宿主引入 3D 纹理资源面）。
-// 结构等价目标（阶段文档 §3）：D3D12 同 binding 布局/同 dispatch 拓扑
-// （local 4x4x4 → 2x2x2）/同资源类型序列；数值目标=Vulkan 双跑逐位。
-// 收敛读回：每 interval 帧 CopyTextureToBuffer 落 [GI_MEAN] 阶梯行
-//（bufferRowLength=32 texel=256B——两端行距一致：D3D12 footprint RowPitch
-// 256 对齐，Vulkan rowLength 以 texel 计；跨端字节布局等价，偏差登记）。
-// RHI_GI_DUMP=1：中央 slice(z=4) 落 PPM（F6-6 中间输出定位）。
+// RHI_TEST_DEFERRED=1）。真实输入版（M6 direct-input spec，替换旧解析
+// sky+flood 烘焙桩）：单次反弹、屏幕空间直射光注入 SH-L1 探针网格——
+// 非完整物理场景 GI（传输无可见性、发射体限相机可见像素，见文件头）。
+// 链（每帧，GBuffer 及其 →SRV 屏障之后；文件头 P2-P6 同序）：
+//   P2 直射 pass（M6DeferredDirect.frag，MRT×2 RGBA16F，复用 M4 light
+//     set/layout b0-b7）：giDirect（直射全项）/ giDirectDiffuse（GI 输入）
+//     → RT→SRV
+//   P3 M6ProbeInject.comp：读 giDirectDiffuse+深度+法线（SRV），每探针
+//     一 workgroup（64 线程，dispatch 8×8×8）累积 SH-L1 → 注入输出
+//     M6ProbeInjectOut（成员 baked；typed UAV store，(8,8,24) 三 slab=R/G/B）
+//   compute→compute 显式 MemoryBarrier（inject store → accum load）
+//   P4 M6ProbeAccum.comp（shader 原样）：EMA（hist*0.9+new*0.1；reset 帧
+//     history 清零——GIHistoryValidity/SC tile 清零先例，parity matrix #8）；
+//     dispatch (Nx/4,Ny/4,3Nz/4)；out UAV→SRV
+//   P5 M6GIResolve.frag：giIndirect = albedo×E_h(N)（三 slab trilinear）→ SRV
+//   P6 M6Composite.frag：direct+indirect 恰一次 → hdr（post on）/ color
+//   ping-pong：grid[2] (8,8,24) RGBA16F 3D 纹理（D3D12 TEXTURE3D / Vulkan
+//   VK_IMAGE_TYPE_3D）。
+// 结构等价目标（阶段文档 §3）：D3D12 同 binding 布局/同 dispatch 拓扑/
+// 同资源类型序列；数值目标=Vulkan 双跑逐位。
+// 收敛读回：ladder 帧 CopyTextureToBuffer 落 [GI_MEAN] 阶梯行（512 探针
+// 0.282095·c00 逐通道均值；bufferRowLength=32 texel=256B、imageHeight=8——
+// 两端行距一致：D3D12 footprint RowPitch 256 对齐，Vulkan rowLength 以
+// texel 计；跨端字节布局等价）。
+// RHI_GI_DUMP=1：中央 slice(z=4) 各向同性值落 PPM（F6-6 中间输出定位）。
 
 // M6 初始化。giFull=false（deferred=1 但 RHI_TEST_GI=0）：只建延迟光照
 // b8/b9/b10 占位面（黑 1x1x1 3D 纹理 + Linear/Clamp 采样器 + scale=0
 // GIParams）——扩展 shader 的 GI 项=+0.0，默认路径逐位不变（文件头契约）。
+// giFull=true：加建 P2 直射管线（layout = M4 directLayout）、P3 注入、P4
+// accum、P5 解析、P6 合成（RT 格式 = litRTFormat）链与 SH 3D 纹理面。
 bool M6GIInit(RHIDeviceBase* device, M6GIState& s, bool wantD3D12, bool giFull,
+              PipelineLayoutHandle directLayout, DataFormat litRTFormat,
               std::string& err) {
     // ---- 延迟光照 b10 GIParams UBO（giFull 决定 giScale 1/0）----
     {
@@ -1259,54 +1803,196 @@ bool M6GIInit(RHIDeviceBase* device, M6GIState& s, bool wantD3D12, bool giFull,
         return true;                              // compute 链不建（GI=0）
     }
 
-    // ---- bake 链 ----
+    // shader 装载（platform 决定字节码；同 M5/M4 装载惯例）。
+    auto loadShader = [&](const char* d3d12Rel, const char* vkRel, ShaderStage stage,
+                          ShaderHandle& out, const char* tag) -> bool {
+        const char* rel = wantD3D12 ? d3d12Rel : vkRel;
+        std::vector<u8> bytes = ReadFileRel(rel);
+        // D3D12 分支 SHA 门禁（错位 cso → E_INVALIDARG 护盾；空字节也走，
+        // 以便 missing 场景带期望 SHA 报错。Vulkan 分支不进此块——零影响）。
+        if (wantD3D12 && !sha_gate::GateD3D12Cso(rel, bytes, tag)) {
+            err = std::string(tag) + " cso sha256 gate";
+            return false;
+        }
+        if (bytes.empty()) { err = std::string(tag) + " bytes missing (" + rel + ")"; return false; }
+        out = device->CreateShader(bytes.data(), bytes.size(), stage, "main");
+        if (out == handles::INVALID_SHADER) { err = std::string(tag) + " CreateShader"; return false; }
+        g_ledger.shaders.insert(out);
+        return true;
+    };
+    // 全屏三角形管线公共形态（无顶点输入/无深度/无 cull——同 M3Post/M4 light）。
+    auto fullscreenDesc = [&](ShaderHandle fsShader, PipelineLayoutHandle layout) {
+        GraphicsPipelineDesc gpd{};
+        gpd.vertexShader = s.fsVs;
+        gpd.pixelShader = fsShader;
+        gpd.layout = layout;
+        gpd.topology = PrimitiveTopology::TriangleList;
+        gpd.fillMode = FillMode::Solid;
+        gpd.cullMode = CullMode::None;
+        gpd.enableDepthTest = false;
+        gpd.enableDepthWrite = false;
+        return gpd;
+    };
+
+    // ---- 全屏三角 VS（M3Post.vert 字节；P2/P5/P6 三管线共享一个句柄）----
+    if (!loadShader("EngineTest/shaders/D3D12/Forward/M3Post.vert.cso",
+                    "Engine/Graphics/Vulkan/shaders/Forward/M3Post.vert.spv",
+                    ShaderStage::Vertex, s.fsVs, "M6 fullscreen VS (M3Post.vert)"))
+        return false;
+
+    // ---- P2 直射 pass：M6DeferredDirect.frag，MRT×2 RGBA16F（giDirect /
+    //      giDirectDiffuse）。布局 = M4 lightLayout（11 绑定超集，shader 只
+    //      声明 b0-b7——spec §6.2 复用 M4 light set layout/pipeline layout/set）----
     {
-        const char* rel = wantD3D12
-            ? "EngineTest/shaders/D3D12/Forward/M6ProbeBake.comp.cso"
-            : "Engine/Graphics/Vulkan/shaders/Forward/M6ProbeBake.comp.spv";
-        std::vector<u8> cb = ReadFileRel(rel);
-        if (cb.empty()) { err = std::string("M6ProbeBake bytes missing (") + rel + ")"; return false; }
-        s.bakeCs = device->CreateShader(cb.data(), cb.size(), ShaderStage::Compute, "main");
-        if (s.bakeCs == handles::INVALID_SHADER) { err = "M6ProbeBake CreateShader"; return false; }
-        g_ledger.shaders.insert(s.bakeCs);
+        if (!loadShader("EngineTest/shaders/D3D12/Forward/M6DeferredDirect.frag.cso",
+                        "Engine/Graphics/Vulkan/shaders/Forward/M6DeferredDirect.frag.spv",
+                        ShaderStage::Pixel, s.directFs, "M6DeferredDirect"))
+            return false;
+        GraphicsPipelineDesc gpd = fullscreenDesc(s.directFs, directLayout);
+        gpd.renderTargetCount = 2;
+        gpd.renderTargetFormats[0] = DataFormat::RGBA16_Float;   // giDirect
+        gpd.renderTargetFormats[1] = DataFormat::RGBA16_Float;   // giDirectDiffuse
+        s.directPipeline = device->CreateGraphicsPipeline(gpd);
+        if (s.directPipeline == handles::INVALID_PIPELINE) { err = "M6DeferredDirect pipeline"; return false; }
+        g_ledger.pipelines.insert(s.directPipeline);
+    }
+
+    // ---- P3 注入链：M6ProbeInject.comp（local 64x1x1，一 workgroup = 一探针）----
+    {
+        if (!loadShader("EngineTest/shaders/D3D12/Forward/M6ProbeInject.comp.cso",
+                        "Engine/Graphics/Vulkan/shaders/Forward/M6ProbeInject.comp.spv",
+                        ShaderStage::Compute, s.injectCs, "M6ProbeInject"))
+            return false;
+        DescriptorSetLayoutBinding b[6];
+        b[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Compute};   // directDiffuse
+        b[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Compute};   // depthTexture
+        b[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Compute};   // gbufferNormal
+        b[3] = {3, DescriptorType::SampledImage, 1, ShaderStage::Compute};   // gbufferMaterial
+        b[4] = {4, DescriptorType::UniformBuffer, 1, ShaderStage::Compute};  // InjectParams
+        b[5] = {5, DescriptorType::StorageImage, 1, ShaderStage::Compute};   // outSH（writeonly）
+        DescriptorSetLayoutDesc dld{};
+        dld.bindingCount = 6;
+        dld.bindings = b;
+        s.injectSetLayout = device->CreateDescriptorSetLayout(dld);
+        PipelineLayoutDesc pld{};
+        pld.setLayoutCount = 1;
+        pld.setLayouts = &s.injectSetLayout;
+        s.injectLayout = device->CreatePipelineLayout(pld);
+        ComputePipelineDesc cpd{};
+        cpd.computeShader = s.injectCs;
+        cpd.layout = s.injectLayout;
+        cpd.threadGroupSize = {64, 1, 1};
+        s.injectPipeline = device->CreateComputePipeline(cpd);
+        if (s.injectSetLayout == handles::INVALID_DESCRIPTOR_SET_LAYOUT ||
+            s.injectLayout == handles::INVALID_PIPELINE_LAYOUT ||
+            s.injectPipeline == handles::INVALID_PIPELINE) {
+            err = "M6ProbeInject pipeline";
+            return false;
+        }
+        g_ledger.setLayouts.insert(s.injectSetLayout);
+        g_ledger.layouts.insert(s.injectLayout);
+        g_ledger.pipelines.insert(s.injectPipeline);
+        BufferDesc bd{};
+        bd.size = sizeof(M6InjectParamsGPU);
+        bd.type = BufferType::Constant;
+        bd.memoryUsage = GPUMemoryUsage::Dynamic;
+        bd.name = "M6InjectParams";
+        s.injectUbo = device->CreateBuffer(bd);
+        if (s.injectUbo == handles::INVALID_RESOURCE) { err = "M6 inject UBO"; return false; }
+        g_ledger.buffers.insert(s.injectUbo);
+        DescriptorSetDesc dsd{};
+        dsd.layout = s.injectSetLayout;
+        s.injectSet = device->CreateDescriptorSet(dsd);
+        if (s.injectSet == handles::INVALID_DESCRIPTOR_SET) { err = "M6 inject set"; return false; }
+        g_ledger.sets.insert(s.injectSet);
+    }
+
+    // ---- P5 解析链：M6GIResolve.frag → giIndirect（1 RT RGBA16F）----
+    {
+        if (!loadShader("EngineTest/shaders/D3D12/Forward/M6GIResolve.frag.cso",
+                        "Engine/Graphics/Vulkan/shaders/Forward/M6GIResolve.frag.spv",
+                        ShaderStage::Pixel, s.resolveFs, "M6GIResolve"))
+            return false;
+        DescriptorSetLayoutBinding b[8];
+        b[0] = {0, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel};   // DeferredViewData
+        b[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel};    // depthTexture
+        b[2] = {2, DescriptorType::SampledImage, 1, ShaderStage::Pixel};    // gbufferAlbedo
+        b[3] = {3, DescriptorType::SampledImage, 1, ShaderStage::Pixel};    // gbufferNormal
+        b[4] = {4, DescriptorType::SampledImage, 1, ShaderStage::Pixel};    // gbufferMaterial
+        b[5] = {5, DescriptorType::SampledImage, 1, ShaderStage::Pixel};    // giProbeSH（texture3D）
+        b[6] = {6, DescriptorType::Sampler, 1, ShaderStage::Pixel};         // giProbeSampler
+        b[7] = {7, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel};   // ResolveParams
+        DescriptorSetLayoutDesc dld{};
+        dld.bindingCount = 8;
+        dld.bindings = b;
+        s.resolveSetLayout = device->CreateDescriptorSetLayout(dld);
+        PipelineLayoutDesc pld{};
+        pld.setLayoutCount = 1;
+        pld.setLayouts = &s.resolveSetLayout;
+        s.resolveLayout = device->CreatePipelineLayout(pld);
+        if (s.resolveSetLayout == handles::INVALID_DESCRIPTOR_SET_LAYOUT ||
+            s.resolveLayout == handles::INVALID_PIPELINE_LAYOUT) {
+            err = "M6GIResolve layouts";
+            return false;
+        }
+        g_ledger.setLayouts.insert(s.resolveSetLayout);
+        g_ledger.layouts.insert(s.resolveLayout);
+        GraphicsPipelineDesc gpd = fullscreenDesc(s.resolveFs, s.resolveLayout);
+        gpd.renderTargetCount = 1;
+        gpd.renderTargetFormats[0] = DataFormat::RGBA16_Float;   // giIndirect
+        s.resolvePipeline = device->CreateGraphicsPipeline(gpd);
+        if (s.resolvePipeline == handles::INVALID_PIPELINE) { err = "M6GIResolve pipeline"; return false; }
+        g_ledger.pipelines.insert(s.resolvePipeline);
+        BufferDesc bd{};
+        bd.size = sizeof(M6ResolveParamsGPU);
+        bd.type = BufferType::Constant;
+        bd.memoryUsage = GPUMemoryUsage::Dynamic;
+        bd.name = "M6ResolveParams";
+        s.resolveUbo = device->CreateBuffer(bd);
+        if (s.resolveUbo == handles::INVALID_RESOURCE) { err = "M6 resolve UBO"; return false; }
+        g_ledger.buffers.insert(s.resolveUbo);
+        DescriptorSetDesc dsd{};
+        dsd.layout = s.resolveSetLayout;
+        s.resolveSet = device->CreateDescriptorSet(dsd);
+        if (s.resolveSet == handles::INVALID_DESCRIPTOR_SET) { err = "M6 resolve set"; return false; }
+        g_ledger.sets.insert(s.resolveSet);
+    }
+
+    // ---- P6 合成链：M6Composite.frag → litRTFormat（post on→hdr / off→color）----
+    {
+        if (!loadShader("EngineTest/shaders/D3D12/Forward/M6Composite.frag.cso",
+                        "Engine/Graphics/Vulkan/shaders/Forward/M6Composite.frag.spv",
+                        ShaderStage::Pixel, s.compFs, "M6Composite"))
+            return false;
         DescriptorSetLayoutBinding b[2];
-        b[0] = {0, DescriptorType::StorageImage, 1, ShaderStage::Compute};
-        b[1] = {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute};
+        b[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel};    // giDirect
+        b[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel};    // giIndirect
         DescriptorSetLayoutDesc dld{};
         dld.bindingCount = 2;
         dld.bindings = b;
-        s.bakeSetLayout = device->CreateDescriptorSetLayout(dld);
+        s.compSetLayout = device->CreateDescriptorSetLayout(dld);
         PipelineLayoutDesc pld{};
         pld.setLayoutCount = 1;
-        pld.setLayouts = &s.bakeSetLayout;
-        s.bakeLayout = device->CreatePipelineLayout(pld);
-        ComputePipelineDesc cpd{};
-        cpd.computeShader = s.bakeCs;
-        cpd.layout = s.bakeLayout;
-        cpd.threadGroupSize = {4, 4, 4};
-        s.bakePipeline = device->CreateComputePipeline(cpd);
-        if (s.bakeSetLayout == handles::INVALID_DESCRIPTOR_SET_LAYOUT ||
-            s.bakeLayout == handles::INVALID_PIPELINE_LAYOUT ||
-            s.bakePipeline == handles::INVALID_PIPELINE) {
-            err = "M6ProbeBake pipeline";
+        pld.setLayouts = &s.compSetLayout;
+        s.compLayout = device->CreatePipelineLayout(pld);
+        if (s.compSetLayout == handles::INVALID_DESCRIPTOR_SET_LAYOUT ||
+            s.compLayout == handles::INVALID_PIPELINE_LAYOUT) {
+            err = "M6Composite layouts";
             return false;
         }
-        g_ledger.setLayouts.insert(s.bakeSetLayout);
-        g_ledger.layouts.insert(s.bakeLayout);
-        g_ledger.pipelines.insert(s.bakePipeline);
-        BufferDesc bd{};
-        bd.size = sizeof(M6BakeParamsGPU);
-        bd.type = BufferType::Constant;
-        bd.memoryUsage = GPUMemoryUsage::Dynamic;
-        bd.name = "M6BakeParams";
-        s.bakeUbo = device->CreateBuffer(bd);
-        if (s.bakeUbo == handles::INVALID_RESOURCE) { err = "M6 bake UBO"; return false; }
-        g_ledger.buffers.insert(s.bakeUbo);
+        g_ledger.setLayouts.insert(s.compSetLayout);
+        g_ledger.layouts.insert(s.compLayout);
+        GraphicsPipelineDesc gpd = fullscreenDesc(s.compFs, s.compLayout);
+        gpd.renderTargetCount = 1;
+        gpd.renderTargetFormats[0] = litRTFormat;   // 与 M4 light pass 同目标同格式
+        s.compPipeline = device->CreateGraphicsPipeline(gpd);
+        if (s.compPipeline == handles::INVALID_PIPELINE) { err = "M6Composite pipeline"; return false; }
+        g_ledger.pipelines.insert(s.compPipeline);
         DescriptorSetDesc dsd{};
-        dsd.layout = s.bakeSetLayout;
-        s.bakeSet = device->CreateDescriptorSet(dsd);
-        if (s.bakeSet == handles::INVALID_DESCRIPTOR_SET) { err = "M6 bake set"; return false; }
-        g_ledger.sets.insert(s.bakeSet);
+        dsd.layout = s.compSetLayout;
+        s.compSet = device->CreateDescriptorSet(dsd);
+        if (s.compSet == handles::INVALID_DESCRIPTOR_SET) { err = "M6 composite set"; return false; }
+        g_ledger.sets.insert(s.compSet);
     }
 
     // ---- accum 链 ----
@@ -1315,6 +2001,11 @@ bool M6GIInit(RHIDeviceBase* device, M6GIState& s, bool wantD3D12, bool giFull,
             ? "EngineTest/shaders/D3D12/Forward/M6ProbeAccum.comp.cso"
             : "Engine/Graphics/Vulkan/shaders/Forward/M6ProbeAccum.comp.spv";
         std::vector<u8> cb = ReadFileRel(rel);
+        // 同 loadShader 的 D3D12 SHA 门禁（accum 链不走 lambda，独立装载）。
+        if (wantD3D12 && !sha_gate::GateD3D12Cso(rel, cb, "M6ProbeAccum")) {
+            err = "M6ProbeAccum cso sha256 gate";
+            return false;
+        }
         if (cb.empty()) { err = std::string("M6ProbeAccum bytes missing (") + rel + ")"; return false; }
         s.accumCs = device->CreateShader(cb.data(), cb.size(), ShaderStage::Compute, "main");
         if (s.accumCs == handles::INVALID_SHADER) { err = "M6ProbeAccum CreateShader"; return false; }
@@ -1374,10 +2065,11 @@ bool M6GIInit(RHIDeviceBase* device, M6GIState& s, bool wantD3D12, bool giFull,
         g_ledger.samplers.insert(s.histSampler);
     }
 
-    // ---- 3D 纹理面（baked 复用 + grid ping-pong）----
+    // ---- 3D 纹理面（注入输出 + grid ping-pong）：SH-L1 (Nx,Ny,3·Nz)=(8,8,24)，
+    //      slab s∈{0,1,2}=通道 R/G/B，texel(i,j,s·8+k)=(c00,c1-1,c10,c11)----
     {
         TextureDesc td{};
-        td.size = {kM6GridDim, kM6GridDim, kM6GridDim};
+        td.size = {kM6GridDim, kM6GridDim, kM6ShSlabs * kM6GridDim};
         td.format = DataFormat::RGBA16_Float;
         td.type = TextureType::Texture3D;       // 首次入共享宿主的 3D 资源面
         td.mipLevels = 1;
@@ -1391,17 +2083,19 @@ bool M6GIInit(RHIDeviceBase* device, M6GIState& s, bool wantD3D12, bool giFull,
             if (s.grid[i] == handles::INVALID_RESOURCE) { err = "M6 grid texture"; return false; }
             g_ledger.textures.insert(s.grid[i]);
         }
-        td.name = "M6ProbeBaked";
-        td.usage = TextureUsage::UnorderedAccess;   // bake 目标（image load/store）
+        td.name = "M6ProbeInjectOut";
+        td.usage = TextureUsage::UnorderedAccess;   // inject 目标（image store）/ accum typed load
         s.baked = device->CreateTexture(td);
-        if (s.baked == handles::INVALID_RESOURCE) { err = "M6 baked texture"; return false; }
+        if (s.baked == handles::INVALID_RESOURCE) { err = "M6 inject output texture"; return false; }
         g_ledger.textures.insert(s.baked);
 
         BufferDesc rb{};
         rb.type = BufferType::Raw;
-        rb.usage = GPUMemoryUsage::Staging;
-        rb.memoryUsage = GPUMemoryUsage::Staging;
-        rb.size = 8u * 8u * kM6ReadbackRowTexels * 8u;   // z*y*rowTexels*8B=16KB
+        // R19-1：同 M1Readback——CopyTextureToBuffer 的 GPU 写目标须 Readback 位。
+        rb.usage = GPUMemoryUsage::Readback;
+        rb.memoryUsage = GPUMemoryUsage::Readback;
+        rb.size = u64(kM6ShSlabs * kM6GridDim) * kM6GridDim * kM6ReadbackRowTexels * 8u;
+        // = 24 slice * 8 行 * 256B = 49152B（rowLength 32 texel，imageHeight 8）
         rb.name = "M6GIReadback";
         s.readbackBuf = device->CreateBuffer(rb);
         if (s.readbackBuf == handles::INVALID_RESOURCE) { err = "M6 readback buffer"; return false; }
@@ -1410,22 +2104,40 @@ bool M6GIInit(RHIDeviceBase* device, M6GIState& s, bool wantD3D12, bool giFull,
     return true;
 }
 
-// bake 集回填（baked 就绪后一次）。
-void M6BindBakeSet(RHIDeviceBase* device, const M6GIState& s) {
-    if (s.bakeSet == handles::INVALID_DESCRIPTOR_SET) return;
-    DescriptorImageInfo img{};   // baked：UAV image3D store
-    img.imageView = s.baked;
-    img.imageLayout = ResourceState::UnorderedAccess;
+// 注入集逐帧回填（帧目标句柄随 resize 重建而变——每帧重绑，零陈旧句柄；
+// 每帧 submit+wait，更新时无在途使用）。
+void M6BindInjectSet(RHIDeviceBase* device, const M6GIState& s, const FrameTargets& ft) {
+    if (s.injectSet == handles::INVALID_DESCRIPTOR_SET) return;
+    DescriptorImageInfo dd{}, depth{}, normal{}, material{}, outImg{};
+    dd.imageView = ft.giDirectDiffuse;   dd.imageLayout = ResourceState::ShaderResource;
+    depth.imageView = ft.depth;          depth.imageLayout = ResourceState::ShaderResource;
+    normal.imageView = ft.gNormal;       normal.imageLayout = ResourceState::ShaderResource;
+    material.imageView = ft.gMaterial;   material.imageLayout = ResourceState::ShaderResource;
+    outImg.imageView = s.baked;          // 注入输出 M6ProbeInjectOut：UAV image3D store
+    outImg.imageLayout = ResourceState::UnorderedAccess;
     DescriptorBufferInfo bi{};
-    bi.buffer = s.bakeUbo; bi.offset = 0; bi.range = sizeof(M6BakeParamsGPU);
-    WriteDescriptorSet w[2]{};
-    w[0].dstSet = s.bakeSet; w[0].dstBinding = 0; w[0].dstArrayElement = 0;
-    w[0].descriptorCount = 1; w[0].descriptorType = DescriptorType::StorageImage;
-    w[0].imageInfo = &img;
-    w[1].dstSet = s.bakeSet; w[1].dstBinding = 1; w[1].dstArrayElement = 0;
-    w[1].descriptorCount = 1; w[1].descriptorType = DescriptorType::UniformBuffer;
-    w[1].bufferInfo = &bi;
-    device->UpdateDescriptorSets(2, w);
+    bi.buffer = s.injectUbo; bi.offset = 0; bi.range = sizeof(M6InjectParamsGPU);
+    struct W { u32 b; DescriptorType t; const DescriptorBufferInfo* ub;
+               const DescriptorImageInfo* ib; };
+    const W ws[6] = {
+        {0, DescriptorType::SampledImage, nullptr, &dd},
+        {1, DescriptorType::SampledImage, nullptr, &depth},
+        {2, DescriptorType::SampledImage, nullptr, &normal},
+        {3, DescriptorType::SampledImage, nullptr, &material},
+        {4, DescriptorType::UniformBuffer, &bi, nullptr},
+        {5, DescriptorType::StorageImage, nullptr, &outImg},
+    };
+    WriteDescriptorSet w[6]{};
+    for (u32 i = 0; i < 6; ++i) {
+        w[i].dstSet = s.injectSet;
+        w[i].dstBinding = ws[i].b;
+        w[i].dstArrayElement = 0;
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = ws[i].t;
+        w[i].bufferInfo = ws[i].ub;
+        w[i].imageInfo = ws[i].ib;
+    }
+    device->UpdateDescriptorSets(6, w);
 }
 
 // accum 集回填（hist/out 由 cur 决定；逐帧重绑——ping-pong 目标切换）。
@@ -1463,28 +2175,114 @@ void M6BindAccumSet(RHIDeviceBase* device, const M6GIState& s) {
     device->UpdateDescriptorSets(5, w);
 }
 
-// 延迟光照 b8 探针纹理逐帧重绑（ping-pong 当前输出）。
-void M6BindDeferredProbe(RHIDeviceBase* device, const M6GIState& s,
-                         const M4DeferredState& d) {
-    if (d.lightSet == handles::INVALID_DESCRIPTOR_SET) return;
-    DescriptorImageInfo img{};
-    // 本帧 accum 输出：M6RecordGI 已翻转 cur（out = grid[翻转前 1-cur] =
-    // grid[翻转后 cur]）——绑定必须在翻转后取 grid[cur]。曾误绑 grid[1-cur]
-    //（=上一帧 history，帧 0 为未定义内容）——off-by-one 已修。
-    img.imageView = s.grid[s.cur];
-    img.imageLayout = ResourceState::ShaderResource;
-    WriteDescriptorSet w{};
-    w.dstSet = d.lightSet; w.dstBinding = 8; w.dstArrayElement = 0;
-    w.descriptorCount = 1; w.descriptorType = DescriptorType::SampledImage;
-    w.imageInfo = &img;
-    device->UpdateDescriptorSets(1, &w);
+// 解析集逐帧回填（帧目标句柄随 resize 变 + ping-pong）：b5 = 本帧 accum 输出
+//（M6RecordGI 已翻转 cur：out = grid[翻转前 1-cur] = grid[翻转后 cur]——
+// 旧 M6BindDeferredProbe 的 off-by-one 教训同此，必须在翻转后取 grid[cur]）。
+void M6BindResolveSet(RHIDeviceBase* device, const M6GIState& s, const FrameTargets& ft,
+                      ResourceHandle viewUbo) {
+    if (s.resolveSet == handles::INVALID_DESCRIPTOR_SET) return;
+    DescriptorBufferInfo vbi{}, rbi{};
+    vbi.buffer = viewUbo; vbi.offset = 0; vbi.range = sizeof(DeferredViewGPU);
+    rbi.buffer = s.resolveUbo; rbi.offset = 0; rbi.range = sizeof(M6ResolveParamsGPU);
+    DescriptorImageInfo depth{}, albedo{}, normal{}, material{}, sh{}, samp{};
+    depth.imageView = ft.depth;        depth.imageLayout = ResourceState::ShaderResource;
+    albedo.imageView = ft.gAlbedo;     albedo.imageLayout = ResourceState::ShaderResource;
+    normal.imageView = ft.gNormal;     normal.imageLayout = ResourceState::ShaderResource;
+    material.imageView = ft.gMaterial; material.imageLayout = ResourceState::ShaderResource;
+    sh.imageView = s.grid[s.cur];      sh.imageLayout = ResourceState::ShaderResource;
+    samp.sampler = s.probeSampler;     // Linear/Clamp（三 slab 各自 trilinear）
+    struct W { u32 b; DescriptorType t; const DescriptorBufferInfo* ub;
+               const DescriptorImageInfo* ib; };
+    const W ws[8] = {
+        {0, DescriptorType::UniformBuffer, &vbi, nullptr},
+        {1, DescriptorType::SampledImage, nullptr, &depth},
+        {2, DescriptorType::SampledImage, nullptr, &albedo},
+        {3, DescriptorType::SampledImage, nullptr, &normal},
+        {4, DescriptorType::SampledImage, nullptr, &material},
+        {5, DescriptorType::SampledImage, nullptr, &sh},
+        {6, DescriptorType::Sampler, nullptr, &samp},
+        {7, DescriptorType::UniformBuffer, &rbi, nullptr},
+    };
+    WriteDescriptorSet w[8]{};
+    for (u32 i = 0; i < 8; ++i) {
+        w[i].dstSet = s.resolveSet;
+        w[i].dstBinding = ws[i].b;
+        w[i].dstArrayElement = 0;
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = ws[i].t;
+        w[i].bufferInfo = ws[i].ub;
+        w[i].imageInfo = ws[i].ib;
+    }
+    device->UpdateDescriptorSets(8, w);
 }
 
-// 帧内 GI 段录制。返回 true=本帧触发历史重置（光变事件检测——
-// GIHistoryValidity 表征：intensity/color/dir 任一变化或首帧）。
+// 合成集逐帧回填（giDirect / giIndirect 随 resize 重建）。
+void M6BindCompositeSet(RHIDeviceBase* device, const M6GIState& s, const FrameTargets& ft) {
+    if (s.compSet == handles::INVALID_DESCRIPTOR_SET) return;
+    DescriptorImageInfo dir{}, ind{};
+    dir.imageView = ft.giDirect;   dir.imageLayout = ResourceState::ShaderResource;
+    ind.imageView = ft.giIndirect; ind.imageLayout = ResourceState::ShaderResource;
+    WriteDescriptorSet w[2]{};
+    w[0].dstSet = s.compSet; w[0].dstBinding = 0; w[0].dstArrayElement = 0;
+    w[0].descriptorCount = 1; w[0].descriptorType = DescriptorType::SampledImage;
+    w[0].imageInfo = &dir;
+    w[1].dstSet = s.compSet; w[1].dstBinding = 1; w[1].dstArrayElement = 0;
+    w[1].descriptorCount = 1; w[1].descriptorType = DescriptorType::SampledImage;
+    w[1].imageInfo = &ind;
+    device->UpdateDescriptorSets(2, w);
+}
+
+// 探针盒（spec §4）：全部可绘 mesh 局部 AABB 并集（model=identity——同 M5
+// 包围球源 mesh->GetLocalAABB()）各向外扩 kM6BoxPad；cell=(max-min)/Nx；
+// normalBias=0.25·min(cell)。写入 s 并一次上传 ResolveParams（盒为场景
+// 常量；InjectParams 逐帧上传时读 s.boxMin/s.cell）。
+bool M6ComputeGridBox(RHIDeviceBase* device, M6GIState& s,
+                      const std::vector<MeshEntry>& meshes, std::string& err) {
+    if (meshes.empty()) { err = "probe box: no meshes"; return false; }
+    float mn[3] = {1e30f, 1e30f, 1e30f}, mx[3] = {-1e30f, -1e30f, -1e30f};
+    for (const MeshEntry& e : meshes) {
+        const rhi::AABB& bb = e.mesh->GetLocalAABB();
+        mn[0] = std::min(mn[0], bb.min.x); mx[0] = std::max(mx[0], bb.max.x);
+        mn[1] = std::min(mn[1], bb.min.y); mx[1] = std::max(mx[1], bb.max.y);
+        mn[2] = std::min(mn[2], bb.min.z); mx[2] = std::max(mx[2], bb.max.z);
+    }
+    for (int a = 0; a < 3; ++a) {
+        mn[a] -= kM6BoxPad;
+        mx[a] += kM6BoxPad;
+        if (!(mx[a] > mn[a])) { err = "probe box: degenerate mesh AABB union"; return false; }
+    }
+    const float n = float(kM6GridDim);
+    s.boxMin = math::v4{mn[0], mn[1], mn[2], 0.0f};
+    s.boxMax = math::v4{mx[0], mx[1], mx[2], 0.0f};
+    s.cell = math::v4{(mx[0] - mn[0]) / n, (mx[1] - mn[1]) / n, (mx[2] - mn[2]) / n, 0.0f};
+    s.normalBias = 0.25f * std::min(s.cell.x, std::min(s.cell.y, s.cell.z));
+    M6ResolveParamsGPU rp{};
+    rp.gridMin = math::v4{mn[0], mn[1], mn[2], s.normalBias};
+    rp.gridInvExtent = math::v4{1.0f / (mx[0] - mn[0]), 1.0f / (mx[1] - mn[1]),
+                                1.0f / (mx[2] - mn[2]), 0.0f};
+    rp.gridDims = math::v4{n, n, n, 0.0f};
+    if (!device->UpdateBufferData(s.resolveUbo, &rp, sizeof(rp), 0)) {
+        err = "M6 resolve UBO upload";
+        return false;
+    }
+    std::cout << "[GI] grid box min=(" << mn[0] << "," << mn[1] << "," << mn[2]
+              << ") max=(" << mx[0] << "," << mx[1] << "," << mx[2]
+              << ") cell=(" << s.cell.x << "," << s.cell.y << "," << s.cell.z
+              << ") dims=" << kM6GridDim << "x" << kM6GridDim << "x" << kM6GridDim
+              << " sh=L1(" << kM6GridDim << "x" << kM6GridDim << "x"
+              << kM6ShSlabs * kM6GridDim << ") normalBias=" << s.normalBias
+              << std::endl;
+    return true;
+}
+
+// 帧内 GI compute 段录制（P3 注入 → P4 累积 → ladder 读回 → ping-pong 翻转）。
+// 前置（调用方保证）：本帧 P2 直射 pass 已录，giDirectDiffuse/深度/GBuffer
+// 已转 SRV。返回 true=本帧触发历史重置（光变事件检测——GIHistoryValidity
+// 表征：intensity/color/dir 任一变化或首帧）。
 bool M6RecordGI(RHIDeviceBase* device, RHICommandBuffer* cmd, M6GIState& s,
-                const LightState& light, u32 frame, bool wantLadder,
-                u32 totalFrames) {
+                const FrameTargets& ft, const math::m4x4& invViewProj,
+                const math::v4& cameraPos, const LightState& light, u32 frame,
+                bool wantLadder, u32 totalFrames) {
     // 重置检测（步进语义：光 keyframe 档位切换帧）。
     const bool reset = !s.havePrevLight ||
         light.intensity != s.prevLight.intensity ||
@@ -1496,19 +2294,25 @@ bool M6RecordGI(RHIDeviceBase* device, RHICommandBuffer* cmd, M6GIState& s,
         light.dirToLight.z != s.prevLight.dirToLight.z;
     s.prevLight = light;
     s.havePrevLight = true;
+    s.lastReset = reset;
+    s.framesSinceReset = reset ? 0u : s.framesSinceReset + 1u;
     if (reset) {
         ++s.resetCount;
         std::cerr << "[GI] frame " << frame << " RESET (light event; history zeroed)"
                   << std::endl;
     }
 
-    // UBO 逐帧上传（提交前 host 写；确定性——光参数+帧级 reset 标志唯一输入）
-    M6BakeParamsGPU bp{};
-    bp.dirAndIntensity = math::v4{light.dirToLight.x, light.dirToLight.y,
-                                  light.dirToLight.z, light.intensity};
-    bp.lightColor = math::v4{light.color.x, light.color.y, light.color.z, 0.0f};
-    Require(device->UpdateBufferData(s.bakeUbo, &bp, sizeof(bp), 0),
-            "M6 bake UBO upload");
+    // UBO 逐帧上传（提交前 host 写；确定性——相机/盒/屏幕尺寸 + 帧级 reset
+    // 标志唯一输入；光参数只经 giDirectDiffuse 间接进入）。
+    M6InjectParamsGPU ip{};
+    ip.invViewProjection = invViewProj;    // = M4 DeferredView 同一 Inverse(proj*view)
+    ip.cameraPos = cameraPos;
+    ip.gridMin = s.boxMin;
+    ip.cellSize = s.cell;
+    ip.gridDims = math::v4{float(kM6GridDim), float(kM6GridDim), float(kM6GridDim), 0.0f};
+    ip.screen = math::v4{float(ft.w), float(ft.h), float(kM6InjectStride), 0.0f};
+    Require(device->UpdateBufferData(s.injectUbo, &ip, sizeof(ip), 0),
+            "M6 inject UBO upload");
     M6AccumParamsGPU ap{};
     ap.flags = math::v4{reset ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
     Require(device->UpdateBufferData(s.accumUbo, &ap, sizeof(ap), 0),
@@ -1516,7 +2320,8 @@ bool M6RecordGI(RHIDeviceBase* device, RHICommandBuffer* cmd, M6GIState& s,
 
     const ResourceHandle hist = s.grid[s.cur];
     const ResourceHandle out = s.grid[1u - s.cur];
-    M6BindAccumSet(device, s);   // cur 语义：hist=grid[cur] out=grid[1-cur]
+    M6BindInjectSet(device, s, ft);  // 本帧帧目标句柄（resize 安全）
+    M6BindAccumSet(device, s);       // cur 语义：hist=grid[cur] out=grid[1-cur]
 
     auto barrier = [&](ResourceHandle tex, ResourceState after) {
         ResourceBarrier rb{};
@@ -1528,26 +2333,28 @@ bool M6RecordGI(RHIDeviceBase* device, RHICommandBuffer* cmd, M6GIState& s,
         cmd->InsertBarrier(&rb, 1);
     };
 
-    // ① bake：baked →UAV，dispatch（解析烘焙；512 texel 全覆盖）
+    // ① 注入：注入输出（M6ProbeInjectOut）→UAV，dispatch（一 workgroup = 一探针，
+    //   8×8×8 组；每组 invocation 0 写三 slab → (8,8,24) 纹素全覆盖）
     barrier(s.baked, ResourceState::UnorderedAccess);
-    cmd->BindComputePipeline(s.bakePipeline);
-    const DescriptorSetHandle bakeSets[] = {s.bakeSet};
-    cmd->BindDescriptorSets(PipelineBindPoint::Compute, s.bakeLayout, 0, 1,
-                            bakeSets, 0, nullptr);
-    cmd->Dispatch(kM6GridDim / 4, kM6GridDim / 4, kM6GridDim / 4);
-    // ② compute→compute 显式依赖（bake store → accum typed load；§1 约定①）
+    cmd->BindComputePipeline(s.injectPipeline);
+    const DescriptorSetHandle injectSets[] = {s.injectSet};
+    cmd->BindDescriptorSets(PipelineBindPoint::Compute, s.injectLayout, 0, 1,
+                            injectSets, 0, nullptr);
+    cmd->Dispatch(kM6GridDim, kM6GridDim, kM6GridDim);
+    // ② compute→compute 显式依赖（inject store → accum typed load；§1 约定①）
     cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                        AccessFlag::ShaderWrite,
                        AccessFlag::ShaderRead | AccessFlag::ShaderWrite);
-    // ③ accum：hist→SRV（sampler3D）、out→UAV（store），dispatch（EMA）
+    // ③ accum：hist→SRV（sampler3D）、out→UAV（store），dispatch（EMA；
+    //   local 4x4x4 → (Nx/4, Ny/4, 3Nz/4) = (2,2,6)）
     barrier(hist, ResourceState::ShaderResource);
     barrier(out, ResourceState::UnorderedAccess);
     cmd->BindComputePipeline(s.accumPipeline);
     const DescriptorSetHandle accumSets[] = {s.accumSet};
     cmd->BindDescriptorSets(PipelineBindPoint::Compute, s.accumLayout, 0, 1,
                             accumSets, 0, nullptr);
-    cmd->Dispatch(kM6GridDim / 4, kM6GridDim / 4, kM6GridDim / 4);
-    // ④ out UAV→SRV（compute store → 延迟光照 tri-linear 采样）
+    cmd->Dispatch(kM6GridDim / 4, kM6GridDim / 4, kM6ShSlabs * kM6GridDim / 4);
+    // ④ out UAV→SRV（compute store → P5 解析 trilinear 采样）
     cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::FragmentShader,
                        AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
     barrier(out, ResourceState::ShaderResource);
@@ -1563,41 +2370,69 @@ bool M6RecordGI(RHIDeviceBase* device, RHICommandBuffer* cmd, M6GIState& s,
         cr.bufferImageHeight = kM6GridDim;
         cr.imageSubresource = {0, 0, 1};
         cr.imageOffset = {0, 0, 0};
-        cr.imageExtent = {kM6GridDim, kM6GridDim, kM6GridDim};
+        cr.imageExtent = {kM6GridDim, kM6GridDim, kM6ShSlabs * kM6GridDim};
         cmd->CopyTextureToBuffer(out, s.readbackBuf, &cr, 1);
         s.readbackPending = true;
     }
-    s.cur = 1u - s.cur;   // ping-pong 翻转（out 成为下一帧 history）
+    s.cur = 1u - s.cur;   // ping-pong 翻转（out 成为下一帧 history；本帧 P5 读 grid[cur]）
     return reset;
 }
 
-// 提交后读回验证：网格均值阶梯行（[GI_MEAN]，f16 解码）+ 中央 slice PPM
-//（RHI_GI_DUMP=1）。reset 跳变/单调收敛证据 = 逐帧 [GI_MEAN] 序列。
+// IEEE binary16 → binary32 完整解码（含次正规/±0/Inf/NaN）。旧 M6 ladder
+// 把次正规数冲成 0；SH 系数在暗区/近 reset 帧可落入次正规段（< 2^-14），
+// 均值换算需逐位精确。
+float M6HalfToFloat(u16 h) {
+    const u32 sign = (u32(h) >> 15) & 1u;
+    const u32 ex = (u32(h) >> 10) & 0x1Fu;
+    u32 mant = u32(h) & 0x3FFu;
+    u32 bits;
+    if (ex == 0u) {
+        if (mant == 0u) {
+            bits = sign << 31;                                  // ±0
+        } else {                                                // 次正规：规格化
+            u32 e = 0;
+            while ((mant & 0x400u) == 0u) { mant <<= 1; ++e; }
+            mant &= 0x3FFu;
+            bits = (sign << 31) | ((113u - e) << 23) | (mant << 13);
+        }
+    } else if (ex == 31u) {
+        bits = (sign << 31) | 0x7F800000u | (mant << 13);       // Inf/NaN
+    } else {
+        bits = (sign << 31) | ((ex + 112u) << 23) | (mant << 13);
+    }
+    float fv;
+    std::memcpy(&fv, &bits, 4);
+    return fv;
+}
+
+// 提交后读回验证：[GI_MEAN] 阶梯行 = 512 探针各向同性平均入射辐射
+// 0.282095·c00 的逐通道均值（slab s = 通道 s，取 .x=c00；f16 完整解码）
+// + 中央 slice(z=4) 同量 PPM（RHI_GI_DUMP=1）。reset 跳变/单调收敛证据 =
+// 逐帧 [GI_MEAN] 序列。
 void M6VerifyGI(RHIDeviceBase* device, M6GIState& s,
                 const std::string& captureDir, u32 frame) {
     const u16* raw = static_cast<const u16*>(device->MapBuffer(s.readbackBuf));
     if (!raw) { Fail("M6 GI readback map"); return; }
-    auto f16 = [](u16 h) {
-        const u32 sign = (h >> 15) & 1u, ex = (h >> 10) & 0x1Fu, mant = h & 0x3FFu;
-        if (ex == 0u) return 0.0f;
-        const u32 bits = (sign << 31) | ((ex + 112u) << 23) | (mant << 13);
-        float fv; std::memcpy(&fv, &bits, 4);
-        return fv;
+    const u32 slicePitch = kM6GridDim * kM6ReadbackRowTexels;   // texels/z-slice
+    // 纹素 (x,y,z) 的 c00（.x 分量）在读回缓冲中的 u16 下标
+    auto c00At = [&](u32 x, u32 y, u32 z) {
+        return size_t(z) * slicePitch * 4 + size_t(y) * kM6ReadbackRowTexels * 4 +
+               size_t(x) * 4;
     };
-    const u32 slicePitch = kM6GridDim * kM6ReadbackRowTexels;   // texels/slice
     double sum[3] = {0.0, 0.0, 0.0};
-    for (u32 z = 0; z < kM6GridDim; ++z)
-        for (u32 y = 0; y < kM6GridDim; ++y)
-            for (u32 x = 0; x < kM6GridDim; ++x) {
-                const size_t t = size_t(z) * slicePitch + size_t(y) * kM6ReadbackRowTexels + x;
-                for (u32 c = 0; c < 3; ++c) sum[c] += f16(raw[t * 4 + c]);
-            }
+    for (u32 ch = 0; ch < kM6ShSlabs; ++ch)
+        for (u32 z = 0; z < kM6GridDim; ++z)
+            for (u32 y = 0; y < kM6GridDim; ++y)
+                for (u32 x = 0; x < kM6GridDim; ++x)
+                    sum[ch] += M6HalfToFloat(raw[c00At(x, y, ch * kM6GridDim + z)]);
     const double n = double(kM6GridDim) * kM6GridDim * kM6GridDim;
-    std::cerr << "[GI_MEAN] frame " << frame << " r=" << sum[0] / n
-              << " g=" << sum[1] / n << " b=" << sum[2] / n << std::endl;
+    std::cerr << "[GI_MEAN] frame " << frame << " r=" << kM6ShY00 * sum[0] / n
+              << " g=" << kM6ShY00 * sum[1] / n << " b=" << kM6ShY00 * sum[2] / n
+              << std::endl;
     ++s.readbackFrames;
 
-    // 中央 slice(z=4) PPM（F6-6 中间输出；HDR 贴 255 预览，同 RHI_HDR_DUMP 惯例）
+    // 中央 slice(z=4) PPM：各向同性值 0.282095·c00（HDR 贴 255 预览，同
+    // RHI_HDR_DUMP 惯例；F6-6 中间输出定位）
     static const bool s_dump = [] {
         const char* d = std::getenv("RHI_GI_DUMP");
         return d && d[0] == '1';
@@ -1608,11 +2443,11 @@ void M6VerifyGI(RHIDeviceBase* device, M6GIState& s,
         pf << "P6\n" << kM6GridDim << " " << kM6GridDim << "\n255\n";
         for (u32 y = 0; y < kM6GridDim; ++y)
             for (u32 x = 0; x < kM6GridDim; ++x) {
-                const size_t t = size_t(4) * slicePitch + size_t(y) * kM6ReadbackRowTexels + x;
                 u8 rgb[3];
-                for (u32 c = 0; c < 3; ++c) {
-                    const float v = f16(raw[t * 4 + c]);
-                    rgb[c] = v <= 0.0f ? 0 : (v >= 1.0f ? 255 : u8(v * 255.0f + 0.5f));
+                for (u32 ch = 0; ch < kM6ShSlabs; ++ch) {
+                    const float v = float(kM6ShY00 *
+                        M6HalfToFloat(raw[c00At(x, y, ch * kM6GridDim + 4u)]));
+                    rgb[ch] = v <= 0.0f ? 0 : (v >= 1.0f ? 255 : u8(v * 255.0f + 0.5f));
                 }
                 pf.write(reinterpret_cast<const char*>(rgb), 3);
             }
@@ -1649,8 +2484,8 @@ std::array<math::v4, 6> M5ExtractFrustumPlanes(const math::m4x4& vp) {
     // N=row3+row2 F=row3-row2；归一化=4 分量长度（镜像 GPUCullingPipeline
     // mkPlane 惯例）。GPU 只做点积 → 约定差异零风险。
     auto row = [&vp](int i) {
-        return math::v4{vp.columns[0][i], vp.columns[1][i], vp.columns[2][i],
-                        vp.columns[3][i]};
+        return math::v4{math::elem(vp, 0, i), math::elem(vp, 1, i),
+                        math::elem(vp, 2, i), math::elem(vp, 3, i)};
     };
     const math::v4 r0 = row(0), r1 = row(1), r2 = row(2), r3 = row(3);
     auto mk = [](const math::v4& a, float sign, const math::v4& b) {
@@ -1700,7 +2535,7 @@ struct M5GpuDrivenState {
     ResourceHandle paramsBuf{handles::INVALID_RESOURCE};    // 128B UBO
     ResourceHandle flagsResetBuf{handles::INVALID_RESOURCE};// 16B UBO 恒 {1,0,0,0}
     ResourceHandle flagsCullBuf{handles::INVALID_RESOURCE}; // 16B UBO 恒 {0,0,0,0}
-    ResourceHandle readbackBuf{handles::INVALID_RESOURCE};  // staging: args+counter
+    ResourceHandle readbackBuf{handles::INVALID_RESOURCE};  // readback: args+counter
     u32 meshCount{0};
     float maxDist{250.0f};
     std::vector<M5InstanceGPU> cpuInst;   // 上传同源 CPU 镜像（谓词复算输入）
@@ -1724,7 +2559,15 @@ bool M5GpuDrivenInit(RHIDeviceBase* device, M5GpuDrivenState& s,
     g_ledger.shaders.insert(s.cs);
 
     DescriptorSetLayoutBinding b[5];
+    // b0 readonly 必须显式声明：M5Cull.comp 的 inst 是 `readonly buffer`
+    //（GLSL 存储限定符），spirv-cross HLSL 链产出 ByteAddressBuffer
+    // t0(space0) = SRV；D3D12 ClassifyBinding 按 readonly 选 SRV/UAV range
+    //——缺省 false 会生成 UAV u0，根签名零 SRV range，Windows 十八测 #882
+    //（CS_ROOT_SIGNATURE_MISMATCH: SRV t0 未绑定）即此。b2/b3 是
+    // writeonly/coherent 写类（u2/u3 UAV），保持缺省。Vulkan/Metal 不消费
+    // readonly（仅 D3D12/Dawn），此位为后端中立修饰。
     b[0] = {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute};  // inst
+    b[0].readonly = true;                                                 // readonly load → t0 SRV
     b[1] = {1, DescriptorType::UniformBuffer, 1, ShaderStage::Compute};  // params
     b[2] = {2, DescriptorType::StorageBuffer, 1, ShaderStage::Compute};  // args
     b[3] = {3, DescriptorType::StorageBuffer, 1, ShaderStage::Compute};  // counter
@@ -1787,15 +2630,24 @@ bool M5GpuDrivenInit(RHIDeviceBase* device, M5GpuDrivenState& s,
     bd.type = BufferType::Indirect;
     bd.usage = GPUMemoryUsage::Static;
     bd.size = u64(s.meshCount) * 20;   // VkDrawIndexedIndirectCommand×N
+    // R19-1：UAV 写目标显式 Storage 位（引擎惯例=GPUDrivenDrawPipeline 的
+    // Indirect|Storage）——D3D12Buffer 据此路由 ALLOW_UNORDERED_ACCESS
+    // （CreateUnorderedAccessView 契约）；Vulkan 侧据此补 STORAGE_BUFFER
+    // usage（原 Indirect 型缺此位 = 基线日志 4 条 pDescriptorWrites
+    // STORAGE_BUFFER validation error 的根因）。
+    bd.bindFlags = static_cast<u32>(BufferUsageFlags::Indirect) |
+                   static_cast<u32>(BufferUsageFlags::Storage);
     bd.name = "M5DrawArgs";
     s.argsBuf = device->CreateBuffer(bd);
     bd.type = BufferType::Raw;
     bd.size = 4;
+    bd.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);  // 同上（UAV 写目标）
     bd.name = "M5VisibleCounter";
     s.counterBuf = device->CreateBuffer(bd);
     bd.type = BufferType::Constant;
     bd.usage = GPUMemoryUsage::Dynamic;
     bd.memoryUsage = GPUMemoryUsage::Dynamic;
+    bd.bindFlags = 0;   // UBO 无 storage 语义（清掉上位残留）
     bd.size = sizeof(M5CullParamsGPU);
     bd.name = "M5CullParams";
     s.paramsBuf = device->CreateBuffer(bd);
@@ -1805,8 +2657,9 @@ bool M5GpuDrivenInit(RHIDeviceBase* device, M5GpuDrivenState& s,
     bd.name = "M5CullFlagsCull";
     s.flagsCullBuf = device->CreateBuffer(bd);
     bd.type = BufferType::Raw;
-    bd.usage = GPUMemoryUsage::Staging;
-    bd.memoryUsage = GPUMemoryUsage::Staging;
+    // R19-1：同 M1Readback——CopyBuffer 的 GPU 写目标须 Readback 位。
+    bd.usage = GPUMemoryUsage::Readback;
+    bd.memoryUsage = GPUMemoryUsage::Readback;
     bd.size = u64(s.meshCount) * 20 + 16;   // args + counter（16B 对齐尾）
     bd.name = "M5Readback";
     s.readbackBuf = device->CreateBuffer(bd);
@@ -1923,6 +2776,20 @@ u32 M5RecordCull(RHIDeviceBase* device, RHICommandBuffer* cmd, M5GpuDrivenState&
     }
 
     // ---- stage0：单线程清零计数器（flags.resetMode=1，setReset）----
+    // R19-1：args/counter 现创建带 UAV 标志（DEFAULT 堆 storage buffer，
+    // CreateUnorderedAccessView 契约）——UAV 标志资源失去 simultaneous-
+    // access 隐式提升，dispatch UAV 写前需显式转入 UnorderedAccess
+    // （tracker 驱动：首帧 COMMON→UAV、后续帧 CopySource→UAV 均合法对；
+    // Vulkan 侧 buffer barrier 跳过=零影响，§4.4 已知债务）。
+    for (ResourceHandle h : {s.argsBuf, s.counterBuf}) {
+        ResourceBarrier rb{};
+        rb.resource = h;
+        rb.beforeState = ResourceState::UnorderedAccess;  // 调用方声明（参考）
+        rb.afterState = ResourceState::UnorderedAccess;
+        rb.subresource = 0xFFFFFFFF;
+        rb.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&rb, 1);
+    }
     cmd->BindComputePipeline(s.pipeline);
     {
         const DescriptorSetHandle sets[] = {s.setReset};
@@ -1978,6 +2845,29 @@ void M5RecordReadback(RHICommandBuffer* cmd, M5GpuDrivenState& s) {
     // InsertBarrier 的 buffer 声明不能替代真实依赖）
     cmd->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
                        AccessFlag::ShaderWrite, AccessFlag::TransferRead);
+    // R21-A：读回拷贝源显式转换（args：INDIRECT_ARGUMENT→COPY_SOURCE、
+    // counter：UAV→COPY_SOURCE）——D3D12 侧 tracker 权威、声明仅参考；此处
+    // 声明真态以便 Vulkan/其他后端语义对照（args 前置态 = M5Execute 的
+    // UAV→INDIRECT_ARGUMENT 显式转换后；counter 前置态 = compute dispatch
+    // UAV 写入态）。Vulkan buffer barrier 跳过=零影响（§4.4 已知债务）。
+    {
+        ResourceBarrier rb{};
+        rb.resource = s.argsBuf;
+        rb.beforeState = ResourceState::IndirectArgument;
+        rb.afterState = ResourceState::CopySource;
+        rb.subresource = 0xFFFFFFFF;
+        rb.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&rb, 1);
+    }
+    {
+        ResourceBarrier rb{};
+        rb.resource = s.counterBuf;
+        rb.beforeState = ResourceState::UnorderedAccess;
+        rb.afterState = ResourceState::CopySource;
+        rb.subresource = 0xFFFFFFFF;
+        rb.queueFamily = 0xFFFFFFFF;
+        cmd->InsertBarrier(&rb, 1);
+    }
     cmd->CopyBuffer(s.argsBuf, s.readbackBuf, 0, 0, u64(s.meshCount) * 20);
     cmd->CopyBuffer(s.counterBuf, s.readbackBuf, 0, u64(s.meshCount) * 20, 4);
     cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
@@ -2143,8 +3033,35 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
         }
     }
 
+    // R19-1 读回侧拷贝布局契约（D3D12 footprint 语义）：Offset 必须 512
+    // 对齐（D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT）、RowPitch 后端按
+    // align(行字节,256) 取（三后端均尊重显式 bufferRowLength：Vulkan
+    // texels / Metal bytesPerRow / D3D12 RowPitch）。统一约定 = 级起点
+    // 512 对齐 + 行距 256 对齐 → 三后端读回内存布局一致。
+    // R21-A 注（二十测 REPORT 点名）：下方循环不递减 dim（各级均按
+    // kSize=8 计行距/高度）= 既有超分配行为——实际槽位 0/2048/4096/6144、
+    // 读回缓冲 6400B（递减 dim 的紧凑推演才是 0/2048/3072/3584、3840B）。
+    // 读回按 mipOff 偏移比较（拷贝与下方校验段同布局同源计算），超分配
+    // 不影响逐字节比较；行为保持零改动（byte-exact 读回已过门禁，不动
+    // 分配逻辑）。原紧凑偏移 0,256,320,336 违 Offset 512 对齐 = 十八测
+    // #849 同族。
+    u64 mipOff[kMipCount]{};
+    u32 mipRowPitch[kMipCount]{};
+    u64 mipReadbackBytes = 0;
+    {
+        u32 dim = kSize;
+        u64 off = 0;
+        for (u32 level = 0; level < kMipCount; ++level) {
+            mipRowPitch[level] = (dim * 4u + 255u) & ~255u;   // 256 对齐行距
+            mipOff[level] = off;
+            off += u64(mipRowPitch[level]) * dim;             // 高度 × 行距
+            off = (off + 511u) & ~u64(511u);                  // 下一级 512 对齐
+        }
+        mipReadbackBytes = mipOff[kMipCount - 1] +
+                           u64(mipRowPitch[kMipCount - 1]) * (kSize >> (kMipCount - 1));
+    }
     // checker 源（列奇偶：x 偶=白 奇=黑——轴翻转不变设计，上传/读取行序
-    // 约定差异不进入期望值）→ staging 上传 texs[0]
+    // 约定差异不进入期望值），紧密 8×8×4。
     u8 checker[kSize * kSize * 4];
     for (u32 y = 0; y < kSize; ++y)
         for (u32 x = 0; x < kSize; ++x) {
@@ -2153,25 +3070,33 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
             p[0] = p[1] = p[2] = v;
             p[3] = 255;
         }
-    ResourceHandle staging = handles::INVALID_RESOURCE, readback = handles::INVALID_RESOURCE;
-    BufferDesc sb{};
-    sb.type = BufferType::Raw;
-    sb.memoryUsage = GPUMemoryUsage::Dynamic;
-    sb.size = sizeof(checker);
-    sb.name = "M5MipUpload";
-    staging = device->CreateBuffer(sb);
-    sb.type = BufferType::Raw;
-    sb.usage = GPUMemoryUsage::Staging;
-    sb.memoryUsage = GPUMemoryUsage::Staging;
-    sb.size = u64(kSize) * kSize * 4 * kMipCount;   // 4 级读回总量
-    sb.name = "M5MipReadback";
-    readback = device->CreateBuffer(sb);
-    if (staging == handles::INVALID_RESOURCE || readback == handles::INVALID_RESOURCE ||
-        !device->UpdateBufferData(staging, checker, sizeof(checker), 0)) {
-        err = "Mipgen staging";
+    // R19-1 上传侧方案 A（§28-2.6-1 转交宿主）：改走 UpdateTextureRegion
+    // （紧密行数据由后端入环展开——D3D12 环侧 footprint 尺寸+512 对齐已
+    // 由 R19-2 §28-2 修复合规；Vulkan/Metal 各走 updateRegion）。原
+    // CommandBuffer 紧凑 staging 拷贝 = 十八测 #869 INVALIDSRCPLACEMENT
+    // 宿主半边（256B 紧凑源 < required 1824B，PLACED_FOOTPRINT 无法表达
+    // 32B 行距）。零后端特判；Dawn 后端该 API 默认 false → 显式报错。
+    TextureRegionUpdate upRegion{};
+    upRegion.width = kSize;
+    upRegion.height = kSize;
+    upRegion.depth = 1;
+    if (!device->UpdateTextureRegion(texs[0], checker, sizeof(checker), upRegion)) {
+        err = "Mipgen upload (UpdateTextureRegion)";
         return false;
     }
-    g_ledger.buffers.insert(staging);
+    ResourceHandle readback = handles::INVALID_RESOURCE;
+    BufferDesc sb{};
+    // R19-1：同 M1Readback——CopyTextureToBuffer 的 GPU 写目标须 Readback 位。
+    sb.type = BufferType::Raw;
+    sb.usage = GPUMemoryUsage::Readback;
+    sb.memoryUsage = GPUMemoryUsage::Readback;
+    sb.size = mipReadbackBytes;
+    sb.name = "M5MipReadback";
+    readback = device->CreateBuffer(sb);
+    if (readback == handles::INVALID_RESOURCE) {
+        err = "Mipgen readback buffer";
+        return false;
+    }
     g_ledger.buffers.insert(readback);
 
     // 每级静态专属 UBO（init 期一次写定——录制期零宿主写，杜绝同帧多
@@ -2249,11 +3174,9 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
     };
     bool rec = mcmd->Begin();
     if (rec) {
-        BufferTextureCopyRegion up{};
-        up.imageSubresource = {0, 0, 1};
-        up.imageExtent = {kSize, kSize, 1};
-        mcmd->CopyBufferToTexture(staging, texs[0], &up, 1);
-        wholeBarrier(texs[0], ResourceState::ShaderResource);   // CopyDest→SR
+        // R19-1：上传已改 init 期 UpdateTextureRegion（方案 A，见上）——
+        // 录制段起点即 SR 声明（更新路径将纹理留在其 resting 布局）。
+        wholeBarrier(texs[0], ResourceState::ShaderResource);   // 更新后→SR 声明
         u32 srcDim = kSize;
         for (u32 level = 1; level < kMipCount; ++level) {
             wholeBarrier(texs[level], ResourceState::UnorderedAccess);  // →UAV
@@ -2271,16 +3194,18 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
             wholeBarrier(texs[level], ResourceState::ShaderResource);  // UAV→SR
             srcDim = dstDim;
         }
-        // 读回 4 级（1-mip 纹理整资源拷贝：内部 SR→XFER_SRC→SR 自洽）
+        // 读回 4 级（1-mip 纹理整资源拷贝：内部 SR→XFER_SRC→SR 自洽）。
+        // R19-1：bufferOffset=512 对齐级起点 + 显式 bufferRowLength（texels）
+        // = 256 对齐行距——满足 D3D12 footprint Offset/RowPitch 契约，且
+        // Vulkan/Metal 同布局（行距 rowPitch、级间隔 mipOff）。
         u32 dim = kSize;
-        u64 byteOff = 0;
         for (u32 level = 0; level < kMipCount; ++level) {
             BufferTextureCopyRegion dr{};
-            dr.bufferOffset = byteOff;
+            dr.bufferOffset = mipOff[level];
+            dr.bufferRowLength = mipRowPitch[level] / 4;   // RGBA8：4B/texel
             dr.imageSubresource = {0, 0, 1};
             dr.imageExtent = {dim, dim, 1};
             mcmd->CopyTextureToBuffer(texs[level], readback, &dr, 1);
-            byteOff += u64(dim) * dim * 4;
             dim = (dim + 1) / 2;
         }
         mcmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
@@ -2299,7 +3224,6 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
     const u8* got = static_cast<const u8*>(device->MapBuffer(readback));
     if (!got) { err = "Mipgen readback map"; return false; }
     u32 dim = kSize, badTexels = 0;
-    u64 off = 0;
     for (u32 level = 0; level < kMipCount; ++level) {
         for (u32 i = 0; i < dim * dim; ++i) {
             u32 exp[4];
@@ -2310,17 +3234,21 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
             } else {
                 exp[0] = exp[1] = exp[2] = 128u; exp[3] = 255u;
             }
+            // R19-1：按拷贝布局寻址（级起点 512 对齐 + 行距 256 对齐）：
+            // texel = mipOff[level] + row*mipRowPitch[level] + col*4。
+            const u64 texel = mipOff[level] +
+                              (i / dim) * u64(mipRowPitch[level]) +
+                              (i % dim) * 4u;
             for (u32 c = 0; c < 4; ++c)
-                if (got[off + u64(i) * 4 + c] != u8(exp[c])) {
+                if (got[texel + c] != u8(exp[c])) {
                     ++badTexels;
                     if (badTexels <= 8)
                         std::cerr << "[MIPGEN][dbg] level=" << level
                                   << " texel=" << i << " ch=" << c
-                                  << " got=" << int(got[off + u64(i) * 4 + c])
+                                  << " got=" << int(got[texel + c])
                                   << " exp=" << exp[c] << std::endl;
                 }
         }
-        off += u64(dim) * dim * 4;
         dim = (dim + 1) / 2;
     }
     device->UnmapBuffer(readback);
@@ -2335,7 +3263,6 @@ bool M5RunMipgenCheck(RHIDeviceBase* device, bool wantD3D12, std::string& err) {
         }
         device->DestroyTexture(texs[level]); g_ledger.textures.erase(texs[level]);
     }
-    device->DestroyBuffer(staging); g_ledger.buffers.erase(staging);
     device->DestroyBuffer(readback); g_ledger.buffers.erase(readback);
     device->DestroySampler(sampler); g_ledger.samplers.erase(sampler);
     device->DestroyPipeline(pipeline); g_ledger.pipelines.erase(pipeline);
@@ -2375,6 +3302,11 @@ struct RunConfig {
     bool mipgen{false};           // M5 F5-5：RHI_TEST_MIPGEN=1 独立 mipgen 验证
     bool gi{false};               // M6 F6-2：RHI_TEST_GI=1 启用 probe-grid GI 切片
     bool giLadder{true};          // 收敛读回阶梯（[GI_MEAN] 每 5 帧+重置帧+末帧）
+    // M6 spec §6.5：RHI_GI_EXPORT_FRAMES=<csv> 原始浮点导出帧（DEFERRED=1 时
+    // 生效，GI on/off 均可；空 = 不导出，默认路径零影响）+ 导出目录
+    //（RHI_GI_EXPORT_DIR，空 = captureDir）。
+    std::unordered_set<u32> giExportFrames;
+    std::string giExportDir;
     std::unordered_set<u32> captureFrames;
     u32 resizeFrame{0xFFFFFFFFu}, restoreFrame{0xFFFFFFFFu};
     u32 resizeW{1600}, resizeH{900};
@@ -2642,7 +3574,8 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
         gpd.vertexBindings[0].perVertex = true;
         gpd.topology = PrimitiveTopology::TriangleList;
         gpd.fillMode = FillMode::Solid;
-        gpd.cullMode = CullMode::Back;
+        // F2：投影 y 行取反使帧缓冲空间绕序变号，cull 对换保同一批物理面
+        gpd.cullMode = CullMode::Front;
         gpd.renderTargetCount = 1;
         gpd.renderTargetFormats[0] = litRTFormat;   // M3：post on → RGBA16F HDR
         gpd.depthStencilFormat = DataFormat::D32_Float;
@@ -2697,7 +3630,8 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
         lpd.vertexBindings[0].stride = 32;
         lpd.vertexBindings[0].perVertex = true;
         lpd.topology = PrimitiveTopology::TriangleList;
-        lpd.cullMode = CullMode::Back;
+        // F2：投影 y 行取反使绕序变号，cull 对换（与 M1 lit 同理）
+        lpd.cullMode = CullMode::Front;
         lpd.renderTargetCount = 1;
         lpd.renderTargetFormats[0] = litRTFormat;   // M3：post on → RGBA16F HDR
         lpd.depthStencilFormat = DataFormat::D32_Float;
@@ -2829,7 +3763,8 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
             gpd.vertexBindings[0].perVertex = true;
             gpd.topology = PrimitiveTopology::TriangleList;
             gpd.fillMode = FillMode::Solid;
-            gpd.cullMode = CullMode::Back;
+            // F2：投影 y 行取反使绕序变号，cull 对换（与 M1 lit 同理）
+            gpd.cullMode = CullMode::Front;
             gpd.renderTargetCount = 3;                      // F4-2 MRT
             gpd.renderTargetFormats[0] = DataFormat::RGBA8_UNorm;
             gpd.renderTargetFormats[1] = DataFormat::RG16_Float;
@@ -2844,6 +3779,8 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
             // b8 探针 3D 纹理/b9 tri-linear 采样器/b10 GIParams UBO——
             // 反射契约 M4DeferredLight.frag 一一对应；GI=0 时 b8 绑黑
             // 1x1x1 占位 + giScale=0，输出逐位不变）；无 push。
+            // GI=1 时 M6 P2 直射 pass（M6DeferredDirect.frag）复用本布局与
+            // lightSet，只消费 b0-b7（M4 light pass 不运行）。
             DescriptorSetLayoutBinding lb[11];
             lb[0] = {0, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel};
             lb[1] = {1, DescriptorType::UniformBuffer, 1, ShaderStage::Pixel};
@@ -2924,21 +3861,31 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
 
     // ---- M6 GI 段资源（F6-2/F6-3；RHI_TEST_DEFERRED=1 时建 b8/b9/b10 面
     //      ——GI=0 为黑 1x1x1 占位+scale=0（默认路径逐位不变）；RHI_TEST_GI=1
-    //      加 bake/accum compute 链 + 8x8x8 RGBA16F 3D ping-pong 网格）----
+    //      加 P2 直射/P3 注入/P4 accum/P5 解析/P6 合成链 + (8,8,24) RGBA16F
+    //      SH 3D ping-pong 网格；探针盒在场景加载后由 mesh AABB 派生）----
     M6GIState m6gi;
     if (ok && cfg.deferred) {
         std::string m6err;
-        if (!M6GIInit(device, m6gi, cfg.wantD3D12, cfg.gi, m6err)) {
+        if (!M6GIInit(device, m6gi, cfg.wantD3D12, cfg.gi, deferred4.lightLayout,
+                      litRTFormat, m6err)) {
             Fail("M6 GI init: " + m6err);
             ok = false;
         } else {
             if (cfg.gi) {
-                M6BindBakeSet(device, m6gi);   // baked 句柄一次回填
-                std::cout << "[GI] init: 8x8x8 RGBA16F Texture3D ping-pong grid, "
-                             "bake(M6ProbeBake.comp, UAV store)+accum(M6Probe"
-                             "Accum.comp, UAV load+SRV hist+UAV store, EMA "
-                             "hist*0.9+new*0.1, reset=history-zero)"
-                          << std::endl;
+                std::cout << "[GI] init: direct-only deferred input (M6DeferredDirect "
+                             "MRT2 RGBA16F: direct / directDiffuse, no ambient) -> "
+                             "SH-L1 inject (M6ProbeInject.comp, 1 probe/workgroup "
+                             "64x1x1, screen stride " << kM6InjectStride
+                          << "px, single bounce, no visibility, camera-visible "
+                             "emitters only) -> EMA accum (M6ProbeAccum.comp "
+                             "hist*0.9+new*0.1, reset=history-zero) -> resolve "
+                             "(M6GIResolve.frag albedo*E_h(N) -> independent "
+                             "indirect RGBA16F) -> composite (M6Composite.frag "
+                             "direct+indirect once, before post); probe grid "
+                          << kM6GridDim << "x" << kM6GridDim << "x" << kM6GridDim
+                          << " SH-L1 Texture3D RGBA16F (" << kM6GridDim << "x"
+                          << kM6GridDim << "x" << kM6ShSlabs * kM6GridDim
+                          << ") ping-pong" << std::endl;
             }
         }
     }
@@ -2972,6 +3919,17 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
 
     // ---- Sponza 场景加载（同源资产 + 逐 mesh albedo）----
     std::vector<MeshEntry> meshes;
+    // 纹理按来源去重（2026-11-11，主堆墙解锁）：键 = 解析后的纹理文件路径
+    //（来源身份）；fallback 白纹理键 = 空串。创建参数恒同证明：
+    // CreateTextureFromPixels 的全部 desc 字段是 (w,h) 的函数（mipLevels
+    // 由 max(w,h) 推导；format/usage/memoryUsage/name 固定），像素数据 =
+    // stbi 强制 4 通道解码同一文件——同路径 ⇒ 同文件 ⇒ 同 (w,h) ⇒ 同参数
+    // 同内容；本宿主无 sRGB/预乘等可变创建标志。命中即复用句柄，免解码/
+    // 上传/mipgen；mipgen 对每张唯一纹理仍跑全 mip 链。每 mesh 的 material/
+    // lit set 主段 SRV 仍各自写入（指向共享纹理，描述符内容与逐 mesh 建纹
+    // 理时逐位相同）。销毁：句柄由本表统一持有，退出时每唯一纹理销毁一次
+    //（逐 mesh 销毁=对共享句柄重复销毁，禁止）。
+    std::unordered_map<std::string, ResourceHandle> albedoBySource;
     primal::utl::vector<SceneDataMeshInfo> sceneInfos;
     if (ok) {
         std::vector<u8> modelBytes = ReadFileRel(traj.assetPath);
@@ -3008,7 +3966,10 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
             assetBase = slash == std::string::npos ? "" : assetBase.substr(0, slash + 1);
 
             static const unsigned char kWhite1x1[4] = {255, 255, 255, 255};
-            u32 texLoaded = 0, texFallback = 0, meshSkipped = 0;
+            // texLoaded = 唯一来源文件数（去重后）；texMeshRefs = 拿到真实
+            // 纹理的 mesh 数（去重前与 texLoaded 同值）；texFallback = 回退
+            // 白纹理的 mesh 数（口径不变）。
+            u32 texLoaded = 0, texMeshRefs = 0, texFallback = 0, meshSkipped = 0;
             for (auto& info : sceneInfos) {
                 if (!info.mesh || !info.mesh->IsValid()) {
                     ++meshSkipped;
@@ -3020,18 +3981,38 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                 unsigned char* pixels = nullptr;
                 std::string texPath =
                     ResolveTexturePath(assetBase, info.diffuseTexturePath);
-                if (!texPath.empty())
-                    pixels = stbi_load(texPath.c_str(), &tw, &th, nullptr, 4);
-                if (pixels && tw > 0 && th > 0) {
-                    e.albedoTex = CreateTextureFromPixels(device, loadCmd, pixels,
-                                                          u32(tw), u32(th));
-                    stbi_image_free(pixels);
-                    ++texLoaded;
+                // 去重命中：同来源已建纹理 → 复用句柄（免解码/上传/mipgen）。
+                const auto cached = texPath.empty() ? albedoBySource.end()
+                                                    : albedoBySource.find(texPath);
+                if (cached != albedoBySource.end()) {
+                    e.albedoTex = cached->second;
+                    ++texMeshRefs;
                 } else {
-                    if (pixels) stbi_image_free(pixels);
-                    e.albedoTex = CreateTextureFromPixels(device, loadCmd,
-                                                          kWhite1x1, 1, 1);
-                    ++texFallback;
+                    if (!texPath.empty())
+                        pixels = stbi_load(texPath.c_str(), &tw, &th, nullptr, 4);
+                    if (pixels && tw > 0 && th > 0) {
+                        e.albedoTex = CreateTextureFromPixels(device, loadCmd, pixels,
+                                                              u32(tw), u32(th));
+                        stbi_image_free(pixels);
+                        if (e.albedoTex != handles::INVALID_RESOURCE) {
+                            albedoBySource.emplace(texPath, e.albedoTex);
+                            ++texMeshRefs;
+                        }
+                        ++texLoaded;
+                    } else {
+                        if (pixels) stbi_image_free(pixels);
+                        // fallback 白纹理同样只建一张（键 = 空串，参数固定）。
+                        const auto white = albedoBySource.find(std::string());
+                        if (white != albedoBySource.end()) {
+                            e.albedoTex = white->second;
+                        } else {
+                            e.albedoTex = CreateTextureFromPixels(device, loadCmd,
+                                                                  kWhite1x1, 1, 1);
+                            if (e.albedoTex != handles::INVALID_RESOURCE)
+                                albedoBySource.emplace(std::string(), e.albedoTex);
+                        }
+                        ++texFallback;
+                    }
                 }
                 if (e.albedoTex == handles::INVALID_RESOURCE) {
                     Fail("albedo texture for mesh " + info.name);
@@ -3043,8 +4024,8 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                 e.materialSet = device->CreateDescriptorSet(msd);
                 if (e.materialSet == handles::INVALID_RESOURCE) {
                     Fail("material set for mesh " + info.name);
-                    device->DestroyTexture(e.albedoTex);
-                    g_ledger.textures.erase(e.albedoTex);
+                    // albedo 纹理由 albedoBySource 统一持有（可能已被先前
+                    // mesh 共享）——不在此销毁，退出清理段每唯一纹理销毁一次。
                     ok = false;
                     break;
                 }
@@ -3070,8 +4051,7 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                     e.litMaterialSet = device->CreateDescriptorSet(lmsd);
                     if (e.litMaterialSet == handles::INVALID_DESCRIPTOR_SET) {
                         Fail("lit material set for mesh " + info.name);
-                        device->DestroyTexture(e.albedoTex);
-                        g_ledger.textures.erase(e.albedoTex);
+                        // 同上：共享纹理不在失败分支销毁（albedoBySource 持有）。
                         ok = false;
                         break;
                     }
@@ -3125,6 +4105,15 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                           << (meshSkipped ? " (skipped " + std::to_string(meshSkipped) + ")"
                                           : "")
                           << std::endl;
+                // 去重统计（2026-11-11）：texLoaded 语义已从"每 mesh 一次
+                // 加载"变为"唯一来源文件数"——Windows 主堆核算据此对账。
+                std::cout << "[RHI_SHARED] texture dedup: " << texLoaded
+                          << " unique source files serve " << texMeshRefs
+                          << " mesh refs"
+                          << (texFallback ? (" (+1 shared fallback texture for "
+                                             + std::to_string(texFallback) + " mesh)")
+                                          : "")
+                          << std::endl;
             }
         }
     }
@@ -3148,11 +4137,22 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
         }
     }
 
+    // ---- M6 探针盒（spec §4；RHI_TEST_GI=1）：mesh AABB 并集外扩 0.5m →
+    //      s.boxMin/cell/normalBias + ResolveParams 一次上传 + [GI] grid box 行 ----
+    if (ok && cfg.gi) {
+        std::string boxErr;
+        if (!M6ComputeGridBox(device, m6gi, meshes, boxErr)) {
+            Fail("M6 GI grid box: " + boxErr);
+            ok = false;
+        }
+    }
+
     // ---- 渲染主循环 ----
     if (ok) {
         FrameTargets ft;
         u32 curW = traj.width, curH = traj.height;
-        if (!CreateFrameTargets(device, ft, curW, curH, cfg.post, cfg.deferred)) {
+        if (!CreateFrameTargets(device, ft, curW, curH, cfg.post, cfg.deferred,
+                                cfg.gi)) {
             Fail("frame targets");
             ok = false;
         } else {
@@ -3170,8 +4170,25 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                 RHICommandBuffer* cmd = rhi::GetCommandBuffer(cmdHandle);
 
                 u32 blackFrames = 0;
+                // M6（GI on）：颜色暗帧计数（post 输出非黑<2% 但几何覆盖≥2%——
+                // 单帧在直射-only 语义下合法；全部帧皆暗则判失败，见汇总段）
+                // + 最小几何覆盖率（GI 黑帧守卫观测量）。
+                u32 giDarkFrames = 0;
+                double giMinCoverage = 1.0;
                 double litRatioSum = 0.0;
                 double lumSum = 0.0;   // M2：平均亮度（阴影 A/B 消融对照用）
+                // R20-B 黑帧分布采集（十九测硬件 M1 159/240 无分布数据——
+                // 二十测裁决"resize 集中 vs 随机交错"的证据）：帧号列表 +
+                // 逐帧非黑占比；RHI_SHARED_LUM_TRACE=1 时逐帧打印。
+                std::vector<u32> blackFrameList;
+                std::vector<double> frameLitRatio;
+                std::vector<double> frameMeanLum;
+                frameLitRatio.reserve(cfg.totalFrames);
+                frameMeanLum.reserve(cfg.totalFrames);
+                const bool lumTrace = [] {
+                    const char* v = std::getenv("RHI_SHARED_LUM_TRACE");
+                    return v && v[0] == '1';
+                }();
                 // M3：消融统计（POST=1 vs POST=0 / EV±0.5 单调性证据）——
                 // Rec.709 luma 256 bin 直方图（帧均值汇总）+ 贴白像素计数
                 //（>=254：POST=0 硬裁剪签名 vs POST=1 ACES 肩部滚降）。
@@ -3191,6 +4208,78 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                     handles::INVALID_RESOURCE, handles::INVALID_RESOURCE,
                     handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
                 bool gbDumpDone = false;
+                // M6 spec §6.5：RHI_GI_EXPORT_FRAMES 原始浮点导出（DEFERRED=1；
+                // 逐导出帧建/毁 Readback 缓冲，账本平衡）。录制期登记，提交+
+                // 等待后落盘 giexp_f<N>_<name>.bin + giexp_f<N>.json 清单。
+                struct GIExportBuf {
+                    std::string name;        // 文件名片段（direct / depth / ...）
+                    std::string format;      // RHI 格式名（清单）
+                    std::string semantics;   // 清单：通道语义
+                    std::string units;       // 清单：单位
+                    ResourceHandle buf{handles::INVALID_RESOURCE};
+                    // rowPitch = GPU 读回行距（字节，256 对齐）；文件落盘为紧密行
+                    //（每行 w*bpp 字节），清单 row_pitch = w*bpp、readback_row_pitch = rowPitch。
+                    u32 bpp{0}, rowPitch{0}, w{0}, h{0}, d{0};   // d>0 = 3D
+                };
+                std::vector<GIExportBuf> giExports;   // 本帧待落盘
+                const std::string giExportDir =
+                    cfg.giExportDir.empty() ? cfg.captureDir : cfg.giExportDir;
+                if (cfg.deferred && !cfg.giExportFrames.empty()) {
+                    std::error_code dirEc;
+                    std::filesystem::create_directories(giExportDir, dirEc);
+                }
+                // 录制一条导出拷贝：tex（当前处于 restState）→ CopySource → 新建
+                // Readback 缓冲 → 还原 restState（同既有 dump 的 SR→Copy→SR 惯例）。
+                // 2D：rowPitch = align(W*bpp, 256)，bufferRowLength = rowPitch/bpp
+                //（Vulkan/D3D12 同布局）；3D（probe_sh）：rowLength 32 texel、
+                // imageHeight=h。GPU 侧行距只服务拷贝契约；落盘去填充（紧密行）。
+                auto recordGIExport = [&](RHICommandBuffer* rc, ResourceHandle tex,
+                                          ResourceState restState, const char* name,
+                                          const char* format, u32 bpp, u32 w, u32 h,
+                                          u32 d, const char* semantics,
+                                          const char* units) {
+                    GIExportBuf e;
+                    e.name = name; e.format = format; e.semantics = semantics;
+                    e.units = units; e.bpp = bpp; e.w = w; e.h = h; e.d = d;
+                    e.rowPitch = d == 0 ? ((w * bpp + 255u) & ~255u)
+                                        : kM6ReadbackRowTexels * bpp;
+                    BufferDesc bd{};
+                    bd.size = u64(e.rowPitch) * h * (d == 0 ? 1u : d);
+                    bd.type = BufferType::Raw;
+                    // R19-1：同 M1Readback——CopyTextureToBuffer 的 GPU 写目标须 Readback 位。
+                    bd.usage = GPUMemoryUsage::Readback;
+                    bd.memoryUsage = GPUMemoryUsage::Readback;
+                    bd.name = "M6GIExport";
+                    e.buf = device->CreateBuffer(bd);
+                    if (e.buf == handles::INVALID_RESOURCE) {
+                        Fail(std::string("GI export buffer ") + name);
+                        return;
+                    }
+                    g_ledger.buffers.insert(e.buf);
+                    ResourceBarrier toCopy{};
+                    toCopy.resource = tex;
+                    toCopy.beforeState = restState;
+                    toCopy.afterState = ResourceState::CopySource;
+                    toCopy.subresource = 0xFFFFFFFF;
+                    toCopy.queueFamily = 0xFFFFFFFF;
+                    rc->InsertBarrier(&toCopy, 1);
+                    BufferTextureCopyRegion cr{};
+                    cr.bufferOffset = 0;
+                    cr.bufferRowLength = e.rowPitch / bpp;          // texels
+                    cr.bufferImageHeight = d == 0 ? 0u : h;
+                    cr.imageSubresource = {0, 0, 1};
+                    cr.imageOffset = {0, 0, 0};
+                    cr.imageExtent = {w, h, d == 0 ? 1u : d};
+                    rc->CopyTextureToBuffer(tex, e.buf, &cr, 1);
+                    ResourceBarrier back{};
+                    back.resource = tex;
+                    back.beforeState = ResourceState::CopySource;
+                    back.afterState = restState;
+                    back.subresource = 0xFFFFFFFF;
+                    back.queueFamily = 0xFFFFFFFF;
+                    rc->InsertBarrier(&back, 1);
+                    giExports.push_back(e);
+                };
                 M1PushConsts pc{};
                 pc.model = rhimath::MatrixIdentity();
                 pc.baseColor = math::v4{1.0f, 1.0f, 1.0f, 1.0f};
@@ -3229,7 +4318,7 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                             DestroyFrameTargets(device, ft);
                             curW = cfg.resizeW; curH = cfg.resizeH;
                             Require(CreateFrameTargets(device, ft, curW, curH, cfg.post,
-                                                        cfg.deferred),
+                                                        cfg.deferred, cfg.gi),
                                     "resize: recreate targets");
                             if (cfg.post) BindM3PostSet(device, post, ft.hdr);
                             if (cfg.deferred)
@@ -3241,7 +4330,7 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                             DestroyFrameTargets(device, ft);
                             curW = traj.width; curH = traj.height;
                             Require(CreateFrameTargets(device, ft, curW, curH, cfg.post,
-                                                        cfg.deferred),
+                                                        cfg.deferred, cfg.gi),
                                     "resize: restore targets");
                             if (cfg.post) BindM3PostSet(device, post, ft.hdr);
                             if (cfg.deferred)
@@ -3261,6 +4350,14 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                     math::m4x4 proj = rhimath::CreatePerspectiveMatrix(
                         float(cam.fovDeg * 3.14159265358979 / 180.0), aspect,
                         0.1f, 200.0f);
+                    // F2（Y-down clip 契约）：投影 y 行整行取反 = 左乘
+                    // diag(1,-1,1,1)，与生产 naga 对 gl_Position.y 取反同效。
+                    // 两端视口（Vulkan 正高 / D3D12 负高）都把 NDC y=-1 映到
+                    // RT 第 0 行 → 世界 +Y 落小行号、RT 本身正立。下文
+                    // vd.viewProjection（含 M5 视锥平面提取）与 M4
+                    // invViewProjection 均消费此取反后的同一 proj。
+                    for (int c = 0; c < 4; ++c)
+                        math::set_elem(proj, c, 1, -math::elem(proj, c, 1));
                     ViewDataGPU vd{};
                     vd.viewProjection = proj * view;
                     vd.cameraPos = math::v4{cam.position.x, cam.position.y,
@@ -3286,8 +4383,10 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                                                          sizeof(ld), 0),
                                 "light UBO upload (keyframed)");
                     }
+                    // M6：dv 提升到帧作用域——P3 注入 UBO 复用同一 invVP/cameraPos
+                    //（与 M4 DeferredView 上传值逐位相同，spec §6.2）。
+                    DeferredViewGPU dv{};
                     if (cfg.deferred) {
-                        DeferredViewGPU dv{};
                         dv.invViewProjection = rhimath::Inverse(proj * view);
                         dv.cameraPos = vd.cameraPos;
                         Require(device->UpdateBufferData(deferred4.viewUbo, &dv,
@@ -3333,14 +4432,8 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                                                            cam.position.z});
                     }
 
-                    // ---- M6 GI 段录制（F6-2/F6-5；RHI_TEST_GI=1）：bake→
-                    //      compute→compute 屏障→accum（EMA/重置）→SRV 供
-                    //      延迟光照采样；ping-pong 翻转；ladder 帧录读回。----
-                    if (cfg.gi) {
-                        M6RecordGI(device, cmd, m6gi, light, f, cfg.giLadder,
-                                   cfg.totalFrames);
-                        M6BindDeferredProbe(device, m6gi, deferred4);
-                    }
+                    // （M6 GI 段录制已移至 GBuffer 后、P2 直射 pass 之后——
+                    //  注入消费本帧直射漫反射缓冲，见下方 deferred 分支 P2-P6。）
 
                     // ---- M2 阴影 depth pass（F2-2/F2-6）：先于 lit ----
                     if (cfg.shadows) {
@@ -3362,6 +4455,7 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                         cmd->BindDescriptorSets(PipelineBindPoint::Graphics,
                                                 shadow.depthLayout, 0, 1,
                                                 &shadow.depthSet, 0, nullptr);
+                        u32 shadowPassDraws = 0;
                         for (const auto& e : meshes) {
                             M2ShadowPush sp{};
                             sp.model = rhimath::MatrixIdentity();
@@ -3369,8 +4463,20 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                                                ShaderStage::Vertex, 0,
                                                sizeof(sp), &sp);
                             e.mesh->Draw(cmd, 1, 0, 0);
+                            ++shadowPassDraws;
                         }
                         cmd->EndRenderPass();
+                        // 诊断：首帧阴影 depth pass 录制事实回显（draw 发出数/
+                        // 清深值/分辨率——对照 M2ShadowSampler 回显惯例）。
+                        if (f == 0) {
+                            std::ostringstream cd;   // 局部流：不改 std::cout 浮点格式态
+                            cd << std::fixed << std::setprecision(1)
+                               << srd.depthAttachment.clearValue.depth;
+                            std::cout << "[RHI_SHARED] M2ShadowPass frame=" << f
+                                      << " draws=" << shadowPassDraws
+                                      << " clearDepth=" << cd.str()
+                                      << " size=" << kShadowMapSize << std::endl;
+                        }
                         // 深度写→采样（F2-2 转换规则；D3D12 侧 StateTracker
                         // DEPTH_WRITE→SRV 单测锁定，Vulkan 侧 layout 转换
                         // 本调用即验证点——错误布局会被 validation 拦截）。
@@ -3381,7 +4487,7 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                         smToSRV.subresource = 0xFFFFFFFF;
                         smToSRV.queueFamily = 0xFFFFFFFF;
                         cmd->InsertBarrier(&smToSRV, 1);
-                        // RHI_SHADOW_DUMP=1：首帧读回 shadow map（D32→staging
+                        // RHI_SHADOW_DUMP=1：首帧读回 shadow map（D32→readback
                         // 缓冲→PGM 归一化深度图）——阴影贴图内容裁决证据。
                         const bool wantDump = f == 0 &&
                             std::getenv("RHI_SHADOW_DUMP") &&
@@ -3390,8 +4496,10 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                             BufferDesc ddb{};
                             ddb.size = u64(kShadowMapSize) * kShadowMapSize * 4;
                             ddb.type = BufferType::Raw;
-                            ddb.usage = GPUMemoryUsage::Staging;
-                            ddb.memoryUsage = GPUMemoryUsage::Staging;
+                            // R19-1：同 M1Readback——CopyTextureToBuffer 的
+                            // GPU 写目标须 Readback 位（dump 四处漏改复记）。
+                            ddb.usage = GPUMemoryUsage::Readback;
+                            ddb.memoryUsage = GPUMemoryUsage::Readback;
                             ddb.name = "M2ShadowDump";
                             shadowDumpBuf = device->CreateBuffer(ddb);
                             g_ledger.buffers.insert(shadowDumpBuf);
@@ -3493,8 +4601,10 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                                     BufferDesc ddb{};
                                     ddb.size = u64(curW) * curH * 4;
                                     ddb.type = BufferType::Raw;
-                                    ddb.usage = GPUMemoryUsage::Staging;
-                                    ddb.memoryUsage = GPUMemoryUsage::Staging;
+                                    // R19-1：同 M1Readback——CopyTextureToBuffer 的
+                                    // GPU 写目标须 Readback 位（dump 四处漏改复记）。
+                                    ddb.usage = GPUMemoryUsage::Readback;
+                                    ddb.memoryUsage = GPUMemoryUsage::Readback;
                                     ddb.name = "M4GBufferDump";
                                     gbDumpBufs[i] = device->CreateBuffer(ddb);
                                     g_ledger.buffers.insert(gbDumpBufs[i]);
@@ -3541,8 +4651,10 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                                     BufferDesc ddb{};
                                     ddb.size = u64(curW) * curH * 4;  // R32F
                                     ddb.type = BufferType::Raw;
-                                    ddb.usage = GPUMemoryUsage::Staging;
-                                    ddb.memoryUsage = GPUMemoryUsage::Staging;
+                                    // R19-1：同 M1Readback——CopyTextureToBuffer 的
+                                    // GPU 写目标须 Readback 位（dump 四处漏改复记）。
+                                    ddb.usage = GPUMemoryUsage::Readback;
+                                    ddb.memoryUsage = GPUMemoryUsage::Readback;
                                     ddb.name = "M4DepthDump";
                                     gbDumpBufs[3] = device->CreateBuffer(ddb);
                                     g_ledger.buffers.insert(gbDumpBufs[3]);
@@ -3565,6 +4677,94 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                             }
                         }
 
+                        if (cfg.gi) {
+                        // ---- M6 GI 模式：P2 直射 → P3 注入/P4 累积 → P5 解析
+                        //      → P6 合成（替换 M4 ② 延迟光照 pass；spec §6.3）----
+                        // 全屏 pass 公共视口/裁剪（同 M4 ②：当前帧目标尺寸）。
+                        auto setFullscreenViewport = [&](RenderPassDesc& rp) {
+                            rp.viewport.topLeft = {0.0f, 0.0f};
+                            rp.viewport.size = {float(curW), float(curH)};
+                            rp.viewport.minDepth = 0.0f;
+                            rp.viewport.maxDepth = 1.0f;
+                            rp.scissor.offset = {0, 0};
+                            rp.scissor.extent = {curW, curH};
+                        };
+                        auto rtToSRV = [&](ResourceHandle tex) {
+                            ResourceBarrier rb{};
+                            rb.resource = tex;
+                            rb.beforeState = ResourceState::RenderTarget;
+                            rb.afterState = ResourceState::ShaderResource;
+                            rb.subresource = 0xFFFFFFFF;
+                            rb.queueFamily = 0xFFFFFFFF;
+                            cmd->InsertBarrier(&rb, 1);
+                        };
+
+                        // ---- P2 直射 pass（M6DeferredDirect：MRT×2 RGBA16F，无深度
+                        //      附件——深度是采样源；复用 M4 light set/layout b0-b7）----
+                        RenderPassDesc drd{};
+                        drd.colorAttachments.resize(2);
+                        drd.colorAttachments[0].texture = ft.giDirect;
+                        drd.colorAttachments[0].format = DataFormat::RGBA16_Float;
+                        drd.colorAttachments[0].loadOp = LoadAction::Clear;
+                        drd.colorAttachments[0].storeOp = StoreAction::Store;
+                        drd.colorAttachments[0].clearValue.color = math::v4{0, 0, 0, 0};
+                        drd.colorAttachments[1] = drd.colorAttachments[0];
+                        drd.colorAttachments[1].texture = ft.giDirectDiffuse;
+                        setFullscreenViewport(drd);
+                        cmd->BeginRenderPass(drd);
+                        cmd->BindGraphicsPipeline(m6gi.directPipeline);
+                        cmd->BindDescriptorSets(PipelineBindPoint::Graphics,
+                                                deferred4.lightLayout, 0, 1,
+                                                &deferred4.lightSet, 0, nullptr);
+                        cmd->Draw(3, 0, 1, 0);
+                        cmd->EndRenderPass();
+                        // RT→SRV：P3 注入（compute texelFetch）+ P6 合成采样
+                        rtToSRV(ft.giDirect);
+                        rtToSRV(ft.giDirectDiffuse);
+
+                        // ---- P3 注入 + P4 累积（+ ladder 读回、ping-pong 翻转）----
+                        M6RecordGI(device, cmd, m6gi, ft, dv.invViewProjection,
+                                   dv.cameraPos, light, f, cfg.giLadder,
+                                   cfg.totalFrames);
+
+                        // ---- P5 解析 pass → giIndirect（独立间接 RGBA16F）----
+                        M6BindResolveSet(device, m6gi, ft, deferred4.viewUbo);
+                        RenderPassDesc ird{};
+                        ird.colorAttachments.resize(1);
+                        ird.colorAttachments[0].texture = ft.giIndirect;
+                        ird.colorAttachments[0].format = DataFormat::RGBA16_Float;
+                        ird.colorAttachments[0].loadOp = LoadAction::Clear;
+                        ird.colorAttachments[0].storeOp = StoreAction::Store;
+                        ird.colorAttachments[0].clearValue.color = math::v4{0, 0, 0, 0};
+                        setFullscreenViewport(ird);
+                        cmd->BeginRenderPass(ird);
+                        cmd->BindGraphicsPipeline(m6gi.resolvePipeline);
+                        cmd->BindDescriptorSets(PipelineBindPoint::Graphics,
+                                                m6gi.resolveLayout, 0, 1,
+                                                &m6gi.resolveSet, 0, nullptr);
+                        cmd->Draw(3, 0, 1, 0);
+                        cmd->EndRenderPass();
+                        rtToSRV(ft.giIndirect);
+
+                        // ---- P6 合成 pass：direct + indirect 恰一次 → hdr（post on，
+                        //      P7 post 原样消费）/ color（post off）----
+                        M6BindCompositeSet(device, m6gi, ft);
+                        RenderPassDesc crd{};
+                        crd.colorAttachments.resize(1);
+                        crd.colorAttachments[0].texture = cfg.post ? ft.hdr : ft.color;
+                        crd.colorAttachments[0].format = litRTFormat;
+                        crd.colorAttachments[0].loadOp = LoadAction::Clear;
+                        crd.colorAttachments[0].storeOp = StoreAction::Store;
+                        crd.colorAttachments[0].clearValue.color = math::v4{0, 0, 0, 1};
+                        setFullscreenViewport(crd);
+                        cmd->BeginRenderPass(crd);
+                        cmd->BindGraphicsPipeline(m6gi.compPipeline);
+                        cmd->BindDescriptorSets(PipelineBindPoint::Graphics,
+                                                m6gi.compLayout, 0, 1,
+                                                &m6gi.compSet, 0, nullptr);
+                        cmd->Draw(3, 0, 1, 0);
+                        cmd->EndRenderPass();
+                        } else {
                         // ---- M4 ② 延迟光照 pass（F4-3；无深度附件）----
                         RenderPassDesc rpd{};
                         rpd.colorAttachments.resize(1);
@@ -3586,6 +4786,7 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                                                 &deferred4.lightSet, 0, nullptr);
                         cmd->Draw(3, 0, 1, 0);
                         cmd->EndRenderPass();
+                        }  // ---- M4 ② 延迟光照（GI off 路径，原样）----
                         gbDumpDone = wantGbDump;
                     } else {
                     RenderPassDesc rpd{};
@@ -3688,8 +4889,10 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                             BufferDesc hdb{};
                             hdb.size = u64(curW) * curH * 8;   // RGBA16F=8B/px
                             hdb.type = BufferType::Raw;
-                            hdb.usage = GPUMemoryUsage::Staging;
-                            hdb.memoryUsage = GPUMemoryUsage::Staging;
+                            // R19-1：同 M1Readback——CopyTextureToBuffer 的
+                            // GPU 写目标须 Readback 位（dump 四处漏改复记）。
+                            hdb.usage = GPUMemoryUsage::Readback;
+                            hdb.memoryUsage = GPUMemoryUsage::Readback;
                             hdb.name = "M3HdrDump";
                             hdrDumpBuf = device->CreateBuffer(hdb);
                             g_ledger.buffers.insert(hdrDumpBuf);
@@ -3720,6 +4923,111 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                             cmd->InsertBarrier(&h2, 1);
                             hdrDumpDone = true;
                         }
+                    }
+
+                    // ---- M6 spec §6.5：原始浮点导出（RHI_GI_EXPORT_FRAMES 命中帧；
+                    //      合成/post 之后录拷贝，提交+等待后落盘）。此刻状态：GI
+                    //      三 RT / GBuffer / 深度 / hdr（post on）= SRV，color = RT，
+                    //      grid[cur] = 本帧 accum 输出（SRV）。----
+                    if (cfg.deferred && cfg.giExportFrames.count(f) != 0) {
+                        const char* kHdrUnits =
+                            "harness linear HDR radiance (pre-exposure, pre-ACES; "
+                            "Lambert without 1/pi)";
+                        if (cfg.gi) {
+                            recordGIExport(cmd, ft.giDirect, ResourceState::ShaderResource,
+                                "direct", "RGBA16_Float", 8, curW, curH, 0,
+                                "rgb = lightColor*(diffuse+specular)*shadow (direct "
+                                "only, no ambient/GI/IBL); a = ndl",
+                                kHdrUnits);
+                            recordGIExport(cmd, ft.giDirectDiffuse, ResourceState::ShaderResource,
+                                "direct_diffuse", "RGBA16_Float", 8, curW, curH, 0,
+                                "rgb = lightColor*albedo*ndl*shadow (GI injection "
+                                "input L_j); a = shadow visibility (PCF 3x3)",
+                                kHdrUnits);
+                            recordGIExport(cmd, ft.giIndirect, ResourceState::ShaderResource,
+                                "indirect", "RGBA16_Float", 8, curW, curH, 0,
+                                "rgb = albedo*E_h(N) from SH-L1 probe grid (single "
+                                "bounce, independent of direct); a = 1 (0 on "
+                                "background)",
+                                kHdrUnits);
+                        }
+                        if (cfg.post) {
+                            recordGIExport(cmd, ft.hdr, ResourceState::ShaderResource,
+                                "final_prepost", "RGBA16_Float", 8, curW, curH, 0,
+                                cfg.gi ? "rgb = direct.rgb + indirect.rgb (M6Composite, "
+                                         "pre-post); a = 1"
+                                       : "M4DeferredLight output (GI off): albedo*0.15 "
+                                         "+ lightColor*(diffuse+specular)*shadow; a = 1",
+                                kHdrUnits);
+                        } else {
+                            recordGIExport(cmd, ft.color, ResourceState::RenderTarget,
+                                "final_prepost", "BGRA8_UNorm", 4, curW, curH, 0,
+                                cfg.gi ? "BGRA8 UNorm direct write of direct+indirect "
+                                         "(post off, clamped)"
+                                       : "BGRA8 UNorm direct write of M4DeferredLight "
+                                         "output (post off, clamped)",
+                                "unorm8 (no tone mapping, no sRGB)");
+                        }
+                        recordGIExport(cmd, ft.depth, ResourceState::ShaderResource,
+                            "depth", "D32_Float", 4, curW, curH, 0,
+                            "post-projection depth [0,1] (forward Z; >= 1 = "
+                            "background)",
+                            "ndc depth");
+                        recordGIExport(cmd, ft.gAlbedo, ResourceState::ShaderResource,
+                            "albedo", "RGBA8_UNorm", 4, curW, curH, 0,
+                            "GBuffer RT0: rgb = albedo texture * baseColor; a = 1",
+                            "unorm8 reflectance");
+                        recordGIExport(cmd, ft.gNormal, ResourceState::ShaderResource,
+                            "normal", "RG16_Float", 4, curW, curH, 0,
+                            "GBuffer RT1: world normal xy; z = (material.a*2-1)*"
+                            "sqrt(max(0,1-x^2-y^2))",
+                            "unit vector components");
+                        recordGIExport(cmd, ft.gMaterial, ResourceState::ShaderResource,
+                            "material", "RGBA8_UNorm", 4, curW, curH, 0,
+                            "GBuffer RT2: r = AO placeholder (1), g = roughness "
+                            "placeholder (0.5), b = uv.x, a = N.z sign (1 = +, 0 = -)",
+                            "unorm8");
+                        if (cfg.gi) {
+                            recordGIExport(cmd, m6gi.grid[m6gi.cur],
+                                ResourceState::ShaderResource, "probe_sh",
+                                "RGBA16_Float", 8, kM6GridDim, kM6GridDim,
+                                kM6ShSlabs * kM6GridDim,
+                                "SH-L1 probe grid after EMA accum (this frame): "
+                                "texel (i,j,s*8+k) = (c00,c1-1,c10,c11) of probe "
+                                "(i,j,k), slab s = channel R,G,B; file rows tight "
+                                "(8 texels = 64 B per row, 8 rows per slice, 24 "
+                                "slices); GPU readback used rowLength 32 texels "
+                                "(256 B), imageHeight 8",
+                                "SH coefficients of incident radiance (harness "
+                                "radiance x steradian)");
+                        }
+                    }
+
+                    // ---- M6：GI 模式几何覆盖率读回（深度 SR→Copy→SR，行距 256
+                    //      对齐；提交后统计深度<1 占比，供 GI 模式黑帧守卫）----
+                    if (cfg.gi) {
+                        ResourceBarrier dToCopy{};
+                        dToCopy.resource = ft.depth;
+                        dToCopy.beforeState = ResourceState::ShaderResource;
+                        dToCopy.afterState = ResourceState::CopySource;
+                        dToCopy.subresource = 0xFFFFFFFF;
+                        dToCopy.queueFamily = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&dToCopy, 1);
+                        BufferTextureCopyRegion cvr{};
+                        cvr.bufferOffset = 0;
+                        cvr.bufferRowLength = ft.giCoveragePitch / 4u;   // texels（D32 4B）
+                        cvr.bufferImageHeight = 0;
+                        cvr.imageSubresource = {0, 0, 1};
+                        cvr.imageOffset = {0, 0, 0};
+                        cvr.imageExtent = {curW, curH, 1};
+                        cmd->CopyTextureToBuffer(ft.depth, ft.giCoverageReadback, &cvr, 1);
+                        ResourceBarrier dBack{};
+                        dBack.resource = ft.depth;
+                        dBack.beforeState = ResourceState::CopySource;
+                        dBack.afterState = ResourceState::ShaderResource;
+                        dBack.subresource = 0xFFFFFFFF;
+                        dBack.queueFamily = 0xFFFFFFFF;
+                        cmd->InsertBarrier(&dBack, 1);
                     }
 
                     // ---- color: RenderTarget → CopySource → 读回 → 还原 ----
@@ -3763,6 +5071,151 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                         M6VerifyGI(device, m6gi, cfg.captureDir, f);
                         m6gi.readbackPending = false;
                     }
+                    // M6 spec §6.5：导出落盘（紧密行：读回缓冲按 rowPitch 行距逐行取
+                    // w*bpp 有效字节——行尾填充字节内容未定义，不写出，文件逐位
+                    // 可复现）+ 清单 JSON；缓冲即毁。
+                    if (!giExports.empty()) {
+                        const std::string stem = "giexp_f" + std::to_string(f);
+                        u32 written = 0;
+                        for (GIExportBuf& e : giExports) {
+                            // 2D：h 行；3D：d 个 slice × h 行（读回 slice 间距 = h*rowPitch）
+                            const u32 rows = e.h * (e.d == 0 ? 1u : e.d);
+                            const u32 tightRow = e.w * e.bpp;
+                            const u8* src = static_cast<const u8*>(device->MapBuffer(e.buf));
+                            if (!src) {
+                                Fail("GI export map " + e.name);
+                            } else {
+                                const std::string p = giExportDir + "/" + stem + "_" +
+                                                      e.name + ".bin";
+                                std::ofstream bf(p, std::ios::binary);
+                                for (u32 r = 0; r < rows; ++r)
+                                    bf.write(reinterpret_cast<const char*>(
+                                                 src + size_t(r) * e.rowPitch),
+                                             std::streamsize(tightRow));
+                                if (!bf) Fail("GI export write " + p);
+                                else ++written;
+                                device->UnmapBuffer(e.buf);
+                            }
+                            device->DestroyBuffer(e.buf);
+                            g_ledger.buffers.erase(e.buf);
+                            e.buf = handles::INVALID_RESOURCE;
+                        }
+                        // 清单（schema rhi-m6-gi-export/1；浮点 9 位有效数字 = f32 可逆）
+                        auto vec3Json = [](float x, float y, float z) {
+                            std::ostringstream o;
+                            o << std::setprecision(9) << "[" << x << ", " << y << ", " << z << "]";
+                            return o.str();
+                        };
+                        std::ostringstream js;
+                        js << std::setprecision(9);
+                        // 本帧 DeferredView/InjectParams 上传的同一 invVP（UBO 内存序 16
+                        // float = GLSL mat4 列主序 [c*4+r]）——独立复算 inject/resolve 用。
+                        float invVP[16];
+                        static_assert(sizeof(dv.invViewProjection) == sizeof(invVP),
+                                      "invViewProjection = 16 floats");
+                        std::memcpy(invVP, &dv.invViewProjection, sizeof(invVP));
+                        std::ostringstream ivp;
+                        ivp << std::setprecision(9) << "[";
+                        for (int i = 0; i < 16; ++i) ivp << (i ? ", " : "") << invVP[i];
+                        ivp << "]";
+                        js << "{\n  \"schema\": \"rhi-m6-gi-export/1\",\n"
+                           << "  \"frame\": " << f << ",\n"
+                           << "  \"platform\": \"" << cfg.platformName << "\",\n"
+                           << "  \"gi\": " << (cfg.gi ? "true" : "false") << ",\n"
+                           << "  \"post\": " << (cfg.post ? "true" : "false") << ",\n"
+                           << "  \"exposure\": "
+                           << (cfg.postExposure * std::pow(2.0f, cfg.postEV)) << ",\n"
+                           << "  \"width\": " << curW << ",\n"
+                           << "  \"height\": " << curH << ",\n"
+                           << "  \"camera\": {\"position\": "
+                           << vec3Json(cam.position.x, cam.position.y, cam.position.z)
+                           << ", \"lookAt\": "
+                           << vec3Json(cam.lookAt.x, cam.lookAt.y, cam.lookAt.z)
+                           << ", \"fov_deg\": " << cam.fovDeg
+                           << ", \"near\": 0.1, \"far\": 200, \"projection_y_row_negated\": true"
+                           << ", \"inv_view_projection\": " << ivp.str()
+                           << ", \"matrix_layout\": \"16 floats in UBO memory order "
+                              "(GLSL mat4 column-major: index c*4+r); world = "
+                              "(M*vec4(uv*2-1, depth, 1)).xyz / w, uv = (px+0.5)/(W,H)\"},\n"
+                           << "  \"light\": {\"dir_to_light\": "
+                           << vec3Json(light.dirToLight.x, light.dirToLight.y,
+                                       light.dirToLight.z)
+                           << ", \"intensity\": " << light.intensity
+                           << ", \"color\": "
+                           << vec3Json(light.color.x, light.color.y, light.color.z)
+                           << "},\n"
+                           << "  \"shadow\": {\"map_size\": " << kShadowMapSize
+                           << ", \"pcf\": \"3x3\", \"compare\": \"LessEqual\""
+                           << ", \"ortho_half_extent\": " << kShadowHalfExtent
+                           << ", \"near\": " << kShadowNear << ", \"far\": " << kShadowFar
+                           << "},\n";
+                        if (cfg.gi) {
+                            js << "  \"gi_grid\": {\"dims\": [" << kM6GridDim << ", "
+                               << kM6GridDim << ", " << kM6GridDim << "]"
+                               << ", \"box_min\": "
+                               << vec3Json(m6gi.boxMin.x, m6gi.boxMin.y, m6gi.boxMin.z)
+                               << ", \"box_max\": "
+                               << vec3Json(m6gi.boxMax.x, m6gi.boxMax.y, m6gi.boxMax.z)
+                               << ", \"cell\": "
+                               << vec3Json(m6gi.cell.x, m6gi.cell.y, m6gi.cell.z)
+                               << ", \"normal_bias\": " << m6gi.normalBias
+                               << ", \"sh_layout\": \"Texture3D RGBA16F (8,8,24); texel "
+                                  "(i,j,s*8+k) = (c00,c1-1,c10,c11) of probe (i,j,k) "
+                                  "channel s (0=R,1=G,2=B); probe (i,j,k) at box_min + "
+                                  "((i,j,k)+0.5)*cell; Y00=0.282095, Y1-1=0.488603*y, "
+                                  "Y10=0.488603*z, Y11=0.488603*x\""
+                               << ", \"ema\": \"hist*0.9+new*0.1\""
+                               << ", \"reset_this_frame\": "
+                               << (m6gi.lastReset ? "true" : "false")
+                               << ", \"frames_since_reset\": " << m6gi.framesSinceReset
+                               << "},\n";
+                        }
+                        js << "  \"buffers\": {";
+                        for (size_t i = 0; i < giExports.size(); ++i) {
+                            const GIExportBuf& e = giExports[i];
+                            js << (i ? ",\n" : "\n") << "    \"" << e.name << "\": {"
+                               << "\"file\": \"" << stem << "_" << e.name << ".bin\""
+                               << ", \"format\": \"" << e.format << "\""
+                               << ", \"bytes_per_pixel\": " << e.bpp
+                               << ", \"row_pitch\": " << e.w * e.bpp          // 文件紧密行距
+                               << ", \"readback_row_pitch\": " << e.rowPitch  // GPU 拷贝行距
+                               << ", \"width\": " << e.w << ", \"height\": " << e.h;
+                            if (e.d != 0) js << ", \"depth\": " << e.d;
+                            js << ", \"semantics\": \"" << e.semantics << "\""
+                               << ", \"units\": \"" << e.units << "\"}";
+                        }
+                        js << "\n  }\n}\n";
+                        const std::string mp = giExportDir + "/" + stem + ".json";
+                        std::ofstream mf(mp, std::ios::binary);
+                        mf << js.str();
+                        if (!mf) Fail("GI export manifest write " + mp);
+                        ++m6gi.exportFrames;
+                        std::cerr << "[GI_EXPORT] frame " << f << " buffers=" << written
+                                  << " dir=" << giExportDir << std::endl;
+                        giExports.clear();
+                    }
+
+                    // M6：GI 模式几何覆盖率（深度<1 像素占比；GI 模式黑帧守卫用）
+                    double giCoverage = 1.0;
+                    if (cfg.gi) {
+                        const u8* cov = static_cast<const u8*>(
+                            device->MapBuffer(ft.giCoverageReadback));
+                        if (!cov) {
+                            Fail("M6 coverage readback map");
+                            giCoverage = 0.0;
+                        } else {
+                            u64 covered = 0;
+                            for (u32 y = 0; y < curH; ++y) {
+                                const float* row = reinterpret_cast<const float*>(
+                                    cov + size_t(y) * ft.giCoveragePitch);
+                                for (u32 x = 0; x < curW; ++x)
+                                    covered += row[x] < 1.0f ? 1u : 0u;
+                            }
+                            giCoverage = double(covered) / (double(curW) * double(curH));
+                            device->UnmapBuffer(ft.giCoverageReadback);
+                        }
+                        giMinCoverage = std::min(giMinCoverage, giCoverage);
+                    }
 
                     // ---- 读回校验/落盘（F1-10 逐帧非黑）----
                     const u8* mapped =
@@ -3790,14 +5243,46 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                         }
                     }
                     const double litRatio = double(lit) / double(pxCount);
+                    const double meanLum = lumAcc / double(pxCount);
                     litRatioSum += litRatio;
-                    lumSum += lumAcc / double(pxCount);
+                    lumSum += meanLum;
+                    frameLitRatio.push_back(litRatio);
+                    frameMeanLum.push_back(meanLum);
+                    if (lumTrace) {
+                        // R20-B：逐帧非黑占比/亮度（黑帧分布的对照组——
+                        // 黑帧与正常帧的占比台阶比二值黑名单更有诊断力）。
+                        std::cerr << "[LUM] frame " << f
+                                  << " litRatio=" << litRatio
+                                  << " meanLum=" << meanLum << std::endl;
+                    }
+                    // d3d12-blackfix 探针：读回首 16 字节 hex + 首像素 BGRA。
+                    // 区分"清屏+拷贝落地"（BGRA 首字节 00 00 00 FF，alpha=
+                    // 0xFF——lit 清屏色 {0,0,0,1}）与"读回仍是 memset 0"
+                    // （00 00 00 00——命令列表未执行/拷贝未写）。全平台打
+                    //（Metal/Vulkan 无害），litRatio=0 区分不了这两种情形。
+                    std::cerr << "[PIXEL0] frame " << f << " first16=";
+                    const int probeBytes = int(pxCount * 4) < 16 ? int(pxCount * 4) : 16;
+                    for (int i = 0; i < probeBytes; ++i)
+                        std::cerr << std::hex << std::setw(2) << std::setfill('0')
+                                  << int(mapped[i]) << ' ';
+                    std::cerr << std::dec << "px0 BGRA=(" << int(mapped[0]) << ','
+                              << int(mapped[1]) << ',' << int(mapped[2]) << ','
+                              << int(mapped[3]) << ')' << std::endl;
                     // 轨迹相机全程朝向画廊内部几何，清屏色=黑 → 非黑比例即几何覆盖。
-                    if (litRatio < 0.02) {
+                    // M6：GI 模式该前提失效（完全阴影几何恰为黑——直射-only 契约，
+                    // 间接仅来自相机可见发射体），守卫改测几何覆盖率（深度<1
+                    // 占比）；颜色暗帧（非黑<2% 但几何覆盖正常）另计入汇总行
+                    //（全部帧皆暗时汇总段判失败）。
+                    const bool nearlyBlack =
+                        cfg.gi ? giCoverage < 0.02 : litRatio < 0.02;
+                    if (cfg.gi && litRatio < 0.02 && !nearlyBlack) ++giDarkFrames;
+                    if (nearlyBlack) {
                         ++blackFrames;
+                        blackFrameList.push_back(f);
                         std::cerr << "[RHI_SHARED] frame " << f
-                                  << " nearly black (" << litRatio << ")"
-                                  << std::endl;
+                                  << " nearly black (" << litRatio << ")";
+                        if (cfg.gi) std::cerr << " coverage=" << giCoverage;
+                        std::cerr << std::endl;
                     }
                     const bool isResizeTag = resizeTagFrames.count(f) != 0;
                     if (cfg.captureFrames.count(f) || isResizeTag) {
@@ -3993,6 +5478,51 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                 Require(blackFrames == 0,
                         "all frames non-black (" + std::to_string(blackFrames) +
                             " nearly-black frames)");
+                // R20-B 黑帧分布汇总（十九测"159/240"无法反推分布——
+                // 集中在 resize 帧后=resize 重建破坏；随机交错=时序竞争/
+                // 轨迹相位相关的数据丢失；全程稀疏=局部纹理/图元缺陷）。
+                if (!blackFrameList.empty()) {
+                    std::cerr << "[BLACK_DIST] total=" << blackFrames << "/"
+                              << cfg.totalFrames << " ("
+                              << (100.0 * blackFrames / double(cfg.totalFrames))
+                              << "%) first=" << blackFrameList.front()
+                              << " last=" << blackFrameList.back() << std::endl;
+                    // 连片 run-length：[start..end] × 长度。
+                    std::cerr << "[BLACK_DIST] runs:";
+                    for (size_t i = 0; i < blackFrameList.size();) {
+                        size_t j = i;
+                        while (j + 1 < blackFrameList.size() &&
+                               blackFrameList[j + 1] == blackFrameList[j] + 1) ++j;
+                        std::cerr << " [" << blackFrameList[i] << ".."
+                                  << blackFrameList[j] << "]x" << (j - i + 1);
+                        i = j + 1;
+                    }
+                    std::cerr << std::endl;
+                    // resize 关联：黑帧落点 vs resize/restore 帧（判"集中在
+                    // resize 后"最直接的键）。
+                    if (cfg.resizeFrame != kNoResize) {
+                        const u32 afterResize = static_cast<u32>(std::count_if(
+                            blackFrameList.begin(), blackFrameList.end(),
+                            [&](u32 fr) { return fr >= cfg.resizeFrame; }));
+                        std::cerr << "[BLACK_DIST] resizeFrame=" << cfg.resizeFrame
+                                  << " restoreFrame=" << cfg.restoreFrame
+                                  << " black-at/after-resize=" << afterResize
+                                  << "/" << blackFrames << std::endl;
+                    }
+                    // 黑帧占比台阶（litRatio 直方粗分档：全 0 / 近 0 / 部分亮）
+                    u32 zeroPx = 0, nearZero = 0, partial = 0;
+                    for (u32 fr : blackFrameList) {
+                        if (fr < frameLitRatio.size()) {
+                            const double r = frameLitRatio[fr];
+                            if (r == 0.0) ++zeroPx;
+                            else if (r < 0.005) ++nearZero;
+                            else ++partial;
+                        }
+                    }
+                    std::cerr << "[BLACK_DIST] litRatio bins: allZero=" << zeroPx
+                              << " <0.5%=" << nearZero << " 0.5-2%=" << partial
+                              << std::endl;
+                }
                 std::cout << "[RHI_SHARED] frames=" << cfg.totalFrames
                           << " final-res=" << curW << "x" << curH
                           << " avg-lit-ratio="
@@ -4005,6 +5535,20 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
                           << " deferred=" << (cfg.deferred ? "on" : "off")
                           << " wall=" << ms << " ms ("
                           << (ms / cfg.totalFrames) << " ms/frame)" << std::endl;
+                // M6：GI 模式黑帧守卫观测量（几何覆盖率）+ 颜色暗帧计数——单帧
+                // 暗帧不判失败（完全阴影几何恰为黑是直射-only 契约），如实输出；
+                // 但全部帧颜色暗（几何覆盖正常）= 没有任何证据表明 direct/
+                // indirect/composite 颜色链出过光 → 判失败。
+                if (cfg.gi) {
+                    std::cout << "[GI] black-frame guard: geometry coverage (depth<1) "
+                                 "min=" << giMinCoverage << " (fail <0.02); dark frames "
+                                 "(post litRatio<0.02 with coverage>=0.02)="
+                              << giDarkFrames << "/" << cfg.totalFrames << std::endl;
+                    Require(giDarkFrames != cfg.totalFrames,
+                            "GI mode: all " + std::to_string(cfg.totalFrames) +
+                            " frames colour-dark (coverage ok) — no evidence the "
+                            "direct/indirect/composite colour chain produced light");
+                }
                 // M3 消融统计输出：全帧累计直方图的分位数 + 贴白率（POST
                 // A/B 与 EV 单调性证据；POST=0 时无此统计——对照组统计在
                 // 读回循环里同式计算，由外部脚本对两次运行输出做 diff）。
@@ -4044,10 +5588,8 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
             device->DestroyDescriptorSet(e.materialSet);
             g_ledger.sets.erase(e.materialSet);
         }
-        if (e.albedoTex != handles::INVALID_RESOURCE) {
-            device->DestroyTexture(e.albedoTex);
-            g_ledger.textures.erase(e.albedoTex);
-        }
+        // albedo 纹理按来源去重后由 albedoBySource 统一持有——先销完全部
+        // 引用它的 set，再逐唯一纹理销毁一次（逐 mesh 销毁=重复销毁）。
         if (e.mesh) {
             e.mesh->Destroy(device);
             delete e.mesh;
@@ -4055,6 +5597,13 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
         }
     }
     meshes.clear();
+    for (auto& sourceTex : albedoBySource) {
+        if (sourceTex.second != handles::INVALID_RESOURCE) {
+            device->DestroyTexture(sourceTex.second);
+            g_ledger.textures.erase(sourceTex.second);
+        }
+    }
+    albedoBySource.clear();
     for (auto& info : sceneInfos) {
         if (info.ownsMeshContentResource &&
             info.meshEntityId != primal::id::invalid_id)
@@ -4075,10 +5624,11 @@ int RunHost(RHIDeviceBase* device, const RunConfig& cfg) {
     }
     if (cfg.deferred) {
         M4DeferredDestroy(device, deferred4);
-        // M6：GI 段汇总（重置/收敛读回/dump 计数）+ 资源销毁（账本平衡）
+        // M6：GI 段汇总（重置/收敛读回/dump/导出计数）+ 资源销毁（账本平衡）
         std::cout << "[GI] summary: resets=" << m6gi.resetCount
                   << " ladderFrames=" << m6gi.readbackFrames
-                  << " gridDumps=" << m6gi.dumpCount << std::endl;
+                  << " gridDumps=" << m6gi.dumpCount
+                  << " exports=" << m6gi.exportFrames << std::endl;
         M6GIDestroy(device, m6gi);
     }
     if (cfg.post) {
@@ -4181,6 +5731,9 @@ int main() {
             return 2;
         }
     }
+    // 资产 SHA 门禁（main 最早处）：设备创建/纹理/网格加载之前硬校验，
+    // 失败按配置错误惯例 exit 2，绝不带错资产进渲染。
+    if (!VerifyTrajectoryAssetSha(cfg.traj, trajRel)) return 2;
     std::cout << "[RHI_SHARED] trajectory=" << cfg.traj.name
               << " asset=" << cfg.traj.assetPath
               << " dt=" << cfg.traj.dt
@@ -4239,17 +5792,25 @@ int main() {
     // M5 F5-5：compute mipgen 独立验证（默认 0；自建自毁资源，不并主轨迹）
     cfg.mipgen = EnvOr("RHI_TEST_MIPGEN", "0") == "1";
     // M6 F6-2：probe-grid GI 切片（默认 0 = M1-M5 行为不变）。组合前置
-    // RHI_TEST_DEFERRED=1——GI ambient 消费在延迟光照 pass（b8/b9/b10；
-    // 无延迟档为配置错误，不给静默错误绑定）。RHI_GI_DUMP=1 时 ladder 帧
-    // 中央 slice 落 PPM；[GI_MEAN] 收敛阶梯恒输出（GI=1 时）。
+    // RHI_TEST_DEFERRED=1——GI 链建在 GBuffer + 延迟直射 pass 之上（P2 直射
+    // 复用延迟光照 set；无延迟档为配置错误，不给静默错误绑定）。RHI_GI_DUMP=1
+    // 时 ladder 帧中央 slice 落 PPM；[GI_MEAN] 收敛阶梯恒输出（GI=1 时）。
     cfg.gi = EnvOr("RHI_TEST_GI", "0") == "1";
     if (cfg.gi && !cfg.deferred) {
         std::cerr << "[RHI_SHARED] config error: RHI_TEST_GI=1 requires "
-                     "RHI_TEST_DEFERRED=1 (GI ambient is consumed by the "
-                     "deferred light pass)"
+                     "RHI_TEST_DEFERRED=1 (GI chain consumes the deferred "
+                     "GBuffer + direct-light pass)"
                   << std::endl;
         return 2;
     }
+    // M6 spec §6.5：原始浮点导出（opt-in；DEFERRED=1 时生效，GI on/off 均可）。
+    // RHI_GI_EXPORT_FRAMES=<csv 帧号>，RHI_GI_EXPORT_DIR 缺省 = captureDir。
+    for (u32 fr : ParseCsvU32(EnvOr("RHI_GI_EXPORT_FRAMES", "")))
+        cfg.giExportFrames.insert(fr);
+    cfg.giExportDir = EnvOr("RHI_GI_EXPORT_DIR", "");
+    if (!cfg.giExportFrames.empty() && !cfg.deferred)
+        std::cerr << "[GI_EXPORT] note: RHI_GI_EXPORT_FRAMES ignored "
+                     "(requires RHI_TEST_DEFERRED=1)" << std::endl;
     // 边界登记回显：dir_to_light 关键帧存在时不重导 M2 阴影级联 VP。
     if (!cfg.traj.lightKeys.empty()) {
         bool hasDir = false;

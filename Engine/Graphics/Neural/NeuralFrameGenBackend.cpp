@@ -1,15 +1,28 @@
 /**
  * @file NeuralFrameGenBackend.cpp
  * @brief FG shim 封装实现（dlopen + 生命周期；探测序列同 NeuralMLXBackend）
+ *
+ * R3（Windows 首编）：MLX/CoreML shim 是 macOS 专属依赖，<dlfcn.h> 在 MSVC
+ * 下不存在。实现整体 APPLE 门控；非 Apple 平台编译降级 stub（Initialize 恒
+ * false → 模块降级，与 shim 缺库时的运行时降级同语义）。头文件保持全平台
+ * 可编（NeuralFrameGenModule.h 按值持有本类成员）。CMake glob 不变。
  */
 #include "NeuralFrameGenBackend.h"
 
+#if defined(__APPLE__)
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
+#endif
 
+// R4（Windows 四测修复）：namespace 必须包裹真实现与 stub 两个分支——R3 版本
+// 把开括号放在 __APPLE__ 分支内、闭括号在 #endif 之后，非 Apple 编译时 stub
+// 定义裸露全局作用域（MSVC C2653 "NeuralFrameGenBackend 不是类或命名空间名
+// 称" + 级联 C2059/C2143）。头文件 include 不能进 namespace，故拆两段 #if。
 namespace primal::graphics::neural {
+
+#if defined(__APPLE__)
 
 namespace {
 
@@ -133,5 +146,28 @@ bool NeuralFrameGenBackend::Interpolate(const f32* frame_a, const f32* frame_b,
     if (err) err->clear();
     return true;
 }
+
+#else  // !defined(__APPLE__)
+
+// 非 Apple 降级 stub：IsAvailable() 恒 false；NeuralFrameGenModule 按
+// Initialize 失败降级（不注册 FG pass）。
+std::string NeuralFrameGenBackend::FindDylib() { return {}; }
+std::string NeuralFrameGenBackend::FindWeights() { return {}; }
+
+bool NeuralFrameGenBackend::Initialize(const std::string&, const std::string&,
+                                       std::string* err) {
+    if (err) *err = "NeuralFrameGenBackend: MLX shim is macOS-only (libNeuralMLXShim.dylib)";
+    return false;
+}
+
+void NeuralFrameGenBackend::Shutdown() {}
+
+bool NeuralFrameGenBackend::Interpolate(const f32*, const f32*, u32, u32, f32,
+                                        f32*, std::string* err) {
+    if (err) *err = "NeuralFrameGenBackend: not available on this platform";
+    return false;
+}
+
+#endif  // defined(__APPLE__)
 
 }  // namespace primal::graphics::neural

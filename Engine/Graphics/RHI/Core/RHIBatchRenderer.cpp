@@ -264,7 +264,7 @@ void RHIBatchRenderer::PerformFrustumCulling(const Frustum& frustum) {
         auto it = batch.items.begin();
         while (it != batch.items.end()) {
             // 简单的球体剔除
-            math::v3 center{it->worldMatrix.columns[3].x, it->worldMatrix.columns[3].y, it->worldMatrix.columns[3].z};
+            math::v3 center = math::xyz(math::column(it->worldMatrix, 3));
             f32 radius = batch.boundingRadius; // 使用批次的包围半径
             
             if (!frustum.IsSphereVisible(center, radius)) {

@@ -207,16 +207,16 @@ static void FillUBO(RHIDeviceBase* device, ResourceHandle ubo,
     // CreateLookAtMatrix stores column-major: column j = (row0[j], row1[j], row2[j], row3[j]).
     // Row 0 = right, row 1 = up, row 2 = -forward.
     const math::m4x4& vm = inputs.view_matrix;
-    math::v3 right   = {vm.columns[0][0], vm.columns[1][0], vm.columns[2][0]};
-    math::v3 up      = {vm.columns[0][1], vm.columns[1][1], vm.columns[2][1]};
-    math::v3 forward = {-vm.columns[0][2], -vm.columns[1][2], -vm.columns[2][2]};
+    math::v3 right   = {math::elem(vm, 0, 0), math::elem(vm, 1, 0), math::elem(vm, 2, 0)};
+    math::v3 up      = {math::elem(vm, 0, 1), math::elem(vm, 1, 1), math::elem(vm, 2, 1)};
+    math::v3 forward = {-math::elem(vm, 0, 2), -math::elem(vm, 1, 2), -math::elem(vm, 2, 2)};
     forward = rhi::math::Normalize(forward);
     right   = rhi::math::Normalize(right);
     up      = rhi::math::Normalize(up);
 
     // Extract tan(halfFovY) and aspect from the projection matrix.
     const math::m4x4& pm = inputs.proj_matrix;
-    float tanHalfFovY = (pm.columns[1][1] != 0.0f) ? 1.0f / pm.columns[1][1] : 1.0f;
+    float tanHalfFovY = (math::elem(pm, 1, 1) != 0.0f) ? 1.0f / math::elem(pm, 1, 1) : 1.0f;
     float aspect = 1.0f;
     if (inputs.render_height > 0) {
         aspect = static_cast<float>(inputs.render_width) / inputs.render_height;
@@ -238,7 +238,7 @@ static void FillUBO(RHIDeviceBase* device, ResourceHandle ubo,
         u.SdfOrigins[c] = {cas.origin.x, cas.origin.y, cas.origin.z, 0.0f};
         u.SdfExtents[c] = {cas.extent.x, cas.extent.y, cas.extent.z, 0.0f};
         u.SdfVoxelSizes[c] = {cas.voxel_size, 0.0f, 0.0f, 0.0f};
-        u.SdfResolutionsAndCount[c] = static_cast<float>(cas.resolution);
+        math::set_component(u.SdfResolutionsAndCount, c, static_cast<float>(cas.resolution));
     }
     u.SdfResolutionsAndCount.w = static_cast<float>(cascadeCount);
     u.CameraPosAndMaxDist = {camPos.x, camPos.y, camPos.z, maxDist};
@@ -262,15 +262,15 @@ static void FillOfflineUBO(RHIDeviceBase* device, ResourceHandle ubo,
                        inputs.camera_position.z};
 
     const math::m4x4& vm = inputs.view_matrix;
-    math::v3 right   = {vm.columns[0][0], vm.columns[1][0], vm.columns[2][0]};
-    math::v3 up      = {vm.columns[0][1], vm.columns[1][1], vm.columns[2][1]};
-    math::v3 forward = {-vm.columns[0][2], -vm.columns[1][2], -vm.columns[2][2]};
+    math::v3 right   = {math::elem(vm, 0, 0), math::elem(vm, 1, 0), math::elem(vm, 2, 0)};
+    math::v3 up      = {math::elem(vm, 0, 1), math::elem(vm, 1, 1), math::elem(vm, 2, 1)};
+    math::v3 forward = {-math::elem(vm, 0, 2), -math::elem(vm, 1, 2), -math::elem(vm, 2, 2)};
     forward = rhi::math::Normalize(forward);
     right   = rhi::math::Normalize(right);
     up      = rhi::math::Normalize(up);
 
     const math::m4x4& pm = inputs.proj_matrix;
-    float tanHalfFovY = (pm.columns[1][1] != 0.0f) ? 1.0f / pm.columns[1][1] : 1.0f;
+    float tanHalfFovY = (math::elem(pm, 1, 1) != 0.0f) ? 1.0f / math::elem(pm, 1, 1) : 1.0f;
     float aspect = (inputs.render_height > 0)
                    ? static_cast<float>(inputs.render_width) / inputs.render_height
                    : 1.0f;
@@ -296,7 +296,7 @@ static void FillOfflineUBO(RHIDeviceBase* device, ResourceHandle ubo,
     u.SdfExtents[0] = {inputs.offline_sdf_extent.x, inputs.offline_sdf_extent.y,
                        inputs.offline_sdf_extent.z, 0.0f};
     u.SdfVoxelSizes[0] = {voxelSize, 0.0f, 0.0f, 0.0f};
-    u.SdfResolutionsAndCount[0] = static_cast<float>(inputs.offline_sdf_resolution);
+    math::set_component(u.SdfResolutionsAndCount, 0, static_cast<float>(inputs.offline_sdf_resolution));
 
     // Cascade count = 1 (only one volume).
     u.SdfResolutionsAndCount.w = 1.0f;

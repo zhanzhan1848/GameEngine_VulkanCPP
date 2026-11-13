@@ -105,6 +105,24 @@ public:
                    : VK_IMAGE_ASPECT_COLOR_BIT;
     }
 
+    /// R11/VUID-01211: 拷贝/上传后纹理"回落"到哪个 layout。此前 copy/blit/
+    /// update 路径无条件回 SHADER_READ_ONLY_OPTIMAL——深度图(只有
+    /// DEPTH_STENCIL_ATTACHMENT|TRANSFER 用途,如 TestVulkanDepthAspect 的
+    /// DepthRT usage 0x23)没有 SAMPLED/INPUT_ATTACHMENT 位,该过渡在
+    /// validation 下非法。按创建时的实际用途位选择合法回落布局:
+    /// SAMPLED/INPUT_ATTACHMENT → SRO;DEPTH_STENCIL_ATTACHMENT →
+    /// DEPTH_STENCIL_ATTACHMENT_OPTIMAL;COLOR_ATTACHMENT → COLOR_ATTACHMENT;
+    /// 纯 TRANSFER → GENERAL。采样纹理(绝大多数)行为不变。
+    VkImageLayout GetRestingLayout() const {
+        if (vkUsageFlags_ & (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT))
+            return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (vkUsageFlags_ & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)
+            return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        if (vkUsageFlags_ & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
+            return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        return VK_IMAGE_LAYOUT_GENERAL;
+    }
+
     /// VT M0.7: 任意子区域上传(2D 单 slice、任意 mip、非压缩格式)。
     /// data 为紧密行主序(region.width * bytesPerTexel / 行),size 必须
     /// 精确等于 bytesPerRow * region.height。语义与 updateDataImpl 相同:

@@ -1,0 +1,23 @@
+# 门禁快照（最终状态）2026-11-06：DirectXMath 迁移完成后全量运行
+# 再生成：bash run_gate.sh（默认输出 /tmp/dxmath_gate_report/summary.txt）
+#
+# 迁移前基线：首轮清单 508 TU（-ferror-limit=0）含 MATH 错误的 TU 88、MATH 诊断块
+#   3064、唯一错误位置 437；补齐测试/第三方包含根并修正清单解析（508→526 TU）后，
+#   又暴露 9 个 Vulkan 单测文件约 180 处，已一并迁移。
+# PLATFORM 192 块与 642829c9 改造前源码跑同一门禁的结果一致（唯一签名全部包含
+#   在基线中）：CMake 生成的 *_SPV 头/编译定义、moodycamel LP64 vs LLP64、
+#   仓内 dxsdk/WRL 垫片版本、MSVC CRT/内建接口、Win32 窗口/进程 API 垫片不足。
+
+==== DirectXMath 形状门禁汇总 ====
+编译单元总数: 527
+零错误 TU: 487    含 MATH 错误的 TU: 0
+MATH 诊断块总数: 0    PLATFORM 诊断块总数: 192
+
+-- 按顶层目录的 MATH 诊断数 --
+-- 按顶层目录的 PLATFORM 诊断数 --
+Engine: 95
+EngineTest: 71
+third_party: 14
+EngineDLL: 12
+
+-- MATH 诊断样例（前 40）--

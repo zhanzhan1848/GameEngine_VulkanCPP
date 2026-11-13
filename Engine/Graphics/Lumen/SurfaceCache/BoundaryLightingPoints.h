@@ -1,5 +1,6 @@
 #pragma once
 #include "BoundaryPointIndex.h"
+#include "../../../Utilities/MathTypes.h"   // math::column（原 matrix.columns 访问的跨后端等价物）
 #include "Engine/Graphics/RHI/Core/CardBoundarySidecar.h"
 #include <cmath>
 #include <cstddef>
@@ -28,13 +29,13 @@ bool AppendBoundaryLightPoints(const rhi::card_boundary::Mesh& mesh,const Card& 
                               std::vector<BoundaryLightPoint>& out) {
     constexpr size_t MaxPoints=BoundaryMaxLightPoints;
     if(card.resolution==0 || (card.axis_direction&255u)>2 || (card.axis_direction>>8)>1)return false;
-    const auto& c=matrix.columns;
-    const float values[]={c[0].x,c[0].y,c[0].z,c[0].w,c[1].x,c[1].y,c[1].z,c[1].w,
-        c[2].x,c[2].y,c[2].z,c[2].w,c[3].x,c[3].y,c[3].z,c[3].w,
+    const auto c0=math::column_of(matrix,0),c1=math::column_of(matrix,1),c2=math::column_of(matrix,2),c3=math::column_of(matrix,3);
+    const float values[]={c0.x,c0.y,c0.z,c0.w,c1.x,c1.y,c1.z,c1.w,
+        c2.x,c2.y,c2.z,c2.w,c3.x,c3.y,c3.z,c3.w,
         card.center.x,card.center.y,card.center.z,card.extent.x,card.extent.y,card.extent.z};
     for(const auto& v:values)if(!BoundaryPointIndex::Finite(v))return false;
-    if(c[0].w!=0 || c[1].w!=0 || c[2].w!=0 || c[3].w!=1)return false;
-    const double m[3][3]={{c[0].x,c[1].x,c[2].x},{c[0].y,c[1].y,c[2].y},{c[0].z,c[1].z,c[2].z}};
+    if(c0.w!=0 || c1.w!=0 || c2.w!=0 || c3.w!=1)return false;
+    const double m[3][3]={{c0.x,c1.x,c2.x},{c0.y,c1.y,c2.y},{c0.z,c1.z,c2.z}};
     double cof[3][3];
     for(size_t i=0;i<3;++i)for(size_t j=0;j<3;++j){const size_t a=(i+1)%3,b=(i+2)%3,d=(j+1)%3,e=(j+2)%3;
         cof[i][j]=m[a][d]*m[b][e]-m[a][e]*m[b][d];}
@@ -51,7 +52,7 @@ bool AppendBoundaryLightPoints(const rhi::card_boundary::Mesh& mesh,const Card& 
         if(s.triangle_id>=mesh.triangle_count || s.albedo[3]!=255)return false;
         for(const auto& x:s.position)if(!BoundaryPointIndex::Finite(x))return false;
         for(const auto& x:s.normal)if(!BoundaryPointIndex::Finite(x))return false;
-        const float translation[]={c[3].x,c[3].y,c[3].z};double normal[3]{};
+        const float translation[]={c3.x,c3.y,c3.z};double normal[3]{};
         for(size_t k=0;k<3;++k){double position=translation[k];
             for(size_t j=0;j<3;++j){position+=m[k][j]*s.position[j];normal[k]+=cof[k][j]*s.normal[j]/det;}
             p.world_footprint[k]=float(position);if(!BoundaryPointIndex::Finite(p.world_footprint[k]))return false;}

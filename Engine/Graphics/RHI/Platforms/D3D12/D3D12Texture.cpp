@@ -6,17 +6,14 @@
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
 #include <cstring>
+#include <string>
 
 #include "D3D12DescriptorHeaps.h"
 #include "D3D12Device.h"
 #include "D3D12Format.h"
 #include "D3D12Upload.h"
 
-#include "Engine/Common/CoreDiag.h"
-
-#ifndef PRIMAL_LOG_STREAM
-#define PRIMAL_LOG_STREAM(level, channel) primal::diag::StreamProxy(level, channel)
-#endif
+#include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi::d3d12 {
 
@@ -119,6 +116,30 @@ u32 DepthSrvFormat(DataFormat format) {
     }
 }
 
+/// DXGI 格式可读名（仅诊断日志用；覆盖 D3D12Abi.h 深度/TYPELESS 邻域，
+/// 未收录值返回 nullptr，调用方回退打印数值）。沿 D3D12Pipeline.cpp
+/// VisibilityName 的诊断辅助惯例。
+const char* DxgiFormatName(u32 dxgiFormat) {
+    switch (dxgiFormat) {
+        case kDXGIFormat_Unknown:               return "UNKNOWN";
+        case kDXGIFormat_R32G8X24_Typeless:     return "R32G8X24_TYPELESS";
+        case kDXGIFormat_D32_Float_S8X24_UInt:  return "D32_FLOAT_S8X24_UINT";
+        case kDXGIFormat_R32_Float_X8X24_Typeless: return "R32_FLOAT_X8X24_TYPELESS";
+        case kDXGIFormat_X32_Typeless_G8X24_UInt: return "X32_TYPELESS_G8X24_UINT";
+        case kDXGIFormat_R32_Typeless:          return "R32_TYPELESS";
+        case kDXGIFormat_D32_Float:             return "D32_FLOAT";
+        case kDXGIFormat_R32_Float:             return "R32_FLOAT";
+        case kDXGIFormat_R24G8_Typeless:        return "R24G8_TYPELESS";
+        case kDXGIFormat_D24_UNorm_S8_UInt:     return "D24_UNORM_S8_UINT";
+        case kDXGIFormat_R24_UNorm_X8_Typeless: return "R24_UNORM_X8_TYPELESS";
+        case kDXGIFormat_X24_Typeless_G8_UInt:  return "X24_TYPELESS_G8_UINT";
+        case kDXGIFormat_R16_Typeless:          return "R16_TYPELESS";
+        case kDXGIFormat_D16_UNorm:             return "D16_UNORM";
+        case kDXGIFormat_R16_UNorm:             return "R16_UNORM";
+        default:                                return nullptr;
+    }
+}
+
 } // namespace
 
 // ============================================================================
@@ -215,9 +236,13 @@ bool D3D12Texture::Initialize() {
         }
 
         u32 dxgi = ToDxgiFormat(texDesc_.format);
-        // 深度模板：资源本体用 TYPELESS 父格式（D3D12 平面资源规则），
-        // 视图（DSV/SRV）分别带具体格式。
-        if (planeCount_ == 2) {
+        // 深度家族：资源本体用 TYPELESS 父格式，视图（DSV/SRV）分别带具体
+        // 格式。双平面是 D3D12 平面资源规则；单平面纯深度在需挂 SRV 时同样
+        // 必须 TYPELESS——typed D32_FLOAT 资源上建 R32_FLOAT SRV 视图不兼容
+        // （SampleCmp 恒 0，M2 阴影≡0 根因）；DSV-only 深度保持 typed 创建。
+        const bool depthSrvCast = isDepthFamily
+            && (texDesc_.usage & TextureUsage::ShaderResource) != TextureUsage::Unknown;
+        if (planeCount_ == 2 || depthSrvCast) {
             dxgi = GetTypelessDxgiFormat(texDesc_.format);
             if (dxgi == kDXGIFormat_Unknown) {
                 PRIMAL_LOG_STREAM(Error, "RHI")
@@ -271,6 +296,32 @@ bool D3D12Texture::Initialize() {
             resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
         }
 
+        // R15-1 层1：GenerateMipmaps 服务承诺的创建期标志增补。Vulkan 侧
+        // ToVkImageUsageFlags（VulkanMath.h）对含 ShaderResource/RenderTarget
+        // 的 usage 隐式补 TRANSFER_SRC/DST，blit 链 mipgen 因此恒可用；D3D12
+        // mipgen 走 PS downsample 需 RTV，而资源缺 ALLOW_RENDER_TARGET 时
+        // mipgen 的 CreateRenderTargetView 触发 debug-layer #42
+        // (CREATERENDERTARGETVIEW_INVALIDRESOURCE；Windows 十四测 exit 2170
+        // 首帧阻塞，CDB 实证)。故对 mips>1 且含 ShaderResource 的纹理，以与
+        // mipgen 入口同口径的 CheckFeatureSupport(RENDER_TARGET 位) 判定格式
+        // 能力后增补 RT 标志（深度/BC/TYPELESS 格式无该位、天然不增补）。
+        // 合法性：D3D12 资源标志仅 DENY_SHADER_RESOURCE 与 RT/DS 互斥
+        // (d3d12.h 注释)，RT 标志与 SRV/COPY/UAV 标志无互斥；增补不改 RHI
+        // usage 语义，描述符仍按 usage 创建（无 RenderTarget 位 → 不分配
+        // RTV 槽，mipgen 自取临时 RTV 槽）。
+        if (texDesc_.mipLevels > 1
+            && (texDesc_.usage & TextureUsage::ShaderResource) != TextureUsage::Unknown
+            && !isDepthFamily) {
+            D3D12_FEATURE_DATA_FORMAT_SUPPORT mipRtvSupport{};
+            mipRtvSupport.Format = static_cast<DXGI_FORMAT>(dxgi);
+            if (SUCCEEDED(native->CheckFeatureSupport(
+                    D3D12_FEATURE_FORMAT_SUPPORT, &mipRtvSupport,
+                    sizeof(mipRtvSupport)))
+                && (mipRtvSupport.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) != 0) {
+                resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+            }
+        }
+
         // 初始状态：COMMON（纹理写类使用必须显式 transition——COMMON 只能
         // 自动提升到读类状态；提升/衰减规则见 D3D12StateTracker 文件头）。
         D3D12MA::ALLOCATION_DESC allocDesc{};
@@ -301,6 +352,12 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
     if (!native || !resource_) return false;
 
     const u32 dxgiFull = ToDxgiFormat(texDesc_.format);
+    // [R6/Windows] isDepthFamily 原是 Initialize()（L201）的局部量，本函数
+    // 不可见（C2065）。在此重算同一表达式（planeCount_ 是成员，成员初始化
+    // 于 Initialize 先行，此处读到的即最终值）。
+    const bool isDepthFamily = planeCount_ == 2
+        || texDesc_.format == DataFormat::D32_Float
+        || texDesc_.format == DataFormat::D16_UNorm;
 
     // ---- RTV（RenderTarget usage；wrap backbuffer 走同一路径） ----
     const bool wantRtv = viewMode_
@@ -396,7 +453,9 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
                 srvDesc.Texture2DArray.FirstArraySlice = viewMode_ ? viewDesc_.firstArraySlice : 0;
                 srvDesc.Texture2DArray.ArraySize = viewMode_ ? viewDesc_.arraySize : texDesc_.arraySize;
                 srvDesc.Texture2DArray.PlaneSlice = 0;
-                srvDesc.Texture2DArray.ResourceMinLOD = 0.0f;
+                // [R6/Windows] 真名 ResourceMinLODClamp（官方头 D3D12_TEX2D_ARRAY_SRV；
+                // ResourceMinLOD 不存在）。
+                srvDesc.Texture2DArray.ResourceMinLODClamp = 0.0f;
                 break;
             case TextureType::Texture2D:
             case TextureType::Unknown:
@@ -405,11 +464,15 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
                 srvDesc.Texture2D.MostDetailedMip = viewMode_ ? viewDesc_.mostDetailedMip : 0;
                 srvDesc.Texture2D.MipLevels = viewMode_ ? viewDesc_.mipCount : texDesc_.mipLevels;
                 srvDesc.Texture2D.PlaneSlice = 0;
-                srvDesc.Texture2D.ResourceMinLOD = 0.0f;
+                // [R6/Windows] 真名 ResourceMinLODClamp（官方头 D3D12_TEX2D_SRV）。
+                srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
                 break;
         }
         native->CreateShaderResourceView(resource_.Get(), &srvDesc,
-                                         heaps.CbvSrvUavCpuHandle(srvSlot_));
+                                         heaps.CbvSrvUavShadowCpuHandle(srvSlot_));
+        // R13/T1 双写：先落 shadow（该持久槽是 UpdateDescriptorSets/区段迁移
+        // 的拷贝源——直写 visible 会让后续读源踩 #654），再镜像进 visible。
+        heaps.CopyCbvSrvUavShadowToVisible(srvSlot_);
     }
 
     // ---- UAV（UnorderedAccess usage；M1 无 view 变体） ----
@@ -437,7 +500,27 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
             uavDesc.Texture2D.PlaneSlice = 0;
         }
         native->CreateUnorderedAccessView(resource_.Get(), nullptr, &uavDesc,
-                                          heaps.CbvSrvUavCpuHandle(uavSlot_));
+                                          heaps.CbvSrvUavShadowCpuHandle(uavSlot_));
+        // R13/T1 双写（同 SRV：shadow 落点 + 镜像，拷贝源语义见 SRV 注释）。
+        heaps.CopyCbvSrvUavShadowToVisible(uavSlot_);
+    }
+
+    // 诊断回显（D3D12 黑屏排障）：深度家族 + SRV 纹理在资源与视图均创建
+    // 完成后回显三者实际格式（Windows 阴影采样证据链；预期如 M2ShadowMap
+    // resource DXGI=R32_TYPELESS DSV=D32_FLOAT SRV=R32_FLOAT）。资源格式从
+    // 现存 ID3D12Resource 读回（不重推导），DSV/SRV 与上方视图 desc 同源
+    // 同值；无 DSV 时打 none。只读回显，不触碰创建逻辑。
+    if (!viewMode_ && isDepthFamily
+        && (texDesc_.usage & TextureUsage::ShaderResource) != TextureUsage::Unknown) {
+        auto fmtName = [](u32 dxgi) -> std::string {
+            const char* n = DxgiFormatName(dxgi);
+            return n ? std::string(n) : std::to_string(dxgi);
+        };
+        PRIMAL_LOG_STREAM(Info, "RHI")
+            << "[D3D12Texture] " << texDesc_.name << " resource DXGI="
+            << fmtName(static_cast<u32>(GetNativeDesc().Format))
+            << " DSV=" << (wantDsv ? fmtName(dxgiFull) : std::string("none"))
+            << " SRV=" << fmtName(DepthSrvFormat(texDesc_.format)) << std::endl;
     }
     return true;
 }

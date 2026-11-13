@@ -294,8 +294,8 @@ private:
     u32 last_consume_read_frame_{ 0 };
     // A5 场景贴合覆盖盒（离线 SDF 就位时由接线端设置）。
     bool has_fit_bounds_{ false };
-    math::v3 fit_bounds_min_{ 0.0f };
-    math::v3 fit_bounds_max_{ 0.0f };
+    math::v3 fit_bounds_min_ = math::splat3(0.0f);
+    math::v3 fit_bounds_max_ = math::splat3(0.0f);
     float fit_margin_{ 0.0f };
 };
 

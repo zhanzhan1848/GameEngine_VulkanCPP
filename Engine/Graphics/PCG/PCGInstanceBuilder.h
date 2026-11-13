@@ -49,11 +49,11 @@ public:
 
             // Build model matrix: Translation * RotationY * Scale
             const auto& pos = points.positions[i];
-            simd::float4 col0 = {sx * cos_a,  0, sz * sin_a,  0};
-            simd::float4 col1 = {0,           sy, 0,          0};
-            simd::float4 col2 = {-sx * sin_a, 0, sz * cos_a,  0};
-            simd::float4 col3 = {pos.x, pos.y, pos.z, 1};
-            inst.model_matrix = simd_matrix(col0, col1, col2, col3);
+            const math::v4 col0{sx * cos_a, 0.f, sz * sin_a, 0.f};
+            const math::v4 col1{0.f, sy, 0.f, 0.f};
+            const math::v4 col2{-sx * sin_a, 0.f, sz * cos_a, 0.f};
+            const math::v4 col3{pos.x, pos.y, pos.z, 1.f};
+            inst.model_matrix = math::make_m4x4(col0, col1, col2, col3);
 
             out_instances.push_back(inst);
         }

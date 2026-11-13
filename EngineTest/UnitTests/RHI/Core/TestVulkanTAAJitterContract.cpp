@@ -1,5 +1,6 @@
 // Real AddTAAPass execution, uploaded CB and logical history contract.
 #include "../../TestFramework.h"
+#include "EngineTest/Utils/TestEnv.h"   // R3: portable setenv (MSVC lacks POSIX one)
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
@@ -168,13 +169,13 @@ struct Scenario {
  ResourceHandle texture(DataFormat format,u32 width,u32 height,std::function<void(u32,u32,u8*)> fill,u32 bpp){TextureDesc d{};d.size={width,height,1};d.format=format;d.type=TextureType::Texture2D;d.mipLevels=d.arraySize=1;std::vector<u8> bytes(u64(width)*height*bpp);for(u32 y=0;y<height;++y)for(u32 x=0;x<width;++x)fill(x,y,bytes.data()+(u64(y)*width+x)*bpp);auto t=CreateAndUploadTexture(f,d,bytes,"TAAJitterFixture");check(t!=handles::INVALID_RESOURCE,"Upload actual fixture texture");textures.push_back(t);return t;}
  ResourceHandle depth(DataFormat format,u32 width,u32 height){return texture(format,width,height,[](u32,u32,u8* p){float z=.5f;std::memcpy(p,&z,4);},4);}
  Capture frame(const std::string& label,u32 n,int fault=0,bool buildOnly=false){
-  auto dir=rootOut()/label;std::filesystem::create_directories(dir);setenv("LUMEN_COMPARE_DIR",dir.c_str(),1);auto ord=std::to_string(n+1);setenv("LUMEN_COMPARE_FRAMES",ord.c_str(),1);setenv("LUMEN_COMPARE_PASSES","TAAPass,Test.Output",1);setenv("LUMEN_COMPARE_STAGING_MIB","64",1);primal::graphics::lumencompare::Begin(n+1);
+  auto dir=rootOut()/label;std::filesystem::create_directories(dir);primaltest::SetEnv("LUMEN_COMPARE_DIR",dir.string().c_str());auto ord=std::to_string(n+1);primaltest::SetEnv("LUMEN_COMPARE_FRAMES",ord.c_str());primaltest::SetEnv("LUMEN_COMPARE_PASSES","TAAPass,Test.Output");primaltest::SetEnv("LUMEN_COMPARE_STAGING_MIB","64");primal::graphics::lumencompare::Begin(n+1);
   RenderGraph graph(*f.base);auto in=graph.ImportResource("TAAFixtureColor",color,ResourceState::ShaderResource),vel=graph.ImportResource("TAAFixtureVelocity",velocity,ResourceState::ShaderResource);auto dep=graph.ImportResource("TAAFixtureDepth",current,ResourceState::ShaderResource);
   bool published=false;u32 calls=0;auto jitter=primal::graphics::utils::GetJitterOffset(n,w,h);
   struct Producer {RGResourceHandle depth;};
   auto producer=graph.AddPass<Producer>("ControlledRasterPublication",RGPassType::Compute,RGPassCategory::Main,[&](Producer& d,RenderGraphBuilder& b){d.depth=b.Write(dep,ResourceState::ShaderResource);b.SideEffect();},[&](const Producer&,RenderGraphContext&){published=true;});
   PostProcess::TAADepthInputs depthInputs{};depthInputs.require_raster_jitter=true;depthInputs.currDepth=current;depthInputs.prevDepth=n==118?handles::INVALID_RESOURCE:previous;depthInputs.previous_depth_frame=fault==3?n-2:n-1;depthInputs.current_depth_rg=producer.depth;
-  for(u32 i=0;i<4;++i){depthInputs.currInvViewProj.columns[i]={0,0,0,0};depthInputs.prevViewProj.columns[i]={0,0,0,0};}depthInputs.currInvViewProj.columns[0].x=depthInputs.currInvViewProj.columns[1].y=depthInputs.currInvViewProj.columns[2].z=depthInputs.currInvViewProj.columns[3].w=1;depthInputs.prevViewProj=depthInputs.currInvViewProj;
+  for(u32 i=0;i<4;++i){set_column(depthInputs.currInvViewProj,i,v4{0,0,0,0});set_column(depthInputs.prevViewProj,i,v4{0,0,0,0});}set_elem(depthInputs.currInvViewProj,0,0,1.f);set_elem(depthInputs.currInvViewProj,1,1,1.f);set_elem(depthInputs.currInvViewProj,2,2,1.f);set_elem(depthInputs.currInvViewProj,3,3,1.f);depthInputs.prevViewProj=depthInputs.currInvViewProj;
   if(fault!=1)depthInputs.raster_jitter_provider=[&](primal::math::v2& out){++calls;if(!published)return false;out=jitter;if(fault==2)out.x=std::numeric_limits<float>::quiet_NaN();return true;};
   auto out=PostProcess::AddTAAPass(graph,in,vel,w,h,n,fault==4?nullptr:&depthInputs).output;graph.MarkAsOutput(out);check(calls==0,"Raster provider must not run during graph construction");if(buildOnly)return {};
   auto command=f.base->CreateCommandBuffer(CommandQueueType::Graphics);auto* cmd=f.vk->GetCommandBuffer(command);check(cmd&&cmd->Reset()&&cmd->Begin(),"Begin RG command");graph.Compile();graph.Execute(cmd);auto* resource=graph.GetResource(out);check(resource!=nullptr,"Actual TAA output RG");primal::graphics::lumencompare::Output(f.base,cmd,"Test.Output","Output",resource->GetPhysicalHandle(),false,ResourceState::CopySource);check(cmd->End()&&cmd->Submit()&&cmd->WaitForCompletion(),"Submit actual TAA RG");f.base->DestroyCommandBuffer(command);check(fault==1||fault==4?calls==0:calls==1,"Exec-only raster provider call count");

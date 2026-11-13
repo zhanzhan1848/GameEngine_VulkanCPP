@@ -4,6 +4,14 @@
 #include "Graphics/Renderer.h"
 #include "Platform/Window.h"
 
+// R13-B（Windows 十二测 C1083）：本头此前无条件 include <Metal/Metal.hpp>——
+// Metal 框架仅 Apple 存在，任何非 Apple TU 经 include 链到达本头即 C1083
+// （实测进入链：EngineDLL/ResourceAPI.cpp 无条件 include MetalContent.h）。
+// 本头全部载荷（框架头/帧缓冲常量/调试宏/MetalHelper/MetalResource）都是
+// Metal 后端专属，整段 APPLE 门控；非 Apple 平台本头退化为引擎通用头转发，
+// 零 Metal 引用。消费者清单（全部 Metal 后端文件，仅 APPLE 编译域经
+// Engine/CMakeLists.txt glob）见 runbook §22B。
+#if defined(__APPLE__)
 
 #include <Metal/Metal.hpp>
 #include <MetalKit/MetalKit.hpp>
@@ -62,3 +70,5 @@ namespace primal::graphics::metal
 
 #include "MetalHelper.h"
 #include "MetalResource.h"
+
+#endif // defined(__APPLE__) — R13-B Metal 载荷门控结束

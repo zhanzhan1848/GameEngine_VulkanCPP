@@ -158,9 +158,14 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
     outputDesc.memoryUsage = GPUMemoryUsage::Static;
     for (int i = 0; i < 3; ++i) {
         output_textures_[i] = device->CreateTexture(outputDesc);
-        if (device->GetPlatform() == RHIPlatform::Vulkan)
+        // MRT2 EnvironmentSpecular 附件：Vulkan/D3D12 同形（deferred frag 的
+        // location 1 输出走同一 20-binding flat set；Metal 无此附件）。
+        if (device->GetPlatform() == RHIPlatform::Vulkan ||
+            device->GetPlatform() == RHIPlatform::D3D12)
             environment_textures_[i] = device->CreateTexture(outputDesc);
-        if (device->GetPlatform() == RHIPlatform::Vulkan && environment_textures_[i] == handles::INVALID_RESOURCE) {
+        if ((device->GetPlatform() == RHIPlatform::Vulkan ||
+             device->GetPlatform() == RHIPlatform::D3D12) &&
+            environment_textures_[i] == handles::INVALID_RESOURCE) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[DeferredLighting] Environment attachment allocation failed" << std::endl;
             Shutdown();
             return false;
@@ -216,7 +221,8 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
     fallback_tex_ = device->CreateTexture(fallbackDesc);
 
     if (fallback_tex_ != handles::INVALID_RESOURCE &&
-        device->GetPlatform() == RHIPlatform::Vulkan) {
+        (device->GetPlatform() == RHIPlatform::Vulkan ||
+         device->GetPlatform() == RHIPlatform::D3D12)) {
         u8 white_pixel[4] = { 255, 255, 255, 255 };
         BufferDesc staging{};
         staging.size = 4;
@@ -261,6 +267,80 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         }
     }
 
+    // R7-WIN(07752): 1x1x6 占位 cube —— IBL 不可用时 bindings 10/11 必须绑
+    // cube 视图(shader OpTypeImage Dim=Cube)。旧实现把 2D fallback_tex_
+    // 绑进 cube 槽,在 Windows(无 sunset.hdr → IBL 失败)必现
+    // VUID-vkCmdDraw-viewType-07752;Mac IBL 成功绑真 cube,本纹理不参与
+    // 绑定,输出不变。内容任意:无 IBL 时 ambientLight.w=0,shader 的 IBL
+    // 分支不采样;Vulkan/D3D12 上仍按 fallback_tex_ 同款 staging+barrier
+    // 把 6 面移出 UNDEFINED(09600 预防)。
+    {
+        TextureDesc cubeDesc{};
+        cubeDesc.size = {1, 1, 1};
+        cubeDesc.format = DataFormat::RGBA8_UNorm;
+        cubeDesc.type = TextureType::TextureCube;   // Vulkan 端强制 arrayLayers=6 + CUBE view
+        cubeDesc.usage = TextureUsage::ShaderResource | TextureUsage::CopyDest;
+        cubeDesc.memoryUsage = GPUMemoryUsage::Static;
+        fallback_cube_tex_ = device->CreateTexture(cubeDesc);
+
+        if (fallback_cube_tex_ != handles::INVALID_RESOURCE &&
+            (device->GetPlatform() == RHIPlatform::Vulkan ||
+             device->GetPlatform() == RHIPlatform::D3D12)) {
+            u8 white_faces[6 * 4];
+            for (u32 f = 0; f < 6; ++f) {
+                white_faces[f * 4 + 0] = 255; white_faces[f * 4 + 1] = 255;
+                white_faces[f * 4 + 2] = 255; white_faces[f * 4 + 3] = 255;
+            }
+            BufferDesc staging{};
+            staging.size = sizeof(white_faces);
+            staging.memoryUsage = GPUMemoryUsage::Dynamic;
+            ResourceHandle stagingHandle = device->CreateBuffer(staging);
+            if (stagingHandle != handles::INVALID_RESOURCE) {
+                void* mapped = device->MapBuffer(stagingHandle);
+                if (mapped) {
+                    std::memcpy(mapped, white_faces, sizeof(white_faces));
+                    device->UnmapBuffer(stagingHandle);
+                }
+                SyncHandle fence = device->CreateSync();
+                auto cmdHandle = device->CreateCommandBuffer(CommandQueueType::Graphics);
+                auto* cmd = GetCommandBuffer(cmdHandle);
+                if (cmd && cmd->Begin()) {
+                    // 逐面 6 段拷贝(而非单段 layerCount=6):D3D12 的
+                    // CopyBufferToTexture 按 baseArrayLayer 只拷单个
+                    // subresource,忽略 layerCount——单段写法会留 5 面
+                    // 未初始化;逐面写法在 Vulkan/D3D12 语义均正确。
+                    BufferTextureCopyRegion regions[6]{};   // {} 值初始化(mipLevel 等归零)
+                    for (u32 f = 0; f < 6; ++f) {
+                        regions[f].bufferOffset = f * 4;   // 6×4B 紧密排列
+                        regions[f].imageSubresource.baseArrayLayer = f;
+                        regions[f].imageSubresource.layerCount = 1;
+                        regions[f].imageOffset = {0, 0, 0};
+                        regions[f].imageExtent = {1, 1, 1};
+                    }
+                    cmd->CopyBufferToTexture(stagingHandle, fallback_cube_tex_, regions, 6);
+
+                    ResourceBarrier toSRV;
+                    toSRV.resource = fallback_cube_tex_;
+                    toSRV.beforeState = ResourceState::CopyDest;
+                    toSRV.afterState = ResourceState::ShaderResource;
+                    toSRV.subresource = RHI_ALL_SUBRESOURCES;
+                    toSRV.queueFamily = 0xFFFFFFFF;
+                    cmd->InsertBarrier(&toSRV, 1);
+
+                    cmd->End();
+                    QueueSubmitInfo submitInfo{};
+                    submitInfo.cmdBuffer = cmdHandle;
+                    submitInfo.signalFence = fence;
+                    device->Submit(submitInfo);
+                    device->WaitForSync(fence, UINT32_MAX);
+                }
+                device->DestroySync(fence);
+                device->DestroyCommandBuffer(cmdHandle);
+                device->DestroyBuffer(stagingHandle);
+            }
+        }
+    }
+
     // Graphics pipeline
     if (vertex_shader != handles::INVALID_SHADER && pixel_shader != handles::INVALID_SHADER) {
         GraphicsPipelineDesc pd{};
@@ -269,7 +349,8 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         pd.pixelShader = pixel_shader;
         pd.renderTargetFormats[0] = DataFormat::RGBA16_Float;
         pd.renderTargetCount = 1;
-        if (device->GetPlatform() == RHIPlatform::Vulkan) {
+        if (device->GetPlatform() == RHIPlatform::Vulkan ||
+            device->GetPlatform() == RHIPlatform::D3D12) {
             pd.renderTargetFormats[1] = DataFormat::RGBA16_Float;
             pd.renderTargetCount = 2;
         }
@@ -398,16 +479,16 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                     // TEMP-DIAG: deferred 的 vp/invVP 真值
                     if (std::getenv("PRIMAL_DUMP_MATRIX")) {
                         std::fprintf(stderr, "[DEF_VP] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
-                                     vp.columns[0].x, vp.columns[0].y, vp.columns[0].z, vp.columns[0].w,
-                                     vp.columns[1].x, vp.columns[1].y, vp.columns[1].z, vp.columns[1].w,
-                                     vp.columns[2].x, vp.columns[2].y, vp.columns[2].z, vp.columns[2].w,
-                                     vp.columns[3].x, vp.columns[3].y, vp.columns[3].z, vp.columns[3].w);
+                                     math::elem(vp, 0, 0), math::elem(vp, 0, 1), math::elem(vp, 0, 2), math::elem(vp, 0, 3),
+                                     math::elem(vp, 1, 0), math::elem(vp, 1, 1), math::elem(vp, 1, 2), math::elem(vp, 1, 3),
+                                     math::elem(vp, 2, 0), math::elem(vp, 2, 1), math::elem(vp, 2, 2), math::elem(vp, 2, 3),
+                                     math::elem(vp, 3, 0), math::elem(vp, 3, 1), math::elem(vp, 3, 2), math::elem(vp, 3, 3));
                         const math::m4x4& iv = vd->invViewProjection;
                         std::fprintf(stderr, "[DEF_INVP] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
-                                     iv.columns[0].x, iv.columns[0].y, iv.columns[0].z, iv.columns[0].w,
-                                     iv.columns[1].x, iv.columns[1].y, iv.columns[1].z, iv.columns[1].w,
-                                     iv.columns[2].x, iv.columns[2].y, iv.columns[2].z, iv.columns[2].w,
-                                     iv.columns[3].x, iv.columns[3].y, iv.columns[3].z, iv.columns[3].w);
+                                     math::elem(iv, 0, 0), math::elem(iv, 0, 1), math::elem(iv, 0, 2), math::elem(iv, 0, 3),
+                                     math::elem(iv, 1, 0), math::elem(iv, 1, 1), math::elem(iv, 1, 2), math::elem(iv, 1, 3),
+                                     math::elem(iv, 2, 0), math::elem(iv, 2, 1), math::elem(iv, 2, 2), math::elem(iv, 2, 3),
+                                     math::elem(iv, 3, 0), math::elem(iv, 3, 1), math::elem(iv, 3, 2), math::elem(iv, 3, 3));
                     }
                     device_->UnmapBuffer(view_cb_[cbIdx]);
                 }
@@ -476,10 +557,10 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                         (void)chk;
                         const math::m4x4& mm = inputs.shadow_matrix0;
                         std::fprintf(stderr, "[SCENE_MAT0] %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
-                                     mm.columns[0].x, mm.columns[0].y, mm.columns[0].z, mm.columns[0].w,
-                                     mm.columns[1].x, mm.columns[1].y, mm.columns[1].z, mm.columns[1].w,
-                                     mm.columns[2].x, mm.columns[2].y, mm.columns[2].z, mm.columns[2].w,
-                                     mm.columns[3].x, mm.columns[3].y, mm.columns[3].z, mm.columns[3].w);
+                                     math::elem(mm, 0, 0), math::elem(mm, 0, 1), math::elem(mm, 0, 2), math::elem(mm, 0, 3),
+                                     math::elem(mm, 1, 0), math::elem(mm, 1, 1), math::elem(mm, 1, 2), math::elem(mm, 1, 3),
+                                     math::elem(mm, 2, 0), math::elem(mm, 2, 1), math::elem(mm, 2, 2), math::elem(mm, 2, 3),
+                                     math::elem(mm, 3, 0), math::elem(mm, 3, 1), math::elem(mm, 3, 2), math::elem(mm, 3, 3));
                         std::fprintf(stderr, "[SCENE_MISC] viewPos=(%.2f,%.2f,%.2f) shadowParams.x=%.1f\n",
                                      inputs.camera_position.x, inputs.camera_position.y,
                                      inputs.camera_position.z, inputs.vsm_enabled ? 1.0f : 0.0f);
@@ -511,6 +592,14 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                 ResourceHandle ft = inputs.ssao_pass->GetFilterTexture();
                 if (ft != handles::INVALID_RESOURCE) ssaoTex = ft;
             }
+            // R7-WIN(07752): IBL 不可用时 10/11 两枚 cube 槽必须绑 cube 视图
+            // (占位 cube 创建失败时退回旧 2D 行为,不引入空 imageView)。
+            // 12(brdfLUT 2D 槽)仍用 2D 白图。IBL 有效时三个槽都绑真资源,
+            // Mac 正常路径不经过本 fallback。
+            const ResourceHandle iblCubeFallback =
+                (fallback_cube_tex_ != handles::INVALID_RESOURCE &&
+                 fallback_cube_tex_ != rhi::ResourceHandle(0))
+                    ? fallback_cube_tex_ : fallback_tex_;
 
             DescData params[] = {
                 {0, DescriptorType::UniformBuffer, view_cb_[cbIdx]},
@@ -523,13 +612,14 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                 {7, DescriptorType::SampledImage, ssaoTex},
                 {8, DescriptorType::Sampler, static_cast<ResourceHandle>(sampler_)},
                 {9, DescriptorType::SampledImage, fallback_tex_},
-                // T4.6.5 part 37: IBL bindings 10/11/12. Fall back to the 1x1
-                // white texture when IBL isn't configured — shader's IBL branch
-                // still samples something valid (white = no ambient tint added).
+                // T4.6.5 part 37: IBL bindings 10/11/12. Fall back when IBL
+                // isn't configured — 10/11 是 cube 槽,占位必须是 cube 视图
+                // (R7-WIN 07752,旧 2D 白图 fallback 触发 viewType 验证错误);
+                // 12 是 2D 槽,保持 1x1 白图(white = no ambient tint added)。
                 {10, DescriptorType::SampledImage,
-                 validOrFallback(ibl_irradiance_, fallback_tex_)},
+                 validOrFallback(ibl_irradiance_, iblCubeFallback)},
                 {11, DescriptorType::SampledImage,
-                 validOrFallback(ibl_prefilter_, fallback_tex_)},
+                 validOrFallback(ibl_prefilter_, iblCubeFallback)},
                 {12, DescriptorType::SampledImage,
                  validOrFallback(ibl_brdf_lut_, fallback_tex_)},
                 // VSM shadow moments (13/14). White fallback keeps Chebyshev

@@ -107,10 +107,10 @@ struct DeviceFixture {
 m4x4 make_identity_m4x4() {
     m4x4 r{};
     std::memset(&r, 0, sizeof(r));
-    r.columns[0][0] = 1.0f;
-    r.columns[1][1] = 1.0f;
-    r.columns[2][2] = 1.0f;
-    r.columns[3][3] = 1.0f;
+    set_elem(r, 0, 0, 1.0f);
+    set_elem(r, 1, 1, 1.0f);
+    set_elem(r, 2, 2, 1.0f);
+    set_elem(r, 3, 3, 1.0f);
     return r;
 }
 
@@ -242,7 +242,7 @@ TestResult TestVulkanStandardPipeline_EditorMode_NoOpRender() {
 
     RenderView view;
     m4x4 viewMat = make_identity_m4x4();
-    viewMat.columns[3][2] = 5.0f;
+    set_elem(viewMat, 3, 2, 5.0f);
     view.SetViewMatrix(viewMat);
 
     m4x4 proj{};
@@ -251,11 +251,11 @@ TestResult TestVulkanStandardPipeline_EditorMode_NoOpRender() {
     float fov = 60.0f * (pi / 180.0f);
     float aspect = float(W) / float(H);
     float f = 1.0f / std::tan(fov * 0.5f);
-    proj.columns[0][0] = f / aspect;
-    proj.columns[1][1] = f;
-    proj.columns[2][2] = 50.0f / (0.1f - 100.0f);
-    proj.columns[2][3] = 1.0f;
-    proj.columns[3][2] = -(0.1f * 100.0f) / (0.1f - 100.0f);
+    set_elem(proj, 0, 0, f / aspect);
+    set_elem(proj, 1, 1, f);
+    set_elem(proj, 2, 2, 50.0f / (0.1f - 100.0f));
+    set_elem(proj, 2, 3, 1.0f);
+    set_elem(proj, 3, 2, -(0.1f * 100.0f) / (0.1f - 100.0f));
     view.SetProjectionMatrix(proj);
     view.Cull(scene);
 
@@ -368,7 +368,7 @@ TestResult TestVulkanEditorRender_ForwardSceneRenderer() {
 
     RenderView view;
     m4x4 viewMat = make_identity_m4x4();
-    viewMat.columns[3][2] = 5.0f;
+    set_elem(viewMat, 3, 2, 5.0f);
     view.SetViewMatrix(viewMat);
 
     m4x4 proj{};
@@ -377,11 +377,11 @@ TestResult TestVulkanEditorRender_ForwardSceneRenderer() {
     float fov = 60.0f * (pi / 180.0f);
     float aspect = float(W) / float(H);
     float f = 1.0f / std::tan(fov * 0.5f);
-    proj.columns[0][0] = f / aspect;
-    proj.columns[1][1] = f;
-    proj.columns[2][2] = 50.0f / (0.1f - 100.0f);
-    proj.columns[2][3] = 1.0f;
-    proj.columns[3][2] = -(0.1f * 100.0f) / (0.1f - 100.0f);
+    set_elem(proj, 0, 0, f / aspect);
+    set_elem(proj, 1, 1, f);
+    set_elem(proj, 2, 2, 50.0f / (0.1f - 100.0f));
+    set_elem(proj, 2, 3, 1.0f);
+    set_elem(proj, 3, 2, -(0.1f * 100.0f) / (0.1f - 100.0f));
     view.SetProjectionMatrix(proj);
     view.Cull(scene);
 

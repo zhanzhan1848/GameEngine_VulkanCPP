@@ -6,6 +6,7 @@
  */
 
 #include "VulkanSync.h"
+#include "VulkanHangDiag.h"
 #include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
@@ -37,6 +38,7 @@ VulkanSync::VulkanSync(VkDevice device, bool signaled)
 
 VulkanSync::~VulkanSync() {
     if (fence_ != VK_NULL_HANDLE) {
+        hangdiag::RetireFence(fence_);
         vkDestroyFence(device_, fence_, nullptr);
         fence_ = VK_NULL_HANDLE;
     }
@@ -49,6 +51,13 @@ VulkanSync::~VulkanSync() {
 bool VulkanSync::WaitFence(u64 timeoutNs) const {
     if (fence_ == VK_NULL_HANDLE) return false;
     if (signaled_) return true;
+    // R10 taskC（Windows 卡死诊断）：调用方传 UINT32_MAX ms（≈49.7 天）的
+    // "无限"等待在 device lost 后永不返回。PRIMAL_VK_HANG_DIAG=1 时改为
+    // 2s 步进有界轮询（超时 dump+_Exit(12)，lost 时 _Exit(13)）；门控
+    // 关闭时保持原单次 vkWaitForFences 调用与超时语义逐字节一致。
+    if (hangdiag::Enabled() && timeoutNs >= 3600000000000ULL) {
+        return hangdiag::BoundedWaitFence(device_, "VulkanSync::WaitFence(infinite)", fence_);
+    }
     VkResult res = vkWaitForFences(device_, 1, &fence_, VK_TRUE, timeoutNs);
     if (res == VK_SUCCESS) {
         return true;
@@ -56,6 +65,7 @@ bool VulkanSync::WaitFence(u64 timeoutNs) const {
     if (res == VK_TIMEOUT) {
         return false;
     }
+    if (res == VK_ERROR_DEVICE_LOST) hangdiag::ReportDeviceLost("VulkanSync::WaitFence", res);
     PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanSync] vkWaitForFences failed: " << res << std::endl;
     return false;
 }
@@ -75,6 +85,8 @@ void VulkanSync::ResetFence() {
 void VulkanSync::DetachNatives(VkFence* outFence, VkSemaphore* outSem) {
     if (outFence) *outFence = fence_;
     if (outSem)   *outSem   = semaphore_;
+    // R10 taskC：句柄所有权移交 GC 延迟销毁——本对象不再持有，dump 侧
+    // 由 VulkanDevice::destroySyncImpl 的 GC lambda retire 兜底。
     fence_ = VK_NULL_HANDLE;
     semaphore_ = VK_NULL_HANDLE;
     signaled_ = false;

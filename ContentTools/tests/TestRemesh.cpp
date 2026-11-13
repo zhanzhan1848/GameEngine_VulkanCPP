@@ -51,15 +51,17 @@ ProcessableMesh make_plane_grid(u32 n = 4) {
 }
 
 // UV sphere — closed, edge-manifold, dense enough for qslim to chew on.
+// （primal::math::pi 替代 M_PI：MSVC <cmath> 不定义 POSIX 扩展 M_PI，
+//  常量经 ToolsCommon.h → CommonHeaders.h → Utilities/MathTypes.h 传递）
 ProcessableMesh make_uv_sphere(u32 stacks = 16, u32 slices = 16) {
     ProcessableMesh m;
     m.positions.emplace_back(v3{0.f, 1.f, 0.f});   // north pole
     for (u32 i = 1; i < stacks; ++i) {
-        const f32 phi = (f32)M_PI * (f32)i / (f32)stacks;
+        const f32 phi = primal::math::pi * (f32)i / (f32)stacks;
         const f32 y = std::cos(phi);
         const f32 r = std::sin(phi);
         for (u32 j = 0; j < slices; ++j) {
-            const f32 theta = 2.f * (f32)M_PI * (f32)j / (f32)slices;
+            const f32 theta = 2.f * primal::math::pi * (f32)j / (f32)slices;
             m.positions.emplace_back(
                 v3{r * std::cos(theta), y, r * std::sin(theta)});
         }

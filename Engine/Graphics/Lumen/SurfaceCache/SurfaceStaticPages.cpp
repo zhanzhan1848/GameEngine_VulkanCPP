@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <vector>   // R3 IWYU: std::vector 使用点直接补齐
 
 namespace primal::graphics::lumen {
 

@@ -173,7 +173,9 @@ option(ENABLE_VULKAN "Enable Vulkan RHI backend (Win32 + Linux + macOS via Molte
 option(ENABLE_D3D12 "Enable D3D12 RHI backend (Windows only)" OFF)
 # Agility SDK 锁版（M0 冻结，R6 工具版本漂移风险）。历史 premake5.lua 用的
 # 1.608.2 与 props 1.606.3 混用已废弃；统一锁 1.611.x 单一版本。
-set(PRIMAL_D3D12_AGILITY_VERSION "1.611.3" CACHE STRING
+# 2026-11-03 修正：1.611.3 在 nuget.org 不存在（flatcontainer 404，实测），
+# 1.611.x 实际可用止于 1.611.2 —— 锁 1.611.2。
+set(PRIMAL_D3D12_AGILITY_VERSION "1.611.2" CACHE STRING
     "Microsoft.Direct3D.D3D12 (Agility SDK) version used when ENABLE_D3D12=ON")
 
 # 检查是否禁用粒子系统
@@ -246,6 +248,19 @@ if(WIN32 AND ENABLE_D3D12)
     list(APPEND GRAPHICS_SOURCES
         "${CMAKE_SOURCE_DIR}/third_party/D3D12MemAlloc/src/D3D12MemAlloc.cpp")
     message(STATUS "D3D12 RHI backend enabled (Engine/Graphics/RHI/Platforms/D3D12, Agility SDK ${PRIMAL_D3D12_AGILITY_VERSION}, D3D12MemAlloc v3.0.1)")
+
+    # ------------------------------------------------------------------
+    # R14-2: GenerateMipmaps 像素下采样 shader 改离线预编译静态嵌入
+    #（方案 B，根治 Windows 构建期 DXC 自定义命令 0x80070459
+    # ERROR_NO_UNICODE_TRANSLATION + MSB8066——R13-A 的 dxc/fxc 构建期
+    # 探针链已整体移除，构建不再依赖任何 HLSL 编译器）。
+    # 字节来自 checked-in 静态头
+    # Graphics/RHI/Platforms/D3D12/D3D12MipGenShaders.h（本目录被上方
+    # GLOB_RECURSE 收入，D3D12MipGen.cpp 同目录 include 即命中，无须
+    # build 树 include 目录与 custom target 接线）。变更 MipGen.hlsl 后
+    # 用 scripts/build_d3d12_mipgen.py 重生成该头（macOS dxc 预编译，
+    # 源 SHA→cso SHA 清单写在头注释里；--check 为 freshness 闸门）。
+    # 选型记录见 Docs/RHI/D3D12_Windows_Integration_Runbook.md §23-2。
 else()
     file(GLOB D3D12_NEUTRAL_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/RHI/Platforms/D3D12/D3D12Abi.h"
@@ -441,6 +456,9 @@ if(WIN32)
         ${CMAKE_CURRENT_SOURCE_DIR}/Common
         $ENV{VULKAN_SDK}/include
     )
+    # R14-2：MipGen 嵌入头已静态化（源码树同目录 checked-in 文件，上方
+    # GLOB_RECURSE 已收录；R13-A 的 build 树 include/custom target 接线
+    # 随构建期编译块一并移除——见上方 WIN32 块注释与 runbook §23-2）。
 elseif(APPLE AND NOT EMSCRIPTEN)
 
     # 设置LLVM编译器
@@ -531,6 +549,30 @@ if(MSVC)
         $<$<CONFIG:Debug>:/ZI>
         $<$<NOT:$<CONFIG:Debug>>:/Ox;/Oi;/GF;/Oy;/Gy>
     )
+
+    # 2026-11-03 R2（Windows 首编）：LumenDDGIPass.cpp 在 MSVC 下触发 C1001
+    # （内部编译器错误；用户附件未传到——无精确错误行号与配置名）。静态扫描
+    # 无明确高危构造（无结构化绑定/std::visit/巨型本地数组；requires 均为
+    # 日志字符串），按 MSVC 官方建议对该文件降优化兜底：per-source /Od 追加
+    # 在 target 选项之后（MSVC 同组优化选项后者生效，非 Debug 的 /Ox 被压住；
+    # Debug 本就 /Od）。待拿到完整 C1001 输出（文件:行号+编译器版本+配置）后
+    # 根治并移除本条。仅 MSVC 生效；clang/gcc（macOS/Linux 树）不受影响。
+    #
+    # 2026-11-03 R3（第三轮，Release 仍 C1001 后的加固）：
+    #   a) 属性读回验证——configure 输出必须出现下述 STATUS 行（含 /Od），
+    #      否则属性未生效（路径不匹配或被后续同属性调用替换——本文件无其它
+    #      set_source_files_properties 触及此源）。
+    #   b) /Od 只压后端（c2）；若 Debug 配置也 ICE = 前端（c1）问题，/Od 无效
+    #      ——转拆分路线：R3 已把 IO 辅助拆出 LumenDDGIPassIO.cpp（4834→4584
+    #      行）；仍复发则继续按块拆 AddPass（~1780 行单函数）。
+    #   c) 诊断需要用户提供：C1001 完整输出（文件:行号+触发函数+cl 版本
+    #      `cl /B1` 号）+ 配置名（Debug/Release）——见 runbook §11.3。
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/DDGI/LumenDDGIPass.cpp"
+        PROPERTIES COMPILE_OPTIONS "/Od")
+    get_source_file_property(PRIMAL_DDGI_ICE_OD_FLAGS
+        "${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Lumen/DDGI/LumenDDGIPass.cpp" COMPILE_OPTIONS)
+    message(STATUS "C1001 mitigation: LumenDDGIPass.cpp per-source COMPILE_OPTIONS='${PRIMAL_DDGI_ICE_OD_FLAGS}' (expect '/Od'; empty = property NOT applied)")
 
     target_link_options(${PROJECT_NAME} PRIVATE /SUBSYSTEM:WINDOWS)
     target_link_options(${PROJECT_NAME} PRIVATE
@@ -680,17 +722,96 @@ if(ENABLE_VULKAN)
     message(STATUS "Vulkan SDK found: ${Vulkan_INCLUDE_DIR}")
 endif()
 
-# D3D12 RHI 后端依赖：Agility SDK（NuGet Microsoft.Direct3D.D3D12，CONFIG 包）。
-# F0-2/F0-3：ENABLE_D3D12 时 REQUIRED 化 + 锁单一版本
-# （PRIMAL_D3D12_AGILITY_VERSION，默认 1.611.x；premake 时代 1.608.2/1.606.3
-# props 混用已废弃）。上方 MSVC 分支内保留的软 find_package 只服务 legacy
-# Direct3D12（ENABLE_D3D12=OFF 时 legacy 仍可能编入）。
+# D3D12 RHI 后端依赖：Agility SDK（NuGet Microsoft.Direct3D.D3D12）。
+# 2026-11-03 接入方式修正（Windows 首编 R1）：官方 Agility NuGet 包不提供
+# CMake CONFIG（find_package CONFIG REQUIRED 必然失败），改为**零机器特定
+# 配置**的动态获取链，优先级降级：
+#   1) 用户缓存变量 PRIMAL_D3D12_AGILITY_SDK_DIR（指向含 build/native/include
+#      的解压目录，或直接含 d3d12.h 的 include 目录）→ 直接采用；
+#   2) 否则 configure 期从 nuget.org flatcontainer 自动下载 pinned nupkg
+#      （就是 zip）到 ${CMAKE_BINARY_DIR}/agility-sdk/，file(ARCHIVE_EXTRACT)
+#      解压，include 用 build/native/include/，bin 用 build/native/bin/x64/；
+#      SHA256 校验（PRIMAL_D3D12_AGILITY_SHA，默认=1.611.2 实测值，来自
+#      api.nuget.org 2026-11-03 下载测量；置空=跳过校验并 WARNING）；
+#   3) 下载失败（离线）→ 回退 Windows SDK 自带 d3d12.h + WARNING（运行时
+#      特性面受 OS/SDK 版本限制），宏 PRIMAL_D3D12_AGILITY_RUNTIME=0；
+#   4) Agility 在场 → 宏 PRIMAL_D3D12_AGILITY_RUNTIME=1，并把
+#      D3D12Core.dll / d3d12SDKLayers.dll copy_if_different 到共享运行输出
+#      根（Windows/<Config>/D3D12/，对齐官方 NuGet targets 的 .\D3D12\
+#      约定——D3D12 运行时按 exe 相对路径解析该子目录）。
+# 上方 MSVC 分支内保留的软 find_package 只服务 legacy Direct3D12
+# （ENABLE_D3D12=OFF 时 legacy 仍可能编入；同样不会找到 CONFIG，无害）。
 if(ENABLE_D3D12)
     if(NOT WIN32)
         message(WARNING "ENABLE_D3D12=ON is ignored on non-Windows platforms (D3D12 needs Agility SDK/d3d12.h)")
     else()
-        find_package(Microsoft.Direct3D.D3D12 ${PRIMAL_D3D12_AGILITY_VERSION} CONFIG REQUIRED)
-        target_link_libraries(${PROJECT_NAME} PRIVATE Microsoft::Direct3D-D3D12)
+        set(PRIMAL_D3D12_AGILITY_SDK_DIR "" CACHE PATH
+            "Agility SDK root (contains build/native/include) or a directory directly containing d3d12.h; empty = auto-download from nuget.org")
+        set(PRIMAL_D3D12_AGILITY_SHA "414858c5cf25e43022938ab992d78a9639b1a9a48efe5b4a05fca2df9294388c" CACHE STRING
+            "SHA256 of the pinned Agility nupkg (measured from api.nuget.org 2026-11-03, 1.611.2); empty = skip verification with WARNING")
+
+        set(PRIMAL_D3D12_AGILITY_INCLUDE_DIR "")
+        set(PRIMAL_D3D12_AGILITY_BIN_DIR "")
+
+        if(PRIMAL_D3D12_AGILITY_SDK_DIR)
+            # 优先级 1：用户提供的 SDK 目录（解压的 nupkg 根或裸 include 目录）。
+            if(EXISTS "${PRIMAL_D3D12_AGILITY_SDK_DIR}/d3d12.h")
+                set(PRIMAL_D3D12_AGILITY_INCLUDE_DIR "${PRIMAL_D3D12_AGILITY_SDK_DIR}")
+            elseif(EXISTS "${PRIMAL_D3D12_AGILITY_SDK_DIR}/build/native/include/d3d12.h")
+                set(PRIMAL_D3D12_AGILITY_INCLUDE_DIR
+                    "${PRIMAL_D3D12_AGILITY_SDK_DIR}/build/native/include")
+                if(EXISTS "${PRIMAL_D3D12_AGILITY_SDK_DIR}/build/native/bin/x64")
+                    set(PRIMAL_D3D12_AGILITY_BIN_DIR
+                        "${PRIMAL_D3D12_AGILITY_SDK_DIR}/build/native/bin/x64")
+                endif()
+            else()
+                message(FATAL_ERROR "PRIMAL_D3D12_AGILITY_SDK_DIR='${PRIMAL_D3D12_AGILITY_SDK_DIR}' contains neither d3d12.h nor build/native/include/d3d12.h")
+            endif()
+        else()
+            # 优先级 2：configure 期自动下载 pinned nupkg（stamp 幂等；换版本重下）。
+            set(PRIMAL_D3D12_AGILITY_ROOT "${CMAKE_BINARY_DIR}/agility-sdk")
+            set(PRIMAL_D3D12_AGILITY_STAMP
+                "${PRIMAL_D3D12_AGILITY_ROOT}/extracted/.primal-agility-${PRIMAL_D3D12_AGILITY_VERSION}")
+            if(NOT EXISTS "${PRIMAL_D3D12_AGILITY_STAMP}")
+                set(PRIMAL_D3D12_AGILITY_NUPKG
+                    "${PRIMAL_D3D12_AGILITY_ROOT}/microsoft.direct3d.d3d12.${PRIMAL_D3D12_AGILITY_VERSION}.nupkg")
+                file(MAKE_DIRECTORY "${PRIMAL_D3D12_AGILITY_ROOT}")
+                message(STATUS "Downloading Agility SDK (Microsoft.Direct3D.D3D12) ${PRIMAL_D3D12_AGILITY_VERSION} from nuget.org ...")
+                file(DOWNLOAD
+                    "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/${PRIMAL_D3D12_AGILITY_VERSION}/microsoft.direct3d.d3d12.${PRIMAL_D3D12_AGILITY_VERSION}.nupkg"
+                    "${PRIMAL_D3D12_AGILITY_NUPKG}"
+                    TIMEOUT 300
+                    STATUS PRIMAL_D3D12_AGILITY_DL_STATUS)
+                list(GET PRIMAL_D3D12_AGILITY_DL_STATUS 0 PRIMAL_D3D12_AGILITY_DL_CODE)
+                if(PRIMAL_D3D12_AGILITY_DL_CODE EQUAL 0)
+                    if(PRIMAL_D3D12_AGILITY_SHA)
+                        file(SHA256 "${PRIMAL_D3D12_AGILITY_NUPKG}" PRIMAL_D3D12_AGILITY_DL_SHA)
+                        if(NOT PRIMAL_D3D12_AGILITY_DL_SHA STREQUAL "${PRIMAL_D3D12_AGILITY_SHA}")
+                            message(FATAL_ERROR "Agility nupkg SHA256 mismatch: got '${PRIMAL_D3D12_AGILITY_DL_SHA}', expected '${PRIMAL_D3D12_AGILITY_SHA}' (pin or investigate)")
+                        endif()
+                    else()
+                        message(WARNING "PRIMAL_D3D12_AGILITY_SHA is empty — skipping nupkg integrity check for ${PRIMAL_D3D12_AGILITY_VERSION}")
+                    endif()
+                    file(REMOVE_RECURSE "${PRIMAL_D3D12_AGILITY_ROOT}/extracted")
+                    file(ARCHIVE_EXTRACT INPUT "${PRIMAL_D3D12_AGILITY_NUPKG}"
+                         DESTINATION "${PRIMAL_D3D12_AGILITY_ROOT}/extracted")
+                    file(WRITE "${PRIMAL_D3D12_AGILITY_STAMP}"
+                         "${PRIMAL_D3D12_AGILITY_VERSION} ${PRIMAL_D3D12_AGILITY_SHA}\n")
+                else()
+                    list(GET PRIMAL_D3D12_AGILITY_DL_STATUS 1 PRIMAL_D3D12_AGILITY_DL_MSG)
+                    message(WARNING "Agility SDK ${PRIMAL_D3D12_AGILITY_VERSION} download failed (${PRIMAL_D3D12_AGILITY_DL_MSG}); falling back to Windows SDK d3d12.h (runtime feature level limited by OS/SDK)")
+                endif()
+            endif()
+            if(EXISTS "${PRIMAL_D3D12_AGILITY_ROOT}/extracted/build/native/include/d3d12.h")
+                set(PRIMAL_D3D12_AGILITY_INCLUDE_DIR
+                    "${PRIMAL_D3D12_AGILITY_ROOT}/extracted/build/native/include")
+                if(EXISTS "${PRIMAL_D3D12_AGILITY_ROOT}/extracted/build/native/bin/x64")
+                    set(PRIMAL_D3D12_AGILITY_BIN_DIR
+                        "${PRIMAL_D3D12_AGILITY_ROOT}/extracted/build/native/bin/x64")
+                endif()
+            endif()
+        endif()
+
         target_compile_definitions(${PROJECT_NAME} PRIVATE
             ENABLE_D3D12=1
             PRIMAL_D3D12_AGILITY_VERSION="${PRIMAL_D3D12_AGILITY_VERSION}"
@@ -700,9 +821,79 @@ if(ENABLE_D3D12)
         # third_party/D3D12MemAlloc/VENDOR.md）。
         target_include_directories(${PROJECT_NAME} PRIVATE
             "${CMAKE_SOURCE_DIR}/third_party/D3D12MemAlloc/include")
-        message(STATUS "Agility SDK (Microsoft.Direct3D.D3D12) ${PRIMAL_D3D12_AGILITY_VERSION} found and REQUIRED")
+
+        if(PRIMAL_D3D12_AGILITY_INCLUDE_DIR)
+            # Agility 头必须排在 Windows SDK 默认 include 之前（BEFORE），
+            # 否则 VS 默认 INCLUDE 路径里的老 d3d12.h 仍会被优先解析。
+            target_include_directories(${PROJECT_NAME} BEFORE PRIVATE
+                "${PRIMAL_D3D12_AGILITY_INCLUDE_DIR}")
+            target_compile_definitions(${PROJECT_NAME} PRIVATE
+                PRIMAL_D3D12_AGILITY_RUNTIME=1
+            )
+            # 运行时 DLL 暂存（R9 修正契约）：Agility side-load 官方契约 =
+            # 每个导出 D3D12SDKVersion/D3D12SDKPath 的 exe 同目录下必须有
+            # .\D3D12\ 子目录（D3D12Core.dll / d3d12SDKLayers.dll）。R8 的
+            # 全局三根硬编码在多配置下错位（八测实证：单测 exe 实际输出
+            # <build>/Tests/UnitTests/Release/，暂存却去了 Tests/UnitTests/D3D12
+            # 缺 Release 层；CMAKE_SOURCE_DIR 根还污染源码树）。R9 改为
+            # 逐 exe POST_BUILD 拷到 $<TARGET_FILE_DIR:tgt>/D3D12/（见本文件
+            # 末尾 primal_stage_d3d12_agility 函数与各调用点）。
+            if(PRIMAL_D3D12_AGILITY_BIN_DIR)
+                set(PRIMAL_D3D12_AGILITY_BIN_DIR "${PRIMAL_D3D12_AGILITY_BIN_DIR}"
+                    CACHE INTERNAL "Agility SDK runtime DLL dir (consumed by primal_stage_d3d12_agility)")
+            endif()
+            message(STATUS "Agility SDK (Microsoft.Direct3D.D3D12) ${PRIMAL_D3D12_AGILITY_VERSION} active: include='${PRIMAL_D3D12_AGILITY_INCLUDE_DIR}' runtime DLLs='${PRIMAL_D3D12_AGILITY_BIN_DIR}'")
+        else()
+            # 优先级 3：离线回退——Windows SDK 自带 d3d12.h（要求 SDK >=
+            # 10.0.16299：D3D12_FEATURE_D3D12_OPTIONS3=21 与本代码面所用
+            # EnumAdapterByGpuPreference 均在该版本就位；VS2022 自带 SDK
+            # 远高于此下限）。能力查询全部运行时 CheckFeatureSupport，
+            # 不存在编译期能力绑定。
+            target_compile_definitions(${PROJECT_NAME} PRIVATE
+                PRIMAL_D3D12_AGILITY_RUNTIME=0
+            )
+            message(WARNING "D3D12 backend builds against Windows SDK d3d12.h (PRIMAL_D3D12_AGILITY_RUNTIME=0): newest Agility-only API surface and the D3D12/ runtime DLL side-load are unavailable in this configuration")
+        endif()
     endif()
 endif()
+
+# R9: 逐 exe Agility 运行时暂存钩子（无条件定义，体内守卫——非 Windows /
+# Agility 离线树 PRIMAL_D3D12_AGILITY_BIN_DIR 为空 CACHE INTERNAL，调用点
+# 无副作用，macOS configure 零变化）。调用方必须在各自 target 定义之后：
+#   - Tools/PrimalEngineCli、Tools/PrimalPlayer（各自 CMakeLists）
+#   - EngineTest/IntegrationTests（setup_test_target 内，覆盖全部集成测试）
+#   - EngineTest/UnitTests（目录末尾 foreach BUILDSYSTEM_TARGETS，覆盖全部单测）
+# $<TARGET_FILE_DIR:tgt> 逐 exe 跟随真实输出目录：VS 多配置的 per-config
+# 子目录（<...>/Release/）与源码树输出目标（primal-engine 的 Windows/<Config>）
+# 均自动正确。EngineDLL（SHARED）不挂——Agility 契约检查进程 exe 的导出
+# 面，编辑器 Windows 通道不在本轮范围（runbook §18 登记）。
+function(primal_stage_d3d12_agility staged_target)
+    if(NOT PRIMAL_D3D12_AGILITY_BIN_DIR)
+        return()
+    endif()
+    if(NOT TARGET ${staged_target})
+        message(WARNING "primal_stage_d3d12_agility: '${staged_target}' is not a target, skipping")
+        return()
+    endif()
+    get_target_property(_primal_staged_type ${staged_target} TYPE)
+    if(NOT _primal_staged_type STREQUAL "EXECUTABLE")
+        return()
+    endif()
+    get_target_property(_primal_agility_staged ${staged_target} PRIMAL_AGILITY_STAGED)
+    if(_primal_agility_staged)
+        return()
+    endif()
+    set_target_properties(${staged_target} PROPERTIES PRIMAL_AGILITY_STAGED TRUE)
+    foreach(_primal_agility_dll D3D12Core.dll d3d12SDKLayers.dll)
+        add_custom_command(TARGET ${staged_target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:${staged_target}>/D3D12"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${PRIMAL_D3D12_AGILITY_BIN_DIR}/${_primal_agility_dll}"
+                "$<TARGET_FILE_DIR:${staged_target}>/D3D12/${_primal_agility_dll}"
+            VERBATIM)
+    endforeach()
+endfunction()
 
 # === Jolt Physics（物理内核；Jolt 头文件只允许出现在 Engine/Simulation/ 内部）===
 if(TARGET Jolt)
@@ -753,7 +944,18 @@ elseif(APPLE AND NOT EMSCRIPTEN)
     # target_link_libraries(${PROJECT_NAME} PRIVATE
     #     ${ACCELERATE}
     # )
-    
+
+elseif(WIN32)
+    # R5（Windows 四测后续）：Windows 无系统 zlib——消费根 CMakeLists WIN32 段
+    # FetchContent 拉取的 zlib 1.3.1（zlibstatic，经 primal_zlib_static ALIAS 保
+    # 下游目标名不变）。include 路径经 zlibstatic 的 PUBLIC 接口传递（source dir
+    # + binary dir 生成的 zconf.h），不再手挂 third_party 路径（vendor 副本已删）。
+    # 非 WIN32 分支（上方 APPLE 的 find_package(ZLIB)）逐字不变。
+    if(TARGET primal_zlib_static)
+        target_link_libraries(${PROJECT_NAME} PRIVATE primal_zlib_static)
+    else()
+        message(FATAL_ERROR "Engine(WIN32): primal_zlib_static target missing — root CMakeLists zlib FetchContent block did not run")
+    endif()
 endif()
 
 # === moodycamel::ConcurrentQueue 支持 ===

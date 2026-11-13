@@ -1,4 +1,5 @@
 #include "TestFramework.h"
+#include "../../Utils/TestEnv.h"
 #include "Graphics/RHI/Systems/RenderSystem.h" // Updated include path
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
@@ -362,12 +363,21 @@ TestResult TestRenderSystemRender() {
 }
 
 int main() {
+    // R9（Windows 八测）：RenderSystem→ForwardRenderer→SSR/Blur/Particle 诸 pass
+    // 经 ShaderRegistry 加载源码树相对路径的 shader 文件；MockRHIDevice 平台为
+    // DeviceDesc 默认（Unknown）→ registry 映射到 Metal 目录+.metal（资产在
+    // git 内两平台 checkout 均有）。macOS 靠 cwd/exe 上溯定位源码根；Windows
+    // 测试机 build 树不在源码树内时上溯跨不过去 → "SSRPass.metal" 加载失败 →
+    // ForwardRenderer init 失败。锚定 PRIMAL_SHADER_ROOT（ResolveShaderPath
+    // 第一优先级，CMake 注入编译期源码根）解除 cwd 依赖；macOS 上指向同一
+    // 源码根，行为零变化。
+    primaltest::SetEnv("PRIMAL_SHADER_ROOT", PRIMAL_TEST_SHADER_ROOT);
     Engine::Test::TestSuite suite("RenderSystem Tests");
     
     suite.AddTestCase(Engine::Test::TestCase("TestRenderSystemInit", TestRenderSystemInit));
     suite.AddTestCase(Engine::Test::TestCase("TestRenderSystemRender", TestRenderSystemRender));
     
-    suite.RunAllTests();
+    const auto runStats = suite.RunAllTests();
     
-    return 0;
+    return runStats.failedTests == 0 ? 0 : 1;
 }

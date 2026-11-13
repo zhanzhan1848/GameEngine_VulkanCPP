@@ -17,6 +17,7 @@
 #include "VulkanBackendLinks.h"
 #include "VulkanTexture.h"
 #include "VulkanCommandBuffer.h"
+#include "VulkanHangDiag.h"
 // Phase 4
 #include "VulkanShader.h"
 #include "VulkanSampler.h"
@@ -35,6 +36,7 @@
 
 #include <iostream>
 #include <vector>
+#include <algorithm>
 #include <cstring>
 #include <set>
 
@@ -193,9 +195,22 @@ bool VulkanDevice::initializeImpl() {
                 VkDescriptorBufferInfo dbi{};
                 dbi.buffer = implicitComputeUBO_;
                 dbi.offset = 0;
-                // range = region 容量:动态偏移(region 基址 + bump)+ range
-                // 恰好不超过 buffer 总量(VUID-01979)
-                dbi.range = kImplicitUBOBytes / 4;
+                // range ≤ maxUniformBufferRange（VUID-VkWriteDescriptorSet-
+                // descriptorType-00332）：桌面 GPU 常为 64KB，region 容量 256KB
+                // 直接作 range 在这些设备上触发验证错误（八测实测 262144 >
+                // 65536，MoltenVK 上限更高所以 macOS 从未暴露）。取 min：
+                // 上限足够的实现（MoltenVK）行为零变化；上限更小的实现按
+                // 设备实际上限收缩——真实单次用量 = SetComputeBytes 的 size
+                // （P4c 验收形态 ≈ maxPushConstants+512=640B，远小于 64KB），
+                // 超限请求由 AllocImplicitComputeUBO 显式拒绝（同 region 耗尽
+                // 的丢弃路径+Error 日志，不静默截断）。动态偏移(region 基址 +
+                // bump) + range 仍恰好不超过 buffer 总量(VUID-01979)。
+                VkPhysicalDeviceProperties pdProps{};
+                vkGetPhysicalDeviceProperties(physicalDevice_, &pdProps);
+                implicitComputeUBORange_ =
+                    std::min<u64>(kImplicitUBOBytes / 4,
+                                  static_cast<u64>(pdProps.limits.maxUniformBufferRange));
+                dbi.range = implicitComputeUBORange_;
                 VkWriteDescriptorSet w{};
                 w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
                 w.dstSet = implicitComputeDescSet_;
@@ -218,6 +233,8 @@ bool VulkanDevice::initializeImpl() {
     } else {
         PRIMAL_LOG_STREAM(Info, "RHI") << "[VulkanDevice] Initialized (validation disabled)." << std::endl;
     }
+    // R10 taskC：诊断初始化（memory budget 扩展支持 + 初始余量；门控）。
+    hangdiag::NoteInit(physicalDevice_, device_);
     lifecycleGeneration_=AllocateVulkanDeviceGeneration();
     return true;
 }
@@ -292,10 +309,15 @@ void VulkanDevice::shutdownImpl() {
 
 void VulkanDevice::waitIdleImpl() const {
     lastWaitIdleResult_=device_!=VK_NULL_HANDLE?vkDeviceWaitIdle(device_):VK_ERROR_DEVICE_LOST;
+    // R10 taskC：WaitIdle 返回 device lost 时 fail-fast（门控）。
+    if (lastWaitIdleResult_.load() == VK_ERROR_DEVICE_LOST)
+        hangdiag::ReportDeviceLost("VulkanDevice::WaitIdle", lastWaitIdleResult_.load());
 }
 
 void VulkanDevice::beginFrameImpl() {
     currentFrameIndex_.store((currentFrameIndex_.load() + 1) % desc_.maxFramesInFlight);
+    // R10 taskC：诊断帧计数（仅 PRIMAL_VK_HANG_DIAG=1 时递增/打印）。
+    hangdiag::NoteFrameBegin();
     // 每帧 BeginFrame 把当前 frame 的 staging pool bump offset 归零
     // (上一帧的 blit 应已 submit 完成,frame N+MAX_FRAMES_IN_FLIGHT 的 pool 安全复用)
     stagingAllocator_.BeginFrame();
@@ -322,6 +344,10 @@ void VulkanDevice::beginFrameImpl() {
 VulkanDevice::ImplicitUBOAlloc VulkanDevice::AllocImplicitComputeUBO(u32 size) {
     ImplicitUBOAlloc ret{};
     if (implicitComputeUBOMapped_ == nullptr || size == 0) return ret;
+    // VUID-00332 收缩后的 range 上限：单次 payload 超过设备 maxUniformBufferRange
+    // 时无法用 uniform descriptor 表达（走 SSBO 是另一形态，超出本回退的
+    // 设计面）——与 region 耗尽同路拒绝，调用方打 Error 日志。
+    if (implicitComputeUBORange_ == 0 || size > implicitComputeUBORange_) return ret;
 
     // per-frame-region ring:1MB / 4 region = 每 region 256KB 独立地址段
     // (region 间基址隔离 — 跨帧的 SetComputeBytes 数据不会互相覆写;
@@ -441,6 +467,7 @@ void VulkanDevice::destroySyncImpl(SyncHandle handle) {
         sync->DetachNatives(&fence, &sem);
         if (fence != VK_NULL_HANDLE || sem != VK_NULL_HANDLE) {
             VkDevice dev = device_;
+            hangdiag::RetireFence(fence);
             gc_.DeferredDestroy([dev, fence, sem]() {
                 if (dev != VK_NULL_HANDLE) {
                     if (fence != VK_NULL_HANDLE) vkDestroyFence(dev, fence, nullptr);
@@ -801,12 +828,20 @@ bool VulkanDevice::submitImpl(const QueueSubmitInfo& info) {
     si.pSignalSemaphores = &signalSem;
 
     VkResult res;
-    { primal::graphics::cpu_stall_audit::Scope cpuScope("vulkan.submit.queue_submit");
-        res = vkQueueSubmit(graphicsQueue_, 1, &si, signalFence); }
+    {
+        primal::graphics::cpu_stall_audit::Scope cpuScope("vulkan.submit.queue_submit");
+        // R10 taskC：vkQueueSubmit 在队列 wedged 时可能阻塞在驱动内——
+        // 门控看门狗；成功后登记 fence/计数供超时 dump 使用。
+        hangdiag::ScopedHangWatch watch("queueSubmit", "submitImpl");
+        res = vkQueueSubmit(graphicsQueue_, 1, &si, signalFence);
+    }
     if (res != VK_SUCCESS) {
+        if (res == VK_ERROR_DEVICE_LOST) hangdiag::ReportDeviceLost("submitImpl", res);
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] submitImpl vkQueueSubmit failed: " << res << std::endl;
         return false;
     }
+    hangdiag::NoteSignalFence(signalFence);
+    hangdiag::NoteSubmitOk(1);
     // T4.6.5 part 24.7 (B8 root cause): mark cmd buffer state as Submitted so
     // the base class WaitForCompletion() gate (RHICommand.h:362) lets
     // waitForCompletionImpl actually fire. Without this, state_ stays at
@@ -869,6 +904,26 @@ ShaderHandle VulkanDevice::createShaderImpl(const void* data, size_t size, Shade
     if ((!data && size > 0) || stage == ShaderStage::Unknown) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] createShaderImpl: invalid args" << std::endl;
         return handles::INVALID_SHADER;
+    }
+    // R7-WIN 诊断(01379):SPIR-V 预检 —— magic 0x07230203(小端字节序
+    // 03 02 23 07)+ size 必须是 4 的倍数。本函数只接受 Vulkan 字节码;
+    // 喂进 DXBC .cso 或 GLSL/WGSL/Metal 源文本时 vkCreateShaderModule
+    // 必定失败(Initialize 返回 false 后本函数同样返回 INVALID_SHADER),
+    // 提前拒绝只是省一次无效驱动调用并留下可定位日志(entryPoint+判类+
+    // hex)。合法 .spv(Mac/Windows 正常路径)首四字节即 magic,预检恒过、
+    // 行为零变化。
+    {
+        const u8* spirvBytes = static_cast<const u8*>(data);
+        const bool spirvHeaderOk = size >= 4 && (size % 4) == 0 &&
+                                   spirvBytes[0] == 0x03 && spirvBytes[1] == 0x02 &&
+                                   spirvBytes[2] == 0x23 && spirvBytes[3] == 0x07;
+        if (!spirvHeaderOk) {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[VulkanShader] reject non-SPIR-V bytes: entryPoint="
+                << (entryPoint ? entryPoint : "(null)") << " size=" << size << " "
+                << detail::DescribeBadSpirvBytes(data, size) << std::endl;
+            return handles::INVALID_SHADER;
+        }
     }
     u32 id = shaderAllocator_->Allocate(*this, data, size, stage, entryPoint);
     VulkanShader* sh = shaderAllocator_->Get(id);
@@ -1026,6 +1081,26 @@ void VulkanDevice::destroyDescriptorSetImpl(DescriptorSetHandle handle) {
     descriptorSetAllocator_->Free(static_cast<u32>(handle));
 }
 
+namespace {
+
+// R7-WIN 诊断(00327):physical device 的 minUniformBufferOffsetAlignment
+// 按 physicalDevice_ 句柄缓存(GTX1060 为 256;MoltenVK 较小),避免每帧
+// updateDescriptorSets 路径反复 vkGetPhysicalDeviceProperties。返回 0
+// 表示未知(跳过告警)。仅诊断用,RHI 更新单线程。
+VkDeviceSize CachedMinUniformBufferOffsetAlignment(VkPhysicalDevice pd) {
+    static VkPhysicalDevice sCachedPd = VK_NULL_HANDLE;
+    static VkDeviceSize sCachedAlign = 0;
+    if (pd != VK_NULL_HANDLE && pd != sCachedPd) {
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(pd, &props);
+        sCachedPd = pd;
+        sCachedAlign = props.limits.minUniformBufferOffsetAlignment;
+    }
+    return (pd == sCachedPd) ? sCachedAlign : 0;
+}
+
+} // namespace
+
 void VulkanDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptorSet* writes) {
     if (!writes || writeCount == 0) return;
     // P0.1 诊断:PRIMAL_DS_TRACE=1 时打印 set 更新(原生句柄与 MoltenVK
@@ -1033,6 +1108,42 @@ void VulkanDevice::updateDescriptorSetsImpl(u32 writeCount, const WriteDescripto
     const bool dsTrace = DSTraceEnabled();
     // 按 dstSet 分组(每个 DescriptorSet::Update 单独处理自己)
     for (u32 i = 0; i < writeCount; ++i) {
+        // R7-WIN 诊断(00327):UBO/UBO_DYNAMIC 子区间 offset 未按
+        // minUniformBufferOffsetAlignment 对齐的旧写入(如 0x40/0x50)在
+        // 桌面驱动上必触发验证错误。有界告警(前 10 次 + 汇总一次),
+        // 纯日志,不改变任何写入行为;Mac 正常路径 offset 均为 0,不触发。
+        if ((writes[i].descriptorType == DescriptorType::UniformBuffer ||
+             writes[i].descriptorType == DescriptorType::UniformBufferDynamic) &&
+            writes[i].bufferInfo) {
+            const VkDeviceSize uboAlign = CachedMinUniformBufferOffsetAlignment(physicalDevice_);
+            if (uboAlign > 1) {
+                // 与 VulkanDescriptorSet::Update 同口径:descriptorCount==0 按 1 处理
+                const u32 uboN = std::max<u32>(1u, writes[i].descriptorCount);
+                for (u32 j = 0; j < uboN; ++j) {
+                    const u64 uboOff = writes[i].bufferInfo[j].offset;
+                    if ((uboOff % uboAlign) != 0) {
+                        static u32 sUnalignedUboWarns = 0;
+                        if (sUnalignedUboWarns < 10) {
+                            ++sUnalignedUboWarns;
+                            PRIMAL_LOG_STREAM(Warn, "RHI")
+                                << "[VulkanDevice] unaligned UBO offset in UpdateDescriptorSets: set="
+                                << static_cast<unsigned>(writes[i].dstSet)
+                                << " binding=" << writes[i].dstBinding
+                                << " offset=0x" << std::hex << uboOff
+                                << " not multiple of minUniformBufferOffsetAlignment=0x"
+                                << uboAlign << std::dec
+                                << " (VUID-VkWriteDescriptorSet-descriptorType-00327 risk)"
+                                << std::endl;
+                            if (sUnalignedUboWarns == 10) {
+                                PRIMAL_LOG_STREAM(Warn, "RHI")
+                                    << "[VulkanDevice] unaligned UBO offset warnings suppressed after "
+                                    << sUnalignedUboWarns << " hits (per-process)" << std::endl;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         VulkanDescriptorSet* ds = GetDescriptorSet(writes[i].dstSet);
         if (ds) {
             if (dsTrace) {
@@ -1612,7 +1723,11 @@ void VulkanDevice::PrimeTextureLayout(rhi::ResourceHandle texture) {
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
     vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
+    {
+        // R10 taskC：queueWaitIdle 门控看门狗（PrimeToShaderRead 同步上传）。
+        hangdiag::ScopedHangWatch wait("queueWaitIdle", "VulkanDevice.PrimeToShaderRead");
+        vkQueueWaitIdle(queue);
+    }
     vkDestroyCommandPool(dev, pool, nullptr);
 
     tex->SetCurrentLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);

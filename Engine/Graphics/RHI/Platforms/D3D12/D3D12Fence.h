@@ -15,6 +15,8 @@
 #include <d3d12.h>
 #include <wrl/client.h>
 
+#include "Common/PrimitiveTypes.h"  // u64/u32（本头不经 RHI Core 头传递链，须自含）
+
 namespace primal::graphics::rhi::d3d12 {
 
 class D3D12FencePool {
@@ -52,7 +54,10 @@ private:
     HANDLE event_ = nullptr;
     u64 signaled_ = 0;          // 已登记的最近目标值
     bool deviceRemoved_ = false;
-    std::mutex mutex_;
+    // [R6/Windows] mutable：PeekNextTarget() const 也要加锁（MSVC C2665——
+    // const 成员函数里 lock_guard 无法绑定 const mutex&）。锁不改变逻辑
+    // 状态，物理可变性是 const 成员函数同步的标准形态。
+    mutable std::mutex mutex_;
 };
 
 } // namespace primal::graphics::rhi::d3d12

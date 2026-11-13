@@ -70,10 +70,10 @@ struct DeviceFixture {
 m4x4 make_identity_m4x4() {
     m4x4 r{};
     std::memset(&r, 0, sizeof(r));
-    r.columns[0][0] = 1.0f;
-    r.columns[1][1] = 1.0f;
-    r.columns[2][2] = 1.0f;
-    r.columns[3][3] = 1.0f;
+    set_elem(r, 0, 0, 1.0f);
+    set_elem(r, 1, 1, 1.0f);
+    set_elem(r, 2, 2, 1.0f);
+    set_elem(r, 3, 3, 1.0f);
     return r;
 }
 
@@ -82,11 +82,11 @@ m4x4 make_perspective(float fovy, float aspect, float nearZ, float farZ) {
     m4x4 r{};
     std::memset(&r, 0, sizeof(r));
     float f = 1.0f / std::tan(fovy * 0.5f);
-    r.columns[0][0] = f / aspect;
-    r.columns[1][1] = f;
-    r.columns[2][2] = farZ / (farZ - nearZ);
-    r.columns[2][3] = 1.0f;
-    r.columns[3][2] = -(farZ * nearZ) / (farZ - nearZ);
+    set_elem(r, 0, 0, f / aspect);
+    set_elem(r, 1, 1, f);
+    set_elem(r, 2, 2, farZ / (farZ - nearZ));
+    set_elem(r, 2, 3, 1.0f);
+    set_elem(r, 3, 2, -(farZ * nearZ) / (farZ - nearZ));
     return r;
 }
 

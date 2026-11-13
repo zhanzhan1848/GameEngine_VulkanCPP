@@ -43,6 +43,28 @@ static const char* GatherAuditFormatName(DataFormat format) {
     }
 }
 
+// r5: 变体 shader 字节装载的平台化路径。Vulkan/Metal → 原样 .spv 路径；
+// D3D12 → 与 tvsrg 的 MapShaderPathForD3D12（TestVulkanSponzaRenderGraph.cpp
+// :230-245）同规则：Engine/Graphics/Vulkan/shaders/ 基座换成
+// EngineTest/shaders/d3d12/、尾缀 .spv → .cso（build_d3d12_shaders.py 镜像
+// 布局）。CreateShader 入口名不需按平台切换：D3D12 实现忽略入口名参数
+// （D3D12Shader 构造契约——DXIL 容器入口恒 main，D3D12Shader.cpp:14-18），
+// Vulkan 用真实 OpEntryPoint，故装载点保持 "ddgi_gi_gather" 实参不变。
+static std::string ResolveVariantShaderPath(const char* vulkanSpvPath,
+                                            RHIPlatform platform) {
+    std::string path = vulkanSpvPath;
+    if (platform == RHIPlatform::D3D12) {
+        static const char kVulkanBase[] = "Engine/Graphics/Vulkan/shaders/";
+        if (path.rfind(kVulkanBase, 0) == 0)
+            path = "EngineTest/shaders/d3d12/" + path.substr(sizeof(kVulkanBase) - 1);
+        if (path.size() > 4 && path.compare(path.size() - 4, 4, ".spv") == 0) {
+            path.resize(path.size() - 4);
+            path += ".cso";
+        }
+    }
+    return utils::ShaderRegistry::ResolveShaderPath(path);
+}
+
 struct GIGatherCB {
     math::m4x4 inv_view_projection;
     math::v4   probe_origin_spacing;
@@ -94,7 +116,10 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     // 15 bindings: 6 textures + 9 buffers.
     // Metal: overlapping texture/buffer namespaces (idiomatic Metal).
     // Vulkan: flat 0..14 (depth as SampledDepthImage) — matches GLSL shader.
-    const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan;
+    // D3D12 与 Vulkan 同形（flat 0..14 + .cso 镜像）；下方变体门只扩平台因子、
+    // env 因子保持（变体 cso 缺失时 CreateShader 失败 → 模块 fail-closed）。
+    const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan ||
+                      device->GetPlatform() == RHIPlatform::D3D12;
     const char* glossyAuditEnv = std::getenv("DDGI_GLOSSY_SOURCE_AUDIT");
     const bool glossyAuditRequested = isVk && glossyAuditEnv &&
         glossyAuditEnv[0] == '1' && glossyAuditEnv[1] == '\0';
@@ -147,10 +172,11 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_CONNECTIONS] source audit and connection candidate are separate variants";
             return false;
         }
-        const auto path=utils::ShaderRegistry::ResolveShaderPath(replaceVisibility
+        const auto path=ResolveVariantShaderPath(replaceVisibility
             ? (referenceVisibility ? "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_replace.comp.spv"
                                    : "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_anyhit.comp.spv")
-            : "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry.comp.spv");
+            : "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry.comp.spv",
+            device->GetPlatform());
         std::ifstream file(path,std::ios::binary|std::ios::ate);
         if(!file || file.tellg()<=0) {
             PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_CONNECTIONS] required shader missing or empty: " << path << std::endl;
@@ -218,6 +244,25 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
         if(geometry_connections_enabled_) {
             for(u32 i=0;i<4;++i) vkBindings[19+i]={23+i,DescriptorType::StorageBuffer,1,ShaderStage::Compute,nullptr};
             vkBindings[23]={27,DescriptorType::UniformBuffer,1,ShaderStage::Compute,nullptr};
+        }
+        // R11-A2（2026-11-13，D3D12 root-signature 对齐）：本表全部
+        // StorageBuffer 都是 gather shader 的只读输入（输出走绑定 2/14 的
+        // storage image u2/u14），逐一置 readonly。镜像 CSO 证据
+        //（dxc -dumpbin，DDGIGIGather 三变体）：storage buffer 全部声明为
+        // ByteAddressBuffer t#——基础/两几何变体 t8/t10/t11/t12/t17/t19/t20，
+        // 几何变体另有 t23-t26（t7 在 HLSL 文本声明、CSO 死代码剔除，同为
+        // 读侧）；D3D12 ClassifyBinding 按 readonly 选 SRV/UAV 段，不置位归
+        // UAV u# → 根签名缺 t 段 → CreateComputePipelineState E_INVALIDARG
+        //（id=688，与 ParticlePass R11-A 同根因类）。置位放在 set_layout_
+        // 创建前：equalBox/normalCache 拷贝继承；glossy 审计布局在其后
+        // 改写 idx19/20 为诊断 SSBO（写侧），不受本循环影响。Vulkan 的
+        // STORAGE_BUFFER 描述符类型本就覆盖读写两种访问（shader 只读 +
+        // 布局 read-write 合法），本字段 Vulkan 路径零消费（见审计报告
+        // §8 零影响证据）；Dawn 走下方 else 分支表，不经此表。
+        for (u32 i = 0; i < 25; ++i) {
+            if (vkBindings[i].descriptorType != DescriptorType::StorageBuffer)
+                continue;
+            vkBindings[i].readonly = true;
         }
         set_layout_ = device->CreateDescriptorSetLayout({geometry_connections_enabled_?24u:19u, vkBindings});
         const auto enabled=[](const char* name){const char* e=std::getenv(name);return e&&std::strcmp(e,"1")==0;};
@@ -295,7 +340,7 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     pipeline_ = device->CreateComputePipeline(pd);
     if (pipeline_ == handles::INVALID_PIPELINE) return false;
     if(queryEnabled) {
-        const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_query_kernel.comp.spv");
+        const auto path=ResolveVariantShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_query_kernel.comp.spv", device->GetPlatform());
         std::ifstream file(path,std::ios::binary|std::ios::ate);
         if(file && file.tellg()>0) {
             const auto count=static_cast<size_t>(file.tellg()); file.seekg(0); std::vector<u8> bytes(count);
@@ -595,8 +640,14 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     cbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
     cbDesc.usage = GPUMemoryUsage::Dynamic;
     cbDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Uniform);
+    // R7-WIN(00327): probe_cb_ 的 counts/camera_pos 子区间(64..128)需
+    // 镜像到 256/512 对齐段(桌面 minUniformBufferOffsetAlignment=0x100),
+    // 缓冲扩到 1024 容纳 0/256/512 三段;0 段布局逐字节不变,镜像段
+    // 内容与原段相同(Mac 输出不变)。far/nvolumes/connection 仍用 256B。
+    BufferDesc probeCbDesc = cbDesc;
+    probeCbDesc.size = 1024;
     for (u32 i = 0; i < 3; ++i) {
-        probe_cb_[i] = device->CreateBuffer(cbDesc);
+        probe_cb_[i] = device->CreateBuffer(probeCbDesc);
         // T4.4: far-volume params (origin+spacing, counts).
         far_cb_[i] = device->CreateBuffer(cbDesc);
         // T6.3 sub-B: N-volume params (144B used in a 256B slot).
@@ -1164,7 +1215,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                             ? 0u : inputs.frame_index + 1u;
                     cb->probe_counts = math::v4{(float)params.probe_count_x, (float)params.probe_count_y, (float)params.probe_count_z,
                         glossy_source_audit_enabled_ ? static_cast<float>(auditFrameStamp) : 9.0f};
-                    cb->camera_pos = math::v4{invView.columns[3][0], invView.columns[3][1], invView.columns[3][2], ddgi->UsesMeasuredVisibility() ? 7.0f : 1.0f};
+                    cb->camera_pos = math::make_v4(math::xyz(math::column(invView, 3)), ddgi->UsesMeasuredVisibility() ? 7.0f : 1.0f);
                     // T6.3 sub-A: probe_vis 数据面——GIDebug() 热调旋钮进 CB，
                     // shader binding 6 第三 vec4（offset 112）。Off（默认）时
                     // x=0，gather 输出零变化。
@@ -1194,6 +1245,15 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                                   << "," << cb->probe_counts.z << "," << cb->probe_counts.w
                                   << ") cam=(" << cb->camera_pos.x << "," << cb->camera_pos.y
                                   << "," << cb->camera_pos.z << ")" << std::endl; }
+                    // R7-WIN(00327): 镜像段上传——把 counts(64..80)与
+                    // camera_pos+debug_vis(80..128)各复制一份到 256/512
+                    // 对齐段,供 binding 5/6 的对齐视图读取。0..128 段
+                    // 原样保留(Mac 读原段或镜像段字节均相同,输出不变)。
+                    // 必须放在全部字段写入(含上方 floor patch)之后。
+                    std::memcpy(reinterpret_cast<u8*>(cb) + 256,
+                                reinterpret_cast<const u8*>(cb) + 64, 16);
+                    std::memcpy(reinterpret_cast<u8*>(cb) + 512,
+                                reinterpret_cast<const u8*>(cb) + 80, 48);
                     device_->UnmapBuffer(probeCB);
                 }
             }
@@ -1358,7 +1418,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             // Texture bindings (6: depth/normal/output/history/orm/specular)
             WriteDescriptorSet texWrites[6] = {};
             DescriptorImageInfo imgInfos[6];
-            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan ||
+                              device_->GetPlatform() == RHIPlatform::D3D12;
             const u32 ormBinding = isVk ? 13u : 4u;
             const u32 specBinding = isVk ? 14u : 5u;
             {
@@ -1560,10 +1621,14 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 const u32 bufBase = isVk ? 4u : 0u;
                 bufWrites[0].dstBinding = bufBase + 0;
                 bufInfos[0].buffer = probeCB; bufInfos[0].offset = 0; bufInfos[0].range = 80;
+                // R7-WIN(00327): offset 64/80 不是 minUniformBufferOffsetAlignment
+                // (桌面 0x100)倍数,触发 00327。改绑上方镜像写入的 256/512 段
+                // (内容与原 64..80/80..128 逐字节相同,每个 binding 视图内字节
+                // 不变,Mac 输出不变);range 不变。
                 bufWrites[1].dstBinding = bufBase + 1;
-                bufInfos[1].buffer = probeCB; bufInfos[1].offset = 64; bufInfos[1].range = 16;
+                bufInfos[1].buffer = probeCB; bufInfos[1].offset = 256; bufInfos[1].range = 16;  // 镜像段(原 64..80)
                 bufWrites[2].dstBinding = bufBase + 2;
-                bufInfos[2].buffer = probeCB; bufInfos[2].offset = 80; bufInfos[2].range = 48;  // T6.3 sub-A: +debugVis(48B)
+                bufInfos[2].buffer = probeCB; bufInfos[2].offset = 512; bufInfos[2].range = 48;  // 镜像段(原 80..128) T6.3 sub-A: +debugVis(48B)
                 bufWrites[3].dstBinding = bufBase + 3; bufWrites[3].descriptorType = DescriptorType::StorageBuffer;
                 bufInfos[3].buffer = (skySH != handles::INVALID_RESOURCE) ? skySH : dummy_buffer_;
                 bufInfos[3].offset = 0; bufInfos[3].range = ~0ull;
@@ -1729,7 +1794,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                      << ",\"near_SH_handle\":" << bufInfos[7].buffer
                      << ",\"near_moments_handle\":" << bufInfos[8].buffer
                      << ",\"probe_cb_valid_bytes\":" << sizeof(GIGatherCB)
-                     << ",\"validity\":\"flat irradiance at offset256 uses total_probes*144B; opensky uses total_probes*8B when active; probeCB bindings4/5/6 use byte ranges0:80/64:80/80:128; unused allocation capacity is not evidence\","
+                     << ",\"validity\":\"flat irradiance at offset256 uses total_probes*144B; opensky uses total_probes*8B when active; probeCB bindings4/5/6 use byte ranges0:80/256:272(mirror of 64:80)/512:560(mirror of 80:128, R7-WIN 00327 align); unused allocation capacity is not evidence\","
                      << "\"observer_note\":\"diagnostic copies add transfer dependencies and may affect latent production synchronization races\"}\n";
             }
 

@@ -61,13 +61,31 @@ namespace constants {
 template<typename T>
 float dot(const T& a, const T& b) {
     float result = 0.0f;
-#if defined(__APPLE__)
+#if defined(PRIMAL_MATH_BACKEND_SIMD)
     if constexpr (std::is_same_v<T, simd::float3>) {
         result = a.x * b.x + a.y * b.y + a.z * b.z;
     } else if constexpr (std::is_same_v<T, simd::float4>) {
         result = a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w;
     } else if constexpr (std::is_same_v<T, simd::float2>) {
         result = a.x * b.x + a.y * b.y;
+    } else {
+        constexpr int size = sizeof(T) / sizeof(float);
+        for (int i = 0; i < size; ++i) {
+            result += a[i] * b[i];
+        }
+    }
+#elif defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // XMFLOAT* 无下标：按 v2/v2a/v3/v4 分派到 XM 点积（XMLoadFloat3 的
+    // w 分量置 0，与可移植分支忽略 v3._pad 的语义一致）。
+    using namespace DirectX;
+    if constexpr (std::is_same_v<T, v2a>) {
+        result = XMVectorGetX(XMVector2Dot(XMLoadFloat2(&a), XMLoadFloat2(&b)));
+    } else if constexpr (std::is_same_v<T, v2>) {
+        result = XMVectorGetX(XMVector2Dot(XMLoadFloat2(&a), XMLoadFloat2(&b)));
+    } else if constexpr (std::is_same_v<T, v3>) {
+        result = XMVectorGetX(XMVector3Dot(XMLoadFloat3(&a), XMLoadFloat3(&b)));
+    } else if constexpr (std::is_same_v<T, v4>) {
+        result = XMVectorGetX(XMVector4Dot(XMLoadFloat4(&a), XMLoadFloat4(&b)));
     } else {
         constexpr int size = sizeof(T) / sizeof(float);
         for (int i = 0; i < size; ++i) {
@@ -219,8 +237,14 @@ T SmoothLerp(const T& a, const T& b, float t) {
  * @return 4x4单位矩阵
  */
 inline m4x4 MatrixIdentity() {
-#if defined(__APPLE__)
+#if defined(PRIMAL_MATH_BACKEND_SIMD)
     return matrix_identity_float4x4;
+#elif defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // 单位阵对角对称，DXM 单位阵与引擎列主序单位阵字节一致。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixIdentity());
+    return result;
 #else
     return m4x4{
         v4{1.0f, 0.0f, 0.0f, 0.0f},
@@ -237,12 +261,20 @@ inline m4x4 MatrixIdentity() {
  * @return 4x4平移矩阵
  */
 inline m4x4 CreateTranslationMatrix(const v3& translation) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // DXM 行 3 = 引擎列 3：XMMatrixTranslation 把平移放底行 = 引擎末列。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixTranslation(translation.x, translation.y, translation.z));
+    return result;
+#else
     return m4x4{
         v4{1.0f, 0.0f, 0.0f, 0.0f},
         v4{0.0f, 1.0f, 0.0f, 0.0f},
         v4{0.0f, 0.0f, 1.0f, 0.0f},
         v4{translation.x, translation.y, translation.z, 1.0f}
     };
+#endif
 }
 
 /**
@@ -251,12 +283,20 @@ inline m4x4 CreateTranslationMatrix(const v3& translation) {
  * @return 4x4缩放矩阵
  */
 inline m4x4 CreateScaleMatrix(const v3& scale) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // 对角阵行/列布局等价，XMMatrixScaling 与下方逐列构造逐元素一致。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixScaling(scale.x, scale.y, scale.z));
+    return result;
+#else
     return m4x4{
         v4{scale.x, 0.0f, 0.0f, 0.0f},
         v4{0.0f, scale.y, 0.0f, 0.0f},
         v4{0.0f, 0.0f, scale.z, 0.0f},
         v4{0.0f, 0.0f, 0.0f, 1.0f}
     };
+#endif
 }
 
 /**
@@ -265,15 +305,23 @@ inline m4x4 CreateScaleMatrix(const v3& scale) {
  * @return 4x4旋转矩阵
  */
 inline m4x4 CreateRotationMatrixX(float angle) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // DXM 行 1 = (0,c,s,0) = 引擎列 1；行 2 = (0,-s,c,0) = 引擎列 2，逐元素一致。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixRotationX(angle));
+    return result;
+#else
     float cosAngle = cosf(angle);
     float sinAngle = sinf(angle);
-    
+
     return m4x4{
         v4{1.0f, 0.0f, 0.0f, 0.0f},
         v4{0.0f, cosAngle, sinAngle, 0.0f},
         v4{0.0f, -sinAngle, cosAngle, 0.0f},
         v4{0.0f, 0.0f, 0.0f, 1.0f}
     };
+#endif
 }
 
 /**
@@ -282,15 +330,23 @@ inline m4x4 CreateRotationMatrixX(float angle) {
  * @return 4x4旋转矩阵
  */
 inline m4x4 CreateRotationMatrixY(float angle) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // DXM 行 0 = (c,0,-s,0) = 引擎列 0；行 2 = (s,0,c,0) = 引擎列 2，逐元素一致。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixRotationY(angle));
+    return result;
+#else
     float cosAngle = cosf(angle);
     float sinAngle = sinf(angle);
-    
+
     return m4x4{
         v4{cosAngle, 0.0f, -sinAngle, 0.0f},
         v4{0.0f, 1.0f, 0.0f, 0.0f},
         v4{sinAngle, 0.0f, cosAngle, 0.0f},
         v4{0.0f, 0.0f, 0.0f, 1.0f}
     };
+#endif
 }
 
 /**
@@ -299,15 +355,23 @@ inline m4x4 CreateRotationMatrixY(float angle) {
  * @return 4x4旋转矩阵
  */
 inline m4x4 CreateRotationMatrixZ(float angle) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // DXM 行 0 = (c,s,0,0) = 引擎列 0；行 1 = (-s,c,0,0) = 引擎列 1，逐元素一致。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixRotationZ(angle));
+    return result;
+#else
     float cosAngle = cosf(angle);
     float sinAngle = sinf(angle);
-    
+
     return m4x4{
         v4{cosAngle, sinAngle, 0.0f, 0.0f},
         v4{-sinAngle, cosAngle, 0.0f, 0.0f},
         v4{0.0f, 0.0f, 1.0f, 0.0f},
         v4{0.0f, 0.0f, 0.0f, 1.0f}
     };
+#endif
 }
 
 /**
@@ -317,6 +381,14 @@ inline m4x4 CreateRotationMatrixZ(float angle) {
  * @return 4x4旋转矩阵
  */
 inline m4x4 CreateRotationMatrixAxis(const v3& axis, float angle) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // 轴必须已归一化（与可移植分支的约定一致），故用 XMMatrixRotationNormal
+    // （跳过内部归一化）。其 Rodrigues 行主序展开的行 i = 引擎列 i，逐元素一致。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixRotationNormal(XMLoadFloat3(&axis), angle));
+    return result;
+#else
     float cosAngle = cosf(angle);
     float sinAngle = sinf(angle);
     float oneMinusCos = 1.0f - cosAngle;
@@ -331,6 +403,7 @@ inline m4x4 CreateRotationMatrixAxis(const v3& axis, float angle) {
         v4{z * x * oneMinusCos + y * sinAngle, z * y * oneMinusCos - x * sinAngle, cosAngle + z * z * oneMinusCos, 0.0f},
         v4{0.0f, 0.0f, 0.0f, 1.0f}
     };
+#endif
 }
 
 /**
@@ -356,6 +429,13 @@ inline m4x4 CreateRotationMatrixEuler(const v3& euler) {
  * @return 4x4透视投影矩阵
  */
 inline m4x4 CreatePerspectiveMatrix(float fovY, float aspect, float nearPlane, float farPlane) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // XMMatrixPerspectiveFovRH 的行 0..3 与下方各列逐元素一致（RH、[0,1] 深度）。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixPerspectiveFovRH(fovY, aspect, nearPlane, farPlane));
+    return result;
+#else
     float tanHalfFov = tanf(fovY * 0.5f);
 
     return m4x4{
@@ -364,6 +444,7 @@ inline m4x4 CreatePerspectiveMatrix(float fovY, float aspect, float nearPlane, f
         v4{0.0f, 0.0f, farPlane / (nearPlane - farPlane), -1.0f},
         v4{0.0f, 0.0f, (nearPlane * farPlane) / (nearPlane - farPlane), 0.0f}
     }; // Metal/Dawn [0,1] depth range. column 3 w=0: clip.w = -z_view
+#endif
 }
 
 /**
@@ -377,6 +458,14 @@ inline m4x4 CreatePerspectiveMatrix(float fovY, float aspect, float nearPlane, f
  * @return 4x4正交投影矩阵
  */
 inline m4x4 CreateOrthographicMatrix(float left, float right, float bottom, float top, float nearPlane, float farPlane) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // XMMatrixOrthographicOffCenterRH 的行 0..3 与下方各列逐元素一致（含
+    // 1/(zn-zf) 的 Z 行与 zn/(zn-zf) 平移项）。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixOrthographicOffCenterRH(left, right, bottom, top, nearPlane, farPlane));
+    return result;
+#else
     // Z formula accounts for view-space Z being negative (CreateLookAtMatrix maps look direction to -Z):
     //   z_view = -near → z_clip = 0,  z_view = -far → z_clip = 1   (Metal [0,1] depth range)
     return m4x4{
@@ -386,6 +475,7 @@ inline m4x4 CreateOrthographicMatrix(float left, float right, float bottom, floa
         v4{(left + right) / (left - right), (top + bottom) / (bottom - top),
            nearPlane / (nearPlane - farPlane), 1.0f}
     };
+#endif
 }
 
 /**
@@ -396,6 +486,16 @@ inline m4x4 CreateOrthographicMatrix(float left, float right, float bottom, floa
  * @return 4x4观察矩阵
  */
 inline m4x4 CreateLookAtMatrix(const v3& eye, const v3& target, const v3& up) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // XMMatrixLookAtRH 的行 i = 引擎列 i：zaxis=normalize(eye-target)=-forward、
+    // xaxis=normalize(cross(up,zaxis))=right、yaxis=cross(zaxis,xaxis)=newUp，
+    // 底行 = (-dot(x,eye), -dot(y,eye), -dot(z,eye), 1) 与下方第 3 列一致。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixLookAtRH(
+        XMLoadFloat3(&eye), XMLoadFloat3(&target), XMLoadFloat3(&up)));
+    return result;
+#else
     v3 forward = Normalize(target - eye);
     v3 right = Normalize(Cross(forward, up));
     v3 newUp = Cross(right, forward);
@@ -410,6 +510,7 @@ inline m4x4 CreateLookAtMatrix(const v3& eye, const v3& target, const v3& up) {
         v4{right.z, newUp.z, -forward.z, 0.0f},
         v4{-Dot(right, eye), -Dot(newUp, eye), Dot(forward, eye), 1.0f}
     };
+#endif
 }
 
 // === 矩阵操作函数 ===
@@ -420,12 +521,20 @@ inline m4x4 CreateLookAtMatrix(const v3& eye, const v3& target, const v3& up) {
  * @return 转置矩阵
  */
 inline m4x4 Transpose(const m4x4& mat) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // 转置对行列布局自反：DXM 转置结果的行 i = 原列 i = 引擎转置的列 i。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixTranspose(XMLoadFloat4x4(&mat)));
+    return result;
+#else
     return m4x4{
         v4{mat.columns[0][0], mat.columns[1][0], mat.columns[2][0], mat.columns[3][0]},
         v4{mat.columns[0][1], mat.columns[1][1], mat.columns[2][1], mat.columns[3][1]},
         v4{mat.columns[0][2], mat.columns[1][2], mat.columns[2][2], mat.columns[3][2]},
         v4{mat.columns[0][3], mat.columns[1][3], mat.columns[2][3], mat.columns[3][3]}
     };
+#endif
 }
 
 /**
@@ -434,8 +543,20 @@ inline m4x4 Transpose(const m4x4& mat) {
  * @return 逆矩阵，如果矩阵不可逆则返回单位矩阵
  */
 inline m4x4 Inverse(const m4x4& m) {
-#if defined(__APPLE__)
+#if defined(PRIMAL_MATH_BACKEND_SIMD)
     return simd::inverse(m);
+#elif defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // 与可移植分支同语义：|det| < EPSILON 返回单位阵；行列式取自
+    // XMMatrixInverse 的输出（与 XMMatrixDeterminant 同源）。
+    using namespace DirectX;
+    XMVECTOR det;
+    XMMATRIX inv{ XMMatrixInverse(&det, XMLoadFloat4x4(&m)) };
+    if (fabsf(XMVectorGetX(det)) < constants::EPSILON) {
+        return MatrixIdentity();
+    }
+    m4x4 result;
+    XMStoreFloat4x4(&result, inv);
+    return result;
 #else
     float m00 = m.columns[0][0], m01 = m.columns[0][1], m02 = m.columns[0][2], m03 = m.columns[0][3];
     float m10 = m.columns[1][0], m11 = m.columns[1][1], m12 = m.columns[1][2], m13 = m.columns[1][3];
@@ -513,11 +634,20 @@ inline m4x4 Inverse(const m4x4& m) {
  * @return 变换后的向量
  */
 inline v3 TransformVector(const m4x4& mat, const v3& vec) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // XMVector3TransformNormal 以 w=0 变换：结果分量 j = Σ vec[i]*mat.columns[i][j]，
+    // 与下方逐列展开一致（不含平移列）。
+    using namespace DirectX;
+    v3 result;
+    XMStoreFloat3(&result, XMVector3TransformNormal(XMLoadFloat3(&vec), XMLoadFloat4x4(&mat)));
+    return result;
+#else
     return v3{
         mat.columns[0][0] * vec.x + mat.columns[1][0] * vec.y + mat.columns[2][0] * vec.z,
         mat.columns[0][1] * vec.x + mat.columns[1][1] * vec.y + mat.columns[2][1] * vec.z,
         mat.columns[0][2] * vec.x + mat.columns[1][2] * vec.y + mat.columns[2][2] * vec.z
     };
+#endif
 }
 
 /**
@@ -527,11 +657,20 @@ inline v3 TransformVector(const m4x4& mat, const v3& vec) {
  * @return 变换后的点
  */
 inline v3 TransformPoint(const m4x4& mat, const v3& point) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // XMVector3Transform 以 w=1 变换后取 xyz（XMStoreFloat3 丢弃 w 分量，
+    // 不做透视除法），与下方逐列展开一致。
+    using namespace DirectX;
+    v3 result;
+    XMStoreFloat3(&result, XMVector3Transform(XMLoadFloat3(&point), XMLoadFloat4x4(&mat)));
+    return result;
+#else
     return v3{
         mat.columns[0][0] * point.x + mat.columns[1][0] * point.y + mat.columns[2][0] * point.z + mat.columns[3][0],
         mat.columns[0][1] * point.x + mat.columns[1][1] * point.y + mat.columns[2][1] * point.z + mat.columns[3][1],
         mat.columns[0][2] * point.x + mat.columns[1][2] * point.y + mat.columns[2][2] * point.z + mat.columns[3][2]
     };
+#endif
 }
 
 /**
@@ -541,12 +680,21 @@ inline v3 TransformPoint(const m4x4& mat, const v3& point) {
  * @return 变换后的法向量（需重新归一化）
  */
 inline v3 TransformNormal(const m4x4& mat, const v3& normal) {
+#if defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // 与可移植分支同语义：3x3 部分变换后按引擎 Normalize 规则
+    // （长度 ≤ EPSILON 返回零向量）归一化。
+    using namespace DirectX;
+    v3 transformed;
+    XMStoreFloat3(&transformed, XMVector3TransformNormal(XMLoadFloat3(&normal), XMLoadFloat4x4(&mat)));
+    return Normalize(transformed);
+#else
     // 使用3x3旋转部分的转置变换法向量
     return Normalize(v3{
         mat.columns[0][0] * normal.x + mat.columns[1][0] * normal.y + mat.columns[2][0] * normal.z,
         mat.columns[0][1] * normal.x + mat.columns[1][1] * normal.y + mat.columns[2][1] * normal.z,
         mat.columns[0][2] * normal.x + mat.columns[1][2] * normal.y + mat.columns[2][2] * normal.z
     });
+#endif
 }
 
 // === 颜色空间转换函数 ===
@@ -651,7 +799,7 @@ inline v3 HSVToRGB(const v3& hsv) {
  * @return 透视投影矩阵
  */
 inline m4x4 MatrixPerspective(float fovY, float aspect, float nearZ, float farZ) {
-#if defined(__APPLE__)
+#if defined(PRIMAL_MATH_BACKEND_SIMD)
     // Metal使用的透视矩阵（NDC Z范围[0,1]，右手坐标系）
     float f = 1.0f / std::tan(fovY * 0.5f);
     simd::float4x4 result{};
@@ -659,6 +807,14 @@ inline m4x4 MatrixPerspective(float fovY, float aspect, float nearZ, float farZ)
     result.columns[1] = simd::float4{0.0f, f, 0.0f, 0.0f};
     result.columns[2] = simd::float4{0.0f, 0.0f, farZ / (nearZ - farZ), -1.0f};
     result.columns[3] = simd::float4{0.0f, 0.0f, (farZ * nearZ) / (nearZ - farZ), 1.0f};
+    return result;
+#elif defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // 历史写法：第 3 列 w=1（其余同 XMMatrixPerspectiveFovRH）。先用 DXM 算
+    // 出 RH 透视（行 0..3 = 引擎列 0..3），再手动把 _44 置回 1。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixPerspectiveFovRH(fovY, aspect, nearZ, farZ));
+    result.m[3][3] = 1.0f;
     return result;
 #else
     float f = 1.0f / std::tan(fovY * 0.5f);
@@ -677,11 +833,17 @@ inline m4x4 MatrixPerspective(float fovY, float aspect, float nearZ, float farZ)
  * @return 平移矩阵
  */
 inline m4x4 MatrixTranslation(const v3& translation) {
-#if defined(__APPLE__)
+#if defined(PRIMAL_MATH_BACKEND_SIMD)
     return simd::float4x4(simd::float4{1.0f, 0.0f, 0.0f, 0.0f},
                           simd::float4{0.0f, 1.0f, 0.0f, 0.0f},
                           simd::float4{0.0f, 0.0f, 1.0f, 0.0f},
                           simd::float4{translation.x, translation.y, translation.z, 1.0f});
+#elif defined(PRIMAL_MATH_BACKEND_DIRECTXMATH)
+    // DXM 行 3 = 引擎列 3（同 CreateTranslationMatrix）。
+    using namespace DirectX;
+    m4x4 result;
+    XMStoreFloat4x4(&result, XMMatrixTranslation(translation.x, translation.y, translation.z));
+    return result;
 #else
     return m4x4{
         v4{1.0f, 0.0f, 0.0f, 0.0f},

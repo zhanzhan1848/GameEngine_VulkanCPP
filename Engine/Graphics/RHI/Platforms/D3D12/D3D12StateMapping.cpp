@@ -166,17 +166,19 @@ u32 SelectD3D12SamplerFilter(const SamplerDesc& desc) {
     const bool minLinear = desc.minFilter != FilterMode::Point;
     const bool magLinear = desc.magFilter != FilterMode::Point;
     const bool mipLinear = desc.mipFilter != FilterMode::Point;
-    // 三布尔八档平铺 switch（与 D3D12Abi.h 滤波表逐值对照）。
+    // 三布尔八档平铺 switch（与 D3D12Abi.h 滤波表逐值对照；2026-11-03 重校：
+    // D3D12_FILTER 为位编码 min<<4|mag<<2|mip，八档真值 0x0/0x1/0x4/0x5/
+    // 0x10/0x11/0x14/0x15）。
     u32 base;
     if (!minLinear && !magLinear && !mipLinear)      base = kD3D12Filter_MinMagMipPoint;           // 0x00
     else if (!minLinear && !magLinear && mipLinear)  base = kD3D12Filter_MinMagPointMipLinear;     // 0x01
-    else if (!minLinear && magLinear && !mipLinear)  base = kD3D12Filter_MinPointMagLinearMipPoint;// 0x02
-    else if (!minLinear && magLinear && mipLinear)   base = kD3D12Filter_MinPointMagLinearMipLinear;// 0x03
-    else if (minLinear && !magLinear && !mipLinear)  base = kD3D12Filter_MinLinearMagMipPoint;     // 0x04
-    else if (minLinear && !magLinear && mipLinear)   base = kD3D12Filter_MinLinearMagPointMipLinear;// 0x05
-    else if (minLinear && magLinear && !mipLinear)   base = kD3D12Filter_MinMagLinearMipPoint;     // 0x06
-    else                                              base = kD3D12Filter_MinMagMipLinear;          // 0x07
-    // COMPARISON 变体恰好是 base + 0x10（D3D12_FILTER 枚举布局），
+    else if (!minLinear && magLinear && !mipLinear)  base = kD3D12Filter_MinPointMagLinearMipPoint;// 0x04
+    else if (!minLinear && magLinear && mipLinear)   base = kD3D12Filter_MinPointMagLinearMipLinear;// 0x05
+    else if (minLinear && !magLinear && !mipLinear)  base = kD3D12Filter_MinLinearMagMipPoint;     // 0x10
+    else if (minLinear && !magLinear && mipLinear)   base = kD3D12Filter_MinLinearMagPointMipLinear;// 0x11
+    else if (minLinear && magLinear && !mipLinear)   base = kD3D12Filter_MinMagLinearMipPoint;     // 0x14
+    else                                              base = kD3D12Filter_MinMagMipLinear;          // 0x15
+    // COMPARISON 变体 = 基础档 + 0x80（D3D12_FILTER reduction 位段编码），
     // D3D12Abi.h 已按真实枚举锁值；不依赖该算术关系，显式平移：
     if (!SamplerDescWantsComparison(desc)) return base;
     switch (base) {

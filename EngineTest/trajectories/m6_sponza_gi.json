@@ -28,18 +28,19 @@
       "roll_deg": 0.0
     },
     "keyframes": [
-      {"time": 0.0,  "position": [2.6, 1.6, 2.0],  "lookAt": [3.8, 3.2, 4.0],  "fov_deg": 42.0},
-      {"time": 0.5,  "position": [1.5, 1.8, 3.5],  "lookAt": [3.6, 2.8, 6.0],  "fov_deg": 45.0},
-      {"time": 1.0,  "position": [0.0, 2.0, 6.0],  "lookAt": [3.2, 2.2, 8.5],  "fov_deg": 48.0},
-      {"time": 1.4,  "position": [0.0, 2.2, 8.0],  "lookAt": [0.0, 2.0, 14.0], "fov_deg": 55.0},
-      {"time": 2.6,  "position": [0.0, 2.2, 8.0],  "lookAt": [0.0, 2.0, 14.0], "fov_deg": 55.0},
-      {"time": 3.0,  "position": [-2.5, 3.0, 6.0], "lookAt": [-1.0, 2.0, 14.0], "fov_deg": 60.0},
-      {"time": 3.6,  "position": [0.0, 3.5, 6.0],  "lookAt": [0.0, 2.0, 12.0],  "fov_deg": 60.0},
-      {"time": 4.0,  "position": [0.0, 5.0, 0.0],  "lookAt": [0.0, 2.0, 8.0],   "fov_deg": 60.0}
+      {"time": 0.0,  "position": [0.5, 7.0, 5.5],  "lookAt": [-4.0, 0.5, 3.0], "fov_deg": 55.0},
+      {"time": 0.5,  "position": [-0.5, 7.5, 4.5], "lookAt": [-5.0, 0.0, 3.0], "fov_deg": 56.0},
+      {"time": 1.0,  "position": [-1.0, 8.5, 3.0], "lookAt": [-6.0, 0.0, 3.5], "fov_deg": 58.0},
+      {"time": 1.4,  "position": [-1.0, 8.0, 2.5], "lookAt": [-6.0, 0.0, 3.5], "fov_deg": 60.0},
+      {"time": 2.6,  "position": [-1.0, 8.0, 2.5], "lookAt": [-6.0, 0.0, 3.5], "fov_deg": 60.0},
+      {"time": 3.0,  "position": [-1.4, 9.2, 3.3], "lookAt": [-6.6, -0.6, 3.1], "fov_deg": 54.0},
+      {"time": 3.5,  "position": [-1.2, 6.8, 2.0], "lookAt": [-5.0, 2.0, 3.0],  "fov_deg": 60.0},
+      {"time": 3.6,  "position": [-1.0, 8.0, 2.5], "lookAt": [-6.0, 0.0, 3.5],  "fov_deg": 60.0},
+      {"time": 4.0,  "position": [0.0, 13.0, 0.0], "lookAt": [0.0, 0.0, 5.0],   "fov_deg": 60.0}
     ],
     "interpolation": "linear",
     "coordinate_system": "right-handed Y-up, +Z forward into Sponza main axis (test-local)",
-    "coverage_notes": "F6-5/F6-7 四段覆盖（相机同 m4 轨迹——材质/阴影/纵深构图复用）：0.0-1.4s 柱列近景特写+跨材质推移（GI ambient 于 albedo 上调制——材质差异可见性段）；1.4-2.6s 画廊纵深静止段（帧 84-155，GI 重置/收敛主观测窗：1.5s 光强 2.2→0.85 触发历史重置（帧 90 [GI_MEAN] 跳落），90-131 EMA 阶梯收敛（每 5 帧 [GI_MEAN] 单调趋近），2.2s 0.85→2.2 恢复重置（帧 132）+ 132-179 二次收敛；2.6-4.0s 侧移+回归锚点段（收敛后稳定帧组合证据，resize 段 120-130 叠加其中）。帧 0 初始 reset=history 未定义（首帧语义）。"
+    "coverage_notes": "F6-5/F6-7 四段覆盖（相机围绕本轨迹光向下的受光面重排；光向/步进/reset/resize 事件与 m4 复用契约不变）：光向 dir_to_light [-0.9,1.5,-0.8]（太阳在 -x/-z 上方，仰角约 51°）下，导出帧反推的受直射可见面=露台层顶面（y≈4.2-5.2，x∈[-3.4,-0.6]，z∈[1.8,3.9]，阳光条纹与其阴影同平面）与 x≈-0.8 处朝 -x 立面——原 m4 复用相机沿 +z 画廊推进全程背对受光面，旧版帧 0-225 因此全黑（基线导出帧 84 实测 100% occluded、[GI_MEAN] 恒 0）。新路径：0.0-1.4s 露台上空高位推进（y 7.0→8.5，受光条纹与下层大厅阴影同框，帧 0 reset 后 [GI_MEAN] 即非零）；1.4-2.6s 静止段 eye(-1,8,2.5)→lookAt(-6,0,3.5) fov60（帧 84-155：1.5s 光强 2.2→0.85 = 帧 90 GI 历史重置（重置后立即非零并按 EMA 重收敛，如 f85 4.85e-4→f90 1.85e-5→f100 1.27e-4），2.2s 0.85→2.2 = 帧 132 重置；位姿恒定 → 重置与 resize 120-130 前后逐像素可比；遮挡区间接光均值 2.2 档 ~2.8e-3、0.85 档 ~1.0e-3）；2.6-4.0s 推近段（fov 60→54 拉近受光面）+ 回落近景（帧 210，y 6.8）+ 高位收尾（帧 240 eye(0,13,0) 俯瞰）。终版采样帧 0/30/60/84/89/119/131/156/180/210/216/239：lit(direct_diffuse>0) 7.9-13.6%、occluded 86.4-92.1%、遮挡区间接光均值>1e-3 者 8/12（0.85 档两帧 R 通道 1.03/1.07e-3 过线、GB 通道 0.74-0.98e-3，系 0.85/2.2=0.386 强度缩放的物理下限）；帧 0 初始 reset=history 未定义（首帧语义）。m6_gi_fixed_view.json 的可见光向不同（[0.85,1.4,0.35]，太阳在相机背后），其机位不可直接搬用——本轨迹受光几何由 20 视角探针扫描实测定位。"
   },
   "timing": {
     "timestep": 0.0166667,
@@ -62,7 +63,7 @@
         {"time": 1.5, "intensity": 0.85},
         {"time": 2.2, "intensity": 2.2}
       ],
-      "keyframe_semantics": "step (latest keyframe with time<=t; shadow cascade VP NOT re-derived on dir changes — M4 documented boundary). M6: intensity step frames (90/132) double as GIHistoryValidity reset events (history zeroed; [GI_MEAN] jump + EMA re-convergence)"
+      "keyframe_semantics": "step (latest keyframe with time<=t; shadow cascade VP NOT re-derived on dir changes — M4 documented boundary). M6: intensity step frames (90/132) double as GIHistoryValidity reset events (history zeroed + EMA re-convergence; on this trajectory the direct-only GI input is 0 until ~frame 230, so the reset jump is 0 here — see coverage_notes; the fixed-view step run shows the non-zero jump)"
     },
     "shadow": {
       "cascades": 1,
@@ -74,22 +75,23 @@
       "far": 150.0
     },
     "gi": {
-      "kind": "GICharacterization (analytic sky + directional flood bake; NOT physical scene GI)",
-      "probe_grid": "8x8x8 RGBA16F Texture3D ping-pong",
-      "world_box_min": [-40.0, -10.0, -30.0],
-      "world_box_max": [40.0, 30.0, 50.0],
-      "accumulation": "EMA hist*0.9 + new*0.1 (fixed weights; production DDGI temporal-weight family)",
+      "kind": "single-bounce screen-space direct-light injection into an SH-L1 probe grid (NOT full physical scene GI: no visibility term in transport, only camera-visible pixels act as emitters, no emissive/sky/IBL)",
+      "input": "M6DeferredDirect (replaces M4DeferredLight in GI mode) MRT2 RGBA16F: direct = lightColor*(diffuse+specular)*shadow (a=ndl); direct_diffuse = lightColor*albedo*ndl*shadow (a=shadow) = the only GI input; direct-only linear HDR, fully shadowed surfaces exactly 0 (no ambient constant, no previous GI, no IBL)",
+      "injection": "M6ProbeInject.comp: 1 workgroup (64 threads) per probe, dispatch 8x8x8; screen samples on an 8 px stride; each sample is a Lambert emitter L_j = direct_diffuse.rgb; c_lm += L_j * dOmega_j * Y_lm(w_j), dOmega_j = area*cos/(r^2 + area/pi)",
+      "probe_grid": "8x8x8 probes; SH-L1 Texture3D RGBA16F (8,8,24) ping-pong; slab s (0..2) = channel R,G,B; texel (i,j,s*8+k) = (c00, c1-1, c10, c11)",
+      "world_box": "union of all drawable mesh local AABBs (model = identity, same source as M5) expanded by 0.5 m on every side; cell = (max-min)/8; normalBias = 0.25*min(cell); logged once as [GI] grid box",
+      "accumulation": "EMA hist*0.9 + new*0.1 (M6ProbeAccum.comp unchanged; fixed weights; production DDGI temporal-weight family)",
       "history_reset": "light-event (intensity/color/dir step) or first frame -> history zeroed (SC tile clear precedent)",
-      "consumption": "deferred light ambient += albedo * tri-linear(sampler3D grid) * giScale",
-      "readback": "[GI_MEAN] every 5 frames + reset frames + final; middle-slice PPM per ladder frame (RHI_GI_DUMP=1)",
-      "bake_determinism": "uint PCG hash + IEEE analytic; no time-varying terms (light params are the only step inputs)"
+      "consumption": "M6GIResolve: independent indirect buffer = albedo * E_h(N), E_h = 0.282095*c00 + 0.325735*(c1-1*n.y + c10*n.z + c11*n.x), clamped >= 0, no GI intensity knob; M6Composite: final = direct + indirect exactly once, before post",
+      "readback": "[GI_MEAN] = mean over 512 probes of 0.282095*c00 per channel, every 5 frames + reset frames + final; middle-slice (z=4) isotropic PPM per ladder frame (RHI_GI_DUMP=1); optional raw float exports via RHI_GI_EXPORT_FRAMES (e.g. 89,119,131,239) -> giexp_f<N>_<buffer>.bin + giexp_f<N>.json",
+      "determinism": "no time-varying terms; camera pose, light params (step keyframes) and the frame-level reset flag are the only inputs"
     },
     "gbuffer": {
       "targets": 3,
       "formats": ["RGBA8_UNorm", "RG16_Float", "RGBA8_UNorm"],
       "normal_encoding": "world_xy_direct_rg16f_z_sign_in_material_alpha",
       "depth": "D32_Float",
-      "light_pass": "fullscreen_triangle_invvp_reconstruct_blinnphong_pcf3x3_same_source_as_forward_plus_gi_ambient_b8b9b10"
+      "light_pass": "GI on: fullscreen M6DeferredDirect (invVP depth reconstruct, Blinn-Phong + PCF3x3 same-source as forward, no ambient; MRT2 RGBA16F direct / direct_diffuse) -> M6ProbeInject (SH-L1) -> M6ProbeAccum (EMA) -> M6GIResolve (independent indirect = albedo*E_h) -> M6Composite (direct + indirect once, before post); GI off: M4DeferredLight (same direct term + 0.15*albedo ambient; b8-b10 bound to a black 1x1x1 placeholder with giScale 0)"
     }
   },
   "manifest_requirements": {

@@ -58,9 +58,15 @@ namespace primal::tools
 		void process_normals(mesh& m, f32 smoothing_angle)
 		{
 #if defined(_MSC_VER)
-			const f32 cos_alpha{ XMScalarCos(pi - smoothing_angle * pi / 180.f) };
-			const bool is_hard_edge{ XMScalarNearEqual(smoothing_angle, 180.f, epsilon) };
-			const bool is_soft_edge{ XMScalarNearEqual(smoothing_angle, 0.f, epsilon) };
+			// R8（Windows 首编）：原分支用 DirectXMath（XMScalarCos/XMVECTOR/
+			// XMLoadFloat3/...），但 math::v3 在 Windows 是本仓可移植结构体
+			// （MathTypes.h：不能别名 XMFLOAT*），XMLoadFloat3 只收 XMFLOAT3*
+			// → 类型不匹配。改为与 __clang__ 分支（macOS 基线）语义一致的可移植
+			// 标量数学：cos_theta = dot/(|n1|+|n2|)（即本分支原注释公式，原
+			// DirectXMath 实现误为 dot/|n1|）；零长度法线回退 {0,1,0}。
+			const f32 cos_alpha{ std::cos(pi - smoothing_angle * pi / 180.f) };
+			const bool is_hard_edge{ std::abs(smoothing_angle - 180.f) < epsilon };
+			const bool is_soft_edge{ std::abs(smoothing_angle) < epsilon };
 			const u32 num_indices{ (u32)m.raw_indices.size() };
 			const u32 num_vertices{ (u32)m.positions.size() };
 			assert(num_indices && num_vertices);
@@ -79,21 +85,23 @@ namespace primal::tools
 					vertex& v{ m.vertices.emplace_back() };
 					v.position = m.positions[m.raw_indices[refs[j]]];
 
-					XMVECTOR n1{ XMLoadFloat3(&m.normals[refs[j]]) };
+					math::v3 n1{ m.normals[refs[j]].x, m.normals[refs[j]].y, m.normals[refs[j]].z };
 					if (!is_hard_edge)
 					{
 						for (u32 k{ j + 1 }; k < num_refs; ++k)
 						{
 							// this value represents the cosine of the angle between nromals
 							f32 cos_theta{ 0.f };
-							XMVECTOR n2{ XMLoadFloat3(&m.normals[refs[k]]) };
+							math::v3 n2{ m.normals[refs[k]].x, m.normals[refs[k]].y, m.normals[refs[k]].z };
 							if (!is_soft_edge)
 							{
 								// Note: we're accounting for the length of n1 in this calculation because
 								//		it can possibly change in this loop iteration. We assume unit length
 								//		for n2.
 								//		cos(angle) = dot(n1, n2) / (||n1|| + ||n2||)
-								XMStoreFloat(&cos_theta, XMVector3Dot(n1, n2) * XMVector3ReciprocalLength(n1));
+								const f32 len1{ std::sqrt(n1.x * n1.x + n1.y * n1.y + n1.z * n1.z) };
+								const f32 len2{ std::sqrt(n2.x * n2.x + n2.y * n2.y + n2.z * n2.z) };
+								cos_theta = (n1.x * n2.x + n1.y * n2.y + n1.z * n2.z) / (len1 + len2);
 							}
 
 							if (is_soft_edge || cos_theta >= cos_alpha)
@@ -106,7 +114,17 @@ namespace primal::tools
 							}
 						}
 					}
-					XMStoreFloat3(&v.normal, XMVector3Normalize(n1));
+					const f32 len_sq{ n1.x * n1.x + n1.y * n1.y + n1.z * n1.z };
+					if (len_sq > epsilon)
+					{
+						const f32 inv{ 1.f / std::sqrt(len_sq) };
+						n1 = { n1.x * inv, n1.y * inv, n1.z * inv };
+					}
+					else
+					{
+						n1 = { 0.f, 1.f, 0.f };
+					}
+					v.normal = { n1.x, n1.y, n1.z };
 				}
 			}
 #elif defined(__clang__)
@@ -199,8 +217,11 @@ namespace primal::tools
 					{
 						v2& uv1{ m.uv_sets[0][refs[k]] };
 #if defined(_MSC_VER)
-						if (XMScalarNearEqual(v.uv.x, uv1.x, epsilon) &&
-							XMScalarNearEqual(v.uv.y, uv1.y, epsilon))
+						// R8（Windows 首编）：XMScalarNearEqual 需要 directxmath.h（本 TU
+						// 未包含 → C3861）。改用与 __clang__ 分支（macOS 基线）完全相同
+						// 的标量形式。
+						if (std::abs(v.uv.x - uv1.x) < epsilon &&
+							std::abs(v.uv.y - uv1.y) < epsilon)
 #elif defined(__clang__)
 						if (std::abs(v.uv.x - uv1.x) < epsilon &&
 							std::abs(v.uv.y - uv1.y) < epsilon)

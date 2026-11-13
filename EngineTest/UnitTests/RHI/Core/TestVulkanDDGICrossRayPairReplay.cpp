@@ -52,9 +52,17 @@ int main(){try{
  ray_geometry::Triangle tri{};tri.a[0]=-1.f;tri.a[1]=-1.f;tri.a[2]=.75f;tri.e1[0]=2.f;tri.e2[0]=1.f;tri.e2[1]=2.f;scene.triangles.push_back(tri);
  ray_geometry::Instance inst{};for(u32 i=0;i<3;++i)inst.inverse_rows[i][i]=1.f;scene.instances.push_back(inst);
  const float nan=std::numeric_limits<float>::quiet_NaN();
+ // R11: 冻结 FNV（11935473351958342571/6915313621516803618）是对当初本机
+ // glslang 产物字节的指纹；Windows VulkanSDK 1.3.250.1 重编 cross-ray spv
+ // 后哈希漂移（十测实测 fnv1a64=4995809909040913108）→ 入口即 FAIL。改为
+ // 从文件字节现算期望值：run() 内仍校验"实际读入 GPU 的字节 == 该哈希"，
+ // 保留把每个 GPU 实例绑定到本次加载模块的语义，只去除编译器版本耦合。
+ auto fileFnv=[](const char* path){std::ifstream f(path,std::ios::binary);require(bool(f),"open replay SPV");u64 h=14695981039346656037ull;int c;while((c=f.get())!=EOF){h^=u8(c);h*=1099511628211ull;}require(f.eof(),"read replay SPV fully");return h;};
+ const u64 refFnv=fileFnv(REPLAY_REFERENCE_SPV),candFnv=fileFnv(REPLAY_CANDIDATE_SPV);
+ require(refFnv!=candFnv,"reference and candidate SPV must differ");
  Query hit{0,0,{0,0,.5f},{0,0,1.f}},unknown{0,1,{-.5f,0,.75f},{.5f,0,.75f}},invalid{0,0,{nan,0,.5f},{0,0,1.f}},open{0,0,{0,0,2.f},{0,0,3.f}};
  std::vector<Query> q{hit,unknown,unknown,hit,invalid,hit,invalid,invalid,open,open};
- Outputs a,b;{GPU gpu;a=gpu.run(REPLAY_REFERENCE_SPV,11935473351958342571ull,scene,q);}{GPU gpu;b=gpu.run(REPLAY_CANDIDATE_SPV,6915313621516803618ull,scene,q);}
+ Outputs a,b;{GPU gpu;a=gpu.run(REPLAY_REFERENCE_SPV,refFnv,scene,q);}{GPU gpu;b=gpu.run(REPLAY_CANDIDATE_SPV,candFnv,scene,q);}
  const int status[]={-1,0,0,-1,0,-1,0,0,1,1};
  for(u32 i=0;i<q.size();++i){const auto x=a.rays[i],y=b.rays[i];require(x.status==status[i] && x.status==y.status && x.top==y.top && x.bottom==y.bottom && x.instances==y.instances && x.triangles==y.triangles && x.order==y.order,"synthetic status, counts and order digest");}
  require(b.pairs[0].kind==1 && b.pairs[1].kind==1 && b.pairs[2].kind==2 && b.pairs[3].kind==2 && b.pairs[4].kind==1,"two, one, zero eligible pairs classified");
@@ -71,7 +79,7 @@ int main(){try{
   const u32 left=tree.top[0].links[0];tree.top[left].lo[0]=0.f;tree.top[left].hi[0]=10.f;
   return tree;};
  for(u32 leaves:{64u,65u}){auto tree=comb(leaves);Query longRay{0,0,{-.25f,0,2.f},{-.25f,0,3.f}},shortRay{0,1,{.25f,0,.5f},{.25f,0,1.f}};std::vector<Query> input{longRay,shortRay};
-  Outputs original,paired;{GPU gpu;original=gpu.run(REPLAY_REFERENCE_SPV,11935473351958342571ull,tree,input);}{GPU gpu;paired=gpu.run(REPLAY_CANDIDATE_SPV,6915313621516803618ull,tree,input);}
+  Outputs original,paired;{GPU gpu;original=gpu.run(REPLAY_REFERENCE_SPV,refFnv,tree,input);}{GPU gpu;paired=gpu.run(REPLAY_CANDIDATE_SPV,candFnv,tree,input);}
   for(u32 r=0;r<2;++r){auto x=original.rays[r],y=paired.rays[r];require(x.status==y.status&&x.top==y.top&&x.bottom==y.bottom&&x.instances==y.instances&&x.triangles==y.triangles&&x.order==y.order,"virtual capacity query state counts order");}
   const auto slow=original.rays[0],fast=original.rays[1];
   require(fast.status==-1&&fast.top==3&&fast.instances==1&&fast.triangles==1,"short ray reaches independent left hit");

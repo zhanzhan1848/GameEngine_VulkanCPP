@@ -17,11 +17,18 @@ target_include_directories(vtbake PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/astc-encoder/Source
 )
 
-find_package(ZLIB QUIET)
-if(ZLIB_FOUND)
-    target_link_libraries(vtbake PRIVATE astcenc-native-static ZLIB::ZLIB)
+# R4（Windows 四测）：Windows 无系统 zlib——用根 CMakeLists WIN32 段 FetchContent
+# 拉取的 zlibstatic（ALIAS primal_zlib_static，定义在本 add_subdirectory 之前）；
+# 其余平台原样。
+if(WIN32 AND TARGET primal_zlib_static)
+    target_link_libraries(vtbake PRIVATE astcenc-native-static primal_zlib_static)
 else()
-    target_link_libraries(vtbake PRIVATE astcenc-native-static z)
+    find_package(ZLIB QUIET)
+    if(ZLIB_FOUND)
+        target_link_libraries(vtbake PRIVATE astcenc-native-static ZLIB::ZLIB)
+    else()
+        target_link_libraries(vtbake PRIVATE astcenc-native-static z)
+    endif()
 endif()
 
 if(NOT WIN32)

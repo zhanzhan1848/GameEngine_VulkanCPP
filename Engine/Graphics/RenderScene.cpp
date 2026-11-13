@@ -123,7 +123,7 @@ void RenderScene::Cull(const rhi::Frustum& frustum, utl::vector<const RenderProx
         } else {
             // 如果 AABB 无效，保守起见认为可见，或者忽略（取决于策略）
             // 这里我们假设它是一个点，或者回退到简单的位置检查
-            math::v3 position{proxy.transform.columns[3][0], proxy.transform.columns[3][1], proxy.transform.columns[3][2]};
+            math::v3 position{math::elem(proxy.transform, 3, 0), math::elem(proxy.transform, 3, 1), math::elem(proxy.transform, 3, 2)};
             f32 radius = 1.0f; // 默认半径
             if (frustum.IsSphereVisible(position, radius)) {
                 outProxies.push_back(&proxy);

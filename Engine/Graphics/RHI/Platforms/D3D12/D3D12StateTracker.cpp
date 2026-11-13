@@ -15,8 +15,12 @@ bool D3D12StateTracker::RegisterResource(u64 resource, bool isTexture,
                                          u32 mipLevels, u32 arraySize,
                                          u32 planeSlices,
                                          ResourceState initialState) {
+    // R16-A：键 = (resource, isTexture)。buffer/texture 分池同号句柄合法
+    // 共存（各自独立跟踪）；仅同 id 同类型的重复注册才是双注册冲突。
     for (const auto& [id, entry] : entries_) {
-        if (id == resource) return false;  // 双注册防御（显式失败）
+        if (id == resource && entry.isTexture == isTexture) {
+            return false;  // 双注册防御（显式失败）
+        }
     }
     u32 initialBits = kD3D12ResourceState_Common;
     if (!ToD3D12ResourceStates(initialState, initialBits)) {
@@ -42,9 +46,13 @@ bool D3D12StateTracker::RegisterResource(u64 resource, bool isTexture,
     return true;
 }
 
-bool D3D12StateTracker::UnregisterResource(u64 resource) {
+bool D3D12StateTracker::UnregisterResource(u64 resource, bool isTexture) {
+    // R16-A：注销也按 (resource, isTexture) 键——跨类型误注销（buffer 销毁
+    // 带走同号纹理条目 / 反之）在 M0 键空间下会静默 orphan 对方，此后对方
+    // 的全部 Transition 返回空 op（#538 家族的第二入口）。
     for (size_t i = 0; i < entries_.size(); ++i) {
-        if (entries_[i].first == resource) {
+        if (entries_[i].first == resource
+            && entries_[i].second.isTexture == isTexture) {
             entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(i));
             return true;
         }
@@ -69,11 +77,16 @@ utl::vector<D3D12ResourceBarrierOp> D3D12StateTracker::Transition(
     if (!ToD3D12ResourceStates(target, targetBits)) return ops;  // 生命周期态拒绝
 
     ResourceEntry* entry = nullptr;
+    // R16-A：按 (resource, isTexture) 查条目——同数值 id 的 buffer/texture
+    // 条目共存时跳过类型不符的条目继续扫描（M0 初版在首个同 id 条目上做
+    // 类型判定即返回空 op，后注册方因此永远拿不到 barrier）。
     for (auto& [id, e] : entries_) {
-        if (id == key.resource) { entry = &e; break; }
+        if (id == key.resource && e.isTexture == key.isTexture) {
+            entry = &e;
+            break;
+        }
     }
-    if (!entry) return ops;                        // 未注册拒绝
-    if (key.isTexture != entry->isTexture) return ops;  // 键类型与注册不符
+    if (!entry) return ops;  // 未注册/类型不匹配拒绝
 
     // 展开目标子资源集合（升序——确定性 op 序）
     const bool wholeResource = key.subresource == kD3D12ResourceBarrierAllSubresources;
@@ -166,14 +179,22 @@ bool D3D12StateTracker::QueryState(const D3D12SubresourceKey& key,
 utl::vector<D3D12DecayRecord> D3D12StateTracker::OnSubmitBoundary() {
     utl::vector<D3D12DecayRecord> decayed;
     if (!config_.decayOnSubmit) return decayed;
-    // 规则 ③：buffer 全部衰减；纹理仅提升态衰减。按注册序 + 子资源升序。
+    // 规则 ③（R17-A 修正）：仅 buffer 衰减；纹理一律不衰减。按注册序 +
+    // 子资源升序。D3D12 提交边界（ExecuteCommandLists 完成）的真实衰减面 =
+    // buffer（全部）+ UPLOAD/READBACK heap 资源 + simultaneous-access 纹理；
+    // 本引擎纹理恒为 DEFAULT-heap committed 且不带 ALLOW_SIMULTANEOUS_ACCESS
+    //（D3D12Texture::Initialize），其状态——含从 COMMON 隐式提升出的读类态
+    //——在 GPU 侧跨提交持久。M0 初版"纹理提升态衰减"把 tracker 拉回 COMMON
+    // 而 GPU 保留提升态：此后任何转换 barrier 的 StateBefore=COMMON 与 GPU
+    // 实际不符（debug-layer 拒绝→资源停留旧态，下一次 CopyTextureRegion
+    // 即 #538 INVALID_SUBRESOURCE_STATE——Windows 十六测 M1 的 tracker/GPU
+    // 分歧源之一，macOS 探针 P5 实证；runbook §26-A）。simultaneous-access
+    // 纹理接入时需按资源 flag 恢复条件衰减（TODO M4+ 多队列/共享纹理）。
     for (auto& [id, entry] : entries_) {
-        const bool alwaysDecay = !entry.isTexture;
+        if (entry.isTexture) continue;  // R17-A：纹理不衰减（GPU 真实语义）
         for (u32 s = 0; s < entry.subresourceCount; ++s) {
             SubEntry& sub = entry.subresources[s];
             if (sub.stateBits == kD3D12ResourceState_Common) continue;
-            const bool decays = alwaysDecay || sub.promoted;
-            if (!decays) continue;
             D3D12DecayRecord rec;
             rec.resource = id;
             rec.subresource = s;
@@ -187,9 +208,9 @@ utl::vector<D3D12DecayRecord> D3D12StateTracker::OnSubmitBoundary() {
 
 D3D12StateTracker::SubEntry* D3D12StateTracker::ResolveSub(
         const D3D12SubresourceKey& key) {
+    // R16-A：(resource, isTexture) 双元键——类型不符的同号条目跳过继续扫。
     for (auto& [id, entry] : entries_) {
-        if (id != key.resource) continue;
-        if (key.isTexture != entry.isTexture) return nullptr;
+        if (id != key.resource || key.isTexture != entry.isTexture) continue;
         const u32 index = (key.subresource == kD3D12ResourceBarrierAllSubresources)
             ? 0u : key.subresource;
         if (index >= entry.subresourceCount) return nullptr;
@@ -200,9 +221,9 @@ D3D12StateTracker::SubEntry* D3D12StateTracker::ResolveSub(
 
 const D3D12StateTracker::SubEntry* D3D12StateTracker::ResolveSub(
         const D3D12SubresourceKey& key) const {
+    // R16-A：同上（const 侧），双元键扫描。
     for (const auto& [id, entry] : entries_) {
-        if (id != key.resource) continue;
-        if (key.isTexture != entry.isTexture) return nullptr;
+        if (id != key.resource || key.isTexture != entry.isTexture) continue;
         const u32 index = (key.subresource == kD3D12ResourceBarrierAllSubresources)
             ? 0u : key.subresource;
         if (index >= entry.subresourceCount) return nullptr;

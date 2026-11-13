@@ -1,5 +1,6 @@
 // Actual production DDGIGIGather geometry-connection contracts; private fixtures only.
 #include "../../TestFramework.h"
+#include "EngineTest/Utils/TestEnv.h"   // R3: portable setenv/unsetenv (MSVC lacks POSIX ones)
 #include "Graphics/RHI/Core/RHIDeviceFactory.h"
 #include "Graphics/RHI/Core/RHIDevice.h"
 #include "Graphics/RHI/Core/RHICommand.h"
@@ -198,7 +199,7 @@ ray_geometry::SceneBVH buildGeometry(const Config& cfg){
     if(cfg.scaled)for(size_t i=0;i<v.size();i+=3){v[i]/=2.f;v[i+1]/=.5f;v[i+2]/=3.f;}
     mesh.num_vertices=v.size()/3;mesh.num_indices=indices.size();mesh.index_size=4;mesh.position_buffer.resize(v.size()*4);mesh.index_buffer.resize(indices.size()*4);
     std::memcpy(mesh.position_buffer.data(),v.data(),v.size()*4);std::memcpy(mesh.index_buffer.data(),indices.data(),indices.size()*4);
-    auto blas=ray_geometry::BuildMeshBLAS(mesh);require(bool(blas),"Build real GG fixture BLAS");math::m4x4 m{};m.columns[0]={1,0,0,0};m.columns[1]={0,1,0,0};m.columns[2]={0,0,1,0};m.columns[3]={0,0,0,1};if(cfg.scaled){m.columns[0].x=2.f;m.columns[1].y=.5f;m.columns[2].z=3.f;}
+    auto blas=ray_geometry::BuildMeshBLAS(mesh);require(bool(blas),"Build real GG fixture BLAS");math::m4x4 m{};math::set_column(m,0,math::v4{1,0,0,0});math::set_column(m,1,math::v4{0,1,0,0});math::set_column(m,2,math::v4{0,0,1,0});math::set_column(m,3,math::v4{0,0,0,1});if(cfg.scaled){math::set_elem(m,0,0,2.f);math::set_elem(m,1,1,.5f);math::set_elem(m,2,2,3.f);}
     std::array<ray_geometry::InstanceInput,1> input{{{blas,m,324}}};ray_geometry::SceneBVH out;require(out.Build(input),"Build real GG fixture TLAS");
 #ifdef GG_CONNECTION_EQUIVALENCE
     if(cfg.geometry==Geometry::HitThenInvalid||cfg.geometry==Geometry::InvalidThenHit){
@@ -458,7 +459,20 @@ Result dispatch(const Config& cfg){
         diffuse[i]=g.texture(width,height,DataFormat::RGBA16_Float,nullptr,0);spec[i]=g.texture(width,height,DataFormat::RGBA16_Float,nullptr,0);
 #endif
     }
-    auto viewBuffer=g.buffer(sizeof(view),BufferType::Constant,GPUMemoryUsage::Dynamic,&view),volumeBuffer=g.buffer(sizeof(volume),BufferType::Constant,GPUMemoryUsage::Dynamic,&volume);
+    // R11/VUID-00327: bindings 5/6 sub-allocate one 128B constant block at
+    // legacy offsets 64/80. minUniformBufferOffsetAlignment is device
+    // dependent (NVIDIA desktop 256 — GTX1060 十测实测 0x100；MoltenVK 16)，
+    // so pack the three slices at runtime-aligned offsets instead of the
+    // fixed 64/80 layout that only survives align<=16 devices.
+    VkPhysicalDeviceProperties devProps{};vkGetPhysicalDeviceProperties(g.vk->GetNativePhysicalDevice(),&devProps);
+    const u64 uboAlign=std::max<u64>(devProps.limits.minUniformBufferOffsetAlignment,1);
+    auto alignUbo=[uboAlign](u64 v){return (v+uboAlign-1)/uboAlign*uboAlign;};
+    const u64 originOff=alignUbo(64),tailOff=alignUbo(originOff+16);
+    std::vector<u8> viewPadded(size_t(tailOff+48),0);
+    std::memcpy(viewPadded.data(),&view.invVP,sizeof(view.invVP));
+    std::memcpy(viewPadded.data()+originOff,&view.origin,sizeof(view.origin));
+    std::memcpy(viewPadded.data()+tailOff,&view.counts,sizeof(view.counts)+sizeof(view.camera)+sizeof(view.debug));
+    auto viewBuffer=g.buffer(viewPadded.size(),BufferType::Constant,GPUMemoryUsage::Dynamic,viewPadded.data()),volumeBuffer=g.buffer(sizeof(volume),BufferType::Constant,GPUMemoryUsage::Dynamic,&volume);
     std::array<u8,176> staticProbe{};std::array<float,36> staticSH{};std::array<float,8> staticFactor{};
     auto staticCB=g.buffer(sizeof(staticProbe),BufferType::Constant,GPUMemoryUsage::Dynamic,staticProbe.data()),sky=g.buffer(sizeof(staticSH),BufferType::Raw,GPUMemoryUsage::Dynamic,staticSH.data()),skyFactor=g.buffer(sizeof(staticFactor),BufferType::Raw,GPUMemoryUsage::Dynamic,staticFactor.data());
     auto nearSH=g.buffer(sizeof(sh),BufferType::Raw,GPUMemoryUsage::Dynamic,sh.data()),depthBuffer=g.buffer(sizeof(moments),BufferType::Raw,GPUMemoryUsage::Dynamic,moments.data()),originBuffer=g.buffer(sizeof(origins),BufferType::Raw,GPUMemoryUsage::Dynamic,origins.data()),conf=g.buffer(sizeof(confidence),BufferType::Raw,GPUMemoryUsage::Dynamic,confidence.data());
@@ -518,7 +532,7 @@ Result dispatch(const Config& cfg){
         const u32 imageBindings[]={0,1,2,3,13,14};std::vector<WriteDescriptorSet> writes;
         for(u32 i=0;i<6;++i)writes.push_back({g.sets[phase],imageBindings[i],0,1,i==0?DescriptorType::SampledDepthImage:(i==2||i==5?DescriptorType::StorageImage:DescriptorType::SampledImage),&images[i],nullptr});
         const u32 bindings[]={4,5,6,7,8,9,10,11,12,17,18,19,20,23,24,25,26,27};
-        DescriptorBufferInfo buffers[]={{viewBuffer,0,64},{viewBuffer,64,16},{viewBuffer,80,48},{sky,0,sizeof(staticSH)},{skyFactor,0,sizeof(staticFactor)},{staticCB,0,sizeof(staticProbe)},{conf,0,sizeof(confidence)},{nearSH,0,sizeof(sh)},{depthBuffer,0,sizeof(moments)},{flatBuffer,256,sizeof(sh)},{volumeBuffer,0,sizeof(volume)},{originBuffer,0,sizeof(origins)},{openBuffer,256,sizeof(open)},
+        DescriptorBufferInfo buffers[]={{viewBuffer,0,64},{viewBuffer,originOff,16},{viewBuffer,tailOff,48},{sky,0,sizeof(staticSH)},{skyFactor,0,sizeof(staticFactor)},{staticCB,0,sizeof(staticProbe)},{conf,0,sizeof(confidence)},{nearSH,0,sizeof(sh)},{depthBuffer,0,sizeof(moments)},{flatBuffer,256,sizeof(sh)},{volumeBuffer,0,sizeof(volume)},{originBuffer,0,sizeof(origins)},{openBuffer,256,sizeof(open)},
             {geometryBuffers[0],0,geometry.top.size()*sizeof(ray_geometry::Node)},{geometryBuffers[1],0,geometry.bottom.size()*sizeof(ray_geometry::Node)},{geometryBuffers[2],0,geometry.triangles.size()*sizeof(ray_geometry::Triangle)},{geometryBuffers[3],0,geometry.instances.size()*sizeof(ray_geometry::Instance)},{policyBuffer,0,sizeof(policy)}};
 #ifdef GG_CONNECTION_UPPER_TEST
 #if defined(GG_CONNECTION_TRAVERSAL_TEST) || defined(GG_CONNECTION_QUERY_KERNEL_TEST)
@@ -610,8 +624,8 @@ void zero(const Pair& x,bool unsupported){for(const auto* image:{&x.diffuse,&x.s
 void identical(const Result& x){for(auto pair:{std::pair{&x.baseline.diffuse,&x.candidate.diffuse},std::pair{&x.baseline.specular,&x.candidate.specular}}){require(pair.first->size()==pair.second->size(),"GPU output dimensions match");for(size_t i=0;i<pair.first->size();++i)require(std::memcmp((*pair.first)[i].raw,(*pair.second)[i].raw,sizeof(Pixel::raw))==0,"raw RGBA16F outputs remain bit-identical");}}
 struct ConnectionEnvironment {
     bool present=false;std::string original;
-    ConnectionEnvironment(){if(const char* p=std::getenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS")){present=true;original=p;}setenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS","0",1);}
-    ~ConnectionEnvironment(){if(present)setenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS",original.c_str(),1);else unsetenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS");}
+    ConnectionEnvironment(){if(const char* p=std::getenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS")){present=true;original=p;}primaltest::SetEnv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS","0");}
+    ~ConnectionEnvironment(){if(present)primaltest::SetEnv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS",original.c_str());else primaltest::UnsetEnv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS");}
 };
 struct OwnedGather {GIGatherModule value;~OwnedGather(){value.Shutdown();}};
 void registerLifecycleCases(const std::shared_ptr<TestSuite>& suite){
@@ -622,7 +636,7 @@ void registerLifecycleCases(const std::shared_ptr<TestSuite>& suite){
         OwnedGather owner;auto& m=owner.value;
         require(m.Initialize(g.d,g.shaders[0],16,16),"Baseline module Initialize succeeds");require(m.IsInitialized()&&!m.RequiresGeometryConnections(),"Baseline module live without candidate");
         if(scenario==1){
-            setenv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS","1",1);
+            primaltest::SetEnv("PRIMAL_DDGI_GEOMETRY_CONNECTIONS","1");
             require(m.Initialize(g.d,g.shaders[0],16,16),"Reinitialize candidate from production geometry SPV succeeds");
             require(m.IsInitialized()&&m.RequiresGeometryConnections(),"Exact-1 candidate initialized after baseline cleanup");
         }else if(scenario==2){

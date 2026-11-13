@@ -62,9 +62,12 @@ void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
 }
 
 // Vulkan：预编译 .comp.spv（Vulkan/Shaders/Lumen/，include 已在构建期内联）。
-std::vector<u8> LoadWrcSpv(const char* shaderName) {
-    const std::string rel = std::string("Engine/Graphics/Vulkan/Shaders/Lumen/")
-                            + shaderName + ".comp.spv";
+// D3D12：DXIL .cso 镜像（EngineTest/shaders/d3d12/Lumen/<name>.comp.cso，
+// spirv-cross 包装入口恒 "main"——后端忽略 entry 名）。
+std::vector<u8> LoadWrcSpv(rhi::RHIPlatform platform, const char* shaderName) {
+    const std::string rel = (platform == rhi::RHIPlatform::D3D12)
+        ? std::string("EngineTest/shaders/d3d12/Lumen/") + shaderName + ".comp.cso"
+        : std::string("Engine/Graphics/Vulkan/Shaders/Lumen/") + shaderName + ".comp.spv";
     const std::string resolved = utils::ShaderRegistry::ResolveShaderPath(rel);
     for (const std::string& path : { rel, resolved }) {
         if (path.empty()) continue;
@@ -95,7 +98,9 @@ LumenWRCPass::~LumenWRCPass() { Shutdown(); }
 bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams& params) {
     // A 线 Vulkan 先行（设计 §1.1）；Metal 上 Initialize 失败，接线层跳过
     //（Metal parity 按 Docs/RHI/GraphicsAPI_Parity_Matrix.md 跟进）。
-    if (device->GetPlatform() != RHIPlatform::Vulkan) return false;
+    // D3D12 与 Vulkan 同形接入（flat binding + .cso 镜像）。
+    if (device->GetPlatform() != RHIPlatform::Vulkan &&
+        device->GetPlatform() != RHIPlatform::D3D12) return false;
     if (GetProbeCountTotal() == 0) return false;
 
     device_ = device;
@@ -316,7 +321,7 @@ void LumenWRCPass::Shutdown() {
 
 void LumenWRCPass::CreatePipelines() {
     auto Compile = [&](const char* name, const char* entry) -> ShaderHandle {
-        auto code = LoadWrcSpv(name);
+        auto code = LoadWrcSpv(device_->GetPlatform(), name);
         if (code.empty()) return handles::INVALID_SHADER;
         return device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
     };
@@ -531,7 +536,7 @@ void LumenWRCPass::UpdateProbeCardList(const SurfaceCacheCard* cards, u32 cardCo
                 c.center.x - probePos.x, c.center.y - probePos.y, c.center.z - probePos.z };
             const float d2 = d.x * d.x + d.y * d.y + d.z * d.z;
             const float ex = c.extent.x, ey = c.extent.y, ez = c.extent.z;
-            const uint axis = c.axis_direction & 0xFFu;
+            const u32 axis = c.axis_direction & 0xFFu;
             const float hu = (axis == 0u) ? ey : ex;
             const float hv = (axis == 0u) ? ez : (axis == 1u ? ez : ey);
             const float faceArea = 4.0f * hu * hv;

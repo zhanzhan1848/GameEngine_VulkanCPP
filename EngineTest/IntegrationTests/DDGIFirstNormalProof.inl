@@ -227,9 +227,9 @@ static bool RunDDGIFirstNormalProof(
         for (u32 k = 0; k < 3u; ++k) {
             const float expectedE1 = v[1][k] - v[0][k];
             const float expectedE2 = v[2][k] - v[0][k];
-            if (std::abs(a[k] - v[0][k]) > 2.0e-5f ||
-                std::abs(e1[k] - expectedE1) > 2.0e-5f ||
-                std::abs(e2[k] - expectedE2) > 2.0e-5f)
+            if (std::abs(math::component(a, k) - v[0][k]) > 2.0e-5f ||
+                std::abs(math::component(e1, k) - expectedE1) > 2.0e-5f ||
+                std::abs(math::component(e2, k) - expectedE2) > 2.0e-5f)
                 return fail("first-surface triangle positions differ from current assets");
         }
         triangleRuntimeIndex[logical] = runtime;
@@ -305,7 +305,8 @@ static bool RunDDGIFirstNormalProof(
             float residual2 = 0.0f;
             for (u32 k = 0; k < 3u; ++k) {
                 const float reconstructed = first2.x * va[k] + first2.y * vb[k] + first2.z * vc[k];
-                const float rayPoint = sourceFinalizeOrigin[k] + sourceFinalizeDirection[k] * first0.z;
+                const float rayPoint = math::component(sourceFinalizeOrigin, k) +
+                                       math::component(sourceFinalizeDirection, k) * first0.z;
                 const float delta = reconstructed - rayPoint;
                 residual2 += delta * delta;
             }

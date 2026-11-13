@@ -15,37 +15,36 @@ namespace {
 //   variant 2 = 180°  : (x, z) → (-x, -z)
 //   variant 3 = -90° Y: (x, z) → (-z, x)
 //
-// Columns are constructed directly because math::m4x4 lays out as
-// `columns[4]` (each entry a column vector). This convention matches
-// AutoSocketClassifier::TransformPoint, which reads m.columns[i][j] for
-// row j of column i — the same on simd::float4x4 (Apple) and on the
-// struct m4x4 fallback (WASM/other).
+// Columns are written via math::set_column (each entry a column vector),
+// mirroring math::m4x4's column layout. This convention matches
+// AutoSocketClassifier::TransformPoint, which reads math::elem(m, i, j)
+// for row j of column i on every math backend (simd/DirectXMath/struct).
 math::m4x4 ComputeVariantTransformY(u32 variant) {
     math::m4x4 m{};
     switch (variant & 3u) {
         case 0:  // identity
-            m.columns[0] = math::v4{1, 0, 0, 0};
-            m.columns[1] = math::v4{0, 1, 0, 0};
-            m.columns[2] = math::v4{0, 0, 1, 0};
-            m.columns[3] = math::v4{0, 0, 0, 1};
+            math::set_column(m, 0, math::v4{1, 0, 0, 0});
+            math::set_column(m, 1, math::v4{0, 1, 0, 0});
+            math::set_column(m, 2, math::v4{0, 0, 1, 0});
+            math::set_column(m, 3, math::v4{0, 0, 0, 1});
             break;
         case 1:  // +90° Y: +X → -Z, +Z → +X
-            m.columns[0] = math::v4{0, 0, -1, 0};
-            m.columns[1] = math::v4{0, 1,  0, 0};
-            m.columns[2] = math::v4{1, 0,  0, 0};
-            m.columns[3] = math::v4{0, 0,  0, 1};
+            math::set_column(m, 0, math::v4{0, 0, -1, 0});
+            math::set_column(m, 1, math::v4{0, 1,  0, 0});
+            math::set_column(m, 2, math::v4{1, 0,  0, 0});
+            math::set_column(m, 3, math::v4{0, 0,  0, 1});
             break;
         case 2:  // 180°: +X → -X, +Z → -Z
-            m.columns[0] = math::v4{-1, 0,  0, 0};
-            m.columns[1] = math::v4{ 0, 1,  0, 0};
-            m.columns[2] = math::v4{ 0, 0, -1, 0};
-            m.columns[3] = math::v4{ 0, 0,  0, 1};
+            math::set_column(m, 0, math::v4{-1, 0,  0, 0});
+            math::set_column(m, 1, math::v4{ 0, 1,  0, 0});
+            math::set_column(m, 2, math::v4{ 0, 0, -1, 0});
+            math::set_column(m, 3, math::v4{ 0, 0,  0, 1});
             break;
         case 3:  // -90° Y: +X → +Z, +Z → -X
-            m.columns[0] = math::v4{ 0, 0, 1, 0};
-            m.columns[1] = math::v4{ 0, 1, 0, 0};
-            m.columns[2] = math::v4{-1, 0, 0, 0};
-            m.columns[3] = math::v4{ 0, 0, 0, 1};
+            math::set_column(m, 0, math::v4{ 0, 0, 1, 0});
+            math::set_column(m, 1, math::v4{ 0, 1, 0, 0});
+            math::set_column(m, 2, math::v4{-1, 0, 0, 0});
+            math::set_column(m, 3, math::v4{ 0, 0, 0, 1});
             break;
     }
     return m;

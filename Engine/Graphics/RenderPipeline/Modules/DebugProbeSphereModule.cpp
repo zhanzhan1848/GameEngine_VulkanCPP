@@ -129,8 +129,13 @@ bool DebugProbeSphereModule::Initialize(RHIDeviceBase* device,
                                  ? "ProbeSphere" : "ProbeSphere.vert";
         auto vs = LoadProbeSphereBytecode(device, vsName);
         if (!vs.empty())
+            // R11/VUID-00707: Vulkan 预编 spv 的入口是 "main"（MoltenVK 实测
+            // "only entry point found was main"）；probe_sphere_vs 是 MSL 双入
+            // 口文件的名字。与下方 irradiance/WRC 的 Vulkan 分支一致。
             vertex_shader = device_->CreateShader(vs.data(), vs.size(),
-                                                  ShaderStage::Vertex, "probe_sphere_vs");
+                                                  ShaderStage::Vertex,
+                                                  device->GetPlatform() == rhi::RHIPlatform::Metal
+                                                      ? "probe_sphere_vs" : "main");
     }
     ShaderHandle irradiance_ps = handles::INVALID_SHADER;
     if (pixel_shader == handles::INVALID_SHADER) {
@@ -139,7 +144,8 @@ bool DebugProbeSphereModule::Initialize(RHIDeviceBase* device,
         auto ps = LoadProbeSphereBytecode(device, psName);
         if (!ps.empty())
             pixel_shader = device_->CreateShader(ps.data(), ps.size(),
-                                                 ShaderStage::Pixel, "probe_sphere_fs");
+                                                 ShaderStage::Pixel,
+                                                 metal ? "probe_sphere_fs" : "main");
         if (metal) {
             auto psIrr = LoadProbeSphereBytecode(device, psName);
             if (!psIrr.empty())

@@ -90,8 +90,38 @@ void VulkanDescriptorSet::Update(const WriteDescriptorSet* writes, u32 writeCoun
     std::vector<VkWriteDescriptorSet> vkWrites;
     std::vector<VkDescriptorBufferInfo> bufInfos;
     std::vector<VkDescriptorImageInfo>  imgInfos;
-    bufInfos.reserve(writeCount * 4);
-    imgInfos.reserve(writeCount * 4);
+    // R10 taskC（UB 加固）：原 reserve(writeCount*4) 是启发式——一旦写入的
+    // descriptorCount 总和超过该值（数组型绑定），后续 push_back 触发向量
+    // 重分配，先前 vw.pBufferInfo/pImageInfo 存进的指针全部悬垂，
+    // vkUpdateDescriptorSets 读已释放内存（UAF）。精确预计算总数后 reserve，
+    // 任何 count 组合都不可能再重分配。当前所有调用方 count=1，容量只会
+    // 等于或小于旧值，写入行为零变化（Mac 参照零影响）。
+    {
+        u64 totalBuf = 0, totalImg = 0;
+        for (u32 i = 0; i < writeCount; ++i) {
+            if (writes[i].dstSet != handle_) continue;
+            const u32 n = std::max<u32>(1u, writes[i].descriptorCount);
+            switch (writes[i].descriptorType) {
+                case DescriptorType::UniformBuffer:
+                case DescriptorType::StorageBuffer:
+                case DescriptorType::UniformBufferDynamic:
+                case DescriptorType::StorageBufferDynamic:
+                    if (writes[i].bufferInfo) totalBuf += n;
+                    break;
+                case DescriptorType::Sampler:
+                case DescriptorType::CombinedImageSampler:
+                case DescriptorType::SampledImage:
+                case DescriptorType::InputAttachment:
+                case DescriptorType::SampledDepthImage:
+                case DescriptorType::StorageImage:
+                    if (writes[i].imageInfo) totalImg += n;
+                    break;
+                default: break;
+            }
+        }
+        bufInfos.reserve(totalBuf);
+        imgInfos.reserve(totalImg);
+    }
 
     for (u32 i = 0; i < writeCount; ++i) {
         const WriteDescriptorSet& w = writes[i];

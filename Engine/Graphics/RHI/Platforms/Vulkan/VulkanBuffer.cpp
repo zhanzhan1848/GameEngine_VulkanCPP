@@ -11,6 +11,7 @@
 
 #include "VulkanBuffer.h"
 #include "VulkanDevice.h"
+#include "VulkanHangDiag.h"
 #include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
@@ -385,7 +386,11 @@ bool VulkanBuffer::updateDataImpl(const void* data, u64 size, u64 offset) {
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
     vkQueueSubmit(vkDev.GetGraphicsQueue(), 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(vkDev.GetGraphicsQueue());
+    {
+        // R10 taskC：queueWaitIdle 在队列楔死时无限阻塞；门控看门狗。
+        hangdiag::ScopedHangWatch wait("queueWaitIdle", "VulkanBuffer.syncUpload");
+        vkQueueWaitIdle(vkDev.GetGraphicsQueue());
+    }
 
     vkFreeCommandBuffers(vkDevice, pool, 1, &cmd);
     vkDestroyCommandPool(vkDevice, pool, nullptr);

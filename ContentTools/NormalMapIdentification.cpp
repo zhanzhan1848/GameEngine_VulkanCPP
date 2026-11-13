@@ -145,12 +145,13 @@ namespace primal::tools
 		DXGI_FORMAT_FORCE_UINT = 0xffffffff
 	};
 
-	struct Image
-	{
-		u64 width, height, rowPitch, slicePitch;
-		u8* pixels;
-		DXGI_FORMAT format;
-	};
+	// R11/LNK2019: 之前这里手写了与 DirectX::Image 同布局的独立 struct，使本
+	// TU 的实现符号 mangle 成 ?...Image@tools@primal...，而 TextureImporter.obj
+	// 声明的是 is_normal_map(DirectX::Image const*)（mangle 含 Image@DirectX）
+	// ——两个不同签名，MSVC 直接 LNK2019（十测 full-build.log 实锤）。改为
+	// 别名指向调用方实际使用的 DirectX::Image（DirectXTex.h 已含）；MSVC 类型
+	// 别名不产生独立 mangle 名，两侧符号合一。成员布局/类型与旧镜像一致。
+	using Image = DirectX::Image;
 
 	inline u64 BitsPerPixel(DXGI_FORMAT fmt)
 	{
@@ -294,7 +295,10 @@ namespace primal::tools
 	bool is_normal_map(const tools::Image *const image)
 	{
 #if defined(_MSC_VER)
-		const DXGI_FORMAT image_format{ image->format };
+		// R11: tools::Image 现在是 DirectX::Image 的别名（见上方定义处注释），
+		// image->format 是全局 ::DXGI_FORMAT；本 TU 的辅助函数用上面镜像的
+		// tools::DXGI_FORMAT（成员名与取值一一对应），显式转换即可。
+		const DXGI_FORMAT image_format{ static_cast<DXGI_FORMAT>(image->format) };
 #elif defined(__clang__)
 		const tools::MTLPixelFormat image_format{ image->format };
 #endif

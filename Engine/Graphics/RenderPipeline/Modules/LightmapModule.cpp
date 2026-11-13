@@ -546,11 +546,11 @@ bool LightmapModule::RegisterEntityDirect(id::id_type mesh_content_id, u32 entit
     EntitySpec spec;
     spec.mesh = mesh_content_id;
     spec.entity = entity_id;
-    spec.transform = math::m4x4{};  // 恒等（列零初始化 + [3][3] 补 1）
-    spec.transform.columns[0].x = 1.f;
-    spec.transform.columns[1].y = 1.f;
-    spec.transform.columns[2].z = 1.f;
-    spec.transform.columns[3].w = 1.f;
+    // 恒等（原实现：零矩阵 + 对角补 1；DirectXMath 分支无聚合零构造，改为显式四列）
+    spec.transform = math::make_m4x4(math::v4{1.f, 0.f, 0.f, 0.f},
+                                     math::v4{0.f, 1.f, 0.f, 0.f},
+                                     math::v4{0.f, 0.f, 1.f, 0.f},
+                                     math::v4{0.f, 0.f, 0.f, 1.f});
     std::memcpy(spec.scale_bias, scale_bias, sizeof(spec.scale_bias));
     directEntities_.push_back(spec);
 
@@ -591,9 +591,9 @@ void LightmapModule::RebuildEntityBuffers(const std::vector<EntitySpec>& specs) 
         const auto* positions = reinterpret_cast<const float*>(asset.position_buffer.data());
         for (u32 v = 0; v < asset.num_vertices; ++v) {
             const float x = positions[v * 3], y = positions[v * 3 + 1], z = positions[v * 3 + 2];
-            cpuPositions.push_back(m.columns[0].x * x + m.columns[1].x * y + m.columns[2].x * z + m.columns[3].x);
-            cpuPositions.push_back(m.columns[0].y * x + m.columns[1].y * y + m.columns[2].y * z + m.columns[3].y);
-            cpuPositions.push_back(m.columns[0].z * x + m.columns[1].z * y + m.columns[2].z * z + m.columns[3].z);
+            cpuPositions.push_back(math::elem(m, 0, 0) * x + math::elem(m, 1, 0) * y + math::elem(m, 2, 0) * z + math::elem(m, 3, 0));
+            cpuPositions.push_back(math::elem(m, 0, 1) * x + math::elem(m, 1, 1) * y + math::elem(m, 2, 1) * z + math::elem(m, 3, 1));
+            cpuPositions.push_back(math::elem(m, 0, 2) * x + math::elem(m, 1, 2) * y + math::elem(m, 2, 2) * z + math::elem(m, 3, 2));
             cpuPositions.push_back(0.0f);
         }
         const auto* uvs = reinterpret_cast<const float*>(asset.lightmap_uv_buffer.data());

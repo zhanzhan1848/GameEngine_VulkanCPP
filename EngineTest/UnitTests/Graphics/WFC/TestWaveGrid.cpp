@@ -12,7 +12,12 @@ TestResult TestWaveGrid_Initialize_And_Size() {
     TEST_ASSERT_EQ(4, grid.Size().y, "Size Y");
     TEST_ASSERT_EQ(4, grid.Size().z, "Size Z");
     TEST_ASSERT_EQ(64u, grid.CellCount(), "CellCount");
-    TEST_ASSERT_EQ(32u, grid.BytesPerCell(), "BytesPerCell (WFCCell size)");
+    // Phase C.1 Mixed 拓宽 WFCCell（u64 → u64[4]，实测 sizeof=56）后本断言
+    // 的硬编码 32 未随之更新（macOS/Windows 同为 56——u32 typed id 布局
+    // 两端一致，非平台打包差异）。改为一致性语义：BytesPerCell 必须等于
+    // WFCCell 实际尺寸，再漂移（容量变化或 BytesPerCell 与结构体脱钩）
+    // 仍会在此报警。
+    TEST_ASSERT_EQ(u32(sizeof(WFCCell)), grid.BytesPerCell(), "BytesPerCell (WFCCell size)");
     return TestResult::Passed;
 }
 
@@ -89,6 +94,6 @@ int main() {
     TEST_CASE(suite, "Resize_Shrinks", TestWaveGrid_Resize_Shrinks);
     TEST_CASE(suite, "Resize_Preserves_MaxTileVariants", TestWaveGrid_Resize_Preserves_MaxTileVariants);
     TEST_CASE(suite, "Reset_Clears_Collapse_But_Keeps_Size", TestWaveGrid_Reset_Clears_Collapse_But_Keeps_Size);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }
