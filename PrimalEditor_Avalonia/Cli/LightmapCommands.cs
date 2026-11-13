@@ -45,9 +45,7 @@ public class LightmapCommands
                       "atlas_size 单位像素（默认 1024）；samples 每纹素采样数（默认 64）；" +
                       "bounces 间接反弹次数（默认 2）；texel_density 纹素/米（默认 16，" +
                       "注意大尺度场景需调低）；denoise 双边滤波开关；output_dir 产物目录" +
-                      "（默认 Content/Bakes/<scene-guid>）。per-instance 键为实体稳定键" +
-                      "（实体 GUID，跨会话稳定）——增删实体或改实体结构后需重烘焙，" +
-                      "旧产物对结构已变的实体会失配。失败语义：任务登记为 failed，" +
+                      "（默认 Content/Bakes/<scene-guid>）。失败语义：任务登记为 failed，" +
                       "task.status 的 error 给出引擎侧摘要。",
         Example = """{"atlas_size":1024,"samples":64,"bounces":2,"texel_density":16}""")]
     public object BakeLightmaps(uint atlas_size = 1024, uint samples = 64, uint bounces = 2,
@@ -124,14 +122,6 @@ public class LightmapCommands
                 if (File.Exists(pagePngPath))
                     TaskRegistry.AddArtifact(task, pagePngPath, "lightmap-page-png");
                 TaskRegistry.Complete(task, true);
-                // per-instance 统计（2026-11-05 稳定键计划）：entries 数组由引擎
-                // 侧 status JSON 返回（per-mesh 清单），只透传数量不重算、不改
-                // 引擎。落在完成时刻的 progress 标签上（MainWindow 的 [Lightmap]
-                // 轮询与 TaskRecord.ProgressLabel 可见）。
-                var entryCount = CountStatusEntries(statusJson);
-                if (entryCount >= 0)
-                    TaskRegistry.ReportProgress(task, 1.0,
-                        $"done: {entryCount} per-instance entries (stable entity keys)");
                 // 场景级持久化：UI 线程写文档模型（ViewModelBase 通知 +
                 // IsDirty）；页面本身已在引擎侧加载，场景重载时由
                 // WorldEditorViewModel 恢复。
@@ -187,25 +177,5 @@ public class LightmapCommands
         }
         var raw = json.Length > 300 ? json[..300] : json;
         return string.IsNullOrWhiteSpace(raw) ? "engine returned empty status" : raw;
-    }
-
-    /// <summary>
-    /// 从引擎 status JSON 里取 per-instance entries 总数；-1 = 无 entries
-    /// 数据或 JSON 不可解析（老引擎无此字段时不报数）。
-    /// </summary>
-    private static int CountStatusEntries(string json)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("entries", out var entries) &&
-                entries.ValueKind == JsonValueKind.Array)
-                return entries.GetArrayLength();
-        }
-        catch
-        {
-            // 引擎侧状态非法 JSON——按无数据处理。
-        }
-        return -1;
     }
 }

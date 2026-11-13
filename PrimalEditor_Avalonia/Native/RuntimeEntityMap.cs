@@ -21,10 +21,4 @@ public sealed class RuntimeEntityMap
     public bool Unregister(EntityGuid guid) => _byGuid.Remove(guid);
 
     public void Clear() => _byGuid.Clear();
-
-    /// <summary>
-    /// 当前全部 guid → runtime id 映射的只读枚举（2026-11-05 lightmap 稳定键
-    /// 计划：全量快照推送遍历用）。调用方不得修改返回的键值。
-    /// </summary>
-    public IEnumerable<KeyValuePair<EntityGuid, uint>> Enumerate() => _byGuid;
 }

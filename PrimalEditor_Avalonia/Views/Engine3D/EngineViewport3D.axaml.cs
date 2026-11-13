@@ -744,9 +744,6 @@ public partial class EngineViewport3D : UserControl
         // StandardRenderPipeline. Re-apply HDR/skybox state now that the
         // ForwardSceneRenderer exists; otherwise the first push was a no-op.
         weVm.SceneEnvironmentViewModel.ApplyToNative();
-        // 同理重放 lightmap 页：setter 时管线不存在，PipelineSetLightmapPage
-        // 返回 0 → 重启编辑器后烘焙结果永不恢复（2026-11-05 修复）。
-        weVm.ApplyActiveSceneLightmapToNative();
         Logger.Info("Active scene re-synced after render pipeline creation");
     }
 

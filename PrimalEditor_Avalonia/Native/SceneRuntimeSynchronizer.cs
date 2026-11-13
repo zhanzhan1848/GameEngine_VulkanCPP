@@ -147,10 +147,6 @@ public sealed class SceneRuntimeSynchronizer
             catch { /* ignore: engine might be torn down already */ }
         }
         _editorHelperGeometryIds.Clear();
-
-        // 稳定键注册表随场景拆除清空（场景关闭；Sync 重同步前亦经此清空，
-        // 随后 Sync 尾部以新快照重推）。
-        _bridge.ClearEntityIdentities();
     }
 
 	/// <summary>
@@ -174,9 +170,6 @@ public sealed class SceneRuntimeSynchronizer
 			_entities.Unregister(entity.EntityGuid);
 		}
 		_live.Remove(entity);
-
-		// 映射已变（实体注销）：重推全量快照（幂等）。
-		PushEntityIdentities();
 	}
 
     public void Sync(Scene scene)
@@ -419,66 +412,6 @@ public sealed class SceneRuntimeSynchronizer
                 _bridge.PfxSetEmitterPosition(pfxId,
                     transform.PositionX, transform.PositionY, transform.PositionZ);
             }
-        }
-
-        // 稳定键注册表（2026-11-05 lightmap 稳定键计划）：场景激活/加载完成
-        //（全部实体创建、网格绑定后）全量推送。
-        PushEntityIdentities();
-    }
-
-    // ---- 实体稳定键注册表推送（2026-11-05 lightmap 稳定键计划） ----
-    // lightmap bake 的 per-instance 键烧的是易失 runtime id（mesh_<h>_e<id>），
-    // 产物 lightmap.lmap 跨会话失配。修复：编辑器把 runtime native entity id →
-    // 实体 GUID 稳定键的全量快照批量推给引擎（引擎侧按 native id upsert，全量
-    // 推送天然幂等）。推送时机 = 实体/网格生命周期节点：Sync（场景激活）、
-    // SyncEntity（实体创建）、RemoveEntity（实体删除）、RefreshEntityMaterials/
-    // RefreshEntityMesh（网格重绑会更换管线 mesh 实体 id）、Teardown（清空）。
-
-    /// <summary>稳定键 = "e" + 实体 GUID 的 N 格式（32 小写 hex，总 33 字符）。</summary>
-    internal static string BuildEntityStableKey(EntityGuid guid) => "e" + guid.Value.ToString("N");
-
-    /// <summary>
-    /// 构造稳定键注册表全量快照（纯函数，测试直测）：遍历
-    /// <see cref="RuntimeEntityMap"/> 的全部 guid → runtime id 映射，经桥解析
-    /// 出管线 mesh 实体 id（bake 键 e&lt;id&gt; 里的 id 即它，而非 source ECS
-    /// id）。只有 mesh 实体才有管线侧实体——无 id 的实体跳过。
-    /// </summary>
-    internal static NativeEngineBridge.EntityIdentityC[] BuildIdentitySnapshot(
-        RuntimeEntityMap entities, INativeEngineBridgeLike bridge)
-    {
-        var snapshot = new List<NativeEngineBridge.EntityIdentityC>();
-        foreach (var (guid, nativeId) in entities.Enumerate())
-        {
-            if (nativeId == 0 || nativeId == NativeEngineBridge.InvalidEntityId) continue;
-            // 只有 mesh 实体才有管线侧实体（PipelineRegisterMeshEntity 路径）；
-            // 灯光/相机等纯组件实体不参与 bake，跳过。
-            if (bridge.TryGetRenderMeshEntityId(nativeId) is not { } meshEntityId) continue;
-            snapshot.Add(new NativeEngineBridge.EntityIdentityC
-            {
-                NativeEntityId = meshEntityId,
-                StableKey = BuildEntityStableKey(guid),
-            });
-        }
-        return snapshot.ToArray();
-    }
-
-    /// <summary>
-    /// 推送全量快照（幂等）。失败仅记日志不抛异常——引擎注册表保持旧态时
-    /// bake 回退易失 runtime id 键（现行为），不阻塞场景同步。
-    /// </summary>
-    private void PushEntityIdentities()
-    {
-        if (!_bridge.IsLoaded) return;
-        try
-        {
-            var snapshot = BuildIdentitySnapshot(_entities, _bridge);
-            if (!_bridge.SetEntityIdentities(snapshot))
-                Logger.Warning(
-                    $"SceneRuntimeSynchronizer: identity push rejected ({snapshot.Length} entries) — engine registry stale");
-        }
-        catch (Exception ex)
-        {
-            Logger.Error("SceneRuntimeSynchronizer: identity push failed", ex);
         }
     }
 
@@ -847,10 +780,6 @@ public sealed class SceneRuntimeSynchronizer
             try { _bridge.ClearEntityMaterialGraph(runtimeId); }
             catch (NotSupportedException) { /* older bridge without graph support */ }
         }
-
-        // 网格/材质重绑会更换管线 mesh 实体 id（SetEntityMeshTextures 内
-        // unregister+register）——重推快照防 bake 键失配。
-        PushEntityIdentities();
     }
 
     /// <summary>Import and rebind geometry after the Inspector replaces a Mesh asset.</summary>
@@ -865,8 +794,6 @@ public sealed class SceneRuntimeSynchronizer
         if (renderer.MeshGuid.Value == Guid.Empty && renderer.BuiltinMesh == BuiltinMeshKind.None)
         {
             _bridge.UnbindEntityMesh(runtimeId);
-            // 网格解除后该实体退出稳定键快照：重推。
-            PushEntityIdentities();
             return;
         }
 
@@ -1042,10 +969,6 @@ public sealed class SceneRuntimeSynchronizer
                     new[] { position.ScaleX, position.ScaleY, position.ScaleZ });
             }
         }
-
-        // 新实体注册后全量重推（幂等；BindEditorHelperMesh 同样会产生管线
-        // mesh，故在方法尾而非 RefreshEntityMaterials 一处收口）。
-        PushEntityIdentities();
     }
 
     /// <summary>

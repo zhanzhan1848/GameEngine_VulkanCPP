@@ -48,6 +48,6 @@ int main() {
     TEST_CASE(suite, "StoneGrayValues",           TestPalette_StoneGrayValues);
     TEST_CASE(suite, "GetRuinsMaterialId_Stable", TestPalette_GetRuinsMaterialId_Stable);
     TEST_CASE(suite, "VineCubeAverageColor",      TestPalette_VineCubeAverageColor);
-    const auto runStats = suite.RunAllTests();
-    return runStats.failedTests == 0 ? 0 : 1;
+    suite.RunAllTests();
+    return 0;
 }

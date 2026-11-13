@@ -390,10 +390,7 @@ public static class Serializer
     {
         var scene = new Scene(document.Name)
         {
-            Guid = document.SceneGuid,
-            // 写侧（ToSceneDocument）一直写出 LightmapPage，读侧此前漏拷——
-            // 重载后烘焙的 lightmap 永不恢复（2026-11-05 跨会话恢复修复）。
-            LightmapPage = document.LightmapPage
+            Guid = document.SceneGuid
         };
 
         ApplyEnvironment(scene.Environment, document.Environment);

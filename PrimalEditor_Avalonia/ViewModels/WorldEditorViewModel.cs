@@ -537,11 +537,7 @@ public class WorldEditorViewModel : Document, ISceneEntityContext, IDeferredCont
                 // CreateGameEntity path should call those APIs
                 // explicitly during creation, never from a scene-swap.
                 SceneSynchronizer.Teardown();
-                if (_activeScene != null)
-                    _activeScene.PropertyChanged -= OnActiveScenePropertyChanged;
                 _activeScene = value;
-                if (_activeScene != null)
-                    _activeScene.PropertyChanged += OnActiveScenePropertyChanged;
                 SelectedEntities = System.Array.Empty<GameEntity>();
                 _allEntities.Clear();
                 Entities.Clear();
@@ -555,7 +551,14 @@ public class WorldEditorViewModel : Document, ISceneEntityContext, IDeferredCont
                     if (NativeEngineBridge.IsLoaded)
                     {
                         SceneSynchronizer.Sync(_activeScene);
-                        ApplyActiveSceneLightmapToNative();
+                        // Lightmap 页（2026-10-19 计划 M4c）：场景激活即恢复
+                        //（引擎侧按 LMAP 清单自动匹配实体；失败仅记录——
+                        // 缺页不阻塞场景本身）。显式清除：页面被删但场景
+                        // 仍引用时兜底。
+                        if (!string.IsNullOrEmpty(_activeScene.LightmapPage))
+                            NativeEngineBridge.PipelineSetLightmapPage(_activeScene.LightmapPage);
+                        else
+                            NativeEngineBridge.PipelineClearLightmap();
                     }
                     SceneEnvironmentViewModel.Attach(_activeScene.Environment);
                 }
@@ -928,44 +931,6 @@ public class WorldEditorViewModel : Document, ISceneEntityContext, IDeferredCont
     public void PushTransformsToNative(IEnumerable<GameEntity> entities)
     {
         SceneSynchronizer.PushTransforms(entities);
-    }
-
-    /// <summary>
-    /// Lightmap 页（2026-10-19 计划 M4c）：把激活场景的 LightmapPage 推给引擎
-    /// （引擎侧按 LMAP 清单以实体稳定键逐实例匹配；失败仅记录——缺页不阻塞
-    /// 场景本身）。显式清除：页面被删但场景仍引用时兜底。
-    /// 两处调用（2026-11-05 跨会话恢复修复）：ActiveScene setter，以及
-    /// EngineViewport3D.ResyncActiveScene——项目打开时场景激活早于
-    /// StandardRenderPipeline 创建，setter 那次 PipelineSetLightmapPage 因管线
-    /// 不存在返回 0（no-op），管线建好后必须重放，否则重启编辑器后烘焙的
-    /// lightmap 永不恢复（与 SceneEnvironmentViewModel.ApplyToNative 同病同治）。
-    /// </summary>
-    public void ApplyActiveSceneLightmapToNative()
-    {
-        if (_activeScene == null || !NativeEngineBridge.IsLoaded) return;
-        if (!string.IsNullOrEmpty(_activeScene.LightmapPage))
-        {
-            // 返回 0 = 管线/模块未就绪或 LMAP 读取失败（引擎侧另有日志）。
-            // 管线未建时属预期（ResyncActiveScene 会重放），故只记 Info。
-            if (NativeEngineBridge.PipelineSetLightmapPage(_activeScene.LightmapPage) == 0)
-                Logger.Info($"Lightmap page not applied yet (pipeline not ready or load failed): {_activeScene.LightmapPage}");
-        }
-        else
-        {
-            NativeEngineBridge.PipelineClearLightmap();
-        }
-    }
-
-    // 场景 payload 在激活之后才原地换入（Serializer：占位对象先激活，
-    // LightmapPage 等字段随后回填），bake 完成也在 UI 线程写回 LightmapPage
-    // ——两种路径都只表现为属性变更，故按变更重放（2026-11-05 跨会话恢复修复）。
-    private void OnActiveScenePropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName != nameof(Scene.LightmapPage) || !ReferenceEquals(sender, _activeScene)) return;
-        if (Avalonia.Threading.Dispatcher.UIThread.CheckAccess())
-            ApplyActiveSceneLightmapToNative();
-        else
-            Avalonia.Threading.Dispatcher.UIThread.Post(ApplyActiveSceneLightmapToNative);
     }
 
     // Native entity id <-> C# GameEntity mapping. RuntimeEntityMap is the

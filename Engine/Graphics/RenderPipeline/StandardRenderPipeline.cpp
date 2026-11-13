@@ -3313,10 +3313,6 @@ void StandardRenderPipeline::SyncEntitiesToRenderScene(RenderScene& scene) {
             id::id_type materialId = meshInfo->gpuMaterialId;
 
             RenderProxy proxy = RenderProxy::Create(eid, meshId, materialId);
-            // content geometry id（geometry_hierarchies 空间）——meshId 在编辑器
-            // 管线路径是 mesh 资源绑定的 ECS 实体 id，不能进 content 两步解析
-            // （2026-11-05 lightmap per-instance 排查；离线路径二者同值不变）。
-            proxy.contentMeshId = meshInfo->meshEntityId;
             proxy.UpdateTransform(world);
 
             game_entity::entity entity{game_entity::entity_id{eid}};

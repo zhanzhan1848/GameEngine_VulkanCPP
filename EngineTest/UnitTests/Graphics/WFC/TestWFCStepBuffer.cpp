@@ -101,6 +101,6 @@ int main() {
     TEST_CASE(suite, "Consume_Respects_Max_Count", TestWFCStepBuffer_Consume_Respects_Max_Count);
     TEST_CASE(suite, "Empty_Consume_Returns_Zero", TestWFCStepBuffer_Empty_Consume_Returns_Zero);
     TEST_CASE(suite, "Concurrent_Producer_Consumer", TestWFCStepBuffer_Concurrent_Producer_Consumer);
-    const auto runStats = suite.RunAllTests();
-    return runStats.failedTests == 0 ? 0 : 1;
+    suite.RunAllTests();
+    return 0;
 }

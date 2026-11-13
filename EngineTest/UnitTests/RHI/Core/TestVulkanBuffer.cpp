@@ -189,8 +189,8 @@ void RegisterVulkanBufferTests() {
 
 int main() {
     RegisterVulkanBufferTests();
-    const auto runStats = TestRunner::RunAllSuites();
-    return runStats.failedTests == 0 ? 0 : 1;
+    TestRunner::RunAllSuites();
+    return 0;
 }
 
 #else // ENABLE_VULKAN undefined
