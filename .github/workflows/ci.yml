@@ -70,10 +70,15 @@ jobs:
         # （Engine/单测不编 meshopt，仅满足存在性守卫）。
         # 跳过 dawn/PhysX/WebGPU/astc-encoder（数 GB）。
         run: |
+          # astc-encoder（BUILD_VTBAKE 默认 ON 时根 CMake 硬依赖）与
+          # JoltPhysics（Engine 物理内核，无条件 add_subdirectory）均为
+          # 2026-09 起新增硬依赖，"轻量列表"必须跟上（dawn/PhysX/WebGPU 仍跳过）。
           git submodule update --init \
             third_party/stb \
             third_party/moodycamel-ConcurrentQueue \
-            third_party/lua
+            third_party/lua \
+            third_party/astc-encoder \
+            third_party/JoltPhysics
           bash scripts/ci_meshopt_fallback.sh
 
       - name: 校验 workflow YAML 有效性
@@ -248,7 +253,9 @@ jobs:
           $submodules = @(
             'third_party/stb',
             'third_party/moodycamel-ConcurrentQueue',
-            'third_party/lua'
+            'third_party/lua',
+            'third_party/astc-encoder',
+            'third_party/JoltPhysics'
           )
           git submodule update --init @submodules
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -547,10 +554,15 @@ jobs:
       - name: 初始化必需的 submodule
         # meshoptimizer pin 只在本机（未推送），脚本回退物化（仅满足根 CMake 守卫）
         run: |
+          # astc-encoder（BUILD_VTBAKE 默认 ON 时根 CMake 硬依赖）与
+          # JoltPhysics（Engine 物理内核，无条件 add_subdirectory）均为
+          # 2026-09 起新增硬依赖，"轻量列表"必须跟上（dawn/PhysX/WebGPU 仍跳过）。
           git submodule update --init \
             third_party/stb \
             third_party/moodycamel-ConcurrentQueue \
-            third_party/lua
+            third_party/lua \
+            third_party/astc-encoder \
+            third_party/JoltPhysics
           bash scripts/ci_meshopt_fallback.sh
 
       - name: 安装构建依赖
@@ -641,11 +653,22 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: 检出仓库（含全部 submodule）
+      - name: 检出仓库
         uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 1
+        # 全量 recursive 会在 meshoptimizer 的本机 pin（4d218f33，未推送）上失败，
+        # 改为下方显式初始化（EMSCRIPTEN 下 astc 分支被跳过；JoltPhysics 无条件
+        # add_subdirectory，必须在场；meshopt 由脚本回退物化，仅满足根 CMake 守卫）。
+
+      - name: 初始化必需的 submodule
+        run: |
+          git submodule update --init \
+            third_party/stb \
+            third_party/moodycamel-ConcurrentQueue \
+            third_party/lua \
+            third_party/JoltPhysics
+          bash scripts/ci_meshopt_fallback.sh
 
       - name: Setup Emscripten SDK
         uses: mymindstorm/setup-emsdk@v14
@@ -1004,7 +1027,8 @@ jobs:
         # 且内容已在本 runner 工作区持久保留（clean:false），不再对 pin 断言。
         run: |
           git submodule update --init third_party/stb \
-            third_party/moodycamel-ConcurrentQueue third_party/lua
+            third_party/moodycamel-ConcurrentQueue third_party/lua \
+            third_party/astc-encoder third_party/JoltPhysics
           bash scripts/ci_meshopt_fallback.sh
 
       - name: C++ 构建（Engine + EngineDLL + PrimalEngineCli + vtbake）
