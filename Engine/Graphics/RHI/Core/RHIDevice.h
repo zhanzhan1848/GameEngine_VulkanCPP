@@ -176,6 +176,12 @@ public:
     virtual const DeviceDesc& GetDesc() const = 0;
     virtual void WaitIdle() const = 0;
     virtual void Shutdown() = 0;
+    // R12-E（D3D12 设备移除关机路径）：设备是否已被驱动移除（device lost/
+    // removed）。默认 false——现役后端除 D3D12 外无逐设备查询语义，行为
+    // 零变化；宿主关机序列据此跳过已死设备上的引擎级资源拆卸（GPU 对象
+    // 已全部失效，COM Release 由进程退出兜底），把 RemoveDevice 后的
+    // teardown 从崩溃退出码变成有日志的受控路径。
+    virtual bool IsDeviceRemoved() const { return false; }
     // T4.6.5 part 35.6: frame lifecycle entrypoints exposed via the polymorphic
     // base so RenderSystem can drive them. RHIDevice::BeginFrame bumps
     // frameCount_ + gc_.SetCurrentFrame; EndFrame runs gc_.Update to actually

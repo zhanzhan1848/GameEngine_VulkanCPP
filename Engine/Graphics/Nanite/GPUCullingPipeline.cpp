@@ -87,6 +87,17 @@ namespace {
 
             std::vector<std::string> candidates;
             candidates.push_back(relPath);
+            // R12-F（2026-11-13，GPUCulling stage0-7 CSO 装载缺口）：D3D12 的
+            // stage 镜像是按入口分件的 GPUCullingPipeline.<entry>.cso
+            // （build_d3d12_shaders.py R3b 约定；Vulkan 才是单模块多入口
+            // .spv 直拼可载）。本 loader 的调用面传 "GPUCullingPipeline" +
+            // entry（无中缀装载名），直拼名在 D3D12 恒落空 → 8 个 stage 全
+            // 部加载失败 → "Failed to create frustum culling pipeline"（r12
+            // Windows 实测 log #110-135）。补 r5w2 同款中缀候选（与
+            // GPUDrivenDrawPipeline.cpp LoadShaderBytecode 的既有回退一致）。
+            if (platform == rhi::RHIPlatform::D3D12)
+                candidates.push_back(utils::ShaderRegistry::GetShaderBaseDir(platform) +
+                                     "Nanite/" + shaderName + "." + entryPoint + ".cso");
             candidates.push_back(utils::ShaderRegistry::ResolveShaderPath(relPath));
 
             std::ifstream file;

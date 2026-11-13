@@ -344,12 +344,26 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
             const utl::vector<DescriptorSetLayoutBinding>& bindings = layout->GetBindings();
 
             // 收集该类的 (binding, count, offset, stage)
+            // R12-B：按"每条原始声明各自分类"收集（ClassifyDescriptorBinding），
+            // 槽位/长度经 QueryBindingTyped 取 (binding, 类) 精确行。原实现经
+            // QueryBinding 首匹配取类：同 binding 号双声明（ShadowFilter 布局
+            // b0 = UBO + SampledImage）会被折成两条同类 range（b0+x1 vs
+            // b0+x1）→ 同 stage 寄存器重叠 → 布局拒绝（r12 Windows 实测，
+            // ShadowFilter compute PSO 落入空根签名后 E_INVALIDARG）。
+            // 同 (binding, 类) 真重复声明按首条生效去重（Vulkan 语义同禁）。
             struct Item { u32 binding; u32 count; u32 offset; ShaderStage stage; };
             std::vector<Item> items;
+            std::vector<u32> seenBindings;
             for (const auto& b : bindings) {
+                D3D12_DESCRIPTOR_RANGE_TYPE rawType; bool rawMain, rawSampler;
+                ClassifyDescriptorBinding(b, rawType, rawMain, rawSampler);
+                if (!rawMain || rawType != type) continue;
+                if (std::find(seenBindings.begin(), seenBindings.end(), b.binding)
+                        != seenBindings.end()) continue;
                 D3D12DescriptorSetLayout::BindingClass info;
-                if (!layout->QueryBinding(b.binding, info) || !info.hasMain) continue;
-                if (info.mainType != type) continue;
+                if (!layout->QueryBindingTyped(b.binding, type, info)
+                    || !info.hasMain) continue;
+                seenBindings.push_back(b.binding);
                 items.push_back({b.binding, info.count, info.mainOffset, b.stageFlags});
             }
             if (items.empty()) continue;
@@ -381,13 +395,22 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
         build.mainCount = layout->TotalDescriptorCount();
 
         // ---- sampler 段（s# 连续段；Sampler + CombinedImageSampler）----
+        // R12-B：同类收集改"原始声明各自分类 + QueryBindingWithSampler 精确
+        // 取行 + 同 binding 去重"（与主段循环同法，理由见上）。
         {
             const utl::vector<DescriptorSetLayoutBinding>& bindings = layout->GetBindings();
             struct SItem { u32 binding; u32 count; u32 offset; };
             std::vector<SItem> items;
+            std::vector<u32> seenSamplerBindings;
             for (const auto& b : bindings) {
+                D3D12_DESCRIPTOR_RANGE_TYPE rawType; bool rawMain, rawSampler;
+                ClassifyDescriptorBinding(b, rawType, rawMain, rawSampler);
+                if (!rawSampler) continue;
+                if (std::find(seenSamplerBindings.begin(), seenSamplerBindings.end(),
+                              b.binding) != seenSamplerBindings.end()) continue;
                 D3D12DescriptorSetLayout::BindingClass info;
-                if (!layout->QueryBinding(b.binding, info) || !info.hasSampler) continue;
+                if (!layout->QueryBindingWithSampler(b.binding, info)) continue;
+                seenSamplerBindings.push_back(b.binding);
                 items.push_back({b.binding, info.count, info.samplerOffset});
             }
             std::sort(items.begin(), items.end(),
@@ -447,10 +470,16 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
             device.GetDescriptorSetLayout(desc.setLayouts[0]);
         if (setLayout0) {
             const u32 pushBits = static_cast<u32>(pushStage);
+            // R12-B：与主段循环同法——原始声明各自分类 + 同 binding 去重，
+            // 双声明（UBO+SampledImage 同 b0）不再把首匹配行重复计数。
+            std::vector<u32> seenPushCbBindings;
             for (const auto& b : setLayout0->GetBindings()) {
-                D3D12DescriptorSetLayout::BindingClass info;
-                if (!setLayout0->QueryBinding(b.binding, info) || !info.hasMain) continue;
-                if (info.mainType != D3D12_DESCRIPTOR_RANGE_TYPE_CBV) continue;
+                D3D12_DESCRIPTOR_RANGE_TYPE rawType; bool rawMain, rawSampler;
+                ClassifyDescriptorBinding(b, rawType, rawMain, rawSampler);
+                if (!rawMain || rawType != D3D12_DESCRIPTOR_RANGE_TYPE_CBV) continue;
+                if (std::find(seenPushCbBindings.begin(), seenPushCbBindings.end(),
+                              b.binding) != seenPushCbBindings.end()) continue;
+                seenPushCbBindings.push_back(b.binding);
                 if ((static_cast<u32>(b.stageFlags) & pushBits) != 0) {
                     ++pushConstantRegister;
                 }

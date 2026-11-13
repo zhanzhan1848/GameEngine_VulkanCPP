@@ -266,6 +266,17 @@ bool D3D12Texture::Initialize() {
                              || texDesc_.type == TextureType::Texture1DArray ? 1 : texDesc_.size.y;
         if (resDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
             resDesc.DepthOrArraySize = static_cast<UINT16>(texDesc_.size.z);
+        } else if (texDesc_.type == TextureType::TextureCube) {
+            // R12-C（2026-11-13，CopyTextureRegion subresource 1..5 越界根修）：
+            // 镜像 Vulkan 语义（VulkanTexture.cpp ici.arrayLayers = isCube
+            // ? 6u : ...）——TextureCube 恒 6 面层。D3D12 原样取 arraySize
+            //（宿主常不设，默认 1）→ 资源仅 1 subresource，而宿主按面寻址
+            // （DeferredLightingModule 占位 cube 逐面 baseArrayLayer=0..5 拷
+            // 贝）→ subresource 1..5 越界 → debug layer id=850 → Close 失败
+            // → 未闭合列表被提交 → RemoveDevice(DXGI_ERROR_INVALID_CALL)
+            //（GTX1060 r12 实测）。显式设 6 的调用方（IBL envCube
+            // arraySize=6）取值不变。
+            resDesc.DepthOrArraySize = 6;
         } else {
             resDesc.DepthOrArraySize = static_cast<UINT16>(texDesc_.arraySize);
         }

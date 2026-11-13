@@ -431,6 +431,18 @@ namespace {
 void ClassifyBinding(const DescriptorSetLayoutBinding& b,
                      D3D12_DESCRIPTOR_RANGE_TYPE& outMain, bool& outHasMain,
                      bool& outHasSampler) {
+    ClassifyDescriptorBinding(b, outMain, outHasMain, outHasSampler);
+}
+
+} // namespace
+
+// R12-B：原匿名命名空间实现本体（语义不变，含 R11-A 规则），提升为 d3d12
+// 命名空间可链接符号供 D3D12Pipeline::BuildRootSignature 按"每条原始声明
+// 各自分类"收集 range（重复 binding 号的不同类型声明不再经 QueryBinding
+// 首匹配折算成同类——ShadowFilter 布局 b0 双声明的重叠拒绝根修）。
+void ClassifyDescriptorBinding(const DescriptorSetLayoutBinding& b,
+                               D3D12_DESCRIPTOR_RANGE_TYPE& outMain, bool& outHasMain,
+                               bool& outHasSampler) {
     outHasMain = false;
     outHasSampler = false;
     switch (b.descriptorType) {
@@ -494,8 +506,6 @@ void ClassifyBinding(const DescriptorSetLayoutBinding& b,
     }
 }
 
-} // namespace
-
 D3D12DescriptorSetLayout::D3D12DescriptorSetLayout(RHIDeviceBase& device,
                                                    const DescriptorSetLayoutDesc& desc)
     : RHIDescriptorSetLayout(device, desc) {}
@@ -549,12 +559,24 @@ bool D3D12DescriptorSetLayout::Initialize() {
         }
         slotTable_.push_back({item.binding, info});
     }
-    // slotTable_ 按 (类序, binding) 排序——QueryBinding 二分前再按 binding 排
-    // （查询键只有 binding；同类内 binding 已升序，重复 binding 不存在）。
+    // slotTable_ 按 (binding, 类序) 排序——R12-B：宿主 DSL 允许同 binding 号
+    // 不同类型的多条声明（ShadowMapModule::InitializeShadowFilter 的
+    // binding 0 = UBO + SampledImage 双行，非 Vulkan 平台补 Metal
+    // texture(0) 行）。原注释"重复 binding 不存在"不成立；std::sort 对等键
+    // 顺序不定，首匹配查询会不确定地在 CBV/SRV 行间摇摆。本排序把同
+    // binding 行按类序（CBV<SRV<UAV<sampler-only）确定排列：QueryBinding
+    // 首匹配恒取 CBV 行（UBO 写入的正确语义），精确消费方走
+    // QueryBindingTyped/QueryBindingWithSampler。
+    const auto rowRank = [](const BindingClass& c) {
+        if (!c.hasMain) return 3;
+        return c.mainType == D3D12_DESCRIPTOR_RANGE_TYPE_CBV ? 0
+             : c.mainType == D3D12_DESCRIPTOR_RANGE_TYPE_SRV ? 1 : 2;
+    };
     std::sort(slotTable_.begin(), slotTable_.end(),
-              [](const std::pair<u32, BindingClass>& a,
-                 const std::pair<u32, BindingClass>& b) {
-                  return a.first < b.first;
+              [&](const std::pair<u32, BindingClass>& a,
+                  const std::pair<u32, BindingClass>& b) {
+                  if (a.first != b.first) return a.first < b.first;
+                  return rowRank(a.second) < rowRank(b.second);
               });
     totalDescriptors_ = mainCursor;
     samplerCount_ = samplerCursor;
@@ -564,6 +586,28 @@ bool D3D12DescriptorSetLayout::Initialize() {
 bool D3D12DescriptorSetLayout::QueryBinding(u32 binding, BindingClass& out) const {
     for (const auto& [b, info] : slotTable_) {
         if (b == binding) {
+            out = info;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool D3D12DescriptorSetLayout::QueryBindingTyped(
+    u32 binding, D3D12_DESCRIPTOR_RANGE_TYPE mainType, BindingClass& out) const {
+    for (const auto& [b, info] : slotTable_) {
+        if (b == binding && info.hasMain && info.mainType == mainType) {
+            out = info;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool D3D12DescriptorSetLayout::QueryBindingWithSampler(u32 binding,
+                                                       BindingClass& out) const {
+    for (const auto& [b, info] : slotTable_) {
+        if (b == binding && info.hasSampler) {
             out = info;
             return true;
         }

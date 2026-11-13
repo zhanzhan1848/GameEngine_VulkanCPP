@@ -600,6 +600,14 @@ bool D3D12Device::createResourceSubsystems() {
     return true;
 }
 
+bool D3D12Device::IsDeviceRemoved() const {
+    // R12-E：const 语义下的活性查询（GetDeviceRemovedReason 幂等只读）。
+    // device_ 为空（未初始化/已 Shutdown）按"未移除"返回——调用方
+    // （关机序列）只在设备存在时关心该状态。
+    if (!device_) return false;
+    return device_->GetDeviceRemovedReason() != S_OK;
+}
+
 void D3D12Device::reportDeviceRemoval(HRESULT reason) {
     // M7 杂项修复：原字符串 "hr=0x" 配十进制值（格式误导）；改十进制直书。
     std::string message = "[D3D12Device] device removed: hr="
@@ -1068,6 +1076,9 @@ ResourceHandle D3D12Device::createTextureImpl(const TextureDesc& desc) {
     // M6 F6-3：TEXTURE3D 无数组维（D3D12 DepthOrArraySize=depth；子资源数
     // = mipLevels×1×plane）——arraySize 恒按 1 注册（防御误传 >1 时模型
     // 与 D3D12 实际子资源几何脱钩；单测 TestM6Texture3DSubresourceModel）。
+    // R12-C：TextureCube 注册 6 面层——与 D3D12Texture::Initialize 的资源
+    // 创建同口径（见其 R12-C 注释；Vulkan ici.arrayLayers=6 的镜像），
+    // 否则 1..5 面的 Transition 因"未知 subresource"被 tracker 静默丢弃。
     d3d12::D3D12Texture* stored = textureAllocator_.Get(id);
     // R16-A：注册失败显式告警。这是 #538 根因链的静默点——M0 键空间下
     // 同号 buffer 先注册即令本注册被"双注册防御"拒绝且无人知晓，此后该
@@ -1075,9 +1086,12 @@ ResourceHandle D3D12Device::createTextureImpl(const TextureDesc& desc) {
     // mipgen 首个写类状态被 debug-layer #538 拦下（Windows 十五测实证）。
     // 十六测若仍见本日志，属同 id 同纹理真双注册（生命周期 bug），不再是
     // 同号冲突。
+    const u32 trackedArrayLayers =
+        desc.type == TextureType::Texture3D ? 1u
+        : desc.type == TextureType::TextureCube ? 6u
+                                                : desc.arraySize;
     if (!stateTracker_.RegisterResource(ResourceHandle(id), true, desc.mipLevels,
-                                        desc.type == TextureType::Texture3D
-                                            ? 1u : desc.arraySize,
+                                        trackedArrayLayers,
                                         stored->PlaneCount(),
                                         ResourceState::General)) {
         PRIMAL_LOG_STREAM(Error, "RHI")
@@ -1259,6 +1273,16 @@ bool D3D12Device::submitImpl(const QueueSubmitInfo& info) {
     if (info.cmdBuffer == handles::INVALID_COMMAND_BUFFER) return false;
     d3d12::D3D12CommandBufferImpl* cmd = GetCommandBuffer(info.cmdBuffer);
     if (!cmd || !cmd->GetCommandList()) return false;
+    // R12-D：未闭合列表提交护栏（宿主常忽略 End() 返回值；未闭合列表被
+    // ExecuteCommandLists 即 RemoveDevice——见 IsRecording 注释）。
+    if (cmd->IsRecording()) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12Device] submit rejected: command list still recording "
+               "(End/Close failed or not called) - refusing to execute an "
+               "unclosed list"
+            << std::endl;
+        return false;
+    }
 
     // 设备丢失 fail-fast 观测。
     const HRESULT reason = device_->GetDeviceRemovedReason();
@@ -1646,8 +1670,11 @@ u32 D3D12Device::ResolveSamplerRegionForWrite(d3d12::D3D12DescriptorSet* set,
         const WriteDescriptorSet& pending = writes[scan];
         if (pending.dstSet != writes[currentWrite].dstSet) continue;
         d3d12::D3D12DescriptorSetLayout::BindingClass pendingInfo;
-        if (!layout->QueryBinding(pending.dstBinding, pendingInfo)
-            || !pendingInfo.hasSampler || !pending.imageInfo) {
+        // R12-B：sampler 行精确取（同 binding 双声明时首匹配可能落非 sampler
+        // 行而漏算终态处方）；无 sampler 行再回退首匹配。
+        if (!layout->QueryBindingWithSampler(pending.dstBinding, pendingInfo)
+            && !layout->QueryBinding(pending.dstBinding, pendingInfo)) continue;
+        if (!pendingInfo.hasSampler || !pending.imageInfo) {
             continue;
         }
         // 以下跳过条件逐条镜像 updateDescriptorSetsImpl 的逐项分支次序
@@ -1727,7 +1754,47 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
         if (!layout) continue;
 
         d3d12::D3D12DescriptorSetLayout::BindingClass info;
-        if (!layout->QueryBinding(write.dstBinding, info)) continue;
+        // R12-B（2026-11-13，ShadowFilter 布局 b0 双声明根修的写入侧半边）：
+        // 同 binding 号双声明（binding 0 = UBO 行 + SampledImage 行）按写入
+        // 声明类型选行：UBO 写 → CBV 行（否则深度图 SRV 会覆盖 b0 的 CBV
+        // 槽），图像写 → SRV/UAV 行。无匹配/Unknown 类型回退首匹配行
+        // （无重复声明的布局单行即精确行——零行为变化）。
+        {
+            D3D12_DESCRIPTOR_RANGE_TYPE prefer;
+            bool havePrefer = false;
+            switch (write.descriptorType) {
+                case DescriptorType::UniformBuffer:
+                case DescriptorType::UniformBufferDynamic:
+                    prefer = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+                    havePrefer = true;
+                    break;
+                case DescriptorType::StorageImage:
+                case DescriptorType::StorageTexelBuffer:
+                    prefer = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+                    havePrefer = true;
+                    break;
+                case DescriptorType::SampledImage:
+                case DescriptorType::SampledDepthImage:
+                case DescriptorType::InputAttachment:
+                case DescriptorType::UniformTexelBuffer:
+                case DescriptorType::StorageBuffer:
+                    // StorageBuffer 先试 SRV（r11-A 图形/只读行）；RW 行由
+                    // 回退首匹配取（同 binding 无 SRV 行时 typed 查询即失败）。
+                    prefer = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+                    havePrefer = true;
+                    break;
+                case DescriptorType::Sampler:
+                case DescriptorType::CombinedImageSampler:
+                case DescriptorType::Unknown:
+                default:
+                    break;  // sampler-only/未标型：维持首匹配原语义
+            }
+            if (!(havePrefer
+                  && layout->QueryBindingTyped(write.dstBinding, prefer, info))
+                && !layout->QueryBinding(write.dstBinding, info)) {
+                continue;
+            }
+        }
 
         // R22-S1：sampler 写入的区间解析（内容级共享——每内容每槽一段）。
         // 以"本调用内该 set 全部 sampler 写入应用后的终态处方"解析：命中

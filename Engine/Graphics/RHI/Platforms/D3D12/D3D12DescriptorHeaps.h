@@ -115,6 +115,15 @@ inline constexpr u32 kDsvHeapCapacity = 64;                  ///< DSV 非可见�
 inline constexpr u32 kDescriptorHeapFrameSlotCount = 3;      ///< = MAX_FRAMES_IN_FLIGHT
 
 // ============================================================================
+/// R12-B：原始绑定声明的分类（原匿名命名空间实现提升为可链接符号——
+/// D3D12Pipeline::BuildRootSignature 需按"每条原始声明各自分类"收集 range，
+/// 不能经 QueryBinding 的首匹配折算）。语义与 ClassifyBinding 原实现
+/// 逐分支一致（R11-A 规则含在内）。
+void ClassifyDescriptorBinding(const DescriptorSetLayoutBinding& b,
+                               D3D12_DESCRIPTOR_RANGE_TYPE& outMain, bool& outHasMain,
+                               bool& outHasSampler);
+
+// ============================================================================
 // D3D12DescriptorSetLayout — 绑定模型的 set 布局描述（M1 F1-4/F1-5）
 //
 // 持有 RHI 绑定副本 + "set 实例区段内描述符排列"（绑定模型契约 §2/§4：
@@ -149,7 +158,21 @@ public:
         u32 samplerOffset = 0;                   ///< sampler 段内偏移
         u32 count = 1;                           ///< 数组长度
     };
+    /// 首匹配查询（同 binding 多行时按 (binding, 类序) 确定性序取第一行，
+    /// 见 Initialize 的 R12-B 注释）。保持既有调用面不变。
     bool QueryBinding(u32 binding, BindingClass& out) const;
+    /// R12-B（2026-11-13，ShadowFilter 布局 b0 重复拒绝根修）：宿主 DSL 允许
+    /// 同一 binding 号以不同类型声明两次（ShadowMapModule::InitializeShadowFilter
+    /// 的 binding 0 = UBO + 非 Vulkan 平台补的 SampledImage"Metal texture(0)"
+    /// 行）。slotTable_ 为每条原始声明各落一行；本查询按 (binding, 主段类)
+    /// 精确取行——root range 构建（D3D12Pipeline）与 set 写入槽位解析
+    /// （updateDescriptorSetsImpl）据此把 UBO 写导向 CBV 行、图像写导向
+    /// SRV 行，不再让首匹配把两条原始声明都折成同一个 b0。
+    bool QueryBindingTyped(u32 binding, D3D12_DESCRIPTOR_RANGE_TYPE mainType,
+                           BindingClass& out) const;
+    /// 同上（sampler 侧）：取该 binding 的 hasSampler 行（CombinedImageSampler
+    /// 行同时带主段；Sampler-only 行仅 sampler）。
+    bool QueryBindingWithSampler(u32 binding, BindingClass& out) const;
 
 protected:
     void destroyImpl() override {}

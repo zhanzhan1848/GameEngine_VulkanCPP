@@ -7780,8 +7780,22 @@ void TestVulkanSponzaRenderGraph::Shutdown() {
 
     if (pipeline_) {
         std::cerr << "[Part35.7] pipeline_->Shutdown..." << std::endl;
-        pipeline_->Shutdown();
-        pipeline_.reset();
+        // R12-E（D3D12 RemoveDevice 后的干净退出）：设备已被驱动移除时，
+        // 管线各模块持有的 GPU 对象全部失效，引擎级拆卸（模块 Shutdown →
+        // 设备 Destroy* 链）在部分初始化模块上会以 0xC0000409 fastfail
+        // 收场（r11/r12 Windows 实测：日志止于本行，EXIT=-1073740791）。
+        // 改为有日志的受控路径：跳过模块拆卸并故意泄漏 unique_ptr
+        // （release()——避免析构重入同一拆卸链），GPU 资源由进程退出与
+        // 驱动回收。设备健康时路径逐字节不变。
+        if (device_ && device_->IsDeviceRemoved()) {
+            std::cerr << "[Part35.7] device removed — skipping pipeline module "
+                         "teardown (GPU objects dead; OS reclaims on exit)"
+                      << std::endl;
+            (void)pipeline_.release();
+        } else {
+            pipeline_->Shutdown();
+            pipeline_.reset();
+        }
         std::cerr << "[Part35.7] pipeline_ done" << std::endl;
     }
 

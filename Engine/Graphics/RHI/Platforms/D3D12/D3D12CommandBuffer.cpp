@@ -227,6 +227,17 @@ bool D3D12CommandBufferImpl::submitImpl(u32 /*waitFlags*/) {
     // ExecuteCommandLists + fence Signal；两条路径共享 ExecuteAndSignal）。
     D3D12Device& dev = static_cast<D3D12Device&>(device_);
     if (!commandList_) return false;
+    // R12-D：未闭合列表提交护栏（与设备层 submitImpl 同款——宿主常忽略
+    // End() 返回值；未闭合列表被 ExecuteCommandLists 即 RemoveDevice，
+    // 见 D3D12CommandBuffer.h IsRecording 注释）。
+    if (isRecording_) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12CommandBuffer] submit rejected: list still recording "
+               "(End/Close failed or not called) - refusing to execute an "
+               "unclosed list"
+            << std::endl;
+        return false;
+    }
     // R21-A（M5 帧 2+ 新暴露面）：本直连路径此前不推进 tracker 提交边界
     // 衰减——只有设备层 submitImpl/EndFrame 与 upload flush 调
     // OnSubmitBoundary，而集成测试逐帧 cmd->Submit + WaitForCompletion 恰
@@ -1189,8 +1200,27 @@ void D3D12CommandBufferImpl::CopyBufferToTexture(ResourceHandle srcBuffer,
 
     const D3D12_RESOURCE_DESC texDesc = tex->GetNativeDesc();
     const u64 texelBytes = tex->BytesPerTexel();
+    // R12-C 护栏：subresource 界内校验。越界拷贝在 debug layer 是 id=850
+    // ERROR 且可能毒化命令列表（Close 失败 → 未闭合列表被提交 →
+    // RemoveDevice，r12 Windows 实测链）。越界项显式 Error + 跳过（接口为
+    // void，日志即失败信号），不再让整条列表/设备为此陪葬。
+    const UINT totalSubresources = texDesc.MipLevels * texDesc.DepthOrArraySize;
     for (u32 i = 0; i < regionCount; ++i) {
         const BufferTextureCopyRegion& r = regions[i];
+        const u64 sub = u64(r.imageSubresource.mipLevel)
+                        + u64(texDesc.MipLevels) * u64(r.imageSubresource.baseArrayLayer);
+        if (sub >= totalSubresources) {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12CommandBuffer] CopyBufferToTexture subresource out of "
+                   "range: mip=" << r.imageSubresource.mipLevel
+                << " layer=" << r.imageSubresource.baseArrayLayer
+                << " -> subresource " << sub << " but texture '"
+                << tex->GetTextureDesc().name << "' has "
+                << totalSubresources << " subresources (MipLevels="
+                << texDesc.MipLevels << " ArraySize=" << texDesc.DepthOrArraySize
+                << ") - skipping region " << i << std::endl;
+            continue;
+        }
         // 源布局：bufferRowLength==0 = 紧密排列（按 extent 宽计算）。
         // footprint 宽度用源行宽（texel），RowPitch = align(宽×texel, 256)。
         const UINT srcRowTexels = r.bufferRowLength ? r.bufferRowLength

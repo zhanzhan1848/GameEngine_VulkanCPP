@@ -129,9 +129,26 @@ namespace {
             const std::string relPath = utils::ShaderRegistry::GetNaniteShaderPath(platform, shaderName);
             std::vector<std::string> candidates;
             candidates.push_back(relPath);
-            if (platform == rhi::RHIPlatform::D3D12)
+            if (platform == rhi::RHIPlatform::D3D12) {
                 candidates.push_back(utils::ShaderRegistry::GetShaderBaseDir(platform) +
                                      "Nanite/" + shaderName + "." + entryPoint + ".cso");
+                // R12-G（2026-11-13，VisibilityBuffer 装载缺口）：另一族镜像
+                // 产物名是 stage 后缀 <name>.vert/.frag.cso（
+                // build_d3d12_shaders.py 对 (Nanite/VisibilityBuffer.vert,
+                // visibility_vertex_shader) 类条目按源文件基名出产物）。
+                // VisibilityBuffer.vert/.frag.cso 已在盘（Vulkan 侧是
+                // vert+frag 双入口单模块 .spv，直拼可载，不受影响）；
+                // MirrorReflection/ShadowMoments 同名族候选同步补上——
+                // 其 .cso 镜像待 SHADER_LIST 增条目后即命中（r12 报告移交项）。
+                const char* stageSuffix = nullptr;
+                if (std::strstr(entryPoint, "vert") || std::strstr(entryPoint, "_vs"))
+                    stageSuffix = ".vert";
+                else if (std::strstr(entryPoint, "frag") || std::strstr(entryPoint, "_fs"))
+                    stageSuffix = ".frag";
+                if (stageSuffix)
+                    candidates.push_back(utils::ShaderRegistry::GetShaderBaseDir(platform) +
+                                         "Nanite/" + shaderName + stageSuffix + ".cso");
+            }
             candidates.push_back(utils::ShaderRegistry::ResolveShaderPath(relPath));
 
             std::ifstream file;
@@ -1141,6 +1158,18 @@ bool GPUDrivenDrawPipeline::CreatePipelines() {
                 binningBindings[0].descriptorType = rhi::DescriptorType::StorageBuffer;
                 binningBindings[0].descriptorCount = 1;
                 binningBindings[0].stageFlags = rhi::ShaderStage::Compute;
+                // R12-A（2026-11-13，Cluster Binning PSO E_INVALIDARG 根修）：
+                // 镜像 ClusterBinning.cso（dxc -dumpbin 实测）声明
+                //   ByteAddressBuffer clusterData : register(t0)
+                // ——只读 SRV t0。binding 0 未置 readonly 时 D3D12
+                // ClassifyBinding 对 compute 可见 storage 按 readonly 选段，
+                // 产出 UAV u0 range，根签名缺 SRV t0 →
+                // CreateComputePipelineState 0x80070057（GTX1060 r12 实测，
+                // debug layer id=882 "Shader SRV descriptor range
+                // (BaseShaderRegister=0,NumDescriptors=1) is not fully bound"）。
+                // 与 GLSL 源（clusterData 只读消费）及 binding 2/3（RW bin/
+                // counter → u2/u3）一致。
+                binningBindings[0].readonly = true;
                 binningBindings[1].binding = 1;
                 binningBindings[1].descriptorType = rhi::DescriptorType::UniformBuffer;
                 binningBindings[1].descriptorCount = 1;

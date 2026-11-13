@@ -135,6 +135,12 @@ public:
 
     ID3D12GraphicsCommandList* GetCommandList() const { return commandList_.Get(); }
 
+    /// R12-D：列表是否仍在录制态（End/Close 未成功）。设备 Submit 据此拒绝
+    /// 未闭合列表的执行——Close 失败（如 debug layer 毒化）后宿主常忽略
+    /// End() 返回值直接提交，ExecuteCommandLists 收到未闭合列表即
+    /// RemoveDevice(DXGI_ERROR_INVALID_CALL)（r12 Windows 实测链）。
+    bool IsRecording() const { return isRecording_; }
+
     /// 设备 Submit（RenderSystem 路径）回执：登记本帧 allocator 的 fence
     /// 护栏与 waitForCompletionImpl 等待依据。
     void OnDeviceSubmit(u64 fenceTarget) {

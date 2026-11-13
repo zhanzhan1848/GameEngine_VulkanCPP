@@ -149,6 +149,10 @@ public:
     // （fail 语义）。
     bool GetTypedUavAdditionalFormats() const { return typedUavAdditionalFormats_; }
 
+    // R12-E：RHIDeviceBase::IsDeviceRemoved 的 D3D12 实装（GetDeviceRemovedReason
+    // != S_OK）。宿主关机序列据此在 RemoveDevice 后跳过引擎级模块拆卸。
+    bool IsDeviceRemoved() const override;
+
     // ODR-bypass 上传虚接口（语义与 VulkanDevice 同名 override 对齐）
     bool UpdateBufferData(ResourceHandle handle, const void* data, u64 size,
                           u64 offset = 0) override;
