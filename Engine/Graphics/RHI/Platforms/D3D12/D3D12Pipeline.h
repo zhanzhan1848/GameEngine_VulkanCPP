@@ -13,8 +13,14 @@
 //   2. set N 的 bindings 先按 stageFlags 精确值分组，组内按类分组、类内
 //      按 binding 升序切连续段：
 //        CBV     (UniformBuffer / UniformBufferDynamic)          → b# range
-//        SRV     (SampledImage / readonly Storage / texel)       → t# range
-//        UAV     (StorageImage / StorageBuffer / StorageTexel)   → u# range
+//        SRV     (SampledImage / readonly Storage / texel、以及
+//                 纯图形可见的 StorageBuffer——R11-A：镜像 vert/frag CSO
+//                 的 storage 声明全部只读 t#，宿主布局未置 readonly 的
+//                 图形 StorageBuffer 按 UAV 分类会缺 VS SRV t 段 → PSO
+//                 E_INVALIDARG，见 D3D12DescriptorHeaps.cpp
+//                 ClassifyBinding 注)                          → t# range
+//        UAV     (StorageImage / compute 可见 StorageBuffer /
+//                 StorageTexel)                                 → u# range
 //        Sampler                                              → s# range（独立表）
 //      每连续段 = 一个 D3D12_DESCRIPTOR_RANGE（RangeType/NumDescriptors/
 //      BaseShaderRegister=段首 binding/RegisterSpace=N）。

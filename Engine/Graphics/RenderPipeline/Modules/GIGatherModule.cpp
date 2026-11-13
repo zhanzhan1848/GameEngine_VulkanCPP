@@ -245,6 +245,25 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             for(u32 i=0;i<4;++i) vkBindings[19+i]={23+i,DescriptorType::StorageBuffer,1,ShaderStage::Compute,nullptr};
             vkBindings[23]={27,DescriptorType::UniformBuffer,1,ShaderStage::Compute,nullptr};
         }
+        // R11-A2（2026-11-13，D3D12 root-signature 对齐）：本表全部
+        // StorageBuffer 都是 gather shader 的只读输入（输出走绑定 2/14 的
+        // storage image u2/u14），逐一置 readonly。镜像 CSO 证据
+        //（dxc -dumpbin，DDGIGIGather 三变体）：storage buffer 全部声明为
+        // ByteAddressBuffer t#——基础/两几何变体 t8/t10/t11/t12/t17/t19/t20，
+        // 几何变体另有 t23-t26（t7 在 HLSL 文本声明、CSO 死代码剔除，同为
+        // 读侧）；D3D12 ClassifyBinding 按 readonly 选 SRV/UAV 段，不置位归
+        // UAV u# → 根签名缺 t 段 → CreateComputePipelineState E_INVALIDARG
+        //（id=688，与 ParticlePass R11-A 同根因类）。置位放在 set_layout_
+        // 创建前：equalBox/normalCache 拷贝继承；glossy 审计布局在其后
+        // 改写 idx19/20 为诊断 SSBO（写侧），不受本循环影响。Vulkan 的
+        // STORAGE_BUFFER 描述符类型本就覆盖读写两种访问（shader 只读 +
+        // 布局 read-write 合法），本字段 Vulkan 路径零消费（见审计报告
+        // §8 零影响证据）；Dawn 走下方 else 分支表，不经此表。
+        for (u32 i = 0; i < 25; ++i) {
+            if (vkBindings[i].descriptorType != DescriptorType::StorageBuffer)
+                continue;
+            vkBindings[i].readonly = true;
+        }
         set_layout_ = device->CreateDescriptorSetLayout({geometry_connections_enabled_?24u:19u, vkBindings});
         const auto enabled=[](const char* name){const char* e=std::getenv(name);return e&&std::strcmp(e,"1")==0;};
         if(enabled("PRIMAL_DDGI_GEOMETRY_EQUAL_BOX") && queryEnabled && replaceVisibility && !referenceVisibility &&

@@ -87,10 +87,26 @@ bool VulkanQueryPool::GetResults(u32 firstQuery, u32 queryCount, void* data, siz
     if (!pool_ || !data || firstQuery + queryCount > count_) return false;
 
     // 每条结果大小:Timestamp/Occlusion = u64;PipelineStatistics 默认按 u64 取每条
-    VkQueryResultFlags flags = VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT;
+    // R11 taskB（Windows 默认路径第 2 帧死锁修复）：默认 flags 不带
+    // VK_QUERY_RESULT_WAIT_BIT。RenderGraph::ResolveTimestamps 每帧 Clear 时读
+    // 2 槽环里上一拍的 query pool；GPU 慢一拍以上时（Windows 原生 NVIDIA 驱动
+    // + 显存超预算下 ~600ms/帧）上一拍 query 尚未 available，而
+    // vkGetQueryPoolResults 无 timeout 参数，WAIT_BIT 在原生驱动上对不可用
+    // query 无限阻塞 → 第 2 帧起必然死等（watchdog 300s exit 7）。
+    // MoltenVK 有文档化怪癖（RenderGraph.cpp T8.13/P0 注释）：即使带 WAIT_BIT
+    // 也立即返回 VK_NOT_READY 且结果缓冲已暂存有效数据——Mac 从未真正阻塞，
+    // 该缺陷一直被掩盖、只在 Windows 暴露。默认改为非阻塞 availability 读后，
+    // VK_NOT_READY 按既有 false 契约返回（调用方不发布当帧时序数据，也不授权
+    // 任何 host 资源复用），MoltenVK 返回值/暂存数据行为不变（实测 readOk
+    // 分布与改动前一致），Mac 像素输出无可测漂移——CPU 等待仅从 query 读内
+    // 移到帧 fence（净帧时不变），实测落在同二进制运行间噪声底内。
+    VkQueryResultFlags flags = VK_QUERY_RESULT_64_BIT;
     // Experiment only: absence of a result is not zero GPU work and must not
     // authorize host reuse of any frame slot or resource. Callers must use the
     // returned boolean to distinguish unavailable timestamp data.
+    // R11 taskB: 查询侧现已默认非阻塞，本开关不再改变此处 flags；保留环境变量
+    // 是因为 RenderGraph::ResolveTimestamps 仍用它门控 NOT_READY 时的暂存数据
+    // 发布路径（=1 的语义向后兼容不变）。
     const char* nonblocking = std::getenv("PRIMAL_VK_QUERY_NONBLOCKING");
     if (type_ == QueryType::Timestamp && nonblocking && std::strcmp(nonblocking,"1") == 0)
         flags &= ~VK_QUERY_RESULT_WAIT_BIT;
@@ -103,8 +119,10 @@ bool VulkanQueryPool::GetResults(u32 firstQuery, u32 queryCount, void* data, siz
     // query 也长期 NOT_READY——RenderGraph.cpp 注释记载的怪癖——不能追等，
     // 否则 Mac 每帧假超时）。真正的楔死由后续权威等待点（acquire/fence/
     // present 的 ScopedHangWatch / BoundedWaitFence，超阈值 dump+_Exit(12)）
-    // 兜底定位。门控关闭时下方单次调用与原行为逐字节一致。
-    if (hangdiag::Enabled() && (flags & VK_QUERY_RESULT_WAIT_BIT)) {
+    // 兜底定位。R11 taskB 后默认 flags 已无 WAIT_BIT，本分支改为仅按
+    // hangdiag::Enabled() 进入（否则诊断遥测静默失效）：对现在的非阻塞默认读
+    // 保留 still-waiting 观测，区分"慢一拍"与"query 永不完成"。
+    if (hangdiag::Enabled()) {
         for (int step = 0; step < 2; ++step) {
             VkResult res = vkGetQueryPoolResults(
                 device_, pool_, firstQuery, queryCount,
@@ -131,8 +149,10 @@ bool VulkanQueryPool::GetResults(u32 firstQuery, u32 queryCount, void* data, siz
 
     if (res == VK_SUCCESS) return true;
     if (res == VK_NOT_READY) {
-        // The nonblocking timestamp experiment expects VK_NOT_READY; keep
-        // the existing false contract (the caller must ignore unavailable data).
+        // The nonblocking default (R11 taskB) and the legacy PRIMAL_VK_QUERY_
+        // NONBLOCKING experiment both expect VK_NOT_READY when the previous
+        // ring slot's queries are not yet available; keep the existing false
+        // contract (the caller must ignore unavailable data).
         return false;
     }
     if (res == VK_ERROR_DEVICE_LOST) {

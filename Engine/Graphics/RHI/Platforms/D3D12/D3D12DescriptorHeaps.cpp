@@ -457,7 +457,6 @@ void ClassifyBinding(const DescriptorSetLayoutBinding& b,
             return;
         case DescriptorType::StorageImage:
         case DescriptorType::StorageTexelBuffer:
-        case DescriptorType::StorageBuffer:
         case DescriptorType::Unknown:
         default:
             // 写类 → UAV；readonly → SRV。
@@ -465,6 +464,33 @@ void ClassifyBinding(const DescriptorSetLayoutBinding& b,
                                  : D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
             outHasMain = true;
             return;
+        case DescriptorType::StorageBuffer: {
+            // R11-A（2026-11-13，ParticlePass PSO E_INVALIDARG 根修）：
+            // 纯图形可见（stageFlags 不含 Compute 位）的 StorageBuffer 恒归
+            // SRV 段，无论宿主布局是否置 readonly。依据：镜像链
+            // （build_d3d12_shaders.py：.spv→spirv-cross→dxc）对只读 storage
+            // buffer 产 ByteAddressBuffer/StructuredBuffer : register(t<binding>)、
+            // 对读写 storage 产 RW* : register(u<binding>)，而全部 119 件镜像中
+            // vert/frag CSO 的 RW 声明数为 0（dxc -dumpbin 逐件核对——引擎
+            // 图形阶段的 storage buffer 全部只读）。宿主布局（ParticlePass
+            // 绑定 1/2、GPUDrivenDrawPipeline 主绘制 1-9 与阴影深度 1-7、
+            // VisibilityBuffer 1-7 等）多未置 readonly，按 UAV 分类使根签名
+            // 缺图形阶段 SRV t 段 → CreateGraphicsPipelineState E_INVALIDARG
+            //（debug layer id=688 "Shader SRV descriptor range (t2..) is not
+            // fully bound"，GTX1060 r11 实测）。Compute 可见绑定不受本规则
+            // 影响：读写 storage 真实存在于 compute 镜像（M5Cull/探针系等
+            // RW u#），仍按 readonly 选段。SRV 分类的 set 写入路径产
+            // D3D12_BUFFER_SRV_FLAG_RAW 视图（updateDescriptorSetsImpl），
+            // 与 ByteAddressBuffer 消费面一致。
+            const u32 computeBit = static_cast<u32>(ShaderStage::Compute);
+            const bool graphicsOnly =
+                (static_cast<u32>(b.stageFlags) & computeBit) == 0;
+            outMain = (graphicsOnly || b.readonly)
+                          ? D3D12_DESCRIPTOR_RANGE_TYPE_SRV
+                          : D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+            outHasMain = true;
+            return;
+        }
     }
 }
 
