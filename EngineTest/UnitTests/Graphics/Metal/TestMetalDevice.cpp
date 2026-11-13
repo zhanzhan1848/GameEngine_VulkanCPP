@@ -33,7 +33,7 @@ int main() {
     suite->AddTestCase(TestCase("CreateDevice", TestCreateDevice));
     
     TestRunner::RegisterTestSuite(suite);
-    TestRunner::RunAllSuites();
+    const auto runStats = TestRunner::RunAllSuites();
     
-    return 0;
+    return runStats.failedTests == 0 ? 0 : 1;
 }

@@ -349,7 +349,7 @@ void RegisterMetalEncoderBarrierSpikeTests() {
 #ifndef UNIT_TEST_LIB
 int main() {
     RegisterMetalEncoderBarrierSpikeTests();
-    TestRunner::RunAllSuites();
-    return 0;
+    const auto runStats = TestRunner::RunAllSuites();
+    return runStats.failedTests == 0 ? 0 : 1;
 }
 #endif

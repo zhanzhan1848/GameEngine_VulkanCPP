@@ -66,6 +66,23 @@ public sealed class SceneDocumentTests
     }
 
     [Fact]
+    public void SceneDocument_LightmapPageSurvivesFullRoundTrip()
+    {
+        // 2026-11-05 回归：写侧一直写出 LightmapPage，FromSceneDocument 漏读
+        // → 重载后烘焙的 lightmap 永不恢复。锁住 Scene→Document→JSON→
+        // Document→Scene 全程保真。
+        const string page = "/tmp/Content/Bakes/abc/lightmap.lmap";
+        var scene = new Scene("LightmapPersistence") { LightmapPage = page };
+
+        var json = JsonSerializer.Serialize(Serializer.ToSceneDocument(scene), SceneDocument.JsonOptions);
+        var document = JsonSerializer.Deserialize<SceneDocument>(json, SceneDocument.JsonOptions);
+        Assert.NotNull(document);
+        var loaded = Serializer.FromSceneDocument(document!);
+
+        Assert.Equal(page, loaded.LightmapPage);
+    }
+
+    [Fact]
     public void SceneDocument_FlattensHierarchyIntoCanonicalParentGuidArray()
     {
         // Arrange: Create hierarchy

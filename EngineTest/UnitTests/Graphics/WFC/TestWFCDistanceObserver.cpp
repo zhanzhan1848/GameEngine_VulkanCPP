@@ -121,6 +121,6 @@ int main() {
     TEST_CASE(suite, "PicksClosestFirst", TestWFCDistanceObserver_PicksClosestFirst);
     TEST_CASE(suite, "TieBreakRowMajor", TestWFCDistanceObserver_TieBreakRowMajor);
     TEST_CASE(suite, "AllCollapsed", TestWFCDistanceObserver_AllCollapsed);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

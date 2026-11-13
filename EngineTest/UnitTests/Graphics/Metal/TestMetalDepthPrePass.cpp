@@ -463,8 +463,8 @@ int main() {
     auto suite = std::make_shared<TestSuite>("MetalDepthPrePassTests");
     suite->AddTestCase(TestCase("RenderSphere", TestDepthPrePass_RenderSphere_Metal));
     TestRunner::RegisterTestSuite(suite);
-    TestRunner::RunAllSuites();
-    return 0;
+    const auto runStats = TestRunner::RunAllSuites();
+    return runStats.failedTests == 0 ? 0 : 1;
 }
 
 #else // !__APPLE__

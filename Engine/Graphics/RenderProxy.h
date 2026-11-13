@@ -13,7 +13,16 @@ namespace primal::graphics {
 struct RenderProxy {
     math::m4x4 transform;       ///< 世界空间变换矩阵
     rhi::AABB worldAABB;        ///< 世界空间包围盒
-    id::id_type meshId;         ///< 引用 RenderMesh 的 ID
+    id::id_type meshId;         ///< 引用 RenderMesh 的 ID（编辑器管线路径 = mesh 资源
+                                ///< 绑定的 ECS 实体 id，见 RegisterMeshEntity；SC
+                                ///< cluster 门禁/RHISceneSynchronizer 按此键查）
+    id::id_type contentMeshId{id::invalid_id}; ///< mesh 资产的 content geometry id
+                                ///< （geometry_hierarchies 空间，可经
+                                ///< content::get_rhi_mesh_id 两步解析到 RHI 资产）。
+                                ///< 由 SyncEntitiesToRenderScene 从
+                                ///< SceneDataMeshInfo::meshEntityId 回填；离线路径
+                                ///< 两者同值。content 系统/烘焙收集按此字段解析，
+                                ///< 勿用 meshId（2026-11-05 lightmap per-instance 排查）。
     id::id_type materialId;     ///< 引用 MaterialInstance 的 ID
     id::id_type entityId;       ///< 对应的 GamePlay Entity ID
     ShaderTechnique technique{ShaderTechnique::Opaque}; ///< 材质渲染技术类型

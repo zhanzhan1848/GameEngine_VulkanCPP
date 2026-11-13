@@ -4,6 +4,7 @@
 
 #include "CommonHeaders.h"
 #include "Content/ContentToEngine.h"
+#include "Graphics/EntityIdentityRegistry.h"
 #include "Graphics/RenderScene.h"
 #include "Engine/Common/CoreLogStream.h"  // PRIMAL_LOG_STREAM
 
@@ -19,10 +20,16 @@ bool CollectBakeScene(const RenderScene& renderScene, CollectedBakeScene& out,
     std::uint32_t failedAssets = 0;
 
     for (const auto& proxy : renderScene.GetProxies()) {
-        // proxy.meshId 是 hierarchy ID——两步解析（RenderSceneSnapshot.cpp:110
-        // 同注）。
+        // 资产解析走 content geometry id（proxy.contentMeshId，由
+        // SyncEntitiesToRenderScene 从 SceneDataMeshInfo::meshEntityId 回填）。
+        // editor 管线路径的 proxy.meshId 是 mesh 资源绑定的 ECS 实体 id，进
+        // content 两步解析必败（2026-11-05 排查：RenderMesh::entityId_ ≠
+        // geometry_hierarchies id）；contentMeshId 缺席（离线路径未回填）时
+        // 回退旧两步解析（离线路径 meshId 即 content id，语义不变）。
+        const id::id_type geometryId =
+            proxy.contentMeshId != id::invalid_id ? proxy.contentMeshId : proxy.meshId;
         rhi::RHIMeshAsset asset;
-        if (!content::get_rhi_mesh_asset(content::get_rhi_mesh_id(proxy.meshId), asset)) {
+        if (!content::get_rhi_mesh_asset(content::get_rhi_mesh_id(geometryId), asset)) {
             ++failedAssets;
             continue;
         }
@@ -66,8 +73,13 @@ bool CollectBakeScene(const RenderScene& renderScene, CollectedBakeScene& out,
         mesh.albedo[0] = proxy.base_color[0];
         mesh.albedo[1] = proxy.base_color[1];
         mesh.albedo[2] = proxy.base_color[2];
-        mesh.name = "mesh_" + std::to_string(proxy.meshId) + "_e" +
-                    std::to_string(proxy.entityId);
+        // 实例键（2026-11-05 稳定键轮）：注册表命中 → "e"+entityGuid 稳定键
+        //（跨会话成立，写进 LMAP name）；未命中 → 老 runtime-id 命名（零回归）。
+        // mesh 键位用 content geometry id（资产稳定，且与 LightmapModule 侧
+        // 同键；editor 管线路径的 proxy.meshId 是 ECS 实体 id，仅会话内有意义）。
+        // 与 LightmapModule::UpdateFrame 共用 ResolveLightmapInstanceKey，
+        // 两侧镜像一致（EntityIdentityRegistry.h 单一实现）。
+        mesh.name = ResolveLightmapInstanceKey((u32)proxy.entityId, geometryId);
 
         // §6.7 色渗透取证：前 10 个 mesh 的烘焙 albedo 一览（注入链可见
         // 性——红帷幕/彩墙 vs 石墙应显著异色；全白≈贴图平均未注入）。
@@ -115,7 +127,7 @@ bool CollectBakeScene(const RenderScene& renderScene, CollectedBakeScene& out,
                                                         : out.ownedUvs[idx].data();
         stored.material_uvs = out.ownedMaterialUvs[idx].empty() ? nullptr
                                                                 : out.ownedMaterialUvs[idx].data();
-        stored.source_mesh_id = (std::uint32_t)proxy.meshId;
+        stored.source_mesh_id = (std::uint32_t)geometryId;
     }
 
     // 灯源映射。RenderLight 的锥角存 cos 值 → BakeLight 契约为角度。

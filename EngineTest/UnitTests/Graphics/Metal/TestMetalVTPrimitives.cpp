@@ -601,8 +601,8 @@ void RegisterMetalVTPrimitivesTests() {
 
 int main() {
     RegisterMetalVTPrimitivesTests();
-    TestRunner::RunAllSuites();
-    return 0;
+    const auto runStats = TestRunner::RunAllSuites();
+    return runStats.failedTests == 0 ? 0 : 1;
 }
 
 #else // !__APPLE__

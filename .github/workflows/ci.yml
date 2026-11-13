@@ -64,14 +64,17 @@ jobs:
           fetch-depth: 1
 
       - name: 初始化轻量 submodule（configure 冒烟所需）
-        # 根 CMakeLists 在缺失 meshoptimizer 头文件时 FATAL_ERROR，
-        # configure 冒烟必须带上。跳过 dawn/PhysX/WebGPU/astc-encoder（数 GB）。
+        # 根 CMakeLists 在缺失 meshoptimizer 头文件时 FATAL_ERROR（守卫见下）。
+        # meshoptimizer 的 pin 是仅存于本机的补丁提交（未推送任何远端），无法
+        # 在 CI fetch——用 scripts/ci_meshopt_fallback.sh 回退到最近上游祖先
+        # （Engine/单测不编 meshopt，仅满足存在性守卫）。
+        # 跳过 dawn/PhysX/WebGPU/astc-encoder（数 GB）。
         run: |
           git submodule update --init \
-            third_party/meshoptimizer \
             third_party/stb \
             third_party/moodycamel-ConcurrentQueue \
             third_party/lua
+          bash scripts/ci_meshopt_fallback.sh
 
       - name: 校验 workflow YAML 有效性
         run: |
@@ -185,15 +188,49 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: 检出仓库
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-          # 默认保留工作区让 build/ 增量编译。结构性头文件守卫变更后，
-          # MSBuild 的 .tlog 依赖记录可能残留旧 include 关系（曾出现已
-          # 守卫的 Metal 头仍被报错），此时用 dispatch 的 clean_build
-          # 深度清理做一次全量重编
-          clean: ${{ github.event_name == 'workflow_dispatch' && inputs.clean_build == true }}
+      - name: 检出仓库（git 重试 ×5，自托管 github.com 连接加固）
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $ws  = $env:GITHUB_WORKSPACE
+          $url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          $ref = $env:GITHUB_SHA
+          $max = 5
+          $deep = '${{ github.event_name == 'workflow_dispatch' && inputs.clean_build == true }}' -eq 'true'
+          git config --global --add safe.directory "$ws" 2>$null | Out-Null
+          $done = $false
+          for ($i = 1; $i -le $max -and -not $done; $i++) {
+            Write-Host "::group::checkout attempt $i/$max"
+            $rc = 0
+            if (-not $deep -and (Test-Path "$ws/.git")) {
+              git -C $ws fetch --depth 1 origin $ref
+              $rc = $LASTEXITCODE
+              if ($rc -eq 0) { git -C $ws checkout --detach --force FETCH_HEAD; $rc = $LASTEXITCODE }
+            } else {
+              Get-ChildItem $ws -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+              git clone --depth 1 --no-checkout $url $ws
+              $rc = $LASTEXITCODE
+              if ($rc -eq 0) {
+                git -C $ws fetch --depth 1 origin $ref; $rc = $LASTEXITCODE
+                if ($rc -eq 0) { git -C $ws checkout --detach --force FETCH_HEAD; $rc = $LASTEXITCODE }
+              }
+            }
+            if ($rc -eq 0) {
+              # meshopt pin 只在本机（见下方回退），submodule update 排除之
+              git -C $ws submodule update --init --recursive --depth 1 -- ':(exclude)third_party/meshoptimizer'
+              $rc = $LASTEXITCODE
+            }
+            Write-Host "::endgroup::"
+            if ($rc -eq 0) { $done = $true } else {
+              Write-Host "::warning::checkout attempt $i failed (rc=$rc); backing off"
+              Start-Sleep -Seconds (20 * $i)
+            }
+          }
+          if (-not $done) { Write-Host "::error::checkout failed after $max attempts"; exit 1 }
+          # meshopt pin 只在本机：回退物化见 scripts/ci_meshopt_fallback.ps1
+          & powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/ci_meshopt_fallback.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C $ws rev-parse HEAD
 
       - name: 清理上一轮的陈旧构建日志
         shell: powershell
@@ -209,12 +246,15 @@ jobs:
           # (root CMakeLists FATAL_ERRORs without meshoptimizer).
           # Skip dawn/PhysX/WebGPU/astc-encoder: multi-GB, WASM-only.
           $submodules = @(
-            'third_party/meshoptimizer',
             'third_party/stb',
             'third_party/moodycamel-ConcurrentQueue',
             'third_party/lua'
           )
           git submodule update --init @submodules
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # meshoptimizer pin 只在本机（未推送），由脚本回退物化（仅满足根 CMake 守卫）
+          & powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/ci_meshopt_fallback.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: 打印环境信息
         shell: powershell
@@ -354,16 +394,60 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      - name: 检出仓库
-        uses: actions/checkout@v4
-        fetch-depth: 1
+      - name: 检出仓库（git 重试 ×5，自托管 github.com 连接加固）
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $ws  = $env:GITHUB_WORKSPACE
+          $url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          $ref = $env:GITHUB_SHA
+          $max = 5
+          $deep = 'false' -eq 'true'
+          git config --global --add safe.directory "$ws" 2>$null | Out-Null
+          $done = $false
+          for ($i = 1; $i -le $max -and -not $done; $i++) {
+            Write-Host "::group::checkout attempt $i/$max"
+            $rc = 0
+            if (-not $deep -and (Test-Path "$ws/.git")) {
+              git -C $ws fetch --depth 1 origin $ref
+              $rc = $LASTEXITCODE
+              if ($rc -eq 0) { git -C $ws checkout --detach --force FETCH_HEAD; $rc = $LASTEXITCODE }
+            } else {
+              Get-ChildItem $ws -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+              git clone --depth 1 --no-checkout $url $ws
+              $rc = $LASTEXITCODE
+              if ($rc -eq 0) {
+                git -C $ws fetch --depth 1 origin $ref; $rc = $LASTEXITCODE
+                if ($rc -eq 0) { git -C $ws checkout --detach --force FETCH_HEAD; $rc = $LASTEXITCODE }
+              }
+            }
+            if ($rc -eq 0) {
+              # 751b467d 原版不含 submodules，但根 CMake 的 meshoptimizer.h 守卫
+              # 需要 meshopt 在场——统一初始化（排除 meshopt，见下方回退）
+              git -C $ws submodule update --init --recursive --depth 1 -- ':(exclude)third_party/meshoptimizer'
+              $rc = $LASTEXITCODE
+            }
+            Write-Host "::endgroup::"
+            if ($rc -eq 0) { $done = $true } else {
+              Write-Host "::warning::checkout attempt $i failed (rc=$rc); backing off"
+              Start-Sleep -Seconds (20 * $i)
+            }
+          }
+          if (-not $done) { Write-Host "::error::checkout failed after $max attempts"; exit 1 }
+          # meshopt pin 只在本机：回退物化见 scripts/ci_meshopt_fallback.ps1
+          & powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/ci_meshopt_fallback.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C $ws rev-parse HEAD
 
       - name: 配置 CMake (Release + Vulkan + D3D12 双后端)
         shell: powershell
         run: |
-          # ENABLE_D3D12=ON：Agility SDK REQUIRED 化（Engine/CMakeLists 的
-          # find_package(Microsoft.Direct3D.D3D12 ${PRIMAL_D3D12_AGILITY_VERSION}
-          # CONFIG REQUIRED)），缺失即 configure 失败——不静默降级。
+          # ENABLE_D3D12=ON：Agility SDK 动态接入（2026-11-03 首编修正：
+          # 官方 NuGet 无 CMake CONFIG 包，find_package 路线已废弃）。
+          # Engine/CMakeLists 降级链=PRIMAL_D3D12_AGILITY_SDK_DIR（可选）>
+          # configure 期自动下载 pinned 1.611.2 nupkg（SHA 校验，需外网）>
+          # Windows SDK 自带 d3d12.h 回退（PRIMAL_D3D12_AGILITY_RUNTIME=0，
+          # 仅 WARNING 不 FAIL）。免预装、零机器特定配置。
           # BUILD_CONTENT_TOOLS=OFF 同原 job（FBX SDK 缺失）。
           cmake -S . -B build-d3d12 -DENABLE_VULKAN=ON -DENABLE_D3D12=ON -DBUILD_CONTENT_TOOLS=OFF
           Write-Host '--- D3D12 gate markers ---'
@@ -461,12 +545,13 @@ jobs:
           fetch-depth: 1
 
       - name: 初始化必需的 submodule
+        # meshoptimizer pin 只在本机（未推送），脚本回退物化（仅满足根 CMake 守卫）
         run: |
           git submodule update --init \
-            third_party/meshoptimizer \
             third_party/stb \
             third_party/moodycamel-ConcurrentQueue \
             third_party/lua
+          bash scripts/ci_meshopt_fallback.sh
 
       - name: 安装构建依赖
         run: |
@@ -915,9 +1000,12 @@ jobs:
           clean: false          # 自托管 runner 复用工作区，保留构建缓存
 
       - name: 初始化 submodule
+        # meshoptimizer pin 只在本机（脚本回退物化）；VHACD 无 .gitmodules 映射
+        # 且内容已在本 runner 工作区持久保留（clean:false），不再对 pin 断言。
         run: |
-          git submodule update --init third_party/meshoptimizer third_party/stb \
-            third_party/moodycamel-ConcurrentQueue third_party/lua third_party/VHACD
+          git submodule update --init third_party/stb \
+            third_party/moodycamel-ConcurrentQueue third_party/lua
+          bash scripts/ci_meshopt_fallback.sh
 
       - name: C++ 构建（Engine + EngineDLL + PrimalEngineCli + vtbake）
         run: |
