@@ -1051,14 +1051,14 @@ static void ConfigureGeometryVertexLayout(GraphicsPipelineDesc& desc) {
 void ForwardSceneRenderer::CreatePipelines() {
     // Helper: WebGPU cannot expose bound vertex buffers as storage, so we use
     // standard @location(N) attributes (5 vertex inputs at slot 0, stride 32B)
-    // and instance-rate attributes for ForwardInstanceData at slot 1 (96B stride).
+    // and instance-rate attributes for InstanceData at slot 1 (96B stride).
     // Metal keeps the legacy slot-20/3 vertex-pulling pattern.
     auto populateWasmVertexInput = [](GraphicsPipelineDesc& desc) {
 #ifdef __EMSCRIPTEN__
         // Vertex attributes (slot 0, 32B stride):
         //   position(0-11) | color_t_sign(12-15) | packed_normal(16-19)
         //   | packed_tangent(20-23) | uv(24-31)
-        // Instance attributes (slot 1, 96B stride = sizeof(ForwardInstanceData)):
+        // Instance attributes (slot 1, 96B stride = sizeof(InstanceData)):
         //   transform mat4x4 (4 rows) | baseColor vec4 | roughness/metallic/alphaCutoff/pad
         utl::vector<rhi::VertexInputAttribute> attrs(11);
         attrs[0]  = {0,  0, rhi::DataFormat::RGB32_Float, 0};   // position
@@ -2464,11 +2464,11 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
 
     // Group visible proxies by technique then by mesh_infos_ index
     u32 mesh_count = static_cast<u32>(mesh_infos_.size());
-    std::array<std::unordered_map<u32, std::vector<graphics::ForwardInstanceData>>, TechniqueCount> technique_groups;
+    std::array<std::unordered_map<u32, std::vector<graphics::InstanceData>>, TechniqueCount> technique_groups;
     // Compiled material-graph proxies (editor world-material path). Only the
     // opaque GBuffer pass consumes them; shadow and forward-blended passes
     // fall through to the fixed technique path.
-    std::unordered_map<u64, std::unordered_map<u32, std::vector<graphics::ForwardInstanceData>>> graph_groups;
+    std::unordered_map<u64, std::unordered_map<u32, std::vector<graphics::InstanceData>>> graph_groups;
     for (auto* proxy : visible) {
         auto it = mesh_id_to_index_.find(proxy->meshId);
         if (it == mesh_id_to_index_.end()) continue;
@@ -2480,7 +2480,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
             proxy->graphVariant != 0 &&
             static_cast<u32>(proxy->technique) == 0 /* opaque */ &&
             graph_variants_.count(proxy->graphVariant)) {
-            graphics::ForwardInstanceData inst{};
+            graphics::InstanceData inst{};
             inst.transform = proxy->transform;
             memcpy(inst.base_color, proxy->base_color, sizeof(f32) * 4);
             inst.roughness    = proxy->roughness;
@@ -2493,7 +2493,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
 
         u32 t = static_cast<u32>(proxy->technique);
         if (t >= TechniqueCount) t = 0;
-        graphics::ForwardInstanceData inst{};
+        graphics::InstanceData inst{};
         inst.transform = proxy->transform;
         memcpy(inst.base_color, proxy->base_color, sizeof(f32) * 4);
         inst.roughness    = proxy->roughness;
@@ -2520,7 +2520,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     for (auto& [_, meshMap] : graph_groups)
         for (auto& [_, transforms] : meshMap)
             total += (u32)transforms.size();
-    u32 required_size = total * sizeof(graphics::ForwardInstanceData);
+    u32 required_size = total * sizeof(graphics::InstanceData);
     if (pcg_instance_buffer_capacity_ < required_size) {
         if (pcg_instance_buffer_ != handles::INVALID_RESOURCE) {
             device_->DestroyBuffer(pcg_instance_buffer_);
@@ -2547,7 +2547,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
         for (auto& [meshIdx, instances] : technique_groups[t]) {
             all_ranges[t][meshIdx] = {off, (u32)instances.size()};
             for (u32 j = 0; j < instances.size(); j++) {
-                ((graphics::ForwardInstanceData*)buf)[off + j] = instances[j];
+                ((graphics::InstanceData*)buf)[off + j] = instances[j];
             }
             off += (u32)instances.size();
         }
@@ -2556,7 +2556,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
         for (auto& [meshIdx, instances] : meshMap) {
             graph_ranges[hash][meshIdx] = {off, (u32)instances.size()};
             for (u32 j = 0; j < instances.size(); j++) {
-                ((graphics::ForwardInstanceData*)buf)[off + j] = instances[j];
+                ((graphics::InstanceData*)buf)[off + j] = instances[j];
             }
             off += (u32)instances.size();
         }
@@ -2591,7 +2591,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
         for (auto& [meshIdx, range] : all_ranges[t]) {
             // T4.6.5 part 15.2: instance buffer bound via SSBO descriptor at binding 2
             // on Vulkan; Metal still uses BindVertexBuffers(3, 1, ...) at vertex stage.
-            u64 inst_offset = range.offset * sizeof(graphics::ForwardInstanceData);
+            u64 inst_offset = range.offset * sizeof(graphics::InstanceData);
 #ifdef __EMSCRIPTEN__
             // WASM uses standard vertex attributes (slot 0) + instance-rate
             // attributes (slot 1). Metal keeps the legacy slot-20/3 vertex-pull.
@@ -2660,7 +2660,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
             cmd->PushConstants(graph_material_layout_, ShaderStage::Vertex, 0, sizeof(PCGPushConsts), &pc);
 
             for (auto& [meshIdx, range] : meshMap) {
-                u64 inst_offset = range.offset * sizeof(graphics::ForwardInstanceData);
+                u64 inst_offset = range.offset * sizeof(graphics::InstanceData);
                 cmd->BindVertexBuffers(3, 1, &pcg_instance_buffer_, &inst_offset);
                 mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 20);
             }

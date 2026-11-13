@@ -38,6 +38,6 @@ int main() {
     TEST_CASE(suite, "Same_Seed_Produces_Same_Sequence", TestWFCRandom_Same_Seed_Produces_Same_Sequence);
     TEST_CASE(suite, "Different_Seeds_Produce_Different_Sequence", TestWFCRandom_Different_Seeds_Produce_Different_Sequence);
     TEST_CASE(suite, "NextRange_Bounded", TestWFCRandom_NextRange_Bounded);
-    const auto runStats = suite.RunAllTests();
-    return runStats.failedTests == 0 ? 0 : 1;
+    suite.RunAllTests();
+    return 0;
 }

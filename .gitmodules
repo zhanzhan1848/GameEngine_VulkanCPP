@@ -28,9 +28,9 @@
 [submodule "third_party/pmp-library"]
 	path = third_party/pmp-library
 	url = https://github.com/pmp-library/pmp-library.git
-# third_party/VHACD 已 vendor 化（2026-11-03）：原 pin 093505c 在远程不存在
-# （本地独有提交，上游历史未含）——gitlink 从索引移除、本条目删除，源码目录
-# 保留为普通目录。来源/补丁全文/收尾选项见 third_party/VHACD/VENDOR.md。
+[submodule "third_party/VHACD"]
+	path = third_party/VHACD
+	url = https://github.com/Unity-Technologies/VHACD.git
 [submodule "third_party/xatlas"]
 	path = third_party/xatlas
 	url = https://github.com/jpcy/xatlas.git
