@@ -224,7 +224,9 @@ jobs:
             }
             if ($rc -eq 0) {
               # meshopt pin 只在本机（见下方回退），submodule update 排除之
-              git -C $ws submodule update --init --recursive --depth 1 -- ':(exclude)third_party/meshoptimizer'
+              # meshopt（本机 pin）与 VHACD（无 .gitmodules 映射，Windows git 视为 fatal）
+              # 都排除：VHACD 仅供 ContentTools（CI 离线）与 macos-engine-smoke（工作区持久保留）
+              git -C $ws submodule update --init --recursive --depth 1 -- ':(exclude)third_party/meshoptimizer' ':(exclude)third_party/VHACD'
               $rc = $LASTEXITCODE
             }
             Write-Host "::endgroup::"
@@ -433,7 +435,9 @@ jobs:
             if ($rc -eq 0) {
               # 751b467d 原版不含 submodules，但根 CMake 的 meshoptimizer.h 守卫
               # 需要 meshopt 在场——统一初始化（排除 meshopt，见下方回退）
-              git -C $ws submodule update --init --recursive --depth 1 -- ':(exclude)third_party/meshoptimizer'
+              # meshopt（本机 pin）与 VHACD（无 .gitmodules 映射，Windows git 视为 fatal）
+              # 都排除：VHACD 仅供 ContentTools（CI 离线）与 macos-engine-smoke（工作区持久保留）
+              git -C $ws submodule update --init --recursive --depth 1 -- ':(exclude)third_party/meshoptimizer' ':(exclude)third_party/VHACD'
               $rc = $LASTEXITCODE
             }
             Write-Host "::endgroup::"

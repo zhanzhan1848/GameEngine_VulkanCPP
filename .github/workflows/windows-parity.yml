@@ -83,7 +83,9 @@ jobs:
             if ($rc -eq 0) {
               # idempotent/resumable: partial prior progress is reused
               # meshopt pin 只在本机（见下方回退），submodule update 排除之
-              git -C $ws submodule update --init --recursive --depth 1 -- ':(exclude)third_party/meshoptimizer'
+              # meshopt（本机 pin）与 VHACD（无 .gitmodules 映射，Windows git 视为 fatal）
+              # 都排除：VHACD 仅供 ContentTools（CI 离线）与 macos-engine-smoke（工作区持久保留）
+              git -C $ws submodule update --init --recursive --depth 1 -- ':(exclude)third_party/meshoptimizer' ':(exclude)third_party/VHACD'
               $rc = $LASTEXITCODE
             }
             Write-Host "::endgroup::"
