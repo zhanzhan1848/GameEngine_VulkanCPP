@@ -17,6 +17,7 @@
 #include "VulkanBackendLinks.h"
 #include "VulkanTexture.h"
 #include "VulkanCommandBuffer.h"
+#include "VulkanHangDiag.h"
 // Phase 4
 #include "VulkanShader.h"
 #include "VulkanSampler.h"
@@ -232,6 +233,8 @@ bool VulkanDevice::initializeImpl() {
     } else {
         PRIMAL_LOG_STREAM(Info, "RHI") << "[VulkanDevice] Initialized (validation disabled)." << std::endl;
     }
+    // R10 taskC：诊断初始化（memory budget 扩展支持 + 初始余量；门控）。
+    hangdiag::NoteInit(physicalDevice_, device_);
     lifecycleGeneration_=AllocateVulkanDeviceGeneration();
     return true;
 }
@@ -306,10 +309,15 @@ void VulkanDevice::shutdownImpl() {
 
 void VulkanDevice::waitIdleImpl() const {
     lastWaitIdleResult_=device_!=VK_NULL_HANDLE?vkDeviceWaitIdle(device_):VK_ERROR_DEVICE_LOST;
+    // R10 taskC：WaitIdle 返回 device lost 时 fail-fast（门控）。
+    if (lastWaitIdleResult_.load() == VK_ERROR_DEVICE_LOST)
+        hangdiag::ReportDeviceLost("VulkanDevice::WaitIdle", lastWaitIdleResult_.load());
 }
 
 void VulkanDevice::beginFrameImpl() {
     currentFrameIndex_.store((currentFrameIndex_.load() + 1) % desc_.maxFramesInFlight);
+    // R10 taskC：诊断帧计数（仅 PRIMAL_VK_HANG_DIAG=1 时递增/打印）。
+    hangdiag::NoteFrameBegin();
     // 每帧 BeginFrame 把当前 frame 的 staging pool bump offset 归零
     // (上一帧的 blit 应已 submit 完成,frame N+MAX_FRAMES_IN_FLIGHT 的 pool 安全复用)
     stagingAllocator_.BeginFrame();
@@ -459,6 +467,7 @@ void VulkanDevice::destroySyncImpl(SyncHandle handle) {
         sync->DetachNatives(&fence, &sem);
         if (fence != VK_NULL_HANDLE || sem != VK_NULL_HANDLE) {
             VkDevice dev = device_;
+            hangdiag::RetireFence(fence);
             gc_.DeferredDestroy([dev, fence, sem]() {
                 if (dev != VK_NULL_HANDLE) {
                     if (fence != VK_NULL_HANDLE) vkDestroyFence(dev, fence, nullptr);
@@ -819,12 +828,20 @@ bool VulkanDevice::submitImpl(const QueueSubmitInfo& info) {
     si.pSignalSemaphores = &signalSem;
 
     VkResult res;
-    { primal::graphics::cpu_stall_audit::Scope cpuScope("vulkan.submit.queue_submit");
-        res = vkQueueSubmit(graphicsQueue_, 1, &si, signalFence); }
+    {
+        primal::graphics::cpu_stall_audit::Scope cpuScope("vulkan.submit.queue_submit");
+        // R10 taskC：vkQueueSubmit 在队列 wedged 时可能阻塞在驱动内——
+        // 门控看门狗；成功后登记 fence/计数供超时 dump 使用。
+        hangdiag::ScopedHangWatch watch("queueSubmit", "submitImpl");
+        res = vkQueueSubmit(graphicsQueue_, 1, &si, signalFence);
+    }
     if (res != VK_SUCCESS) {
+        if (res == VK_ERROR_DEVICE_LOST) hangdiag::ReportDeviceLost("submitImpl", res);
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] submitImpl vkQueueSubmit failed: " << res << std::endl;
         return false;
     }
+    hangdiag::NoteSignalFence(signalFence);
+    hangdiag::NoteSubmitOk(1);
     // T4.6.5 part 24.7 (B8 root cause): mark cmd buffer state as Submitted so
     // the base class WaitForCompletion() gate (RHICommand.h:362) lets
     // waitForCompletionImpl actually fire. Without this, state_ stays at
@@ -1706,7 +1723,11 @@ void VulkanDevice::PrimeTextureLayout(rhi::ResourceHandle texture) {
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
     vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);
+    {
+        // R10 taskC：queueWaitIdle 门控看门狗（PrimeToShaderRead 同步上传）。
+        hangdiag::ScopedHangWatch wait("queueWaitIdle", "VulkanDevice.PrimeToShaderRead");
+        vkQueueWaitIdle(queue);
+    }
     vkDestroyCommandPool(dev, pool, nullptr);
 
     tex->SetCurrentLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);

@@ -12,9 +12,13 @@
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 
+#include "VulkanHangDiag.h"
+
+#include <chrono>
 #include <iostream>
 #include <cstring>
 #include <cstdlib>
+#include <thread>
 
 namespace primal::graphics::rhi {
 
@@ -90,6 +94,34 @@ bool VulkanQueryPool::GetResults(u32 firstQuery, u32 queryCount, void* data, siz
     const char* nonblocking = std::getenv("PRIMAL_VK_QUERY_NONBLOCKING");
     if (type_ == QueryType::Timestamp && nonblocking && std::strcmp(nonblocking,"1") == 0)
         flags &= ~VK_QUERY_RESULT_WAIT_BIT;
+
+    // R10 taskC（Windows 卡死诊断）：WAIT_BIT 在 GPU 楔死/query 永不完成时
+    // 无限阻塞（RenderGraph::ResolveTimestamps 每帧 Clear 时走此路径；
+    // vkGetQueryPoolResults 无 timeout 参数，唯一有界形态是去 WAIT_BIT 的
+    // 非阻塞探测）。PRIMAL_VK_HANG_DIAG=1：非阻塞探测 + 250ms 短宽限重试一次，
+    // 仍 NOT_READY 则按旧单次调用的 false 契约返回（MoltenVK 对已执行 CB 的
+    // query 也长期 NOT_READY——RenderGraph.cpp 注释记载的怪癖——不能追等，
+    // 否则 Mac 每帧假超时）。真正的楔死由后续权威等待点（acquire/fence/
+    // present 的 ScopedHangWatch / BoundedWaitFence，超阈值 dump+_Exit(12)）
+    // 兜底定位。门控关闭时下方单次调用与原行为逐字节一致。
+    if (hangdiag::Enabled() && (flags & VK_QUERY_RESULT_WAIT_BIT)) {
+        for (int step = 0; step < 2; ++step) {
+            VkResult res = vkGetQueryPoolResults(
+                device_, pool_, firstQuery, queryCount,
+                queryCount * stride, data, stride,
+                flags & ~VK_QUERY_RESULT_WAIT_BIT);
+            if (res == VK_SUCCESS) return true;
+            if (res == VK_ERROR_DEVICE_LOST) hangdiag::ReportDeviceLost("queryGetResults", res);
+            if (res != VK_NOT_READY) return false;
+            if (step == 0) {
+                fprintf(stderr, "[VK-HANG] still-waiting kind=queryGetResults first=%u count=%u step=0 frame=%llu\n",
+                        firstQuery, queryCount,
+                        (unsigned long long)hangdiag::g_frame.load());
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            }
+        }
+        return false;  // MoltenVK 慢性 NOT_READY：旧单次 WAIT_BIT 调用的 false 契约
+    }
 
     VkResult res = vkGetQueryPoolResults(
         device_, pool_, firstQuery, queryCount,

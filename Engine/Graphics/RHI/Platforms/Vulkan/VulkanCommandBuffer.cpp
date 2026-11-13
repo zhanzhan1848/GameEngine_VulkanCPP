@@ -18,6 +18,7 @@
 #include "VulkanPipeline.h"
 #include "VulkanDescriptorSet.h"
 #include "VulkanMath.h"
+#include "VulkanHangDiag.h"
 #include "Engine/Common/CoreLogStream.h"
 #include "VulkanDDGIAuditPrefix.h"
 
@@ -161,6 +162,7 @@ void VulkanCommandBuffer::destroyImpl() {
     VulkanDevice& vk = static_cast<VulkanDevice&>(device_);
     VkDevice dev = vk.GetNativeDevice();
     if (submitFence_ != VK_NULL_HANDLE) {
+        hangdiag::RetireFence(submitFence_);
         vkDestroyFence(dev, submitFence_, nullptr);
         submitFence_ = VK_NULL_HANDLE;
     }
@@ -294,11 +296,20 @@ bool VulkanCommandBuffer::submitImpl(u32 /*waitFlags*/) {
         vkResetFences(vk.GetNativeDevice(), 1, &submitFence_);
     }
 
-    VkResult res = vkQueueSubmit(queue, 1, &si, submitFence_);
+    VkResult res;
+    {
+        // R10 taskC：门控看门狗 + 提交追踪（此为 VulkanDevice::submitImpl 之外
+        // 的第二个提交入口——一次性 cmd buffer 路径）。
+        hangdiag::ScopedHangWatch watch("queueSubmit", "VulkanCommandBuffer::submit");
+        res = vkQueueSubmit(queue, 1, &si, submitFence_);
+    }
     if (res != VK_SUCCESS) {
+        if (res == VK_ERROR_DEVICE_LOST) hangdiag::ReportDeviceLost("VulkanCommandBuffer::submit", res);
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkQueueSubmit failed: " << res << std::endl;
         return false;
     }
+    hangdiag::NoteSignalFence(submitFence_);
+    hangdiag::NoteSubmitOk(1);
     return true;
 }
 
@@ -314,21 +325,29 @@ bool VulkanCommandBuffer::waitForCompletionImpl() {
     if (externalFenceSignaled_) {
         if (externalFence_ == VK_NULL_HANDLE) return true;
         VkDevice extDev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
+        // R10 taskC：门控时改用有界轮询（超时/lost 在内部终止进程），
+        // 门控关闭时保持原 5s 超时单次调用逐字节不变。
+        if (hangdiag::Enabled())
+            return hangdiag::BoundedWaitFence(extDev, "VulkanCommandBuffer::WaitForCompletion(external)", externalFence_);
         VkResult extRes = vkWaitForFences(extDev, 1, &externalFence_, VK_TRUE, 5ULL * 1000ULL * 1000ULL * 1000ULL);
         if (extRes == VK_TIMEOUT) {
             PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] External fence WaitForCompletion TIMEOUT (5s)" << std::endl;
         }
+        if (extRes == VK_ERROR_DEVICE_LOST) hangdiag::ReportDeviceLost("VulkanCommandBuffer::WaitForCompletion(external)", extRes);
         return extRes == VK_SUCCESS;
     }
 
     VkDevice dev = static_cast<VulkanDevice&>(device_).GetNativeDevice();
     if (submitFence_ == VK_NULL_HANDLE) return false;
+    if (hangdiag::Enabled())
+        return hangdiag::BoundedWaitFence(dev, "VulkanCommandBuffer::WaitForCompletion", submitFence_);
     VkResult res = vkWaitForFences(dev, 1, &submitFence_, VK_TRUE, 5ULL * 1000ULL * 1000ULL * 1000ULL);
     if (res == VK_SUCCESS) return true;
     if (res == VK_TIMEOUT) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] WaitForCompletion TIMEOUT (5s)" << std::endl;
         return false;
     }
+    if (res == VK_ERROR_DEVICE_LOST) hangdiag::ReportDeviceLost("VulkanCommandBuffer::WaitForCompletion", res);
     PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanCommandBuffer] vkWaitForFences failed: " << res << std::endl;
     return false;
 }

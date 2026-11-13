@@ -15,6 +15,7 @@
 #include "VulkanSurface.h"
 #include "VulkanDevice.h"
 #include "VulkanSync.h"
+#include "VulkanHangDiag.h"
 #include "Engine/Common/CoreLogStream.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
@@ -355,15 +356,38 @@ bool VulkanSwapChain::AcquireNextImage(u32* imageIndex, SyncHandle semaphore,
     // P4c-F2: OUT_OF_DATE 时重建并重试(上限 8 次 — 持续失效说明窗口
     // 处于持续 resize 风暴中,放弃本次 acquire 让上层跳帧)。
     constexpr u32 kMaxAcquireRetries = 8;
+    // R10 taskC（Windows 卡死诊断）：PRIMAL_VK_HANG_DIAG=1 时 acquire 用
+    // 2s 短超时轮询并在超阈值后 dump+_Exit(12)；门控关闭时与原
+    // UINT64_MAX 单次调用逐字节同行为。
+    const auto diagT0 = std::chrono::steady_clock::now();
+    if (hangdiag::Enabled()) {
+        fprintf(stderr, "[VK-HANG] wait kind=acquire frame=%llu lastAcqFrame=%lld img=%u\n",
+                (unsigned long long)hangdiag::g_frame.load(),
+                (long long)hangdiag::g_lastAcquireFrame.load(),
+                hangdiag::g_lastAcquireImage.load());
+    }
     for (u32 attempt = 0; attempt < kMaxAcquireRetries; ++attempt) {
         u32 idx = 0;
         VkResult res = vkAcquireNextImageKHR(vk.GetNativeDevice(), swapchain_,
-                                             UINT64_MAX, sem, fen, &idx);
+                                             hangdiag::Enabled() ? 2000000000ULL : UINT64_MAX,
+                                             sem, fen, &idx);
+        if (res == VK_TIMEOUT && hangdiag::Enabled()) {
+            const auto el = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - diagT0).count();
+            if (el >= (long long)hangdiag::TimeoutSecs()) hangdiag::ExitTimeout("acquire");
+            fprintf(stderr, "[VK-HANG] still-waiting kind=acquire elapsed=%llds frame=%llu\n",
+                    (long long)el, (unsigned long long)hangdiag::g_frame.load());
+            // 短超时重试不消耗 OUT_OF_DATE 重试额度（本 attempt 未产生失效）。
+            --attempt;
+            continue;
+        }
+        if (res == VK_ERROR_DEVICE_LOST) hangdiag::ReportDeviceLost("acquire", res);
         if (res == VK_SUCCESS || res == VK_SUBOPTIMAL_KHR) {
             // SUBOPTIMAL:本次仍可呈现,下一帧入口重建。
             if (res == VK_SUBOPTIMAL_KHR) needsRecreate_ = true;
             currentIndex_ = idx;
             if (imageIndex) *imageIndex = idx;
+            hangdiag::NoteAcquireOk(idx);
             return true;
         }
         if (res == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -406,7 +430,14 @@ void VulkanSwapChain::Present(SyncHandle semaphore) {
     pi.pImageIndices = &currentIndex_;
     pi.pResults = nullptr;
 
-    VkResult res = vkQueuePresentKHR(vk.GetGraphicsQueue(), &pi);
+    // R10 taskC：present 在驱动端可无限阻塞（队列楔死时）。门控看门狗。
+    VkResult res;
+    {
+        hangdiag::ScopedHangWatch watch("present", "queuePresent");
+        res = vkQueuePresentKHR(vk.GetGraphicsQueue(), &pi);
+    }
+    if (res == VK_ERROR_DEVICE_LOST) hangdiag::ReportDeviceLost("present", res);
+    if (res == VK_SUCCESS) hangdiag::NotePresentOk(currentIndex_);
     if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR) {
         // P4c-F2: 置标志,下一帧 Acquire 入口重建 — 不在 present 返回
         // 路径里同步重建(避免打断当前帧的收尾)。

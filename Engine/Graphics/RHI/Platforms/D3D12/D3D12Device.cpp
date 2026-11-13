@@ -559,6 +559,30 @@ bool D3D12Device::createAllocator() {
 }
 
 bool D3D12Device::createResourceSubsystems() {
+    // R10-B（对齐 VulkanDevice.cpp "Per-type free_list 预留" 与
+    // MetalDevice.cpp Allocators reserved 惯例，此前 D3D12 独缺）：
+    // RHIAllocator 底层 utl::vector 扩容（1.5x reserve）会整体搬迁既有
+    // 槽位。CommandBufferManager 与 RenderSystem::cmdBuffers_ 缓存的是
+    // 创建期 Get() 返回的池内裸指针——池从 0 容量起步时，第 2 个命令缓冲
+    // 的分配（cap 1→3）即令第 1 个缓冲的缓存指针悬垂，Shutdown 期
+    // cmdBuffers_[0]->Destroy() 对已 free 内存做虚调用 → 0xC0000005
+    //（r8/r9 init 失败路径实测；Metal=256/Vulkan=32 预留故两端无此患）。
+    // 初始化期一次性预留，运行期槽位高水位不超预留值即不再扩容搬移。
+    // 数值逐池镜像 VulkanDevice（同一 harness 工作负载实测足够）；
+    // pipeline 池预留另防 D3D12CommandBufferImpl 绑定镜像
+    // bound{Graphics,Compute}Pipeline_（非拥有 D3D12Pipeline*）在
+    // bind→draw 之间因管线池扩容而悬垂的同族隐患。
+    commandBufferAllocator_.Reserve(32);
+    bufferAllocator_.Reserve(256);
+    textureAllocator_.Reserve(128);
+    shaderAllocator_.Reserve(256);
+    samplerAllocator_.Reserve(64);
+    descriptorSetLayoutAllocator_.Reserve(128);
+    pipelineLayoutAllocator_.Reserve(128);
+    descriptorSetAllocator_.Reserve(1024);
+    pipelineAllocator_.Reserve(256);
+    syncAllocator_.Reserve(64);
+
     if (!descriptorHeaps_.Initialize(device_.Get(),
                                      d3d12::D3D12DescriptorHeapManager::Config{})) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] descriptor heaps init failed" << std::endl;

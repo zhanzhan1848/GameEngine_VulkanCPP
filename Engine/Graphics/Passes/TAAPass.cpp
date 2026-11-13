@@ -86,12 +86,32 @@ bool TAAPass::Initialize(rhi::RHIDeviceBase* device, u32 width, u32 height, rhi:
         if (!file.is_open()) return rhi::handles::INVALID_SHADER;
         
         size_t fileSize = (size_t)file.tellg();
-        utl::vector<char> buffer(fileSize + 1);
+        // Binary formats must be handed to CreateShader at their exact encoded
+        // size: SPIR-V (Vulkan) is 4-byte-aligned and rejects a trailing null
+        // byte; DXBC (.cso, D3D12) must match the container's encoded size —
+        // fileSize+1 fails pipeline creation with 0x80070057 ("Encoded
+        // Compute Shader size doesn't match specified size", r9-win BlurPass).
+        // Metal/Dawn source text keeps the null terminator for runtime compile.
+        // Sniff the leading magic so the branch follows the actual file content
+        // (03 02 23 07 = SPIR-V little-endian, "DXBC" = D3D12 container).
+        char magic[4] = {};
+        if (fileSize >= 4) {
+            file.seekg(0);
+            file.read(magic, sizeof(magic));
+            file.clear();
+        }
+        const bool isBinaryShader = fileSize >= 4 &&
+            ((magic[0] == '\x03' && magic[1] == '\x02' &&
+              magic[2] == '\x23' && magic[3] == '\x07') ||
+             (magic[0] == 'D' && magic[1] == 'X' &&
+              magic[2] == 'B' && magic[3] == 'C'));
+        const size_t codeSize = isBinaryShader ? fileSize : fileSize + 1;
+        utl::vector<char> buffer(codeSize);
         file.seekg(0);
         file.read(buffer.data(), fileSize);
-        buffer[fileSize] = '\0';
-        
-        return device_->CreateShader(buffer.data(), fileSize + 1, stage, entry);
+        if (!isBinaryShader) buffer[fileSize] = '\0';
+
+        return device_->CreateShader(buffer.data(), codeSize, stage, entry);
     };
 
     vertexShader_ = loadShader("EngineTest/shaders/TAA.metal", rhi::ShaderStage::Vertex, "vertexMain");

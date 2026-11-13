@@ -20,6 +20,7 @@
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 // VMA_IMPLEMENTATION 由 VulkanDevice.cpp 单 TU 提供;此处仅用 vk_mem_alloc.h 声明
 #include <vk_mem_alloc.h>
+#include "VulkanHangDiag.h"
 #endif
 
 #include <iostream>
@@ -294,8 +295,27 @@ void VulkanStagingAllocator::FlushBlocking() {
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
-    vkQueueSubmit(queue_, 1, &si, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue_);
+    // R10 taskC：PRIMAL_VK_HANG_DIAG=1 时用 fence 有界轮询替代
+    // vkQueueWaitIdle（队列楔死时后者无限阻塞）；门控关闭时保持原路径。
+    if (hangdiag::Enabled()) {
+        VkFence diagFence = VK_NULL_HANDLE;
+        VkFenceCreateInfo fci{};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        if (vkCreateFence(device_, &fci, nullptr, &diagFence) == VK_SUCCESS) {
+            vkQueueSubmit(queue_, 1, &si, diagFence);
+            hangdiag::NoteSignalFence(diagFence);
+            hangdiag::BoundedWaitFence(device_, "StagingAllocator::FlushBlocking", diagFence);
+            hangdiag::RetireFence(diagFence);
+            vkDestroyFence(device_, diagFence, nullptr);
+        } else {
+            vkQueueSubmit(queue_, 1, &si, VK_NULL_HANDLE);
+            hangdiag::ScopedHangWatch wait("queueWaitIdle", "staging.FlushBlocking");
+            vkQueueWaitIdle(queue_);
+        }
+    } else {
+        vkQueueSubmit(queue_, 1, &si, VK_NULL_HANDLE);
+        vkQueueWaitIdle(queue_);
+    }
 
     vkFreeCommandBuffers(device_, pool, 1, &cmd);
     vkDestroyCommandPool(device_, pool, nullptr);

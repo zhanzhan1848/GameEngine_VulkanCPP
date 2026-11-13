@@ -14,6 +14,7 @@
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 #include <vk_mem_alloc.h>
+#include "VulkanHangDiag.h"
 #endif
 
 #include <iostream>
@@ -971,14 +972,23 @@ bool VulkanTexture::updateRegion(const void* data, u64 size, const TextureRegion
     si.pCommandBuffers = &cmd;
     vkQueueSubmit(vkDev.GetGraphicsQueue(), 1, &si, submitFence);
     if (submitFence != VK_NULL_HANDLE) {
-        vkWaitForFences(vkDevice, 1, &submitFence, VK_TRUE, UINT64_MAX);
+        // R10 taskC：UINT64_MAX fence 等待在 device lost 后永不返回；
+        // PRIMAL_VK_HANG_DIAG=1 时改为有界轮询，门控关闭时原调用不变。
+        if (hangdiag::Enabled()) {
+            hangdiag::NoteSignalFence(submitFence);
+            hangdiag::BoundedWaitFence(vkDevice, "VulkanTexture.uploadFence", submitFence);
+        } else {
+            vkWaitForFences(vkDevice, 1, &submitFence, VK_TRUE, UINT64_MAX);
+        }
     } else {
+        hangdiag::ScopedHangWatch wait("queueWaitIdle", "VulkanTexture.upload");
         vkQueueWaitIdle(vkDev.GetGraphicsQueue());
     }
 
     vkFreeCommandBuffers(vkDevice, pool, 1, &cmd);
     vkDestroyCommandPool(vkDevice, pool, nullptr);
     if (submitFence != VK_NULL_HANDLE) {
+        hangdiag::RetireFence(submitFence);
         vkDestroyFence(vkDevice, submitFence, nullptr);
     }
     vmaDestroyBuffer(allocator, stagingBuf, stagingAlloc);
