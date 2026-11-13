@@ -10,6 +10,15 @@
 #pragma once
 
 #include "CommonHeaders.h"
+
+// MSVC 没有 __builtin_return_address；_ReturnAddress() 语义等价（返回调用方地址）。
+// 仅用于 stale-handle 诊断打印，非功能路径。
+#if defined(_MSC_VER)
+  #include <intrin.h>
+  #define PRIMAL_RHI_RETURN_ADDRESS() _ReturnAddress()
+#else
+  #define PRIMAL_RHI_RETURN_ADDRESS() __builtin_return_address(0)
+#endif
 #include "Utilities/FreeList.h"
 #include "RHIResource.h"
 #include "RHICommand.h"
@@ -243,7 +252,7 @@ public:
                     "[RHI-HANDLE] stale %s handle id=%u gen=%u currentGen=%u ra=%p — resolving null\n",
                     typeid(T).name(), id, gen,
                     (id < _generations.size()) ? _generations[id] : 0u,
-                    __builtin_return_address(0));
+                    PRIMAL_RHI_RETURN_ADDRESS());
             }
             return nullptr;
         }
