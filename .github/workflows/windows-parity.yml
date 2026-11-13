@@ -1,0 +1,353 @@
+# windows-parity.yml - Windows self-hosted CI for the D3D12/Vulkan parity
+# program (R12). Single serial job on the D3D12_runner machine (labels:
+# self-hosted, Windows, X64, D3D12, Vulkan).
+#
+# Gates, in order:
+#   1. configure + full build (MSVC / VS2022 / x64 / Release,
+#      -DENABLE_D3D12=ON -DENABLE_VULKAN=ON)
+#   2. D3D12 shader mirrors: generate with scripts/build_d3d12_shaders.py
+#      (tools via D3D12_GLSLANG / D3D12_SPIRV_CROSS / D3D12_DXC), then the
+#      CRLF-insensitive --check freshness gate. Mirrors are NOT tracked in
+#      git since 751b467d, so the toolchain is a hard requirement on a
+#      clean workspace (same degrade semantics as ci.yml windows-d3d12 when
+#      stale mirrors are already present).
+#   3. unit tests: ctest -R "Unit"; UnitDDGIFitGrid "Not Run" is tolerated
+#      (exe never present, r3-r10 convention).
+#   4. TestRHISponzaShared M2-M6 regression: 18 runs driven by
+#      scripts/win-ci/run_harness.py; every PPM/PGM frame must be
+#      byte-identical to the runner-local baseline (PRIMAL_CI_HARNESS_BASELINE;
+#      missing baseline = hard fail with seed instructions - never skipped),
+#      plus M6 strict frame verification via scripts/m6_gi_verify.py.
+#   5. four TestVulkanSponzaRenderGraph f350 groups (D3D12 GI-on/off,
+#      Vulkan GI-on/off): 400 frames, capture frame 350, 300 s no-progress
+#      watchdog (engine PRIMAL_SPONZA_WATCHDOG_SECS + script-level backup).
+#      PRIMAL_VK_HANG_DIAG is NOT set (official default path).
+#   6. PSNR/SSIM gate: each captured f350 vs the tracked Mac Vulkan
+#      reference (.github/ci-assets/ref_mac_vulkan_RG_f350.ppm, SHA256
+#      verified at runtime). Gate = psnr_rgb_db >= 43.5 dB. The gate is
+#      intentionally NOT lowered: as of r11 Windows Vulkan GI-on is
+#      34.43 dB and D3D12 renders no frames - the workflow reports those
+#      as FAIL until the engine actually reaches parity.
+#
+# All inline scripts are ASCII-only (cp936-safe). Runner-local resources are
+# injected through environment variables configured on the runner machine
+# (see .github/RUNNER_SETUP_WINDOWS.md); no Desktop paths are hardcoded.
+
+name: windows-parity
+
+on:
+  push:
+    branches: [dev, d3d12-windows-test-20261103]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-parity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-parity:
+    name: Windows parity (MSVC / Vulkan+D3D12 / f350 gates)
+    runs-on: [self-hosted, Windows, X64, D3D12, Vulkan]
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout (submodules recursive)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+          clean: false
+
+      - name: Summary header
+        shell: powershell
+        run: |
+          "# Windows parity run`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "- commit: ${{ github.sha }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "- runner: $env:COMPUTERNAME" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "- PSNR gate: 43.5 dB (frozen; current known state: Vulkan GI-on 34.43 dB = FAIL, D3D12 no frames = FAIL)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Preflight (tools, env, assets)
+        shell: powershell
+        run: |
+          $fail = $false
+          function Check($cond, $msg) {
+            if ($cond) { Write-Output "[preflight] OK   $msg" }
+            else { Write-Output "[preflight] MISS $msg"; $script:fail = $true }
+          }
+          $python = Get-Command python -ErrorAction SilentlyContinue
+          if (-not $python) { $python = Get-Command python3 -ErrorAction SilentlyContinue }
+          Check ($null -ne $python) "python on PATH ($($python.Source))"
+          $cmake = Get-Command cmake -ErrorAction SilentlyContinue
+          Check ($null -ne $cmake) "cmake on PATH ($($cmake.Source))"
+          # Shader toolchain: env override first, then PATH.
+          $glslang = if ($env:D3D12_GLSLANG) { $env:D3D12_GLSLANG } elseif (Get-Command glslangValidator -ErrorAction SilentlyContinue) { (Get-Command glslangValidator).Source }
+          $cross  = if ($env:D3D12_SPIRV_CROSS) { $env:D3D12_SPIRV_CROSS } elseif (Get-Command spirv-cross -ErrorAction SilentlyContinue) { (Get-Command spirv-cross).Source }
+          $dxc    = if ($env:D3D12_DXC) { $env:D3D12_DXC } elseif (Get-Command dxc -ErrorAction SilentlyContinue) { (Get-Command dxc).Source }
+          Check ([bool]$glslang) "glslangValidator ($glslang)"
+          Check ([bool]$cross) "spirv-cross ($cross)"
+          Check ([bool]$dxc) "dxc ($dxc)"
+          Check ([bool]$env:PRIMAL_CI_ASSET_DIR) "PRIMAL_CI_ASSET_DIR (local assets: Sponza.model, SponzaTangentFrames.model, sunset.hdr, Sponza_global_sdf.v3.cache)"
+          if (-not $env:PRIMAL_CI_HARNESS_BASELINE) {
+            Write-Output "[preflight] WARN PRIMAL_CI_HARNESS_BASELINE not set - the harness step will fail with seed instructions"
+          } else {
+            Write-Output "[preflight] OK   PRIMAL_CI_HARNESS_BASELINE = $env:PRIMAL_CI_HARNESS_BASELINE"
+          }
+          if (-not $env:PRIMAL_CI_OFFLINE_DEPS) {
+            Write-Output "[preflight] WARN PRIMAL_CI_OFFLINE_DEPS not set - configure falls back to network download for agility-sdk/zlib"
+          } else {
+            Write-Output "[preflight] OK   PRIMAL_CI_OFFLINE_DEPS = $env:PRIMAL_CI_OFFLINE_DEPS"
+          }
+          if ($fail) { Write-Output '::error::preflight failed - see RUNNER_SETUP_WINDOWS.md'; exit 1 }
+          exit 0
+
+      - name: Stage local assets (SHA-gated)
+        shell: powershell
+        run: |
+          $src = $env:PRIMAL_CI_ASSET_DIR
+          $assets = @(
+            @{ s = 'Sponza.model';                 d = 'EngineTest\assets\Sponza.model';                 sha = 'b0c1f2d5e583508aab922c6e4c2c38cf2a564f952709f45827ac10d4c4757390' },
+            @{ s = 'SponzaTangentFrames.model';    d = 'EngineTest\assets\SponzaTangentFrames.model';    sha = '974efb3a95d7773519691ee937c493fcb306dd717066e42431c691ea7af66d5e' },
+            @{ s = 'sunset.hdr';                   d = 'EngineTest\assets\textures\hdr\sunset.hdr';      sha = '49627ecb64a77e12567c8c3853cb63248a14013fd7553ebffb904f8fd428ffec' },
+            @{ s = 'Sponza_global_sdf.v3.cache';   d = 'EngineTest\assets\Sponza_global_sdf.v3.cache';   sha = '0f00339ae8fc472a0f5b003bc060ab1f7a1b64e2c7d5b5e3d6b93146214ec581' }
+          )
+          $bad = $false
+          foreach ($a in $assets) {
+            $s = Join-Path $src $a.s
+            if (-not (Test-Path $s)) { Write-Output "::error::asset source missing: $s"; $bad = $true; continue }
+            $h = (Get-FileHash -Algorithm SHA256 -Path $s).Hash.ToLower()
+            if ($h -ne $a.sha) { Write-Output "::error::asset SHA mismatch for $($a.s): got $h want $($a.sha)"; $bad = $true; continue }
+            $d = $a.d
+            $dd = Split-Path $d -Parent
+            if (-not (Test-Path $dd)) { New-Item -ItemType Directory -Force -Path $dd | Out-Null }
+            $needCopy = $true
+            if (Test-Path $d) {
+              $hd = (Get-FileHash -Algorithm SHA256 -Path $d).Hash.ToLower()
+              if ($hd -eq $a.sha) { $needCopy = $false }
+            }
+            if ($needCopy) { Copy-Item $s $d -Force; Write-Output "[assets] staged $($a.s) -> $d" }
+            else { Write-Output "[assets] present $($a.s) (SHA ok)" }
+          }
+          if ($bad) { exit 1 }
+          exit 0
+
+      - name: Configure CMake (VS2022 x64 Release, dual backend)
+        shell: powershell
+        run: |
+          $build = if ($env:PRIMAL_CI_BUILD_DIR) { $env:PRIMAL_CI_BUILD_DIR } else { 'build-winparity' }
+          $extra = @()
+          if ($env:PRIMAL_CI_OFFLINE_DEPS) {
+            $agi = Join-Path $env:PRIMAL_CI_OFFLINE_DEPS 'agility-sdk'
+            $zl  = Join-Path $env:PRIMAL_CI_OFFLINE_DEPS 'zlib-src'
+            if (Test-Path (Join-Path $agi 'build\native\include\d3d12.h')) { $extra += "-DPRIMAL_D3D12_AGILITY_SDK_DIR=$agi" }
+            if (Test-Path (Join-Path $zl 'CMakeLists.txt')) { $extra += "-DPRIMAL_ZLIB_SOURCE_DIR=$zl" }
+          }
+          if ($env:PRIMAL_CI_SDK_MODULES) { $extra += "-DCMAKE_MODULE_PATH=$env:PRIMAL_CI_SDK_MODULES" }
+          Write-Output "[configure] cmake extra args: $extra"
+          $cmakeArgs = @('-S', '.', '-B', $build,
+                         '-G', 'Visual Studio 17 2022', '-A', 'x64',
+                         '-DCMAKE_BUILD_TYPE=Release',
+                         '-DENABLE_D3D12=ON', '-DENABLE_VULKAN=ON',
+                         '-DBUILD_CONTENT_TOOLS=OFF') + $extra
+          & cmake @cmakeArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Output '--- D3D12 gate markers ---'
+          Select-String -Path (Join-Path $build 'CMakeCache.txt') -Pattern 'ENABLE_D3D12|ENABLE_VULKAN|PRIMAL_D3D12_AGILITY' |
+            ForEach-Object { Write-Output $_.Line.Trim() }
+          exit 0
+
+      - name: Build (Release, all targets)
+        shell: powershell
+        run: |
+          $build = if ($env:PRIMAL_CI_BUILD_DIR) { $env:PRIMAL_CI_BUILD_DIR } else { 'build-winparity' }
+          $log = 'msbuild-winparity.log'
+          cmd /c "cmake --build $build --config Release --parallel > $log 2>&1"
+          $code = $LASTEXITCODE
+          Write-Output "build exit code: $code; log tail:"
+          Get-Content $log | Select-Object -Last 60
+          if ($code -ne 0) {
+            $err = Get-Content $log | Where-Object { $_ -match '(fatal error C\d+|error C\d+|error LNK\d+|error MSB\d+)' }
+            if ($err) { $err | Select-Object -First 40 | ForEach-Object { Write-Output $_ } }
+            exit $code
+          }
+          exit 0
+
+      - name: D3D12 shader mirrors (generate + freshness check)
+        shell: powershell
+        run: |
+          $mirror = 'EngineTest/shaders/d3d12/Forward/M1Forward.frag.cso'
+          $python = (Get-Command python -ErrorAction SilentlyContinue).Source
+          if (-not $python) { $python = (Get-Command python3 -ErrorAction SilentlyContinue).Source }
+          $glslang = if ($env:D3D12_GLSLANG) { $env:D3D12_GLSLANG } elseif (Get-Command glslangValidator -ErrorAction SilentlyContinue) { (Get-Command glslangValidator).Source }
+          $cross   = if ($env:D3D12_SPIRV_CROSS) { $env:D3D12_SPIRV_CROSS } elseif (Get-Command spirv-cross -ErrorAction SilentlyContinue) { (Get-Command spirv-cross).Source }
+          $dxc     = if ($env:D3D12_DXC) { $env:D3D12_DXC } elseif (Get-Command dxc -ErrorAction SilentlyContinue) { (Get-Command dxc).Source }
+          if ($python -and $glslang -and $cross -and $dxc) {
+            $env:D3D12_GLSLANG = $glslang
+            $env:D3D12_SPIRV_CROSS = $cross
+            $env:D3D12_DXC = $dxc
+            Write-Output "[shaders] tools: $glslang | $cross | $dxc"
+            & $python scripts/build_d3d12_shaders.py
+            if ($LASTEXITCODE -ne 0) { Write-Output '::error::build_d3d12_shaders.py failed'; exit $LASTEXITCODE }
+            & $python scripts/build_d3d12_shaders.py --check
+            if ($LASTEXITCODE -ne 0) { Write-Output '::error::D3D12 shader freshness gate failed'; exit $LASTEXITCODE }
+            Write-Output '[shaders] mirrors regenerated and freshness gate passed'
+          } elseif (Test-Path $mirror) {
+            Write-Output '::warning::shader toolchain incomplete; reusing mirrors already present in the workspace (stale risk - freshness gate skipped)'
+          } else {
+            Write-Output '::error::shader mirrors are not tracked in git and the toolchain (glslangValidator/spirv-cross/dxc) is unavailable. See RUNNER_SETUP_WINDOWS.md.'
+            exit 1
+          }
+          exit 0
+
+      - name: Unit tests (ctest -R Unit)
+        shell: powershell
+        run: |
+          $build = if ($env:PRIMAL_CI_BUILD_DIR) { $env:PRIMAL_CI_BUILD_DIR } else { 'build-winparity' }
+          ctest --test-dir $build -C Release -R "Unit" --output-on-failure --timeout 300 --no-tests=error | Tee-Object -FilePath ctest-unit.log
+          $rc = $LASTEXITCODE
+          Write-Output "ctest exit code: $rc"
+          if ($rc -eq 0) { exit 0 }
+          # Tolerate exactly the known "Not Run" case: UnitDDGIFitGrid
+          # (exe never present on this matrix, r3-r10/r11 convention).
+          $log = (Get-Content ctest-unit.log) -join "`n"
+          $unexpected = $false
+          if ($log -match 'tests passed') { Write-Output '[units] summary line present' }
+          foreach ($m in [regex]::Matches($log, '(?m)^\s*\d+ - (\S+) \((Failed|Not Run)\)')) {
+            $name = $m.Groups[1].Value
+            $why  = $m.Groups[2].Value
+            if ($name -eq 'UnitDDGIFitGrid' -and $why -eq 'Not Run') {
+              Write-Output "[units] tolerated: $name ($why)"
+            } else {
+              Write-Output "::error::unexpected unit test problem: $name ($why)"
+              $unexpected = $true
+            }
+          }
+          if ($unexpected) { exit $rc }
+          Write-Output '[units] only UnitDDGIFitGrid Not Run - treated as pass (r3-r11 convention)'
+          exit 0
+
+      - name: Harness M2-M6 regression (18 runs + baseline byte gate + M6 strict)
+        shell: powershell
+        run: |
+          # This step records the gate result instead of failing fast, so the
+          # f350/parity gates below still run; the final verdict step fails
+          # the job if this or any other gate is red.
+          $build = if ($env:PRIMAL_CI_BUILD_DIR) { $env:PRIMAL_CI_BUILD_DIR } else { 'build-winparity' }
+          $python = (Get-Command python -ErrorAction SilentlyContinue).Source
+          if (-not $python) { $python = (Get-Command python3 -ErrorAction SilentlyContinue).Source }
+          $cands = @()
+          if ($env:PRIMAL_CI_BIN_DIR) { $cands += (Join-Path $env:PRIMAL_CI_BIN_DIR 'TestRHISponzaShared.exe') }
+          $cands += (Join-Path $build 'bin\Release\TestRHISponzaShared.exe')
+          $cands += 'Windows\Release\TestRHISponzaShared.exe'
+          $cands += 'Windows\x64\Release\TestRHISponzaShared.exe'
+          $cands += (Join-Path $build 'Release\TestRHISponzaShared.exe')
+          $cands += (Join-Path $build 'Tests\Release\TestRHISponzaShared.exe')
+          $exe = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) {
+            Write-Output '::error::TestRHISponzaShared.exe not found; probed:'
+            $cands | ForEach-Object { Write-Output "  $_" }
+            '2' | Out-File ci-out/harness_gate_exit.txt -Encoding ascii
+            exit 0
+          }
+          Write-Output "[harness] exe = $exe"
+          $baseline = $env:PRIMAL_CI_HARNESS_BASELINE
+          & $python scripts/win-ci/run_harness.py --repo . --exe $exe --out ci-out/harness --baseline "$baseline"
+          "$LASTEXITCODE" | Out-File ci-out/harness_gate_exit.txt -Encoding ascii
+          if (Test-Path 'ci-out/harness/harness_summary.md') {
+            Get-Content 'ci-out/harness/harness_summary.md' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
+          exit 0
+
+      - name: Four f350 capture groups (watchdogged, never fails the step)
+        shell: powershell
+        run: |
+          $build = if ($env:PRIMAL_CI_BUILD_DIR) { $env:PRIMAL_CI_BUILD_DIR } else { 'build-winparity' }
+          $cands = @()
+          if ($env:PRIMAL_CI_BIN_DIR) { $cands += (Join-Path $env:PRIMAL_CI_BIN_DIR 'TestVulkanSponzaRenderGraph.exe') }
+          $cands += (Join-Path $build 'bin\Release\TestVulkanSponzaRenderGraph.exe')
+          $cands += 'Windows\Release\TestVulkanSponzaRenderGraph.exe'
+          $cands += 'Windows\x64\Release\TestVulkanSponzaRenderGraph.exe'
+          $cands += (Join-Path $build 'Release\TestVulkanSponzaRenderGraph.exe')
+          $cands += (Join-Path $build 'Tests\Release\TestVulkanSponzaRenderGraph.exe')
+          $exe = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) {
+            Write-Output '::error::TestVulkanSponzaRenderGraph.exe not found; probed:'
+            $cands | ForEach-Object { Write-Output "  $_" }
+            exit 1
+          }
+          Write-Output "[f350] exe = $exe"
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350
+          exit 0
+
+      - name: PSNR/SSIM gate + summary (verdict deferred to the final step)
+        shell: powershell
+        run: |
+          # Records the gate result; the final verdict step fails the job.
+          $python = (Get-Command python -ErrorAction SilentlyContinue).Source
+          if (-not $python) { $python = (Get-Command python3 -ErrorAction SilentlyContinue).Source }
+          & $python scripts/win-ci/parity_report.py --repo . --gates ci-out/f350/f350_gates.json --out ci-out/f350 --summary $env:GITHUB_STEP_SUMMARY
+          "$LASTEXITCODE" | Out-File ci-out/parity_gate_exit.txt -Encoding ascii
+          exit 0
+
+      - name: Gate verdict (fails the job if any recorded gate is red)
+        shell: powershell
+        run: |
+          $red = $false
+          foreach ($g in @(@{ n = 'harness'; f = 'ci-out/harness_gate_exit.txt' },
+                           @{ n = 'parity';  f = 'ci-out/parity_gate_exit.txt' })) {
+            if (Test-Path $g.f) {
+              $v = (Get-Content $g.f -Raw).Trim()
+              if ($v -eq '0') { Write-Output "[verdict] $($g.n): PASS" }
+              else { Write-Output "[verdict] $($g.n): FAIL (exit $v)"; $red = $true }
+            } else {
+              Write-Output "[verdict] $($g.n): no result recorded (earlier step did not run)"
+              $red = $true
+            }
+          }
+          # Build / configure / shader / unit-test steps fail fast on their
+          # own; reaching this step means they were green.
+          if ($red) {
+            Write-Output '::error::one or more parity gates failed - see the summary table and artifacts'
+            exit 1
+          }
+          Write-Output '[verdict] all gates green'
+          exit 0
+
+      - name: Upload harness evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-m2-m6
+          path: |
+            ci-out/harness/runs.json
+            ci-out/harness/*.txt
+            ci-out/harness/*.md
+            ci-out/harness/*.log
+            ci-out/harness/verify/*/report.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload f350 parity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: f350-parity
+          path: |
+            ci-out/f350/*.ppm
+            ci-out/f350/*.png
+            ci-out/f350/*.json
+            ci-out/f350/*.log
+            ci-out/f350/*.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload build log (failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-winparity-log
+          path: |
+            msbuild-winparity.log
+            ctest-unit.log
+          if-no-files-found: ignore
+          retention-days: 14
