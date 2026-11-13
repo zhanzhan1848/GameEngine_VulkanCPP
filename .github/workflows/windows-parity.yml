@@ -59,8 +59,9 @@ jobs:
           $ws  = $env:GITHUB_WORKSPACE
           $url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
           $ref = $env:GITHUB_SHA
-          $max = 5
+          $max = 8
           git config --global --add safe.directory "$ws" 2>$null | Out-Null
+          git config --global http.version HTTP/1.1 2>$null | Out-Null
           $done = $false
           for ($i = 1; $i -le $max -and -not $done; $i++) {
             Write-Host "::group::checkout attempt $i/$max"
@@ -90,8 +91,9 @@ jobs:
             }
             Write-Host "::endgroup::"
             if ($rc -eq 0) { $done = $true } else {
-              Write-Host "::warning::checkout attempt $i failed (rc=$rc); backing off"
-              Start-Sleep -Seconds (20 * $i)
+              $wait = [Math]::Min(45 * $i, 240)
+              Write-Host "::warning::checkout attempt $i failed (rc=$rc); backing off ${wait}s"
+              Start-Sleep -Seconds $wait
             }
           }
           if (-not $done) { Write-Host "::error::checkout failed after $max attempts"; exit 1 }
