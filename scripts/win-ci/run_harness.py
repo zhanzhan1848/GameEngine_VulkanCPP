@@ -272,6 +272,10 @@ def main():
     ap.add_argument("--m6-script", default=None)
     args = ap.parse_args()
 
+    # Create the out root before any early exit (usage errors, baseline
+    # missing) so the caller's gate recording can always write under it.
+    os.makedirs(os.path.abspath(args.out), exist_ok=True)
+
     repo = os.path.abspath(args.repo)
     exe = os.path.abspath(args.exe)
     out_root = os.path.abspath(args.out)

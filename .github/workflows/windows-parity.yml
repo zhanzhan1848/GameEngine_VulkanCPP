@@ -275,6 +275,7 @@ jobs:
           # This step records the gate result instead of failing fast, so the
           # f350/parity gates below still run; the final verdict step fails
           # the job if this or any other gate is red.
+          New-Item -ItemType Directory -Force ci-out, ci-out\harness, ci-out\f350 | Out-Null
           $build = if ($env:PRIMAL_CI_BUILD_DIR) { $env:PRIMAL_CI_BUILD_DIR } else { 'build-winparity' }
           $python = (Get-Command python -ErrorAction SilentlyContinue).Source
           if (-not $python) { $python = (Get-Command python3 -ErrorAction SilentlyContinue).Source }
@@ -304,6 +305,7 @@ jobs:
       - name: Four f350 capture groups (watchdogged, never fails the step)
         shell: powershell
         run: |
+          New-Item -ItemType Directory -Force ci-out, ci-out\harness, ci-out\f350 | Out-Null
           $build = if ($env:PRIMAL_CI_BUILD_DIR) { $env:PRIMAL_CI_BUILD_DIR } else { 'build-winparity' }
           $cands = @()
           if ($env:PRIMAL_CI_BIN_DIR) { $cands += (Join-Path $env:PRIMAL_CI_BIN_DIR 'TestVulkanSponzaRenderGraph.exe') }
