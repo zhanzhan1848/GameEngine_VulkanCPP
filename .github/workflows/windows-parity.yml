@@ -288,8 +288,17 @@ jobs:
           $cands += (Join-Path $build 'Tests\Release\TestRHISponzaShared.exe')
           $exe = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $exe) {
+            # recursive fallback: the MSVC output dir convention has drifted
+            # between repo revisions; find the exe wherever ALL_BUILD put it
+            $exe = Get-ChildItem -Path . -Recurse -Filter 'TestRHISponzaShared.exe' -ErrorAction SilentlyContinue |
+                   Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $exe) {
             Write-Output '::error::TestRHISponzaShared.exe not found; probed:'
             $cands | ForEach-Object { Write-Output "  $_" }
+            Write-Output '[diag] recursive exe search found nothing; msbuild log mentions:'
+            Select-String -Path 'msbuild-winparity.log' -Pattern 'RHISponzaShared' -ErrorAction SilentlyContinue |
+              Select-Object -First 8 | ForEach-Object { Write-Output "  $($_.Line)" }
             '2' | Out-File ci-out/harness_gate_exit.txt -Encoding ascii
             exit 0
           }
@@ -316,8 +325,16 @@ jobs:
           $cands += (Join-Path $build 'Tests\Release\TestVulkanSponzaRenderGraph.exe')
           $exe = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $exe) {
+            $exe = Get-ChildItem -Path . -Recurse -Filter 'TestVulkanSponzaRenderGraph.exe' -ErrorAction SilentlyContinue |
+                   Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $exe) {
             Write-Output '::error::TestVulkanSponzaRenderGraph.exe not found; probed:'
             $cands | ForEach-Object { Write-Output "  $_" }
+            Write-Output '[diag] recursive exe search found nothing; msbuild log mentions:'
+            Select-String -Path 'msbuild-winparity.log' -Pattern 'SponzaRenderGraph' -ErrorAction SilentlyContinue |
+              Select-Object -First 8 | ForEach-Object { Write-Output "  $($_.Line)" }
+            Write-Output '[diag] Windows\Release exists: ' + (Test-Path 'Windows\Release')
             exit 1
           }
           Write-Output "[f350] exe = $exe"
