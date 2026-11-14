@@ -58,7 +58,8 @@ environment variables:
 | `PRIMAL_CI_HARNESS_BASELINE` | yes | Directory holding the seeded M2-M6 frame baseline (section 5). If unset, the harness gate fails with seed instructions - it is never silently skipped. |
 | `D3D12_GLSLANG` / `D3D12_SPIRV_CROSS` / `D3D12_DXC` | if not on PATH | Absolute paths to glslangValidator / spirv-cross / dxc. Read natively by `scripts/build_d3d12_shaders.py`. |
 | `PRIMAL_CI_OFFLINE_DEPS` | optional | Directory with `agility-sdk\build\native\include\d3d12.h` (NuGet layout) and `zlib-src\CMakeLists.txt`. Injected as `-DPRIMAL_D3D12_AGILITY_SDK_DIR` / `-DPRIMAL_ZLIB_SOURCE_DIR`. If unset, CMake downloads Agility 1.611.2 from nuget.org (SHA-pinned) and FetchContent-pulls zlib - needs outbound network. |
-| `PRIMAL_CI_SDK_MODULES` | optional | `diagnostic-sdk-modules` directory injected as `-DCMAKE_MODULE_PATH` (e.g. for finding DirectXTex/FBX config packages). Optional when `BUILD_CONTENT_TOOLS=OFF`. |
+| `PRIMAL_CI_SDK_MODULES` | **yes** | `diagnostic-sdk-modules` directory injected as `-DCMAKE_MODULE_PATH` - provides the DirectXTex/FBX config packages that `find_package(... REQUIRED)` needs with `BUILD_CONTENT_TOOLS=ON`. |
+| `PRIMAL_CI_THIRD_PARTY_DIR` | **yes** | Directory holding vendored `FBX_SDK\` and `VHACD\` (robocopy from the retest tree's `third_party\`). Staged into the checkout's `third_party\` before configure. VHACD's gitlink pin only exists on the dev machine and FBX_SDK is a vendored SDK - neither is materializable from git. |
 | `PRIMAL_CI_BUILD_DIR` | optional | Build directory inside the checkout (default `build-winparity`). Reused across runs (checkout uses `clean: false`) for incremental builds. |
 | `PRIMAL_CI_BIN_DIR` | optional | Explicit directory of the built test exes; otherwise the workflow probes `build\bin\Release`, `Windows\Release`, `Windows\x64\Release`, `build\Release`, `build\Tests\Release`. |
 
@@ -89,11 +90,14 @@ Optional: `Sponza_pipeline_signed_v5.model` (150,864,704 B, SHA256
 needed as a bake fallback when the v3 SDF cache is absent; the CI does not
 require it.
 
-## 5. Seeding the harness baseline (one-time per engine baseline)
+## 5. Harness baseline (auto-bootstrapped)
 
 The 276-frame M2-M6 byte gate compares against a runner-local baseline, not
-git. Seed it once on a known-good commit (r11 `73d6956` or the merged dev tip
-`05e44628`/`b8bb56c3`), after building normally:
+git. **The first green run bootstraps it automatically**: the matrix always
+runs M1-M6; if runs and M6-strict are green and no baseline exists yet,
+`run_harness.py` seeds the baseline from that run (seed.json marks it
+BOOTSTRAP) and the byte gate activates from the next run. Manual seeding is
+still available on a known-good commit (r11 `73d6956` or merged dev tip):
 
 ```bat
 set PRIMAL_CI_HARNESS_BASELINE=C:\primal-ci\harness-baseline

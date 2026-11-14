@@ -321,53 +321,6 @@ def main():
               encoding="utf-8") as fh:
         json.dump(records, fh, indent=2)
 
-    if args.seed:
-        if not args.baseline:
-            fail_usage("--seed needs --baseline or PRIMAL_CI_HARNESS_BASELINE")
-        seed_baseline(records, args.baseline, args.force)
-        print("[harness] baseline seeded at %s (%d frames total)" %
-              (args.baseline, total_frames), flush=True)
-        print("[harness] seed mode: byte gate skipped for this invocation",
-              flush=True)
-        with open(os.path.join(out_root, "harness_summary.md"), "w",
-                  encoding="utf-8") as fh:
-            fh.write("### Harness M2-M6 - SEED RUN (no byte gate)\n\n")
-            fh.write("Total frames: %d written to baseline %s.\n" %
-                     (total_frames, args.baseline))
-        sys.exit(0)
-
-    if not args.baseline or not os.path.isdir(args.baseline):
-        sys.stderr.write(
-            "[harness] GATE FAIL - PRIMAL_CI_HARNESS_BASELINE is not set or "
-            "does not exist:\n  %r\n"
-            "[harness] seed it on a known-good commit (r11 73d6956 or "
-            "the merged dev tip):\n"
-            "  set PRIMAL_CI_HARNESS_BASELINE=C:\\primal-ci\\harness-baseline\n"
-            "  git checkout <known-good-sha>\n"
-            "  python scripts\\win-ci\\run_harness.py --repo . --exe "
-            "<build>\\bin\\Release\\TestRHISponzaShared.exe --out "
-            "ci-out\\harness --seed\n"
-            "[harness] after seeding, re-run this CI job; the gate then "
-            "requires every frame byte-identical to the baseline.\n")
-        sys.exit(2)
-
-    if True:
-        lines, totals = compare_to_baseline(records, args.baseline)
-        report = ("vs baseline %s total=%d same=%d differ=%d "
-                  "missing_old=%d missing_new=%d" %
-                  (args.baseline, totals["total"], totals["same"],
-                   totals["differ"], totals["missing_old"],
-                   totals["missing_new"]))
-        with open(os.path.join(out_root, "frame-sha-vs-baseline.txt"), "w",
-                  encoding="utf-8") as fh:
-            fh.write(report + "\n" + "\n".join(lines) + "\n")
-        print("[harness] " + report, flush=True)
-        for line in lines:
-            print("  " + line, flush=True)
-        if (totals["differ"] or totals["missing_old"]
-                or totals["missing_new"]):
-            gate["baseline_ok"] = False
-
     m6_results = []
     if not args.skip_m6_verify:
         m6_results, m6_ok = verify_m6(records, out_root, repo, m6_script)
@@ -390,6 +343,49 @@ def main():
                          (r["exit"], r["run"], r["frame"], r["elapsed_s"],
                           "PASS" if r["pass"] else "FAIL"))
 
+    # Baseline handling. The matrix ALWAYS runs first (M1-M6 must execute
+    # regardless); the baseline only decides whether the byte gate evaluates.
+    # With no baseline on disk, bootstrap-seed it from this run - but never
+    # from a build that failed its own runs/m6 gates (the f350 PSNR gate vs
+    # the Mac reference is the independent anchor).
+    baseline_present = bool(args.baseline) and os.path.isdir(args.baseline)
+    bootstrap = args.seed or not baseline_present
+    baseline_note = ""
+
+    if args.seed and not args.baseline:
+        fail_usage("--seed needs --baseline or PRIMAL_CI_HARNESS_BASELINE")
+
+    if bootstrap:
+        if not (gate["runs_ok"] and gate["m6_ok"]):
+            gate["baseline_ok"] = True  # nothing to compare against
+            baseline_note = "skipped (bootstrap refused: runs/m6 gates red)"
+            print("[harness] baseline missing and runs/m6 gates are red - "
+                  "no bootstrap; byte gate remains unevaluated", flush=True)
+        else:
+            seed_baseline(records, args.baseline, args.force)
+            gate["baseline_ok"] = True
+            baseline_note = ("BOOTSTRAP (seeded from this run; byte gate "
+                             "active from the next run)")
+            print("[harness] BASELINE BOOTSTRAP: %d frames seeded at %s "
+                  "(runs+m6 gates green); byte gate active from the next run"
+                  % (total_frames, args.baseline), flush=True)
+    else:
+        lines, totals = compare_to_baseline(records, args.baseline)
+        report = ("vs baseline %s total=%d same=%d differ=%d "
+                  "missing_old=%d missing_new=%d" %
+                  (args.baseline, totals["total"], totals["same"],
+                   totals["differ"], totals["missing_old"],
+                   totals["missing_new"]))
+        with open(os.path.join(out_root, "frame-sha-vs-baseline.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(report + "\n" + "\n".join(lines) + "\n")
+        print("[harness] " + report, flush=True)
+        for line in lines:
+            print("  " + line, flush=True)
+        if (totals["differ"] or totals["missing_old"]
+                or totals["missing_new"]):
+            gate["baseline_ok"] = False
+
     # Markdown summary for $GITHUB_STEP_SUMMARY (appended by the workflow).
     with open(os.path.join(out_root, "harness_summary.md"), "w",
               encoding="utf-8") as fh:
@@ -411,6 +407,8 @@ def main():
         fh.write("\nTotal frames: %d (official r11: 276). " % total_frames)
         fh.write("M6 strict: %d/%d PASS.\n" %
                  (sum(1 for r in m6_results if r["pass"]), len(m6_results)))
+        fh.write("Baseline: %s\n" % (baseline_note or
+                                      "byte-identity compared"))
 
     print("[harness] gate: runs_ok=%s baseline_ok=%s m6_ok=%s" %
           (gate["runs_ok"], gate["baseline_ok"], gate["m6_ok"]), flush=True)

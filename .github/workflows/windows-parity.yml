@@ -131,6 +131,8 @@ jobs:
           Check ([bool]$cross) "spirv-cross ($cross)"
           Check ([bool]$dxc) "dxc ($dxc)"
           Check ([bool]$env:PRIMAL_CI_ASSET_DIR) "PRIMAL_CI_ASSET_DIR (local assets: Sponza.model, SponzaTangentFrames.model, sunset.hdr, Sponza_global_sdf.v3.cache)"
+          Check ([bool]$env:PRIMAL_CI_THIRD_PARTY_DIR) "PRIMAL_CI_THIRD_PARTY_DIR (vendored third_party: FBX_SDK\, VHACD\ - ContentTools/integration tests need them)"
+          Check ([bool]$env:PRIMAL_CI_SDK_MODULES) "PRIMAL_CI_SDK_MODULES (diagnostic-sdk-modules: DirectXTex/FBX config packages for find_package)"
           if (-not $env:PRIMAL_CI_HARNESS_BASELINE) {
             Write-Output "[preflight] WARN PRIMAL_CI_HARNESS_BASELINE not set - the harness step will fail with seed instructions"
           } else {
@@ -174,6 +176,25 @@ jobs:
           if ($bad) { exit 1 }
           exit 0
 
+      - name: Stage vendored third_party (FBX_SDK / VHACD)
+        shell: powershell
+        run: |
+          # ContentTools (and every integration test behind TARGET
+          # ContentTools) needs the Windows FBX SDK and the VHACD sources.
+          # Neither is materializable on CI: FBX_SDK is a vendored SDK (not in
+          # git), VHACD's pinned commit only exists on the dev machine. Both
+          # are seeded once from the retest tree and mirrored in here.
+          $src = $env:PRIMAL_CI_THIRD_PARTY_DIR
+          foreach ($d in @('FBX_SDK', 'VHACD')) {
+            $from = Join-Path $src $d
+            $to = Join-Path 'third_party' $d
+            if (-not (Test-Path $from)) { Write-Output "::error::vendored source missing: $from"; exit 1 }
+            Write-Output "staging $from -> $to"
+            robocopy $from $to /E /NFL /NDL /NJH /NJS | Out-Null
+            if ($LASTEXITCODE -ge 8) { Write-Output "::error::robocopy failed for $d (code $LASTEXITCODE)"; exit 1 }
+          }
+          exit 0
+
       - name: Configure CMake (VS2022 x64 Release, dual backend)
         shell: powershell
         run: |
@@ -190,8 +211,7 @@ jobs:
           $cmakeArgs = @('-S', '.', '-B', $build,
                          '-G', 'Visual Studio 17 2022', '-A', 'x64',
                          '-DCMAKE_BUILD_TYPE=Release',
-                         '-DENABLE_D3D12=ON', '-DENABLE_VULKAN=ON',
-                         '-DBUILD_CONTENT_TOOLS=OFF') + $extra
+                         '-DENABLE_D3D12=ON', '-DENABLE_VULKAN=ON') + $extra
           & cmake @cmakeArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Output '--- D3D12 gate markers ---'
