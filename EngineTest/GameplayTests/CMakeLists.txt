@@ -20,5 +20,13 @@ endforeach()
 # 再链静态 Engine 会双副本单例（transform/gameplay 运行态读到空副本，实测断言）。
 add_executable(TestGameplayE2E TestGameplayE2E.cpp)
 target_link_libraries(TestGameplayE2E PRIVATE EngineDLL)
+# Windows 上 EngineDLL 是共享 DLL，MSVC 没有 rpath——测试 exe 旁边必须
+# 有 EngineDLL.dll，否则进程启动即 0xC0000135（Windows CI 首跑实测）。
+# Mac 走既有 rpath，此拷贝在 WIN32 下才注册。
+if(WIN32)
+    add_custom_command(TARGET TestGameplayE2E POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:EngineDLL> $<TARGET_FILE_DIR:TestGameplayE2E>)
+endif()
 add_test(NAME UnitTestGameplayE2E COMMAND TestGameplayE2E)
 set_tests_properties(UnitTestGameplayE2E PROPERTIES TIMEOUT 120)
