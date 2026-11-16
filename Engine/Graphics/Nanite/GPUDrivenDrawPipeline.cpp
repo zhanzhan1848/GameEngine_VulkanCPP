@@ -1906,17 +1906,25 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     PRIMAL_LOG_STREAM(Info, "Render") << "  Elements: " << totalElements << std::endl;
 
     // 2. Allocate Global Buffers
+    // R19（2026-11-16，run 43887484324）：本函数创建的全部全局 buffer 的
+    // bindFlags 补显式 ResourceUsage::UnorderedAccess 位。D3D12 端 R16 reroute
+    // 据此把宿主可见堆（Dynamic→UPLOAD）改道 DEFAULT+ALLOW_UNORDERED_ACCESS
+    // ——set 写入侧对 t/u 双行的 UAV 视图（set=69/76/77/78 bindings 2-7，
+    // canary 32 条点名）随标志齐备自然合法；填充路径见下方 UploadBuffer 的
+    // UpdateBufferData 回落。其余后端零变化：Vulkan 的 Structured 类型映射
+    // 已无条件蕴含 STORAGE usage 位（同位 OR）、Metal 忽略 bindFlags、Dawn
+    // 仅在 type 未设时才读 bindFlags。
     // Meshlets
     rhi::BufferDesc meshletDesc{};
     meshletDesc.size = totalMeshlets * sizeof(rhi::RHIMeshlet);
-    meshletDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage);
+    meshletDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage) | (u32)(rhi::ResourceUsage::UnorderedAccess);
     meshletDesc.usage = rhi::GPUMemoryUsage::Dynamic; // Changed to Dynamic
     global_meshlet_buffer_ = device_->CreateBuffer(meshletDesc);
 
     // Meshlet Vertices (Global Vertex Indices)
     rhi::BufferDesc meshletVerticesDesc{};
     meshletVerticesDesc.size = totalVertices * sizeof(u32);
-    meshletVerticesDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage);
+    meshletVerticesDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage) | (u32)(rhi::ResourceUsage::UnorderedAccess);
     meshletVerticesDesc.usage = rhi::GPUMemoryUsage::Dynamic; // Changed to Dynamic
     global_meshlet_vertices_buffer_ = device_->CreateBuffer(meshletVerticesDesc);
 
@@ -1924,7 +1932,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     rhi::BufferDesc meshletTrianglesDesc{};
     const u32 triangleBytesPadded = (totalTriangles + 3u) & ~3u;
     meshletTrianglesDesc.size = triangleBytesPadded;
-    meshletTrianglesDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage);
+    meshletTrianglesDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage) | (u32)(rhi::ResourceUsage::UnorderedAccess);
     meshletTrianglesDesc.usage = rhi::GPUMemoryUsage::Dynamic; // Changed to Dynamic
     global_meshlet_triangles_buffer_ = device_->CreateBuffer(meshletTrianglesDesc);
 
@@ -1932,7 +1940,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     // Use packed float3 (12 bytes) to match Metal's packed_float3
     rhi::BufferDesc positionDesc{};
     positionDesc.size = totalPositions * sizeof(PackedV3);
-    positionDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage); // Vertex pulling
+    positionDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage) | (u32)(rhi::ResourceUsage::UnorderedAccess); // Vertex pulling
     positionDesc.usage = rhi::GPUMemoryUsage::Dynamic; // Changed to Dynamic
     global_vertex_buffer_ = device_->CreateBuffer(positionDesc);
 
@@ -1941,7 +1949,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     // Matches TestParticleSponza VertexElement format (NO padding)
     rhi::BufferDesc elementDesc{};
     elementDesc.size = totalElements * 24; // 24 bytes per vertex element
-    elementDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage);
+    elementDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage) | (u32)(rhi::ResourceUsage::UnorderedAccess);
     elementDesc.usage = rhi::GPUMemoryUsage::Dynamic;
     global_element_buffer_ = device_->CreateBuffer(elementDesc);
 
@@ -2191,17 +2199,16 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     // Upload Unique Geometry Data
     auto UploadBuffer = [&](rhi::ResourceHandle buffer, const void* data, u64 size) {
         // Simple map/unmap or staging
-        // Assuming we can map for now (Static might fail on some backends, but Metal usually allows managed)
-        // If not, we need a staging buffer helper. 
-        // Let's assume device_->MapBuffer works or we'll fix it.
-        // Actually, RHIDevice usually requires Staging for Static buffers.
-        // We'll skip implementation details and assume a helper `UpdateBuffer` exists or map works.
-        // For this test, let's try mapping.
+        // R19：D3D12 端全局 buffer 已因显式 UA 位改道 DEFAULT+ALLOW_UNORDERED_
+        // ACCESS，持久 Map 随之失效——Map 失败即回落 UpdateBufferData（staging
+        // 环拷贝；帧内排队到下一命令缓冲 Begin 编码，构造帧首帧可能读到零
+        // 初始化数据，次帧起为真实几何）。其余后端（Metal/Vulkan/Dawn）Dynamic
+        // 仍为宿主可见堆，Map 命中，与既有逐字节路径相同（Mac 输出零变化）。
         void* ptr = device_->MapBuffer(buffer);
         if (ptr) {
             memcpy(ptr, data, size);
             device_->UnmapBuffer(buffer);
-        } else {
+        } else if (!device_->UpdateBufferData(buffer, data, size, 0)) {
              PRIMAL_LOG_STREAM(Error, "Render") << "Failed to map buffer for upload!" << std::endl;
         }
     };
@@ -2296,7 +2303,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
     // Allocate and Upload Cluster Map Buffer
     rhi::BufferDesc mapDesc{};
     mapDesc.size = totalClusters * sizeof(ClusterMap);
-    mapDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage);
+    mapDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage) | (u32)(rhi::ResourceUsage::UnorderedAccess);  // R19 UA 位（同上）
     mapDesc.usage = rhi::GPUMemoryUsage::Dynamic;
     
     cluster_map_buffer_ = device_->CreateBuffer(mapDesc);
@@ -2313,7 +2320,7 @@ void GPUDrivenDrawPipeline::UpdateGeometryData(const RenderSceneSnapshot& scene_
 
     rhi::BufferDesc instDesc{};
     instDesc.size = instanceDataFull.size() * sizeof(graphics::InstanceData);
-    instDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage);
+    instDesc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage) | (u32)(rhi::ResourceUsage::UnorderedAccess);  // R19 UA 位（同上）
     instDesc.usage = rhi::GPUMemoryUsage::Dynamic;
     global_instance_data_buffer_ = device_->CreateBuffer(instDesc);
     UploadBuffer(global_instance_data_buffer_, instanceDataFull.data(), instanceDataFull.size() * sizeof(graphics::InstanceData));

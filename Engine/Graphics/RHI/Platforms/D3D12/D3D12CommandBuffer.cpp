@@ -15,6 +15,7 @@
 
 #include "Engine/Common/CoreLogStream.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <mutex>
 #include <unordered_set>
@@ -313,6 +314,14 @@ bool WarnBarrierDeclMismatchOnce(u64 resource) {
     std::lock_guard<std::mutex> lock(g_barrierDeclWarnMutex);
     return g_barrierDeclWarned.insert(resource).second;
 }
+
+// R19：宿主堆 buffer 上 barrier 请求的一次性去重（同上防御口径）。
+std::mutex g_hostHeapBarrierWarnMutex;
+std::unordered_set<u64> g_hostHeapBarrierWarned;
+bool WarnHostHeapBarrierOnce(u64 resource) {
+    std::lock_guard<std::mutex> lock(g_hostHeapBarrierWarnMutex);
+    return g_hostHeapBarrierWarned.insert(resource).second;
+}
 } // namespace
 
 void D3D12CommandBufferImpl::InsertBarrier(const ResourceBarrier* barriers, u32 barrierCount) {
@@ -350,6 +359,27 @@ void D3D12CommandBufferImpl::InsertBarrier(const ResourceBarrier* barriers, u32 
         // buffer 的 Track 被跟踪器拒绝，自然维持 M1 手工路径 no-op）。
         d3d12::D3D12Buffer* bufHandle = dev.GetBuffer(rb.resource);
         if (bufHandle) {
+            // R19（run 43887484324 id=524 根修）：宿主堆（UPLOAD/READBACK）
+            // buffer 是无 barrier 区——规定态 GENERIC_READ/COPY_DEST 不可被
+            // ResourceBarrier 转换，对其发 transition 即 validation "states
+            // mismatch support required from D3D12_RESOURCE_FLAGS"（实测
+            // DDGI irr/depth/conf 的 UAV→SRV 声明 barrier 打在 UPLOAD 堆
+            // probe buffer 上）。按 D3D12 契约：宿主堆 buffer 的读写序由堆
+            // 类型自身保证，barrier 请求整条丢弃；tracker 模型钉在注册态
+            // General（COMMON）——不 Track/不 Transition，下游 CopyBuffer 等
+            // 的零 op 分支与本 guard 口径一致。每 resource 一次性 Warn 留痕
+            //（数据通路的正确修法 = buffer 属主把 desc 改 DEFAULT 路由）。
+            if (bufHandle->GetHeapType() != D3D12_HEAP_TYPE_DEFAULT) {
+                if (WarnHostHeapBarrierOnce(rb.resource)) {
+                    PRIMAL_LOG_STREAM(Warn, "RHI")
+                        << "[D3D12CommandBuffer] InsertBarrier skipped: host-heap "
+                           "buffer is barrier-free (GENERIC_READ/COPY_DEST are "
+                           "terminal states): resource="
+                        << rb.resource << " afterState="
+                        << static_cast<u32>(rb.afterState) << std::endl;
+                }
+                continue;
+            }
             D3D12SubresourceKey key{};
             key.resource = rb.resource;
             key.subresource = 0;
@@ -1131,6 +1161,32 @@ void D3D12CommandBufferImpl::CopyBuffer(ResourceHandle src, ResourceHandle dst,
                       : (srcBuf->GetBufferDesc().size > srcOffset
                              ? srcBuf->GetBufferDesc().size - srcOffset : 0);
     if (bytes == 0) return;
+    // R19（run 43887484324 id=538 / frame 3→4 GPU 楔死根修）：堆合法性闸门。
+    // D3D12 里 CopyBufferRegion 的目标必须能进入 COPY_DEST 态——UPLOAD 堆
+    // 规定态 GENERIC_READ 不可转换 → 拷入 UPLOAD = 不可能操作（实测 GIGather_
+    // FlatIrr/FlatOpenSky 以 Storage|TransferDst|Dynamic 落 UPLOAD，逐帧
+    // CopyBuffer 打入 → 驱动层楔死 → fence 永不 signal → watchdog exit 7，
+    // validation "Resource state (0xAC3 GENERIC_READ) invalid as destination"）。
+    // 对称拦 READBACK 作源（规定态 COPY_DEST 同理不可转到 COPY_SOURCE）。
+    // 跳过 + Error（封顶 32）保住设备与帧循环；数据通路由 buffer 属主把
+    // desc 改显式 UA 位（R16 reroute → DEFAULT）后恢复。dst=READBACK（born
+    // COPY_DEST）/src=UPLOAD（GENERIC_READ 含 COPY_SOURCE）为合法面，不拦。
+    if (dstBuf->GetHeapType() == D3D12_HEAP_TYPE_UPLOAD ||
+        srcBuf->GetHeapType() == D3D12_HEAP_TYPE_READBACK) {
+        static std::atomic<u32> s_impossibleCopyReports{0};
+        if (s_impossibleCopyReports.fetch_add(1, std::memory_order_relaxed) < 32) {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12CommandBuffer] CopyBuffer skipped: "
+                << (dstBuf->GetHeapType() == D3D12_HEAP_TYPE_UPLOAD
+                        ? "UPLOAD-heap dst (GENERIC_READ is terminal — cannot enter COPY_DEST)"
+                        : "READBACK-heap src (COPY_DEST is terminal — cannot enter COPY_SOURCE)")
+                << " (fix: add explicit UnorderedAccess bind flag to reroute buffer to "
+                   "DEFAULT heap) src=" << src << " dst=" << dst
+                << " bytes=" << bytes
+                << " name='" << dstBuf->GetBufferDesc().name << "'" << std::endl;
+        }
+        return;
+    }
     // R21-A（M5 #538 修复）：tracker 驱动的拷贝态显式转换（对齐 R17-A
     // CopyTextureToBuffer 先例）。M1 的"零 barrier + COMMON 提升/提交衰减"
     // 只对 COMMON 起点成立；帧内经 UAV/INDIRECT_ARGUMENT 流转的 buffer

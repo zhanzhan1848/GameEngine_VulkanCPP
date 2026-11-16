@@ -22,6 +22,15 @@
 //     DXGI_ERROR_INVALID_CALL（Windows CI f350 frame0 三轮复现根因）。
 //     持久 Map 随改道失效（消费面已审计为 GPU 写目标）；仅 Storage 位、
 //     无显式 UA 位的宿主可见堆 buffer 不改道（SRV-only 消费 + CPU 直填）。
+//   - 宿主堆 = 无 barrier 区（R19，run 43887484324）：UPLOAD/READBACK 堆
+//     buffer 的规定态 GENERIC_READ/COPY_DEST 是终态，不可被 ResourceBarrier
+//     转换——InsertBarrier 对宿主堆 buffer 整条丢弃（tracker 钉 General），
+//     CopyBuffer 拦"UPLOAD 作 dst / READBACK 作 src"的不可能拷贝（否则
+//     驱动层楔死：fence 永不 signal → watchdog exit 7）。DEFAULT 堆
+//     buffer（含 UAV 标志资源）按 buffer 的 COMMON 隐式提升/提交衰减规则
+//     走既有零 op/tracker 路径——ALLOW_UNORDERED_ACCESS 标志不剥夺 buffer
+//     的隐式提升（该限制属 non-simultaneous-access 纹理；frames 1-3 带
+//     标志 culling buffer 的 compute/拷贝路径实证）。
 //
 // UpdateData 路由：UPLOAD heap → 直接 memcpy；DEFAULT heap → 设备上传环
 // （帧内 QueueCopyBuffer 下一命令缓冲编码；帧外 FlushBlocking 阻塞）。

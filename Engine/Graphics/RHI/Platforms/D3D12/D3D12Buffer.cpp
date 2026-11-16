@@ -165,9 +165,11 @@ bool D3D12Buffer::Initialize() {
     // 的目标资源必须带此标志，否则 CREATEUNORDEREDACCESSVIEW_INVALIDRESOURCE
     // 族失败（十九测 M5 argsBuf/counterBuf 在 #882 修后的下一炸点）。
     // 约束：①UAV 标志与 UPLOAD/READBACK 堆互斥 → 仅 DEFAULT 堆路由；
-    // ②带标志后资源失去 simultaneous-access 隐式提升/衰减——UAV 写前与
-    // 拷贝源读取前的状态转换须由调用方经 StateTracker 显式化（共享宿主
-    // M5 已配套补齐）。Vulkan parity：BufferDescToVkUsage 对同两位映射
+    // ②（R19 勘误，run 43887484324 frames 1-3 实证）buffer 的 COMMON 隐式
+    // 提升/提交衰减不受 ALLOW_UNORDERED_ACCESS 影响——该限制属
+    // non-simultaneous-access 纹理；既有"带标志须显式转换"的记载仅对
+    // M5 那类经 tracker 显式流转的路径成立，零 op 隐式面照常合法。
+    // Vulkan parity：BufferDescToVkUsage 对同两位映射
     // VK_BUFFER_USAGE_STORAGE_BUFFER_BIT（VulkanBuffer.cpp L66-79）——同
     // 输入两后端均产出 storage 能力，语义对齐（R15-1 教训：标志增补必须
     // 对齐 RHI 契约）。
