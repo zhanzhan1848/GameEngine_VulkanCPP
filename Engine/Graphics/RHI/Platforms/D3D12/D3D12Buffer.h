@@ -59,6 +59,11 @@ public:
         return resource_ ? resource_->GetGPUVirtualAddress() : 0;
     }
     D3D12_HEAP_TYPE GetHeapType() const { return heapType_; }
+    /// R17：资源是否实际带 ALLOW_UNORDERED_ACCESS 创建。DEFAULT 堆 ≠ 有
+    /// 标志（快照/placeholder 类 Static+无 storage 位 buffer 在 DEFAULT 堆
+    /// 但无标志）——CreateUnorderedAccessView 写入侧的 fail-soft 判据必须
+    /// 用本值而非堆类型（run 43876024964 实测 heapDefault=1 误导排查一轮）。
+    bool HasUavFlag() const { return uavFlagged_; }
     const BufferDesc& GetBufferDesc() const { return bufferDesc_; }
 
 protected:
@@ -73,6 +78,7 @@ private:
     D3D12MA::Allocation* allocation_ = nullptr;
     void* mappedPtr_ = nullptr;             // UPLOAD/READBACK 持久映射
     D3D12_HEAP_TYPE heapType_ = D3D12_HEAP_TYPE_DEFAULT;
+    bool uavFlagged_ = false;               // R17：Initialize 按最终 resDesc.Flags 记录
     bool warnedMapUnsupported_ = false;
     BufferDesc bufferDesc_{};               // 原始 desc（size/usage/类型信息）
 };

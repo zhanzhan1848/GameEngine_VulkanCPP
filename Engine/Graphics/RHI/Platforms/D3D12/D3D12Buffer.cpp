@@ -66,6 +66,7 @@ D3D12Buffer::D3D12Buffer(D3D12Buffer&& other) noexcept
       allocation_(other.allocation_),
       mappedPtr_(other.mappedPtr_),
       heapType_(other.heapType_),
+      uavFlagged_(other.uavFlagged_),
       warnedMapUnsupported_(other.warnedMapUnsupported_),
       bufferDesc_(std::move(other.bufferDesc_)) {
     other.allocation_ = nullptr;
@@ -79,6 +80,7 @@ D3D12Buffer& D3D12Buffer::operator=(D3D12Buffer&& other) noexcept {
         allocation_ = other.allocation_;
         mappedPtr_ = other.mappedPtr_;
         heapType_ = other.heapType_;
+        uavFlagged_ = other.uavFlagged_;
         warnedMapUnsupported_ = other.warnedMapUnsupported_;
         bufferDesc_ = std::move(other.bufferDesc_);
         other.allocation_ = nullptr;
@@ -176,6 +178,10 @@ bool D3D12Buffer::Initialize() {
         (heapType_ == D3D12_HEAP_TYPE_DEFAULT && storageSemantic)
             ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
             : D3D12_RESOURCE_FLAG_NONE;
+    // R17：按最终 Flags 记账——堆类型 ≠ 标志（DEFAULT 堆上无 storage 位的
+    // buffer 无标志）。写入侧 fail-soft 判据消费本值（HasUavFlag）。
+    uavFlagged_ =
+        (resDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) != 0;
 
     // 初始状态按 heap type 规定值（见文件头映射表）。
     const D3D12_RESOURCE_STATES initialState =

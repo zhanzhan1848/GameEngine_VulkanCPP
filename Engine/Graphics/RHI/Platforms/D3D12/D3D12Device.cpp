@@ -631,9 +631,12 @@ void D3D12Device::reportDeviceRemoval(HRESULT reason) {
         default: break;
     }
     // InfoQueue 尾部消息：丢失瞬间的驱动侧诊断。
+    // R17：8 → 64。run 43876024964 实测移除窗口内多类误用并发（SRV 维度
+    // 溢出 + UAV 无标志目标），8 条尾部截断会丢前面的现场；容量已抬到
+    // 65536（d3d12-blackfix），64 条 drain 无溢出风险。
     if (infoQueue_) {
         const u64 count = infoQueue_->GetNumStoredMessages();
-        const u64 tail = count > 8 ? count - 8 : 0;  // 最多 8 条
+        const u64 tail = count > 64 ? count - 64 : 0;  // 最多 64 条
         for (u64 i = tail; i < count; ++i) {
             SIZE_T size = 0;
             if (FAILED(infoQueue_->GetMessage(i, nullptr, &size)) || size == 0) continue;
@@ -1854,6 +1857,24 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                 assert(slot < descriptorHeaps_.CbvSrvUavCapacity());
                 // R13/T1 双写第一步：Create*View 落 shadow 堆（dst = shadow 槽）。
                 const D3D12_CPU_DESCRIPTOR_HANDLE dst = descriptorHeaps_.CbvSrvUavShadowCpuHandle(slot);
+                // R17（run 43876024964 根修）：RAW SRV/UAV 的 NumElements 必须
+                // 落在资源内。宿主 range=~0ull（VK_WHOLE_SIZE 约定）此前被
+                // UINT 截断成 0xFFFFFFFF——对 400000B 的 visible_cluster_list
+                // 造出"view 超出资源"的非法描述符，debug layer 在移除查询
+                // drain 时点名（CreateShaderResourceView ... NumElements
+                // (value = 4294967295) must be between 1 and 100000），实测
+                // 触发设备移除 DXGI_ERROR_INVALID_CALL。钳位语义 = Vulkan 的
+                // vkUpdateDescriptorSets 对 VK_WHOLE_SIZE 的处理（range 收敛
+                // 到 buffer 剩余字节）。
+                const u64 bufferAvail = buffer->GetBufferDesc().size > bi.offset
+                                          ? buffer->GetBufferDesc().size - bi.offset
+                                          : 0;
+                const u64 viewBytes = (bi.range && bi.range < bufferAvail) ? bi.range
+                                                                          : bufferAvail;
+                // fail-soft 护栏：UAV 视图被跳过时不得镜像 shadow→visible
+                //（该槽保留旧内容=死槽，shader 不访问即合法——同 R14 纹理
+                // 孪生行"无 UAV 持久槽照旧 continue"口径）。
+                bool viewWritten = true;
                 switch (rowInfo.mainType) {
                     case D3D12_DESCRIPTOR_RANGE_TYPE_CBV: {
                         // CBV 尺寸须 256 倍数；BufferLocation 256 对齐（烘焙偏移）。
@@ -1871,48 +1892,54 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                         srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
                         srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                         srv.Buffer.FirstElement = bi.offset / 4;
-                        srv.Buffer.NumElements = static_cast<UINT>(
-                            (bi.range ? bi.range : buffer->GetBufferDesc().size - bi.offset) / 4);
+                        srv.Buffer.NumElements = static_cast<UINT>(viewBytes / 4);
                         srv.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
                         native->CreateShaderResourceView(buffer->GetNativeResource(), &srv, dst);
                         break;
                     }
                     case D3D12_DESCRIPTOR_RANGE_TYPE_UAV: {
-                        // R16（2026-11-16，INVALID_CALL 设备移除根修的写入侧
-                        // canary）：CreateUnorderedAccessView 的目标资源必须带
-                        // ALLOW_UNORDERED_ACCESS 标志——该标志只可能落在
-                        // DEFAULT 堆（与 UPLOAD/READBACK 互斥，D3D12Buffer
-                        // 已按显式 UA 绑定位改道）。命中宿主堆资源＝该
-                        // buffer 的 desc 既无显式 UA 位又被绑到 UAV 行
-                        //（shader RW 写目标），debug layer 记
-                        // CREATEUNORDEREDACCESSVIEW_INVALIDRESOURCE、零售层
-                        // 实测直接移除设备（DXGI_ERROR_INVALID_CALL，CI f350
-                        // frame0 三轮复现）。调用本身无法现场补救（资源已
-                        // 建成），Error 级点名 buffer（进程级封顶 32 条）把
-                        // 下一个此类 desc 错误从"静默移除"变成"日志可定位"。
-                        if (buffer->GetHeapType() != D3D12_HEAP_TYPE_DEFAULT) {
-                            // 计数封顶而非按 handle 去重：无锁集合免线程化
-                            // 写入路径的容器竞争风险；32 条足够点名窗口内
-                            // 全部违规 buffer。
-                            static std::atomic<u32> s_nonDefaultUavReports{0};
-                            if (s_nonDefaultUavReports.fetch_add(1, std::memory_order_relaxed) < 32) {
+                        // R16 canary → R17 收紧为"实际标志"判据 + fail-soft：
+                        // CreateUnorderedAccessView 的目标资源必须带
+                        // ALLOW_UNORDERED_ACCESS。R16 版按堆类型判断漏掉了
+                        // "DEFAULT 堆但无标志"类（快照 instance/clusterRef、
+                        // placeholder meshlet/cluster_map——Static+无 storage
+                        // 位；trace 只打 heapDefault 造成 heap=1 的误导）。
+                        // 资源已建成无法现场补标志 → 跳过本次视图创建（孪生
+                        // UAV 行 = 死槽，shader 经 t{N} 读即合法；自然 UAV 行
+                        // 被跳过 = desc 缺 UA 位，canary 点名后补 desc——
+                        // 同 R16 indirect_args 修法）。Error 级日志进程级封顶
+                        // 32 条（无锁计数，免容器竞争）。
+                        if (!buffer->HasUavFlag()) {
+                            static std::atomic<u32> s_unflaggedUavReports{0};
+                            if (s_unflaggedUavReports.fetch_add(1, std::memory_order_relaxed) < 32) {
                                 PRIMAL_LOG_STREAM(Error, "RHI")
-                                    << "[D3D12Device] UAV write targets host-heap "
-                                       "buffer (no ALLOW_UNORDERED_ACCESS — device "
-                                       "removal risk): set="
+                                    << "[D3D12Device] UAV write skipped: buffer has no "
+                                       "ALLOW_UNORDERED_ACCESS (dead twin slot; fix desc "
+                                       "if shader writes u-reg): set="
                                     << write.dstSet << " binding=" << write.dstBinding
                                     << " size=" << buffer->GetBufferDesc().size
+                                    << " heapDefault="
+                                    << (buffer->GetHeapType() == D3D12_HEAP_TYPE_DEFAULT ? 1 : 0)
                                     << " name='" << buffer->GetBufferDesc().name << "'"
                                     << std::endl;
                             }
+                            viewWritten = false;
+                            break;
                         }
                         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
                         uav.Format = DXGI_FORMAT_R32_TYPELESS;
                         uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
                         uav.Buffer.FirstElement = bi.offset / 4;
-                        uav.Buffer.NumElements = static_cast<UINT>(
-                            (bi.range ? bi.range : buffer->GetBufferDesc().size - bi.offset) / 4);
+                        uav.Buffer.NumElements = static_cast<UINT>(viewBytes / 4);
                         uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+                        // R17 trace 教训：CreateUnorderedAccessView 返回 void——
+                        // 无 hr 可打（上轮"trace 缺 hr 字段"实为 API 无返回
+                        // 值）。等价证据 = 调用后查 GetDeviceRemovedReason，
+                        // removed=0x0 即本调用未杀死设备。
+                        HRESULT removedAfterUav = S_OK;
+                        native->CreateUnorderedAccessView(buffer->GetNativeResource(),
+                                                          nullptr, &uav, dst);
+                        if (ApiTraceEnabled()) removedAfterUav = native->GetDeviceRemovedReason();
                         if (ApiTraceEnabled()) {
                             PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
                                 << "[D3D12ApiTrace] CreateUnorderedAccessView"
@@ -1920,22 +1947,22 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                                 << " binding=" << write.dstBinding
                                 << " elem=" << e
                                 << " size=" << buffer->GetBufferDesc().size
-                                << " heapDefault="
-                                << (buffer->GetHeapType() == D3D12_HEAP_TYPE_DEFAULT ? 1 : 0)
+                                << " uavFlagged=" << (buffer->HasUavFlag() ? 1 : 0)
                                 << " firstElem=" << uav.Buffer.FirstElement
                                 << " numElems=" << uav.Buffer.NumElements
+                                << " removedAfter=0x" << std::hex
+                                << static_cast<unsigned long>(removedAfterUav) << std::dec
                                 << " name='" << buffer->GetBufferDesc().name << "'"
                                 << std::endl;
                         }
-                        native->CreateUnorderedAccessView(buffer->GetNativeResource(),
-                                                          nullptr, &uav, dst);
                         break;
                     }
                     default: break;
                 }
                 // 双写第二步：shadow → visible 同槽（ClassifyBinding 只产
                 // CBV/SRV/UAV 三值，default 分支不可达；三分支统一在此镜像）。
-                descriptorHeaps_.CopyCbvSrvUavShadowToVisible(slot);
+                // fail-soft 跳过的 UAV 槽不镜像（死槽保留旧内容）。
+                if (viewWritten) descriptorHeaps_.CopyCbvSrvUavShadowToVisible(slot);
             }
             // --- 图像/sampler 段（拷贝现成描述符——纹理创建时已建 SRV/UAV）---
             else if (write.imageInfo) {
