@@ -364,6 +364,130 @@ SHADER_LIST = [
     ("SSRPass.spv", "ssrCS", "SSRPass", "comp", "spv"),
     ("Particle/Particle.vert.spv", "main", "Particle/Particle.vert", "vert", "spv"),
     ("Particle/Particle.frag.spv", "main", "Particle/Particle.frag", "frag", "spv"),
+    # -----------------------------------------------------------------------
+    # R13: parity f350 路径缺口补齐（taskE 报告 §4 的 69 个 .cso 缺口）。
+    # 前提：R13-a 已把 D3D12 镜像路径映射中央化到 ShaderRegistry::
+    # ResolveShaderPath(platform, relPath)（Engine/Graphics/Vulkan/shaders/
+    # 基座 → EngineTest/shaders/d3d12/、.spv→.cso，含大写 Shaders/ 前缀），
+    # 本批产物即按该布局落盘、按引擎请求的 .spv 同名 .cso 命名。
+    # 分族核对结论：全部 69 项在 Vulkan 树都有 GLSL 源（Forward 族是 GLSL
+    # 而非 naga——R3 批 Forward/GBuffer.vert GLSL 链先例已证），故全走
+    # GLSL 链，无需 R3b spv 旁路。源入口=GLSL 源真实函数名（绝大多数
+    # main；SSGITrace=ssgi_trace；DDGIGIGather 变体族=ddgi_gi_gather），
+    # 逐一与源文件 void 声明核对过。
+    # -----------------------------------------------------------------------
+    # SDFViz 三件（SDFVisualizationModule.cpp R13 D3D12 分支）：
+    ("Debug/SDFVisualization.comp", "main"),
+    ("Debug/OfflineSDFViz.comp", "main"),
+    ("Debug/SDFVizBlit.frag", "main"),
+    # ForwardSceneRenderer 技术变体/Skybox/DepthOnly/Streaming 二十件
+    # （LoadShaderSource R13 D3D12 分支按 Forward/<Name>.<stage>.spv 镜像；
+    # MaterialGraphVertex 为 Metal-only 设计无 .spv，不编）：
+    ("Forward/GBufferVT.frag", "main"),
+    ("Forward/DepthOnly.vert", "main"),
+    ("Forward/Skybox.vert", "main"),
+    ("Forward/Skybox.frag", "main"),
+    ("Forward/GBufferAlphaClip.vert", "main"),
+    ("Forward/GBufferAlphaClip.frag", "main"),
+    ("Forward/GBufferUnlit.vert", "main"),
+    ("Forward/GBufferUnlit.frag", "main"),
+    ("Forward/GBufferFoliage.vert", "main"),
+    ("Forward/GBufferFoliage.frag", "main"),
+    ("Forward/GBufferWater.vert", "main"),
+    ("Forward/GBufferWater.frag", "main"),
+    ("Forward/GBufferTransparent.vert", "main"),
+    ("Forward/GBufferTransparent.frag", "main"),
+    ("Forward/ForwardWater.vert", "main"),
+    ("Forward/ForwardWater.frag", "main"),
+    ("Forward/ForwardTransparent.vert", "main"),
+    ("Forward/ForwardTransparent.frag", "main"),
+    ("Forward/StreamingGBuffer.vert", "main"),
+    ("Forward/StreamingGBuffer.frag", "main"),
+    # LumenSSGI 四件（LumenSSGIPass.cpp R13 D3D12 分支；SSGITrace 源入口
+    # 是功能名 ssgi_trace，与引擎 CreateShader 实参一致，其余三件源入口
+    # main）：
+    ("Lumen/SSGITrace.comp", "ssgi_trace"),
+    ("Lumen/SSGITemporal.comp", "main"),
+    ("Lumen/SSGIFilter.comp", "main"),
+    ("Lumen/SSGIHalfResDenoise.comp", "main"),
+    # DDGIGIGather 变体七件（GIGatherModule.cpp R13 平台感知装载点；-D 栈
+    # 与 scripts/build_ddgi_connections_spv.py 的 pair/instance-payload/
+    # equal-box/bounds-first/cacheless64/cacheless32/traversal-audit 配方逐字
+    # 一致——注意 traversal_audit 无 QUERY_KERNEL；源入口 ddgi_gi_gather，
+    # 同 R5 anyhit/query_kernel 先例链形）：
+    ("Lumen/DDGIGIGather.comp", "ddgi_gi_gather", "Lumen/DDGIGIGather_geometry_pair.comp",
+     ["-DDDGI_GEOMETRY_CONNECTIONS", "-DDDGI_GEOMETRY_REPLACE", "-DDDGI_GEOMETRY_ANY_HIT",
+      "-DDDGI_GEOMETRY_QUERY_KERNEL", "-DDDGI_GEOMETRY_PAIR"]),
+    ("Lumen/DDGIGIGather.comp", "ddgi_gi_gather", "Lumen/DDGIGIGather_geometry_instance_payload.comp",
+     ["-DDDGI_GEOMETRY_CONNECTIONS", "-DDDGI_GEOMETRY_REPLACE", "-DDDGI_GEOMETRY_ANY_HIT",
+      "-DDDGI_GEOMETRY_QUERY_KERNEL", "-DDDGI_INSTANCE_PAYLOAD_CACHE"]),
+    ("Lumen/DDGIGIGather.comp", "ddgi_gi_gather", "Lumen/DDGIGIGather_geometry_equal_box.comp",
+     ["-DDDGI_GEOMETRY_CONNECTIONS", "-DDDGI_GEOMETRY_REPLACE", "-DDDGI_GEOMETRY_ANY_HIT",
+      "-DDDGI_GEOMETRY_QUERY_KERNEL", "-DDDGI_GEOMETRY_EQUAL_BOX"]),
+    ("Lumen/DDGIGIGather.comp", "ddgi_gi_gather", "Lumen/DDGIGIGather_geometry_cacheless64.comp",
+     ["-DDDGI_GEOMETRY_CONNECTIONS", "-DDDGI_GEOMETRY_REPLACE", "-DDDGI_GEOMETRY_ANY_HIT",
+      "-DDDGI_GEOMETRY_QUERY_KERNEL", "-DDDGI_GATHER_CACHELESS"]),
+    ("Lumen/DDGIGIGather.comp", "ddgi_gi_gather", "Lumen/DDGIGIGather_geometry_cacheless32.comp",
+     ["-DDDGI_GEOMETRY_CONNECTIONS", "-DDDGI_GEOMETRY_REPLACE", "-DDDGI_GEOMETRY_ANY_HIT",
+      "-DDDGI_GEOMETRY_QUERY_KERNEL", "-DDDGI_GATHER_CACHELESS",
+      "-DDDGI_GATHER_CACHELESS_32"]),
+    ("Lumen/DDGIGIGather.comp", "ddgi_gi_gather", "Lumen/DDGIGIGather_geometry_bounds_first.comp",
+     ["-DDDGI_GEOMETRY_CONNECTIONS", "-DDDGI_GEOMETRY_REPLACE", "-DDDGI_GEOMETRY_ANY_HIT",
+      "-DDDGI_GEOMETRY_QUERY_KERNEL", "-DDDGI_GEOMETRY_BOUNDS_FIRST"]),
+    ("Lumen/DDGIGIGather.comp", "ddgi_gi_gather", "Lumen/DDGIGIGather_geometry_traversal_audit.comp",
+     ["-DDDGI_GEOMETRY_CONNECTIONS", "-DDDGI_GEOMETRY_REPLACE", "-DDDGI_GEOMETRY_ANY_HIT",
+      "-DDDGI_TRAVERSAL_AUDIT"]),
+    # EnvironmentVisibility pair / wg32 两件（EnvironmentVisibilityModule.cpp
+    # R13 平台感知装载点；-D 与 scripts/build_environment_pair_spv.py /
+    # build_environment_trace_workgroup_spv.py 配方逐字一致，源入口 main）：
+    ("Lumen/EnvironmentVisibility.comp", "main", "Lumen/EnvironmentVisibility_trace_pair.comp",
+     ["-DENV_VIS_PAIR=1"]),
+    ("Lumen/EnvironmentVisibility.comp", "main", "Lumen/EnvironmentVisibility_trace_wg32.comp",
+     ["-DENV_TRACE_WG32=1"]),
+    # Lumen SSR 三件 + Toon（PostProcess/SSRPass.cpp R13 D3D12 分支与名字
+    # 三元（SSRTrace/SSRTemporal/SSRComposite）；ToonPass.cpp R13 分支）：
+    ("Lumen/SSRTrace.comp", "main"),
+    ("Lumen/SSRTemporal.comp", "main"),
+    ("Lumen/SSRComposite.comp", "main"),
+    ("PostProcess/Toon.comp", "main"),
+    # LineBatchRenderer 两件 + FroxelFog 四件（R13 D3D12 分支）：
+    ("Forward/Line.vert", "main"),
+    ("Forward/Line.frag", "main"),
+    ("Volume/FroxelDensityInject.comp", "main"),
+    ("Volume/FroxelLightIntegrate.comp", "main"),
+    ("Volume/FroxelReproject.comp", "main"),
+    ("Volume/FroxelResolve.comp", "main"),
+    # GeometryDebug 八件 + PassDebugView 三件 + ProbeSphere 变体两件
+    # （GeometryDebugPass.cpp / PassDebugViewModule.cpp /
+    # DebugProbeSphereModule.cpp R13 D3D12 分支；源入口全 main）：
+    ("Debug/MeshletDebug.vert", "main"),
+    ("Debug/MeshletDebug.frag", "main"),
+    ("Debug/SDFDebug.vert", "main"),
+    ("Debug/SDFDebug.frag", "main"),
+    ("Debug/VectorFieldDebug.vert", "main"),
+    ("Debug/VectorFieldDebug.frag", "main"),
+    ("Debug/VoxelDebug.vert", "main"),
+    ("Debug/VoxelDebug.frag", "main"),
+    ("Debug/PassDebugView.vert", "main"),
+    ("Debug/PassDebugView.frag", "main"),
+    ("Debug/PassDebugViewSimple.frag", "main"),
+    ("Debug/ProbeSphereIrradiance.frag", "main"),
+    ("Debug/ProbeSphereWRC.frag", "main"),
+    # PlanarReflection 两件（PlanarReflectionModule.cpp R13 分支，与 r12
+    # taskA 预警的 MirrorComposite 缺行同项）：
+    ("PostProcess/MirrorComposite.vert", "main"),
+    ("PostProcess/MirrorComposite.frag", "main"),
+    # PFX 四 pass 八件（ParticleFX{Light,Mesh,Ribbon,Decal}Pass.cpp R13
+    # D3D12 分支；git 实际路径是小写 shaders/PFX/（与代码里大写 Shaders/
+    # 在 macOS/Windows 大小写不敏感 FS 下同一路径），源入口全 main）：
+    ("PFX/ParticleFXLight.vert", "main"),
+    ("PFX/ParticleFXLight.frag", "main"),
+    ("PFX/ParticleFXMesh.vert", "main"),
+    ("PFX/ParticleFXMesh.frag", "main"),
+    ("PFX/ParticleFXRibbon.vert", "main"),
+    ("PFX/ParticleFXRibbon.frag", "main"),
+    ("PFX/ParticleFXDecal.vert", "main"),
+    ("PFX/ParticleFXDecal.frag", "main"),
 ]
 
 
