@@ -419,7 +419,17 @@ bool GPUCullingPipeline::CreateBuffers() {
         indirectDesc.size = sizeof(u32) * 5; // vertex_count + instance_count + first_vertex + first_instance + padding
         indirectDesc.type = rhi::BufferType::Structured;
         indirectDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
-        indirectDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::IndirectArg) | static_cast<u32>(rhi::BufferUsageFlags::TransferDst);
+        // R16：stage7_build_indirect_commands 以 RWByteAddressBuffer u7 写入
+        // 本 buffer（D3D12 镜像自然 UAV 行，stage1 镜像同款 u7 声明）——
+        // 补显式 UnorderedAccess 绑定位，D3D12 端据此把宿主可见堆改道
+        // DEFAULT+ALLOW_UNORDERED_ACCESS；否则 CreateDescriptorSets 的
+        // UAV 视图创建即触发设备移除 DXGI_ERROR_INVALID_CALL（f350 frame0
+        // 根因链的 binding 7 分支）。跨后端零变化：Vulkan 的 Structured
+        // 类型映射已无条件蕴含 STORAGE usage 位、Metal 忽略 bindFlags
+        //（Structured 已含 UA）、Dawn 仅在 type 未设时才读 bindFlags 推断。
+        indirectDesc.bindFlags = static_cast<u32>(rhi::ResourceUsage::IndirectArg) |
+                                 static_cast<u32>(rhi::BufferUsageFlags::TransferDst) |
+                                 static_cast<u32>(rhi::ResourceUsage::UnorderedAccess);
         frame_res.indirect_args_buffer = device_->CreateBuffer(indirectDesc);
 
         // Culling constants buffer

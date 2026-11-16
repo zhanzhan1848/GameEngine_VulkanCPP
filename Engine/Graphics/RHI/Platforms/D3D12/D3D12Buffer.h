@@ -15,6 +15,13 @@
 //     （CreateUnorderedAccessView 契约）。UAV 标志与 UPLOAD/READBACK 堆
 //     互斥故不路由；带标志资源失去 simultaneous-access 隐式提升/衰减，
 //     其 UAV 写/拷贝源读取的状态转换由调用方经 StateTracker 显式化。
+//   - UAV 宿主堆改道（R16）：bindFlags 显式 UnorderedAccess 位（shader
+//     RW 写目标语义）的 buffer 若按 memoryUsage 落在 UPLOAD/READBACK 堆，
+//     改道 DEFAULT 堆使 UAV 路由置位——否则 set 写入对宿主堆资源建 UAV
+//     视图 = CREATEUNORDEREDACCESSVIEW_INVALIDRESOURCE → 设备移除
+//     DXGI_ERROR_INVALID_CALL（Windows CI f350 frame0 三轮复现根因）。
+//     持久 Map 随改道失效（消费面已审计为 GPU 写目标）；仅 Storage 位、
+//     无显式 UA 位的宿主可见堆 buffer 不改道（SRV-only 消费 + CPU 直填）。
 //
 // UpdateData 路由：UPLOAD heap → 直接 memcpy；DEFAULT heap → 设备上传环
 // （帧内 QueueCopyBuffer 下一命令缓冲编码；帧外 FlushBlocking 阻塞）。

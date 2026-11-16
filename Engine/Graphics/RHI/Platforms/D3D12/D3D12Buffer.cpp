@@ -5,6 +5,7 @@
 
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
+#include <cstdlib>
 #include <cstring>
 
 #include "D3D12Device.h"
@@ -13,6 +14,20 @@
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::rhi::d3d12 {
+
+namespace {
+/// R16 埋点开关（默认关；PRIMAL_D3D12_API_TRACE=1 开）：buffer 资源创建
+/// （size/heap/flags/hr）与宿主可见堆 UAV 改道逐条输出。日志走
+/// PRIMAL_LOG（stderr），stdout 留给机器输出。与 D3D12Device.cpp 的
+/// FRAME_TRACE/UPLOAD_TRACE 同款 env 门控。
+bool ApiTraceEnabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("PRIMAL_D3D12_API_TRACE");
+        return v && v[0] == '1';
+    }();
+    return enabled;
+}
+}  // namespace
 
 // ============================================================================
 // 构造 / 生命周期
@@ -86,6 +101,37 @@ bool D3D12Buffer::Initialize() {
         return false;
     }
 
+    // R16（2026-11-16，GPUDrivenDraw INVALID_CALL 设备移除根修）：bindFlags
+    // 显式携带 ResourceUsage::UnorderedAccess 的 buffer 不允许留在
+    // UPLOAD/READBACK 宿主堆——D3D12 契约 ALLOW_UNORDERED_ACCESS 与两类
+    // 宿主堆互斥（下方 UAV 路由因此只在 DEFAULT 堆置位），而
+    // updateDescriptorSetsImpl 对 UAV 行的 set 写入会直接对目标资源调
+    // CreateUnorderedAccessView：资源无此标志即
+    // CREATEUNORDEREDACCESSVIEW_INVALIDRESOURCE，实测即刻触发设备移除
+    // GetDeviceRemovedReason()=DXGI_ERROR_INVALID_CALL(0x887A0001)（Windows
+    // CI 三轮同点复现：GPUCulling 六族 UAV buffer 以 Dynamic→UPLOAD 堆
+    // 创建，callCount==1 的 CreateDescriptorSets 即杀死设备；首个暴露点
+    // 是其后 GPUDrivenDraw Global Buffers 的 CreateCommittedResource
+    // hr=0x887A0005）。改道 DEFAULT 堆让 UAV 路由自然置位。CPU 直填路径
+    // （持久 Map）随改道失效——该组合消费面已审计：GPUCulling 的
+    // visibility/counter/list/debug 六族为 GPU 写（CPU map 点均带空指针
+    // 护栏，ReadDebugData 无在用调用方）、NaniteStreaming request/feedback
+    // 双族不在本测试窗口的绑定面。仅 BufferUsageFlags::Storage 位（无
+    // 显式 UA 位）的宿主可见堆 buffer 不改道——GPUDrivenDraw 全局 buffer
+    // 族为 SRV-only 消费 + UploadBuffer 经 Map 直填，改道会断填充路径。
+    const bool explicitUav =
+        (bufferDesc_.bindFlags & static_cast<u32>(ResourceUsage::UnorderedAccess)) != 0;
+    if (explicitUav && heapType_ != D3D12_HEAP_TYPE_DEFAULT) {
+        if (ApiTraceEnabled()) {
+            PRIMAL_LOG_STREAM(Warn, "RHI")
+                << "[D3D12Buffer] UAV bind flag on host heap -> rerouting to "
+                   "DEFAULT+ALLOW_UNORDERED_ACCESS size="
+                << bufferDesc_.size << " name='" << bufferDesc_.name << "'"
+                << std::endl;
+        }
+        heapType_ = D3D12_HEAP_TYPE_DEFAULT;
+    }
+
     D3D12MA::ALLOCATION_DESC allocDesc{};
     allocDesc.HeapType = heapType_;
 
@@ -140,6 +186,22 @@ bool D3D12Buffer::Initialize() {
     Microsoft::WRL::ComPtr<ID3D12Resource> resource;
     HRESULT hr = allocator->CreateResource(&allocDesc, &resDesc, initialState,
                                            nullptr, &allocation_, IID_PPV_ARGS(&resource));
+    if (ApiTraceEnabled()) {
+        // R16 埋点：逐资源创建 trace（API 名+关键参数+hr）。CreateUnordered-
+        // AccessView 类误用的窗口定位用——首个非 S_OK 的 CreateResource
+        // （0x887A0005=设备已移除）之前的行为现此日志可逐条对齐。
+        PRIMAL_LOG_STREAM(Info, "RHI")
+            << "[D3D12ApiTrace] CreateCommittedResource(buffer) hr=0x"
+            << std::hex << static_cast<unsigned long>(hr) << std::dec
+            << " size=" << bufferDesc_.size
+            << " heap=" << (heapType_ == D3D12_HEAP_TYPE_UPLOAD    ? "UPLOAD"
+                            : heapType_ == D3D12_HEAP_TYPE_READBACK ? "READBACK"
+                                                                    : "DEFAULT")
+            << " uavFlag=" << ((resDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+                                   ? 1
+                                   : 0)
+            << " name='" << bufferDesc_.name << "'" << std::endl;
+    }
     if (FAILED(hr) || !resource) {
         PRIMAL_LOG_STREAM(Error, "RHI")
             << "[D3D12Buffer] CreateResource failed hr=0x" << std::hex

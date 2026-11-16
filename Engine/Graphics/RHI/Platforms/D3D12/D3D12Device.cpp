@@ -5,6 +5,7 @@
 
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
+#include <atomic>
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -59,6 +60,15 @@ bool EnvFlagDisabled(const char* name) {
 /// 日志走 PRIMAL_LOG（stderr），stdout 留给机器输出。
 bool FrameTraceEnabled() {
     static const bool enabled = EnvFlag("PRIMAL_D3D12_FRAME_TRACE");
+    return enabled;
+}
+
+/// R16 埋点开关（默认关；PRIMAL_D3D12_API_TRACE=1 开）：UAV set 写入
+/// （CreateUnorderedAccessView 逐调用参数）与 buffer 资源创建 trace
+/// （D3D12Buffer.cpp 同名开关联动）——INVALID_CALL 设备移除窗口的逐
+/// API 对齐用。首个非 S_OK 调用之前的完整行为从 stderr 可逐条复原。
+bool ApiTraceEnabled() {
+    static const bool enabled = EnvFlag("PRIMAL_D3D12_API_TRACE");
     return enabled;
 }
 
@@ -1868,6 +1878,34 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                         break;
                     }
                     case D3D12_DESCRIPTOR_RANGE_TYPE_UAV: {
+                        // R16（2026-11-16，INVALID_CALL 设备移除根修的写入侧
+                        // canary）：CreateUnorderedAccessView 的目标资源必须带
+                        // ALLOW_UNORDERED_ACCESS 标志——该标志只可能落在
+                        // DEFAULT 堆（与 UPLOAD/READBACK 互斥，D3D12Buffer
+                        // 已按显式 UA 绑定位改道）。命中宿主堆资源＝该
+                        // buffer 的 desc 既无显式 UA 位又被绑到 UAV 行
+                        //（shader RW 写目标），debug layer 记
+                        // CREATEUNORDEREDACCESSVIEW_INVALIDRESOURCE、零售层
+                        // 实测直接移除设备（DXGI_ERROR_INVALID_CALL，CI f350
+                        // frame0 三轮复现）。调用本身无法现场补救（资源已
+                        // 建成），Error 级点名 buffer（进程级封顶 32 条）把
+                        // 下一个此类 desc 错误从"静默移除"变成"日志可定位"。
+                        if (buffer->GetHeapType() != D3D12_HEAP_TYPE_DEFAULT) {
+                            // 计数封顶而非按 handle 去重：无锁集合免线程化
+                            // 写入路径的容器竞争风险；32 条足够点名窗口内
+                            // 全部违规 buffer。
+                            static std::atomic<u32> s_nonDefaultUavReports{0};
+                            if (s_nonDefaultUavReports.fetch_add(1, std::memory_order_relaxed) < 32) {
+                                PRIMAL_LOG_STREAM(Error, "RHI")
+                                    << "[D3D12Device] UAV write targets host-heap "
+                                       "buffer (no ALLOW_UNORDERED_ACCESS — device "
+                                       "removal risk): set="
+                                    << write.dstSet << " binding=" << write.dstBinding
+                                    << " size=" << buffer->GetBufferDesc().size
+                                    << " name='" << buffer->GetBufferDesc().name << "'"
+                                    << std::endl;
+                            }
+                        }
                         D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
                         uav.Format = DXGI_FORMAT_R32_TYPELESS;
                         uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
@@ -1875,6 +1913,20 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                         uav.Buffer.NumElements = static_cast<UINT>(
                             (bi.range ? bi.range : buffer->GetBufferDesc().size - bi.offset) / 4);
                         uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+                        if (ApiTraceEnabled()) {
+                            PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
+                                << "[D3D12ApiTrace] CreateUnorderedAccessView"
+                                << " set=" << write.dstSet
+                                << " binding=" << write.dstBinding
+                                << " elem=" << e
+                                << " size=" << buffer->GetBufferDesc().size
+                                << " heapDefault="
+                                << (buffer->GetHeapType() == D3D12_HEAP_TYPE_DEFAULT ? 1 : 0)
+                                << " firstElem=" << uav.Buffer.FirstElement
+                                << " numElems=" << uav.Buffer.NumElements
+                                << " name='" << buffer->GetBufferDesc().name << "'"
+                                << std::endl;
+                        }
                         native->CreateUnorderedAccessView(buffer->GetNativeResource(),
                                                           nullptr, &uav, dst);
                         break;
