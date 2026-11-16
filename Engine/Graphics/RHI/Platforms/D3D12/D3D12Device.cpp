@@ -1018,6 +1018,17 @@ ResourceHandle D3D12Device::createBufferImpl(const BufferDesc& desc) {
     if (!buffer || !buffer->Initialize()) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] buffer create failed name='"
                                         << desc.name << "'" << std::endl;
+        // R15：0x887a0005 类失败首现即查移除原因——init 期静默移除的现场
+        // 证据（GPUDrivenDraw Global Buffers 三轮均在此首次暴露 removed，
+        // 但原因从未落日志）。进程级一次性。
+        static bool removalReasonLogged = false;
+        if (!removalReasonLogged) {
+            const HRESULT rr = device_->GetDeviceRemovedReason();
+            if (rr != S_OK) {
+                reportDeviceRemoval(rr);
+                removalReasonLogged = true;
+            }
+        }
         bufferAllocator_.Free(id);
         return handles::INVALID_RESOURCE;
     }
