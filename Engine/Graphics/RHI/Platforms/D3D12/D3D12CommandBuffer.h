@@ -203,8 +203,10 @@ protected:
 
 private:
     /// tracker op → D3D12_RESOURCE_BARRIER[]（一次下发）；resource 为该 op 的
-    /// 原生资源指针。
-    void EmitTrackerOps(const utl::vector<D3D12ResourceBarrierOp>& ops, ID3D12Resource* resource);
+    /// 原生资源指针。R22：key 参与——flag 门控闸门丢弃非法 op 时以它把
+    /// tracker 信念净化回 General（COMMON），防止虚构态泄入后续 barrier。
+    void EmitTrackerOps(const utl::vector<D3D12ResourceBarrierOp>& ops,
+                        ID3D12Resource* resource, const D3D12SubresourceKey& key);
     /// 纹理 → target 的隐式转换（拷贝路径用；tracker 驱动）。
     void TransitionTexture(D3D12Texture* texture, ResourceHandle handle,
                            ResourceState target, u32 subresource);

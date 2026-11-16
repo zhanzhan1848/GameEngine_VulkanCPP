@@ -180,7 +180,20 @@ bool D3D12CommandBufferImpl::beginImpl() {
         return false;
     }
     if (FAILED(commandList_->Reset(allocators_[currentAllocator_].Get(), nullptr))) {
-        PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12CommandBuffer] list Reset failed" << std::endl;
+        // R22：毒化列表（Close 失败后遗留 recording 态）会让宿主帧循环以
+        // 每秒数千次 Begin 重试——原无条件刷屏在 300s watchdog 窗口产出
+        // 163 万行（run 43910901099）。首现 + 每 65536 次一条，保留诊断
+        // 密度不淹没日志。失败计数全局（进程级诊断口径）。
+        static std::atomic<u64> s_listResetFailCount{0};
+        const u64 n = s_listResetFailCount.fetch_add(1, std::memory_order_relaxed);
+        if (n == 0 || (n % 65536) == 0) {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12CommandBuffer] list Reset failed (occurrence "
+                << (n + 1) << "; the list is stuck in the recording state — "
+                   "a prior Close failure poisoned it, see the earlier "
+                   "'Close failed hr=' line)"
+                << std::endl;
+        }
         return false;
     }
 
@@ -211,8 +224,22 @@ bool D3D12CommandBufferImpl::beginImpl() {
 }
 
 bool D3D12CommandBufferImpl::endImpl() {
-    if (FAILED(commandList_->Close())) {
-        PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12CommandBuffer] Close failed" << std::endl;
+    // R22：Close 失败留 hr + 设备移除原因——区分"列表被录制期 ERROR 毒化"
+    //（E_FAIL 族，本轮根修目标）与"设备已移除"（0x887A0005 族，另有根因）。
+    const HRESULT closeHr = commandList_->Close();
+    if (FAILED(closeHr)) {
+        D3D12Device& dev = static_cast<D3D12Device&>(device_);
+        const HRESULT removed = dev.GetNativeDevice()
+            ? dev.GetNativeDevice()->GetDeviceRemovedReason() : S_OK;
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12CommandBuffer] Close failed hr=0x"
+            << std::hex << static_cast<unsigned long>(closeHr)
+            << " removedReason=0x" << static_cast<unsigned long>(removed)
+            << std::dec
+            << " (recording-time debug-layer ERRORs poison the list — check "
+               "the next DrainInfoQueueMessages batch for the id=NNN message; "
+               "E_FAIL with removedReason=0x0 = poisoned list, not device loss)"
+            << std::endl;
         return false;
     }
     D3D12Device& dev = static_cast<D3D12Device&>(device_);
@@ -264,13 +291,97 @@ bool D3D12CommandBufferImpl::waitForCompletionImpl() {
 // barrier 集成（M0 D3D12StateTracker）
 // ============================================================================
 
+// R22（run 43910901099 Close 失败根因判据内核）：classic barrier 的
+// Transition op 若 before/after 任一侧含 flag 门控状态位而资源 Flags 不支持
+// （buffer 无 ALLOW_UNORDERED_ACCESS 却引用 UAV 位；纹理无 RT/DS/UAV 标志
+// 却引用对应位），该 ResourceBarrier 在录制点即被 debug layer 判 ERROR
+// （id=524 "states mismatch support required from D3D12_RESOURCE_FLAGS"）——
+// 而 ERROR 级录制期验证失败会毒化命令列表（Close 返回失败；R12-C id=850
+// 越界拷贝同机制，本文件 CopyBufferToTexture 护栏注释/r12 Windows 实测链）。
+// 判据按资源真实 desc.Flags（native GetDesc，含 D3D12Buffer/D3D12Texture
+// 创建期推导），不依赖 RHI usage 声明。
+namespace {
+bool StateBitsExceedResourceFlags(const D3D12_RESOURCE_DESC& desc, u32 bits) {
+    if ((bits & kD3D12ResourceState_UnorderedAccess) != 0
+        && (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0) {
+        return true;
+    }
+    if ((bits & kD3D12ResourceState_RenderTarget) != 0
+        && (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0) {
+        return true;
+    }
+    if ((bits & (kD3D12ResourceState_DepthWrite | kD3D12ResourceState_DepthRead)) != 0
+        && (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) == 0) {
+        return true;
+    }
+    return false;
+}
+
+// R22：被丢弃 op 的一次性留痕（key=资源指针+双侧状态位）+ 全局封顶 32——
+// 下轮 CI 若仍有 id=524 残余，此日志给出资源指针/位值/flags 的现场。
+std::mutex g_barrierFlagDropMutex;
+std::unordered_set<u64> g_barrierFlagDropped;
+std::atomic<u32> g_barrierFlagDropReports{0};
+void ReportDroppedBarrierOp(ID3D12Resource* resource, u32 before, u32 after) {
+    const u64 key = static_cast<u64>(reinterpret_cast<unsigned long long>(resource))
+                  ^ (static_cast<u64>(before) << 20) ^ static_cast<u64>(after);
+    bool fresh = false;
+    {
+        std::lock_guard<std::mutex> lock(g_barrierFlagDropMutex);
+        fresh = g_barrierFlagDropped.insert(key).second;
+    }
+    if (!fresh) return;
+    if (g_barrierFlagDropReports.fetch_add(1, std::memory_order_relaxed) >= 32) return;
+    const D3D12_RESOURCE_DESC d = resource->GetDesc();
+    PRIMAL_LOG_STREAM(Error, "RHI")
+        << "[D3D12CommandBuffer] barrier op dropped: state bits exceed "
+           "resource flags (would poison the list with debug-layer id=524 "
+           "-> Close fails): resource=0x"
+        << reinterpret_cast<void*>(resource)
+        << " before=0x" << std::hex << before
+        << " after=0x" << after
+        << " flags=0x" << d.Flags
+        << " dimension=" << static_cast<unsigned>(d.Dimension)
+        << std::dec
+        << " (flag-gated bits: UAV requires ALLOW_UNORDERED_ACCESS; RT "
+           "requires ALLOW_RENDER_TARGET; DS requires ALLOW_DEPTH_STENCIL; "
+           "fix: resource owner must set the usage/bind flag so creation "
+           "derives the D3D12 flag, or the module must stop declaring this "
+           "state on this resource)"
+        << std::endl;
+}
+} // namespace
+
 void D3D12CommandBufferImpl::EmitTrackerOps(const utl::vector<D3D12ResourceBarrierOp>& ops,
-                                            ID3D12Resource* resource) {
+                                            ID3D12Resource* resource,
+                                            const D3D12SubresourceKey& key) {
     if (ops.empty() || !resource || !commandList_) return;
+    D3D12Device& dev = static_cast<D3D12Device&>(device_);
     D3D12_RESOURCE_BARRIER barriers[8];
     u32 count = 0;
     for (const D3D12ResourceBarrierOp& op : ops) {
         if (op.kind == D3D12ResourceBarrierOp::Kind::Transition && count < 8) {
+            // R22：flag 门控合法性闸门（id=524 毒化守卫，见上方判据内核）。
+            // 丢弃不重发——无 UAV 视图的资源本就无 GPU 写需同步，该 barrier
+            // 无真实同步语义（300 处 CreateUnorderedAccessView 全部落在
+            // uavFlagged=1 资源，run 43910901099 实测）。
+            if (StateBitsExceedResourceFlags(resource->GetDesc(),
+                                             op.stateBefore | op.stateAfter)) {
+                ReportDroppedBarrierOp(resource, op.stateBefore, op.stateAfter);
+                // tracker 侧同步净化回 General（COMMON）：Transition 在返回
+                // op 前已把（虚构）终态记入 tracker，留着它会让后续
+                // CopyBuffer/间接路径按虚构态产出"before≠GPU 实际"的合法
+                // flag 但错位 barrier（新型毒化）。COMMON 信念 = buffer 恒走
+                // 零 op 提升面（不再发 barrier）＝与"被丢弃的 barrier 从未
+                // 发生"的 GPU/debug-layer 事实一致。逐 op 的具体子资源坐标
+                // 参与净化（纹理部分子资源场景）。
+                D3D12SubresourceKey sanitize = key;
+                if (op.subresource != kD3D12ResourceBarrierAllSubresources) {
+                    sanitize.subresource = op.subresource;
+                }
+                dev.GetStateTracker().Track(sanitize, ResourceState::General);
+                continue;
+            }
             D3D12_RESOURCE_BARRIER& b = barriers[count++];
             b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -279,6 +390,21 @@ void D3D12CommandBufferImpl::EmitTrackerOps(const utl::vector<D3D12ResourceBarri
             b.Transition.StateAfter = static_cast<D3D12_RESOURCE_STATES>(op.stateAfter);
             b.Transition.Subresource = op.subresource;
         } else if (op.kind == D3D12ResourceBarrierOp::Kind::UAV && count < 8) {
+            // R22：UAV 型 barrier 只对可能处于 UAV 态的资源有意义——无
+            // ALLOW_UNORDERED_ACCESS 的资源永远进不了 UAV（tracker 的 UAV
+            // 信念只能来自被上方闸门净化的虚构链或零 op 提升记账），该 op
+            // 是纯虚构，同样丢弃 + 净化（防 debug-layer 挑剔）。
+            if ((resource->GetDesc().Flags
+                 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0) {
+                ReportDroppedBarrierOp(resource, kD3D12ResourceState_UnorderedAccess,
+                                       kD3D12ResourceState_UnorderedAccess);
+                D3D12SubresourceKey sanitize = key;
+                if (op.subresource != kD3D12ResourceBarrierAllSubresources) {
+                    sanitize.subresource = op.subresource;
+                }
+                dev.GetStateTracker().Track(sanitize, ResourceState::General);
+                continue;
+            }
             D3D12_RESOURCE_BARRIER& b = barriers[count++];
             b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
             b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -302,7 +428,7 @@ void D3D12CommandBufferImpl::TransitionTexture(D3D12Texture* texture, ResourceHa
     key.subresource = subresource;
     key.isTexture = true;
     EmitTrackerOps(dev.GetStateTracker().Transition(key, target),
-                   texture->GetNativeResource());
+                   texture->GetNativeResource(), key);
 }
 
 namespace {
@@ -343,7 +469,7 @@ void D3D12CommandBufferImpl::InsertBarrier(const ResourceBarrier* barriers, u32 
             key.subresource = sub;
             key.isTexture = true;
             EmitTrackerOps(dev.GetStateTracker().Transition(key, rb.afterState),
-                           texture->GetNativeResource());
+                           texture->GetNativeResource(), key);
             continue;
         }
         // M5 F5-2/F5-4：buffer 走 tracker（M1 为 no-op——COMMON 提升覆盖
@@ -401,7 +527,7 @@ void D3D12CommandBufferImpl::InsertBarrier(const ResourceBarrier* barriers, u32 
                 dev.GetStateTracker().Track(key, rb.beforeState);
             }
             EmitTrackerOps(dev.GetStateTracker().Transition(key, rb.afterState),
-                           bufHandle->GetNativeResource());
+                           bufHandle->GetNativeResource(), key);
         }
     }
 }
@@ -1077,12 +1203,19 @@ void D3D12CommandBufferImpl::DrawIndirect(ResourceHandle buffer, u64 offset, u32
     ID3D12CommandSignature* sig = dev.GetDrawIndirectSignature();
     if (!sig) return;
     if (!EnsureGraphicsState()) return;   // R20-A：签名/PSO 自愈 + 守卫
-    D3D12SubresourceKey key{};
-    key.resource = buffer;
-    key.subresource = 0;
-    key.isTexture = false;
-    EmitTrackerOps(dev.GetStateTracker().Transition(key, ResourceState::IndirectArgument),
-                   buf->GetNativeResource());
+    // R22：宿主堆 arg buffer 不做显式转换——UPLOAD 规定态 GENERIC_READ
+    // 已含 INDIRECT_ARGUMENT 位（0x200，D3D12 位定义），发 transition 反而
+    // 是 id=524 录制期 ERROR（毒化列表→Close 失败）；tracker 也不在宿主
+    // 堆上留非 COMMON 记账（否则后续 CopyBuffer 会据此对宿主堆发 op）。
+    // DEFAULT 堆路径的 UAV 位合法性由 EmitTrackerOps 中心闸门兜底。
+    if (buf->GetHeapType() == D3D12_HEAP_TYPE_DEFAULT) {
+        D3D12SubresourceKey key{};
+        key.resource = buffer;
+        key.subresource = 0;
+        key.isTexture = false;
+        EmitTrackerOps(dev.GetStateTracker().Transition(key, ResourceState::IndirectArgument),
+                       buf->GetNativeResource(), key);
+    }
     UpdateStats(CommandType::DrawIndirect);
     commandList_->ExecuteIndirect(sig, drawCount, buf->GetNativeResource(), offset,
                                   nullptr, 0);
@@ -1101,12 +1234,16 @@ void D3D12CommandBufferImpl::DrawIndexedIndirect(ResourceHandle buffer, u64 offs
     ID3D12CommandSignature* sig = dev.GetDrawIndexedIndirectSignature();
     if (!sig) return;
     if (!EnsureGraphicsState()) return;   // R20-A：签名/PSO 自愈 + 守卫（M5 GPU-driven 直绘消费点）
-    D3D12SubresourceKey key{};
-    key.resource = buffer;
-    key.subresource = 0;
-    key.isTexture = false;
-    EmitTrackerOps(dev.GetStateTracker().Transition(key, ResourceState::IndirectArgument),
-                   buf->GetNativeResource());
+    // R22：宿主堆 arg buffer 闸门（同 DrawIndirect 注释——GENERIC_READ 已
+    // 含 INDIRECT_ARGUMENT，显式转换即 id=524 录制期 ERROR）。
+    if (buf->GetHeapType() == D3D12_HEAP_TYPE_DEFAULT) {
+        D3D12SubresourceKey key{};
+        key.resource = buffer;
+        key.subresource = 0;
+        key.isTexture = false;
+        EmitTrackerOps(dev.GetStateTracker().Transition(key, ResourceState::IndirectArgument),
+                       buf->GetNativeResource(), key);
+    }
     UpdateStats(CommandType::DrawIndirect);
     commandList_->ExecuteIndirect(sig, drawCount, buf->GetNativeResource(), offset,
                                   nullptr, 0);
@@ -1135,12 +1272,15 @@ void D3D12CommandBufferImpl::DispatchIndirect(ResourceHandle buffer, u64 offset)
     ID3D12CommandSignature* sig = dev.GetDispatchIndirectSignature();
     if (!sig) return;
     if (!EnsureComputeState()) return;   // R20-A：签名/PSO 自愈 + 守卫
-    D3D12SubresourceKey key{};
-    key.resource = buffer;
-    key.subresource = 0;
-    key.isTexture = false;
-    EmitTrackerOps(dev.GetStateTracker().Transition(key, ResourceState::IndirectArgument),
-                   buf->GetNativeResource());
+    // R22：宿主堆 arg buffer 闸门（同 DrawIndirect 注释）。
+    if (buf->GetHeapType() == D3D12_HEAP_TYPE_DEFAULT) {
+        D3D12SubresourceKey key{};
+        key.resource = buffer;
+        key.subresource = 0;
+        key.isTexture = false;
+        EmitTrackerOps(dev.GetStateTracker().Transition(key, ResourceState::IndirectArgument),
+                       buf->GetNativeResource(), key);
+    }
     UpdateStats(CommandType::DispatchIndirect);
     commandList_->ExecuteIndirect(sig, 1, buf->GetNativeResource(), offset, nullptr, 0);
 }
@@ -1212,29 +1352,57 @@ void D3D12CommandBufferImpl::CopyBuffer(ResourceHandle src, ResourceHandle dst,
     dstKey.resource = dst;
     dstKey.subresource = 0;
     dstKey.isTexture = false;
+    // R22（run 43910901099 帧 0/1/2 Close 失败，id=524/id=538 双根修）：
+    //   ①宿主堆闸门扩展到本路径的显式转换——R19 只拦"非法方向拷贝"，但
+    //     tracker 完全可能持有宿主堆 buffer 的非 COMMON 记账（间接路径
+    //     Transition(IndirectArgument) 的零 op 提升记账即一例），旧代码
+    //     会据此对宿主堆发真实 transition = id=524 录制期 ERROR → 毒化
+    //     列表 → Close 失败。宿主堆规定态（GENERIC_READ/COPY_DEST）不可
+    //     转换，恒按零 op 处理（与 InsertBarrier 的 R19 闸门同口径）。
+    //   ②隐式提升记账：拷贝本身把 GPU 侧状态提升为 src=COPY_SOURCE /
+    //     dst=COPY_DEST（COMMON 起点隐式提升，零 barrier），提交边界才
+    //     衰减回 COMMON。旧实现不记账 → 同一录制会话内的第二次使用
+    //     （copy A→B 后再 copy B→C）时 debug layer 视 B 仍处 COPY_DEST、
+    //     不可作 source（id=538 "assumed at first use ... invalid for
+    //     use as a source buffer"）→ 同一毒化链。记账后同会话再拷即产出
+    //     COPY_DEST→COPY_SOURCE 合法转换。仅 DEFAULT 堆记账（宿主堆规
+    //     定态恒定，无转换/衰减语义，维持 COMMON 建模）。
+    const bool srcHostHeap = srcBuf->GetHeapType() != D3D12_HEAP_TYPE_DEFAULT;
+    const bool dstHostHeap = dstBuf->GetHeapType() != D3D12_HEAP_TYPE_DEFAULT;
     ResourceState srcPrev = ResourceState::Unknown;
     ResourceState dstPrev = ResourceState::Unknown;
-    const bool srcExplicit = dev.GetStateTracker().QueryState(srcKey, srcPrev)
+    const bool srcExplicit = !srcHostHeap
+        && dev.GetStateTracker().QueryState(srcKey, srcPrev)
         && srcPrev != ResourceState::General;   // General = COMMON（位值 0）
-    const bool dstExplicit = dev.GetStateTracker().QueryState(dstKey, dstPrev)
+    const bool dstExplicit = !dstHostHeap
+        && dev.GetStateTracker().QueryState(dstKey, dstPrev)
         && dstPrev != ResourceState::General;
     if (srcExplicit) {
         EmitTrackerOps(dev.GetStateTracker().Transition(srcKey, ResourceState::CopySource),
-                       srcBuf->GetNativeResource());
+                       srcBuf->GetNativeResource(), srcKey);
     }
     if (dstExplicit) {
         EmitTrackerOps(dev.GetStateTracker().Transition(dstKey, ResourceState::CopyDest),
-                       dstBuf->GetNativeResource());
+                       dstBuf->GetNativeResource(), dstKey);
     }
     commandList_->CopyBufferRegion(dstBuf->GetNativeResource(), dstOffset,
                                    srcBuf->GetNativeResource(), srcOffset, bytes);
     if (srcExplicit) {
         EmitTrackerOps(dev.GetStateTracker().Transition(srcKey, srcPrev),
-                       srcBuf->GetNativeResource());
+                       srcBuf->GetNativeResource(), srcKey);
     }
     if (dstExplicit) {
         EmitTrackerOps(dev.GetStateTracker().Transition(dstKey, dstPrev),
-                       dstBuf->GetNativeResource());
+                       dstBuf->GetNativeResource(), dstKey);
+    }
+    // R22-②：隐式提升记账（explicit 路径的 Transition 已把终态记回
+    // tracker，不重复记）。未注册资源的 Track 被跟踪器拒绝（防御面，
+    // createBufferImpl 全量注册下理论不触发）。
+    if (!srcExplicit && !srcHostHeap) {
+        dev.GetStateTracker().Track(srcKey, ResourceState::CopySource);
+    }
+    if (!dstExplicit && !dstHostHeap) {
+        dev.GetStateTracker().Track(dstKey, ResourceState::CopyDest);
     }
 }
 
@@ -1289,6 +1457,38 @@ void D3D12CommandBufferImpl::CopyBufferToTexture(ResourceHandle srcBuffer,
         footprint.Footprint.Depth = r.imageExtent.depth;
         const u64 rowBytes = u64(srcRowTexels) * texelBytes;
         footprint.Footprint.RowPitch = static_cast<UINT>((rowBytes + 255) & ~u64(255));
+        // R22（run 43910901099 init 期 line 392 Close failed 根修）：placed
+        // footprint 所需字节数超源 buffer 尺寸的拷贝在录制点即被 debug
+        // layer 判 id=869 ERROR（"PlacedFootprint extends past the end of
+        // the buffer"，GetRequiredIntermediateSize 同式）——与 R12-C 的
+        // id=850 同为"录制期 ERROR 毒化列表 → Close 失败"类。按 D3D12 规
+        // 范公式（末行不 padding）预算所需字节，超界项显式 Error + 跳过，
+        // 不再毒化整条列表。以 desc 逻辑尺寸为界（UPLOAD 堆资源本体已向上
+        // 取整 256B——按逻辑尺寸判是保守侧：恰好挤进 padding 的拷贝被跳过，
+        // 但其数据通路本就 undersized，日志即失败信号）。
+        const u64 requiredBytes = footprint.Offset
+            + u64(footprint.Footprint.RowPitch) * footprint.Footprint.Height
+              * (footprint.Footprint.Depth ? footprint.Footprint.Depth - 1 : 0)
+            + u64(footprint.Footprint.RowPitch) * (footprint.Footprint.Height
+                                                   ? footprint.Footprint.Height - 1 : 0)
+            + rowBytes;
+        if (requiredBytes > buf->GetBufferDesc().size) {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12CommandBuffer] CopyBufferToTexture placed footprint "
+                   "exceeds source buffer: required="
+                << requiredBytes << " buffer=" << buf->GetBufferDesc().size
+                << " (offset=" << footprint.Offset
+                << " rowPitch=" << footprint.Footprint.RowPitch
+                << " height=" << footprint.Footprint.Height
+                << " depth=" << footprint.Footprint.Depth
+                << " rowBytes=" << rowBytes
+                << " bufferName='" << buf->GetBufferDesc().name
+                << "' texName='" << tex->GetTextureDesc().name
+                << "') - skipping region " << i
+                << " (would poison the list with debug-layer id=869 -> Close fails)"
+                << std::endl;
+            continue;
+        }
 
         D3D12_TEXTURE_COPY_LOCATION srcLoc{};
         srcLoc.pResource = buf->GetNativeResource();
@@ -1405,6 +1605,31 @@ void D3D12CommandBufferImpl::CopyTextureToBuffer(ResourceHandle srcTexture,
         const u64 rowBytes = u64(srcRowTexels) * texelBytes;
         dstLoc.PlacedFootprint.Footprint.RowPitch =
             static_cast<UINT>((rowBytes + 255) & ~u64(255));
+        // R22：目标 footprint 超界守卫（与 CopyBufferToTexture 的 id=869
+        // 守卫同式——读回目标 buffer 尺寸不足同样在录制点判 ERROR 毒化
+        // 列表）。超界项 Error + 跳过。
+        {
+            const D3D12_PLACED_SUBRESOURCE_FOOTPRINT& fp = dstLoc.PlacedFootprint;
+            const u64 requiredBytes = fp.Offset
+                + u64(fp.Footprint.RowPitch) * fp.Footprint.Height
+                  * (fp.Footprint.Depth ? fp.Footprint.Depth - 1 : 0)
+                + u64(fp.Footprint.RowPitch) * (fp.Footprint.Height
+                                                ? fp.Footprint.Height - 1 : 0)
+                + rowBytes;
+            if (requiredBytes > buf->GetBufferDesc().size) {
+                PRIMAL_LOG_STREAM(Error, "RHI")
+                    << "[D3D12CommandBuffer] CopyTextureToBuffer placed "
+                       "footprint exceeds destination buffer: required="
+                    << requiredBytes << " buffer=" << buf->GetBufferDesc().size
+                    << " bufferName='" << buf->GetBufferDesc().name
+                    << "' texName='" << tex->GetTextureDesc().name
+                    << "' - skipping region " << i
+                    << " (would poison the list with debug-layer id=869 -> "
+                       "Close fails)"
+                    << std::endl;
+                continue;
+            }
+        }
 
         // R18-A：CopyTextureRegion 签名 = (pDst, DstX/Y/Z, pSrc, pSrcBox)，
         // 第一参是【目标】。原调用 (&srcLoc, imageOffset…, &dstLoc, nullptr)
