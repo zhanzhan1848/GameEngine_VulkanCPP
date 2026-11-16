@@ -131,7 +131,7 @@ jobs:
           Check ([bool]$cross) "spirv-cross ($cross)"
           Check ([bool]$dxc) "dxc ($dxc)"
           Check ([bool]$env:PRIMAL_CI_ASSET_DIR) "PRIMAL_CI_ASSET_DIR (local assets: Sponza.model, SponzaTangentFrames.model, sunset.hdr, Sponza_global_sdf.v3.cache)"
-          Check ([bool]$env:PRIMAL_CI_THIRD_PARTY_DIR) "PRIMAL_CI_THIRD_PARTY_DIR (vendored third_party: FBX_SDK\, VHACD\ - ContentTools/integration tests need them)"
+          Check ([bool]$env:PRIMAL_CI_THIRD_PARTY_DIR) "PRIMAL_CI_THIRD_PARTY_DIR (vendored third_party: VHACD\ only - collision module needs it; FBX SDK is the system Autodesk install))"
           Check ([bool]$env:PRIMAL_CI_SDK_MODULES) "PRIMAL_CI_SDK_MODULES (diagnostic-sdk-modules: DirectXTex/FBX config packages for find_package)"
           if (-not $env:PRIMAL_CI_HARNESS_BASELINE) {
             Write-Output "[preflight] WARN PRIMAL_CI_HARNESS_BASELINE not set - the harness step will fail with seed instructions"
@@ -176,7 +176,7 @@ jobs:
           if ($bad) { exit 1 }
           exit 0
 
-      - name: Stage vendored third_party (FBX_SDK / VHACD)
+      - name: Stage vendored third_party (VHACD)
         shell: powershell
         run: |
           # ContentTools (and every integration test behind TARGET
@@ -185,13 +185,16 @@ jobs:
           # git), VHACD's pinned commit only exists on the dev machine. Both
           # are seeded once from the retest tree and mirrored in here.
           $src = $env:PRIMAL_CI_THIRD_PARTY_DIR
-          foreach ($d in @('FBX_SDK', 'VHACD')) {
-            $from = Join-Path $src $d
-            $to = Join-Path 'third_party' $d
-            if (-not (Test-Path $from)) { Write-Output "::error::vendored source missing: $from"; exit 1 }
-            Write-Output "staging $from -> $to"
-            robocopy $from $to /E /NFL /NDL /NJH /NJS | Out-Null
-            if ($LASTEXITCODE -ge 8) { Write-Output "::error::robocopy failed for $d (code $LASTEXITCODE)"; exit 1 }
+          # FBX SDK 不补种：系统 Autodesk 安装（Program Files），由
+          # PRIMAL_CI_SDK_MODULES 的 FindFBX 模块定位。
+          $from = Join-Path $src 'VHACD'
+          if (-not (Test-Path $from)) { Write-Output "::error::vendored source missing: $from"; exit 1 }
+          $to = 'third_party/VHACD'
+          Write-Output "staging $from -> $to"
+          robocopy $from $to /E /NFL /NDL /NJH /NJS | Out-Null
+          if ($LASTEXITCODE -ge 8) { Write-Output "::error::robocopy failed for VHACD (code $LASTEXITCODE)"; exit 1 }
+          if (-not (Test-Path 'third_party/VHACD/src/VHACD_Lib/public/VHACD.h')) {
+            Write-Output '::error::VHACD staged but VHACD_Lib/public/VHACD.h missing (wrong tree layout?)'; exit 1
           }
           exit 0
 
