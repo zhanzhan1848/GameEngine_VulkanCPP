@@ -214,7 +214,10 @@ jobs:
           $cmakeArgs = @('-S', '.', '-B', $build,
                          '-G', 'Visual Studio 17 2022', '-A', 'x64',
                          '-DCMAKE_BUILD_TYPE=Release',
-                         '-DENABLE_D3D12=ON', '-DENABLE_VULKAN=ON') + $extra
+                         '-DENABLE_D3D12=ON', '-DENABLE_VULKAN=ON',
+                         # 显式 ON：build 目录跨 run 持久（clean:false），
+                         # CMakeCache 里残留的 OFF 不会因旗标缺席而翻转。
+                         '-DBUILD_CONTENT_TOOLS=ON') + $extra
           & cmake @cmakeArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Write-Output '--- D3D12 gate markers ---'
