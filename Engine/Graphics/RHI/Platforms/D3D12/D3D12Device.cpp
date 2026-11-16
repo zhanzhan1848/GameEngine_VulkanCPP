@@ -1807,20 +1807,33 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
             samplerRangeBase = ResolveSamplerRegionForWrite(set, writes, writeCount, w);
         }
 
+        // R14（2026-11-16，compute 根签名 t/u 覆盖根修的写入侧半边）：把
+        // "一行（BindingClass）的逐元素写入"抽成本地 lambda，自然行与孪生行
+        // 各调一次。孪生行 = Initialize 按 GLSL 实际访问方向合成的对侧字母行
+        //（族 A：StorageBuffer 声明 natural UAV + SRV 孪生——shader 经
+        // ByteAddressBuffer t{N} 读；族 B：SampledImage 声明 natural SRV +
+        // UAV 孪生——shader 经 RWTexture/RWByteAddressBuffer u{N} 写）。
+        // 纹理源槽取 UavSlot() 时无 UAV 持久槽的纹理照旧 continue（死槽，
+        // shader 不访问即合法）——与既有自然行行为同款。buffer 写入两字母
+        // 视图（RAW SRV/UAV）恒可建。r12 双声明（两行均自然行）不进孪生
+        // 配对——配对条件恰一侧 twin=true，语义与既有 per-write 声明类型
+        // 选行（R12-B）正交。
+        auto writeMainRow =
+            [&](const d3d12::D3D12DescriptorSetLayout::BindingClass& rowInfo) {
             for (u32 e = 0; e < write.descriptorCount; ++e) {
                 // --- 主段（CBV/SRV/UAV）---
-            if (info.hasMain && write.bufferInfo) {
+            if (rowInfo.hasMain && write.bufferInfo) {
                 const DescriptorBufferInfo& bi = write.bufferInfo[e];
                 d3d12::D3D12Buffer* buffer = GetBuffer(bi.buffer);
                 if (!buffer) continue;
-                const u32 slot = set->BaseSlot() + info.mainOffset + write.dstArrayElement + e;
+                const u32 slot = set->BaseSlot() + rowInfo.mainOffset + write.dstArrayElement + e;
                 // R19-4 断言布防：write 越出 set 区段/堆容量（dstArrayElement
                 // 或 descriptorCount 超 layout 声明）时崩在此行——堆写入槽位
                 // 无上界检查是本函数既有缺口（写越堆尾=CPU AV 于 D3D12 内部）。
                 assert(slot < descriptorHeaps_.CbvSrvUavCapacity());
                 // R13/T1 双写第一步：Create*View 落 shadow 堆（dst = shadow 槽）。
                 const D3D12_CPU_DESCRIPTOR_HANDLE dst = descriptorHeaps_.CbvSrvUavShadowCpuHandle(slot);
-                switch (info.mainType) {
+                switch (rowInfo.mainType) {
                     case D3D12_DESCRIPTOR_RANGE_TYPE_CBV: {
                         // CBV 尺寸须 256 倍数；BufferLocation 256 对齐（烘焙偏移）。
                         const u64 range = bi.range ? bi.range
@@ -1864,13 +1877,13 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
             // --- 图像/sampler 段（拷贝现成描述符——纹理创建时已建 SRV/UAV）---
             else if (write.imageInfo) {
                 const DescriptorImageInfo& ii = write.imageInfo[e];
-                if (info.hasMain) {
+                if (rowInfo.hasMain) {
                     d3d12::D3D12Texture* texture = GetTexture(ii.imageView);
                     if (!texture) continue;
-                    const u32 srcSlot = info.mainType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+                    const u32 srcSlot = rowInfo.mainType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV
                         ? texture->UavSlot() : texture->SrvSlot();
                     if (srcSlot == d3d12::D3D12Texture::kInvalidDescriptorSlot) continue;
-                    const u32 dstSlot = set->BaseSlot() + info.mainOffset
+                    const u32 dstSlot = set->BaseSlot() + rowInfo.mainOffset
                                         + write.dstArrayElement + e;
                     // R20-B 埋点（PRIMAL_D3D12_UPLOAD_TRACE 同门）：纹理 SRV
                     // 持久槽→set 槽复制日志——宿主 albedo 材质集写入证据；
@@ -1893,7 +1906,7 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
                     descriptorHeaps_.CopyCbvSrvUavShadowToVisible(dstSlot);
                 }
-                if (info.hasSampler) {
+                if (rowInfo.hasSampler) {
                     // R22-S1：无逐项动作——sampler 区间内容已由写入级解析
                     // 保证（MaterializeSamplerRange 按终态处方一次物化，或
                     // 命中既有共享区间；共享区段只被物化写一次，杜绝逐项
@@ -1903,6 +1916,30 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                     (void)samplerRangeBase;
                 }
             }
+        }
+        };
+        writeMainRow(info);
+        // R14：孪生配对写入。写入行是自然行 → 找同 binding 的 twin 行；写入
+        // 行本身是 twin（StorageBuffer 写入的 SRV 优先命中孪生行时）→ 回写
+        // 自然行。r12 双声明（两行皆自然行）两侧都不满足 twin 条件 → 零行为
+        // 变化。
+        if (info.hasMain) {
+            d3d12::D3D12DescriptorSetLayout::BindingClass complement;
+            bool hasComplement = false;
+            if (!info.twin) {
+                hasComplement = layout->QueryBindingTwin(write.dstBinding,
+                                                         info.mainType, complement)
+                                && complement.hasMain;
+            } else {
+                const D3D12_DESCRIPTOR_RANGE_TYPE naturalType =
+                    info.mainType == D3D12_DESCRIPTOR_RANGE_TYPE_SRV
+                        ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+                        : D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+                hasComplement =
+                    layout->QueryBindingTyped(write.dstBinding, naturalType, complement)
+                    && complement.hasMain && !complement.twin;
+            }
+            if (hasComplement) writeMainRow(complement);
         }
     }
 }

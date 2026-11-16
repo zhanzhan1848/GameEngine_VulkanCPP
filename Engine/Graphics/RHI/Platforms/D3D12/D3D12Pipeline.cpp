@@ -366,6 +366,26 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
                 seenBindings.push_back(b.binding);
                 items.push_back({b.binding, info.count, info.mainOffset, b.stageFlags});
             }
+            // R14（2026-11-16，compute 根签名 t/u 覆盖根修）：追加本类型的合成
+            // 孪生行——自然行属对侧字母声明（族 A：StorageBuffer 可写声明
+            // natural UAV + SRV 孪生；族 B：SampledImage 声明 natural SRV +
+            // UAV 孪生；合成条件/审计证据见 D3D12DescriptorHeaps.cpp
+            // Initialize 的 R14 段）。孪生 item 随自然 item 同段排序合并——
+            // 相邻 binding 的同类型行并成同一 range（如 LightEval t5-t7 孪生
+            // 与 t9/t10 自然行拼接）。stage 取自孪生所源声明（与自然行同组）。
+            for (const auto& b : bindings) {
+                D3D12_DESCRIPTOR_RANGE_TYPE rawType; bool rawMain, rawSampler;
+                ClassifyDescriptorBinding(b, rawType, rawMain, rawSampler);
+                if (!rawMain || rawType == type) continue;
+                if (std::find(seenBindings.begin(), seenBindings.end(), b.binding)
+                        != seenBindings.end()) continue;
+                D3D12DescriptorSetLayout::BindingClass twinInfo;
+                if (!layout->QueryBindingTwin(b.binding, rawType, twinInfo)
+                    || !twinInfo.hasMain || twinInfo.mainType != type) continue;
+                seenBindings.push_back(b.binding);
+                items.push_back({b.binding, twinInfo.count, twinInfo.mainOffset,
+                                 b.stageFlags});
+            }
             if (items.empty()) continue;
             std::sort(items.begin(), items.end(),
                       [](const Item& a, const Item& b) { return a.binding < b.binding; });

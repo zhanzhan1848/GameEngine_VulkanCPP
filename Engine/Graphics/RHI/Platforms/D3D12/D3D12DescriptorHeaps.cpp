@@ -578,6 +578,140 @@ bool D3D12DescriptorSetLayout::Initialize() {
                   if (a.first != b.first) return a.first < b.first;
                   return rowRank(a.second) < rowRank(b.second);
               });
+
+    // ---- R14（2026-11-16，compute 根签名 t/u 覆盖根修）：合成孪生行 ----
+    // 镜像链（GLSL→glslang→spirv-cross→dxc，build_d3d12_shaders.py）的寄存器
+    // 字母由 GLSL 源限定符决定，与宿主布局声明无关（dxc -dumpbin 逐件核对，
+    // /tmp/r14_work/all_cso_bindings.json 全 188 件镜像审计）：
+    //   readonly buffer          → ByteAddressBuffer/StructuredBuffer t{N}
+    //   读写/writeonly buffer    → RWByteAddressBuffer             u{N}
+    //   image2D（含 readonly）   → RWTexture2D                     u{N}
+    //   texture2D（采样）        → Texture2D                       t{N}
+    //   UBO → cb{N}、sampler → s{N}（无歧义）。
+    // Vulkan 的 VK_DESCRIPTOR_TYPE_STORAGE_BUFFER 不区分访问方向，宿主布局
+    // 的 descriptorType/readonly 因此与 GLSL 源错位（r13 Windows run
+    // 43824892255 实测两族错配，9 个 compute PSO 批量
+    // "Root Signature doesn't match Compute Shader"→E_INVALIDARG→device removed）：
+    //   A：宿主 StorageBuffer 非 readonly（→u{N}），GLSL 实为 readonly buffer
+    //      （shader 要 t{N}）——DDGICardRadianceAvg b2、DDGIProbeIrradiance
+    //      FromCards b1-b4/b6、LightCull b3、LightEval b5/b6/b7、IndirectTrace
+    //      b7/b12、IndirectResolve b6/b7/b8/b16、CaptureWrite b13；
+    //   B：宿主 SampledImage（→t{N}），GLSL 实为 image/写 buffer（shader 要
+    //      u{N}）——SurfaceCacheShadow b3/b4、DDGITraceFinalize 族 b14。
+    // 修法＝"t/u 孪生覆盖"：对 compute 可见的这两族声明，在对侧字母追加一
+    // 行（本表 + 根签名 range + set 写入三处同步），shader 用哪侧都命中；
+    // 对侧行是 shader 未用的死槽（合法——根签名允许超额 range，死槽描述符
+    // 不被访问即无运行期检查）。顶点/纯像素 stage 不合成（镜像审计 vert
+    // CSO 0 个 UAV、材质像素集堆预算紧——b115034 实测 512/slot 打满；残余
+    // 错配见任务报告：GBufferVT.frag u6,space1、DeferredLighting.frag s8）。
+    // StorageImage 不需要孪生：镜像链对 image（含 readonly）恒产 u{N}，宿主
+    // StorageImage 分类恰为 UAV，两侧恒对齐（Dilate b0/b1 实证）。
+    // 防御性跳过：同 (binding, 字母) 已有自然行（r12 双声明布局不折不加）、
+    // 寄存器区间与任何同字母行重叠（count>1 数组防同可见性重叠——
+    // BuildRootSignature 的重叠自检会整布局拒绝，宁缺毋滥）。
+    {
+        const u32 computeBit = static_cast<u32>(ShaderStage::Compute);
+        struct TwinRow { u32 binding; u32 count; D3D12_DESCRIPTOR_RANGE_TYPE type; };
+        utl::vector<TwinRow> twinRows;
+        // 跳过 0：同 binding 号多条声明（r12 ShadowFilter b0 = UBO +
+        // SampledImage 双行）不合成孪生——孪生配对语义只对"单声明 binding"
+        // 成立（UBO 写入的补位写入会把 buffer UAV 落进无关孪生槽，破坏
+        // R12-B 的按写入声明类型选行原则）。
+        utl::vector<u32> multiDeclaredBindings;
+        for (const auto& b : bindings_) {
+            if (std::find(multiDeclaredBindings.begin(),
+                          multiDeclaredBindings.end(), b.binding)
+                    != multiDeclaredBindings.end()) continue;
+            u32 decls = 0;
+            for (const auto& other : bindings_) {
+                if (other.binding == b.binding) ++decls;
+            }
+            if (decls > 1) multiDeclaredBindings.push_back(b.binding);
+        }
+        for (const auto& b : bindings_) {
+            if (std::find(multiDeclaredBindings.begin(),
+                          multiDeclaredBindings.end(), b.binding)
+                    != multiDeclaredBindings.end()) continue;
+            const bool computeVisible =
+                (static_cast<u32>(b.stageFlags) & computeBit) != 0;
+            if (!computeVisible) continue;
+            D3D12_DESCRIPTOR_RANGE_TYPE naturalType;
+            bool hasMainRow, hasSamplerRow;
+            ClassifyBinding(b, naturalType, hasMainRow, hasSamplerRow);
+            if (!hasMainRow) continue;
+            if (std::find(seenTwinBindings.begin(), seenTwinBindings.end(),
+                          b.binding) != seenTwinBindings.end()) continue;
+            const u32 count = b.descriptorCount ? b.descriptorCount : 1;
+            TwinRow candidate{0, 0, D3D12_DESCRIPTOR_RANGE_TYPE_SRV};
+            if (b.descriptorType == DescriptorType::StorageBuffer
+                && (naturalType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+                    || naturalType == D3D12_DESCRIPTOR_RANGE_TYPE_SRV)) {
+                // 族 A/D：StorageBuffer 双向孪生——宿主 readonly 标志在两个
+                // 方向上都与 GLSL 源错位（族 A：宿主未置 readonly、GLSL
+                // readonly buffer 走 t{N}，DDGIProbeIrradianceFromCards
+                // b1-b4/b6 等；族 D：宿主置 readonly、GLSL 实为读写 buffer
+                // 走 u{N}，DDGITraceFinalize b14 hit_normal dumpbin 实证
+                // "hnb UAV byte r/w u14"）。两向都对侧补行。
+                candidate = {b.binding, count,
+                             naturalType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+                                 ? D3D12_DESCRIPTOR_RANGE_TYPE_SRV
+                                 : D3D12_DESCRIPTOR_RANGE_TYPE_UAV};
+            } else if ((b.descriptorType == DescriptorType::SampledImage
+                        || b.descriptorType == DescriptorType::SampledDepthImage
+                        || b.descriptorType == DescriptorType::InputAttachment
+                        || b.descriptorType == DescriptorType::UniformTexelBuffer
+                        // 族 C：StorageImage+readonly 宿主声明归 SRV，但镜像链
+                        // 对 readonly image2D 仍产 RWTexture2D u{N}（cross 的
+                        // image 读取走 Load，不折 Texture2D——Shadow b3/b4、
+                        // LightCull b0/b1、LightEval b0-2 dumpbin 实证）。
+                        || (b.descriptorType == DescriptorType::StorageImage && b.readonly))
+                       && naturalType == D3D12_DESCRIPTOR_RANGE_TYPE_SRV) {
+                // 族 B/C：自然行 SRV ← 宿主"采样/只读图像"声明；GLSL image/
+                // 写 buffer 走 u。
+                candidate = {b.binding, count, D3D12_DESCRIPTOR_RANGE_TYPE_UAV};
+            } else {
+                continue;
+            }
+            // 跳过 1：同 (binding, 字母) 已有行（r12 双声明或重复声明）。
+            bool exists = false;
+            for (const auto& [rb, ri] : slotTable_) {
+                if (rb == candidate.binding && ri.hasMain
+                    && ri.mainType == candidate.type) { exists = true; break; }
+            }
+            if (exists) continue;
+            // 跳过 2：同字母寄存器区间重叠（数组 count>1 与相邻 binding 并存
+            // 时孪生会与自然行同可见性重叠——根签名重叠自检整布局拒绝，
+            // 不如不合成该孪生保住其余覆盖）。
+            bool overlap = false;
+            for (const auto& [rb, ri] : slotTable_) {
+                if (!ri.hasMain || ri.mainType != candidate.type) continue;
+                if (candidate.binding < rb + (ri.count ? ri.count : 1)
+                    && rb < candidate.binding + candidate.count) {
+                    overlap = true; break;
+                }
+            }
+            if (overlap) continue;
+            seenTwinBindings.push_back(b.binding);
+            twinRows.push_back(candidate);
+        }
+        // 孪生偏移接在自然行之后（自然行偏移不变——既有消费面零扰动）。
+        for (const TwinRow& t : twinRows) {
+            BindingClass info;
+            info.count = t.count;
+            info.hasMain = true;
+            info.mainType = t.type;
+            info.mainOffset = mainCursor;
+            info.twin = true;
+            mainCursor += t.count;
+            slotTable_.push_back({t.binding, info});
+        }
+        std::sort(slotTable_.begin(), slotTable_.end(),
+                  [&](const std::pair<u32, BindingClass>& a,
+                      const std::pair<u32, BindingClass>& b) {
+                      if (a.first != b.first) return a.first < b.first;
+                      return rowRank(a.second) < rowRank(b.second);
+                  });
+    }
     totalDescriptors_ = mainCursor;
     samplerCount_ = samplerCursor;
     return true;
@@ -608,6 +742,18 @@ bool D3D12DescriptorSetLayout::QueryBindingWithSampler(u32 binding,
                                                        BindingClass& out) const {
     for (const auto& [b, info] : slotTable_) {
         if (b == binding && info.hasSampler) {
+            out = info;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool D3D12DescriptorSetLayout::QueryBindingTwin(
+    u32 binding, D3D12_DESCRIPTOR_RANGE_TYPE naturalType, BindingClass& out) const {
+    for (const auto& [b, info] : slotTable_) {
+        if (b == binding && info.twin && info.hasMain
+            && info.mainType != naturalType) {
             out = info;
             return true;
         }

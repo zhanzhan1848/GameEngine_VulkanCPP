@@ -157,6 +157,10 @@ public:
         bool hasSampler = false;                 ///< 进 sampler 表
         u32 samplerOffset = 0;                   ///< sampler 段内偏移
         u32 count = 1;                           ///< 数组长度
+        bool twin = false;  ///< R14：合成孪生行（对侧寄存器字母的镜像行，
+                            ///< 见 Initialize 的 R14 注释）。原始声明的行恒
+                            ///< twin=false——双声明（r12 ShadowFilter b0）两行
+                            ///< 都是自然行，不参与孪生配对。
     };
     /// 首匹配查询（同 binding 多行时按 (binding, 类序) 确定性序取第一行，
     /// 见 Initialize 的 R12-B 注释）。保持既有调用面不变。
@@ -173,6 +177,17 @@ public:
     /// 同上（sampler 侧）：取该 binding 的 hasSampler 行（CombinedImageSampler
     /// 行同时带主段；Sampler-only 行仅 sampler）。
     bool QueryBindingWithSampler(u32 binding, BindingClass& out) const;
+    /// R14（2026-11-16，compute 根签名 t/u 覆盖根修）：取 binding 的合成孪生
+    /// 行——同 binding、主段类型 != naturalType、twin=true。镜像链
+    /// （GLSL→spirv-cross→dxc）对同一 binding 的 HLSL 寄存器字母由 GLSL 源
+    /// 限定符决定（readonly buffer→t#；image/读写 buffer→u#），宿主布局的
+    /// descriptorType/readonly 声明与 GLSL 源不一致时单字母分类必然错一半
+    ///（r13 Windows run 43824892255：9 个 Lumen/SurfaceCache compute PSO
+    /// "Root Signature doesn't match Compute Shader" 批量 E_INVALIDARG）。
+    /// 孪生行让根签名与 set 写入同时覆盖 t{N}/u{N} 两侧，shader 用哪侧都
+    /// 命中。合成规则/防御性跳过条件见 Initialize 的 R14 段。
+    bool QueryBindingTwin(u32 binding, D3D12_DESCRIPTOR_RANGE_TYPE naturalType,
+                          BindingClass& out) const;
 
 protected:
     void destroyImpl() override {}
