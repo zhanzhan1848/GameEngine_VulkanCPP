@@ -1395,14 +1395,15 @@ static std::vector<u8> SelfLoadShaderSource(const char* file, rhi::RHIPlatform p
         // mirroring the same relative path (build_d3d12_shaders.py layout);
         // spirv-cross rewrites every entry point to "main" so the cso is
         // consumed with the same one-file-per-stage shape as the spv.
-        const bool d3d12 = (platform == rhi::RHIPlatform::D3D12);
-        const char* suffix = (stage == ShaderStage::Vertex) ? (d3d12 ? ".vert.cso" : ".vert.spv")
-                           : (stage == ShaderStage::Pixel) ? (d3d12 ? ".frag.cso" : ".frag.spv")
-                           : (d3d12 ? ".cso" : ".spv");
-        std::string rel = d3d12
-            ? std::string("EngineTest/shaders/d3d12/") + file + suffix
-            : std::string("Engine/Graphics/Vulkan/shaders/") + file + suffix;
-        std::string path = SelfLoadResolve(rel);
+        // R13: 镜像映射（基座换替 + .spv→.cso）中央化到 ShaderRegistry::
+        // ResolveShaderPath(platform, relPath)，本处不再内联拼 d3d12 路径。
+        const char* suffix = (stage == ShaderStage::Vertex) ? ".vert.spv"
+                           : (stage == ShaderStage::Pixel) ? ".frag.spv"
+                           : ".spv";
+        const std::string rel =
+            std::string("Engine/Graphics/Vulkan/shaders/") + file + suffix;
+        const std::string path =
+            utils::ShaderRegistry::ResolveShaderPath(platform, rel);
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f.is_open()) return {};
         std::streamsize size = f.tellg();

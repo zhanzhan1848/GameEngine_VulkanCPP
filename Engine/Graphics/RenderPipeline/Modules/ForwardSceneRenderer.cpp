@@ -26,6 +26,7 @@
 #include "Graphics/MaterialInstance.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Utils/IBLPrecomputer.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include "Graphics/Scene/LightSyncSystem.h"
 #include "Graphics/DebugDraw/DebugDrawQueue.h"
 #include "Content/ContentToEngine.h"
@@ -257,14 +258,21 @@ static std::string InlineIncludes(const std::string& source, int depth,
 // not just adding more .spv files. See plan T4.6.5 for the full blocker list.
 static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platform,
                                         ShaderStage stage) {
-    if (platform == RHIPlatform::Vulkan) {
+    if (platform == RHIPlatform::Vulkan || platform == RHIPlatform::D3D12) {
         // Convention: <Name>.<stage>.spv with entry point "main"
         // Compute path: existing DeferredLighting.spv lives in the parent
         // shaders/ dir (not Forward/), with no stage suffix (single .spv file).
         // Caller passes "DeferredLighting" + ShaderStage::Compute to hit that path.
+        // R13: D3D12 与 Vulkan 同形——同一相对路径经 ShaderRegistry 平台感知
+        // 解析换成 DXIL 镜像（EngineTest/shaders/d3d12/Forward/<Name>.<stage>.cso，
+        // spirv-cross 入口恒 "main"，D3D12Shader 忽略 entry 名）。此前 D3D12 落
+        // 到 Metal 文本分支，MSL 源被当 DXIL 消费——CI 首轮 26 处 DXBC/DXIL
+        // magic mismatch 的来源。
         if (stage == ShaderStage::Compute) {
             std::string relPath = VULKAN_COMPUTE_SHADER_DIR + filename + ".spv";
-            std::string path = ResolveShaderPath(relPath);
+            std::string path = (platform == RHIPlatform::D3D12)
+                ? utils::ShaderRegistry::ResolveShaderPath(platform, relPath)
+                : ResolveShaderPath(relPath);
             auto bytes = ReadFileToBytes(path);
             if (bytes.empty()) {
                 PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to load compute SPIR-V: " << path << std::endl;
@@ -274,7 +282,9 @@ static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platfo
         }
         const char* stageSuffix = (stage == ShaderStage::Vertex) ? ".vert" : ".frag";
         std::string relPath = VULKAN_SHADER_DIR + filename + stageSuffix + ".spv";
-        std::string path = ResolveShaderPath(relPath);
+        std::string path = (platform == RHIPlatform::D3D12)
+            ? utils::ShaderRegistry::ResolveShaderPath(platform, relPath)
+            : ResolveShaderPath(relPath);
         auto bytes = ReadFileToBytes(path);
         if (bytes.empty()) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[ForwardSceneRenderer] Failed to load SPIR-V: " << path << std::endl;
@@ -979,8 +989,10 @@ void ForwardSceneRenderer::CreateShaders() {
         lighting_ps_ = load("DeferredLighting", "fragmentLighting_v3", ShaderStage::Pixel);
     }
     // T4.6.5 part 3: Vulkan uses dedicated Blit shaders (Path A); Metal still
-    // uses the multi-entry DeferredLighting.metal fragmentBlit.
-    if (platform == RHIPlatform::Vulkan) {
+    // uses the multi-entry DeferredLighting.metal fragmentBlit. R13: D3D12 与
+    // Vulkan 同走 Blit.vert/frag 镜像（Metal fragmentBlit 多入口形态在 DXIL
+    // 单入口镜像里不存在）。
+    if (platform == RHIPlatform::Vulkan || platform == RHIPlatform::D3D12) {
         blit_vs_ = load("Blit", "main", ShaderStage::Vertex);
         blit_ps_ = load("Blit", "main", ShaderStage::Pixel);
     } else {
