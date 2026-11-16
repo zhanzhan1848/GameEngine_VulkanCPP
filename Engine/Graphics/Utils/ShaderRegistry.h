@@ -62,6 +62,21 @@ public:
     // If nothing matches, relPath is returned unchanged so the caller's
     // "failed to open" error still names the expected location.
     static std::string ResolveShaderPath(const std::string& relPath);
+
+    // Platform-aware variant (R13: D3D12 mirror centralization). Callers pass
+    // the canonical Vulkan-tree relative path (e.g. "Engine/Graphics/Vulkan/
+    // shaders/Lumen/TAA.comp.spv"). On D3D12 the path is first remapped to the
+    // DXIL mirror layout (GIGatherModule ResolveVariantShaderPath precedent /
+    // tvsrg MapShaderPathForD3D12):
+    //   "Engine/Graphics/Vulkan/shaders/<rest>.spv"
+    //     -> "EngineTest/shaders/d3d12/<rest>.cso"
+    // (also accepts the legacy capital-S "Engine/Graphics/Vulkan/Shaders/"
+    // prefix used by the PFX loaders), then resolved through the CWD-walk
+    // above. Any other platform falls through to the single-arg resolution
+    // with the path unchanged, so Vulkan/Metal behavior is identical to
+    // calling ResolveShaderPath(relPath) directly.
+    static std::string ResolveShaderPath(rhi::RHIPlatform platform,
+                                         const std::string& relPath);
 };
 
 } // namespace primal::graphics::utils

@@ -1,6 +1,7 @@
 #include "PassDebugViewModule.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include "Engine/Common/CoreLogStream.h"
 #include <fstream>
 #include <cstring>
@@ -22,7 +23,9 @@ constexpr u32 kParamBufferSize = sizeof(math::m4x4) * 2 + sizeof(math::v4) * 2;
 std::vector<u8> LoadPassDebugBytecode(rhi::RHIDeviceBase* device, const char* name) {
     const auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
     std::vector<std::string> candidates;
-    if (platform == rhi::RHIPlatform::Vulkan) {
+    if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
+        // R13: D3D12 与 Vulkan 同形——候选经 ShaderRegistry 平台感知解析换
+        // DXIL 镜像（EngineTest/shaders/d3d12/Debug/<name>.cso）。
         std::string file = std::string(name) + ".spv";
         candidates.push_back("Engine/Graphics/Vulkan/shaders/Debug/" + file);
         candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Vulkan/shaders/Debug/" + file);
@@ -42,14 +45,16 @@ std::vector<u8> LoadPassDebugBytecode(rhi::RHIDeviceBase* device, const char* na
     }
 
     for (const auto& path : candidates) {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        const std::string openPath = (platform == rhi::RHIPlatform::D3D12)
+            ? utils::ShaderRegistry::ResolveShaderPath(platform, path) : path;
+        std::ifstream file(openPath, std::ios::binary | std::ios::ate);
         if (!file.is_open()) continue;
         std::streamsize size = file.tellg();
         file.seekg(0, std::ios::beg);
         std::vector<u8> bytes(static_cast<size_t>(size));
         if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) continue;
         if (platform == rhi::RHIPlatform::Metal) return bytes;           // MSL 源
-        if (size % 4 != 0) continue;                                      // SPIR-V 4B 对齐
+        if (platform != rhi::RHIPlatform::D3D12 && size % 4 != 0) continue; // SPIR-V 4B 对齐（DXIL 无此约束）
         return bytes;
     }
     PRIMAL_LOG_STREAM(Error, "Render") << "[PassDebugView] shader bytecode not found for '"

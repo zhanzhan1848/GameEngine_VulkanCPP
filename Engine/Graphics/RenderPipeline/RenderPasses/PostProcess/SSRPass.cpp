@@ -59,13 +59,16 @@ static ResourceHandle s_TemporalHistory[MAX_FRAMES] = {                 // half-
 // ============================================================================
 
 // Load a shader as either binary SPIR-V (Vulkan) or source text (Metal/Dawn).
-// For Vulkan, returns the raw bytecode and *outIsBinary=true.
+// For Vulkan/D3D12, returns the raw bytecode and *outIsBinary=true.
 // For Metal/Dawn, returns the source text and *outIsBinary=false.
+// R13: D3D12 与 Vulkan 同形——DXIL 镜像 EngineTest/shaders/d3d12/Lumen/
+// <name>.comp.cso（ShaderRegistry 平台感知解析）；此前 D3D12 落到 Metal 文本
+// 分支，MSL 源被当 DXIL 消费。
 static std::vector<u8> LoadShaderBytes(RHIPlatform platform, const char* shaderName,
                                        const char* lumenDir, bool* outIsBinary) {
-    *outIsBinary = (platform == RHIPlatform::Vulkan);
+    *outIsBinary = (platform == RHIPlatform::Vulkan || platform == RHIPlatform::D3D12);
 
-    if (platform == RHIPlatform::Vulkan) {
+    if (platform == RHIPlatform::Vulkan || platform == RHIPlatform::D3D12) {
         // Lumen SSR shaders live in Engine/Graphics/Vulkan/shaders/Lumen/SSR*.comp.spv
         std::string relPath = std::string(lumenDir) + shaderName + ".comp.spv";
         const std::vector<std::string> candidates = {
@@ -73,7 +76,11 @@ static std::vector<u8> LoadShaderBytes(RHIPlatform platform, const char* shaderN
             "Engine/Graphics/Vulkan/shaders/Lumen/" + std::string(shaderName) + ".comp.spv",
         };
         for (const auto& path : candidates) {
-            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            // Vulkan 保持裸路径直开（原行为零变化）；D3D12 换镜像路径解析。
+            const std::string openPath = (platform == RHIPlatform::D3D12)
+                ? utils::ShaderRegistry::ResolveShaderPath(platform, path)
+                : path;
+            std::ifstream file(openPath, std::ios::binary | std::ios::ate);
             if (!file.is_open()) continue;
             std::streamsize size = file.tellg();
             file.seekg(0, std::ios::beg);
@@ -143,9 +150,11 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
     // ShaderRegistry resolves "SSRPass" → SSRPass.metal, "SSRTemporal" → SSRTemporal.metal,
     // "SSRComposite" → SSRComposite.metal. For Vulkan/Dawn we use the same names so the
     // Lumen/ subdir lookup works.
-    const char* traceName    = (platform == RHIPlatform::Vulkan) ? "SSRTrace"     : "SSRPass";
-    const char* temporalName = (platform == RHIPlatform::Vulkan) ? "SSRTemporal"  : "SSRTemporal";
-    const char* upsampleName = (platform == RHIPlatform::Vulkan) ? "SSRComposite" : "SSRComposite";
+    // R13: D3D12 与 Vulkan 同名（镜像按 Vulkan 相对路径布局）。
+    const bool binaryNames = (platform == RHIPlatform::Vulkan || platform == RHIPlatform::D3D12);
+    const char* traceName    = binaryNames ? "SSRTrace"     : "SSRPass";
+    const char* temporalName = binaryNames ? "SSRTemporal"  : "SSRTemporal";
+    const char* upsampleName = binaryNames ? "SSRComposite" : "SSRComposite";
 
     ShaderHandle traceCS    = loadShader(traceName,    "ssr_trace");
     ShaderHandle temporalCS = loadShader(temporalName, "ssr_temporal");

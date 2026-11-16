@@ -112,7 +112,25 @@ static std::vector<u8> LoadShaderBytecode(const char* shaderName, rhi::RHIPlatfo
     // P2.1 (2026-09-15): Vulkan 走预编译 SPIR-V（build_spv.sh 的 Volume/
     // 条目）；MSL 文本喂给 Vulkan shader 模块是无效 pCode（08738，
     // "FroxelFogPass Shader compilation failed" 的根因）。
-    if (platform == rhi::RHIPlatform::Vulkan) {
+    // R13: D3D12 与 Vulkan 同走预编译分支——经 ShaderRegistry 平台感知解析
+    // 换 DXIL 镜像（EngineTest/shaders/d3d12/Volume/<name>.comp.cso）；此前
+    // D3D12 落到 Metal 文本分支，MSL 源被当 DXIL 消费。
+    if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
+        if (platform == rhi::RHIPlatform::D3D12) {
+            const std::string rel =
+                std::string("Engine/Graphics/Vulkan/shaders/Volume/") + shaderName + ".comp.spv";
+            const std::string resolved = utils::ShaderRegistry::ResolveShaderPath(platform, rel);
+            std::ifstream f(resolved, std::ios::binary | std::ios::ate);
+            if (f.is_open()) {
+                std::streamsize sz = f.tellg();
+                f.seekg(0);
+                std::vector<u8> code(static_cast<size_t>(sz));
+                f.read(reinterpret_cast<char*>(code.data()), sz);
+                return code;
+            }
+            PRIMAL_LOG_STREAM(Error, "Engine") << "[FroxelFogPass] Failed to load cso mirror: " << resolved << std::endl;
+            return {};
+        }
         const char* spvPaths[] = {
             "Engine/Graphics/Vulkan/shaders/Volume/",
             "Darwin/Debug/Engine/Graphics/Vulkan/shaders/Volume/",

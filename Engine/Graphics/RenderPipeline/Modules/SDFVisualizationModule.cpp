@@ -3,6 +3,7 @@
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
 #include "Graphics/Nanite/GlobalSDF.h"
 #include "Graphics/RHI/Core/RHIMath.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include <algorithm>
 #include <fstream>
 #include <iostream>
@@ -63,12 +64,20 @@ bool SDFVisualizationModule::Initialize(RHIDeviceBase* device,
         f.read(reinterpret_cast<char*>(b.data()), sz);
         return b;
     };
-    std::vector<u8> compBytes = tryPath(compPath);
-    for (int i = 1; i <= 6 && compBytes.empty(); ++i) {
-        std::string pfx;
-        for (int j = 0; j < i; ++j) pfx += "../";
-        compBytes = tryPath(pfx + compPath);
-    }
+    // R13: D3D12 走 DXIL 镜像（EngineTest/shaders/d3d12/…cso，中央化于
+    // ShaderRegistry::ResolveShaderPath(platform, relPath)）；镜像缺失时直接
+    // 置空（模块惰性），绝不回退 .spv——那是 CI 首轮 42 处 DXBC/DXIL magic
+    // mismatch 的来源之一。其余平台保持裸路径 + ../ 上溯原行为。
+    const bool d3d12Mirror = device->GetPlatform() == RHIPlatform::D3D12;
+    std::vector<u8> compBytes = d3d12Mirror
+        ? tryPath(utils::ShaderRegistry::ResolveShaderPath(device->GetPlatform(), compPath))
+        : tryPath(compPath);
+    if (!d3d12Mirror)
+        for (int i = 1; i <= 6 && compBytes.empty(); ++i) {
+            std::string pfx;
+            for (int j = 0; j < i; ++j) pfx += "../";
+            compBytes = tryPath(pfx + compPath);
+        }
     ShaderHandle compShader = handles::INVALID_SHADER;
     if (!compBytes.empty())
         compShader = device->CreateShader(compBytes.data(), compBytes.size(),
@@ -102,12 +111,15 @@ bool SDFVisualizationModule::Initialize(RHIDeviceBase* device,
 
     // ---- Offline SDF compute pipeline (dense ray march for unsigned SDF) ----
     const char* offlineCompPath = "Engine/Graphics/Vulkan/shaders/Debug/OfflineSDFViz.comp.spv";
-    std::vector<u8> offlineCompBytes = tryPath(offlineCompPath);
-    for (int i = 1; i <= 6 && offlineCompBytes.empty(); ++i) {
-        std::string pfx;
-        for (int j = 0; j < i; ++j) pfx += "../";
-        offlineCompBytes = tryPath(pfx + offlineCompPath);
-    }
+    std::vector<u8> offlineCompBytes = d3d12Mirror
+        ? tryPath(utils::ShaderRegistry::ResolveShaderPath(device->GetPlatform(), offlineCompPath))
+        : tryPath(offlineCompPath);
+    if (!d3d12Mirror)
+        for (int i = 1; i <= 6 && offlineCompBytes.empty(); ++i) {
+            std::string pfx;
+            for (int j = 0; j < i; ++j) pfx += "../";
+            offlineCompBytes = tryPath(pfx + offlineCompPath);
+        }
     if (!offlineCompBytes.empty()) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[SDFViz] OfflineSDFViz.comp.spv loaded (" << offlineCompBytes.size() << " bytes)" << std::endl;
         ShaderHandle offlineShader = device->CreateShader(
@@ -149,12 +161,15 @@ bool SDFVisualizationModule::Initialize(RHIDeviceBase* device,
 
     // Load SDFVizBlit.frag.spv — passthrough blit (no tonemapping).
     const char* blitPath = "Engine/Graphics/Vulkan/shaders/Debug/SDFVizBlit.frag.spv";
-    std::vector<u8> blitBytes = tryPath(blitPath);
-    for (int i = 1; i <= 6 && blitBytes.empty(); ++i) {
-        std::string pfx;
-        for (int j = 0; j < i; ++j) pfx += "../";
-        blitBytes = tryPath(pfx + blitPath);
-    }
+    std::vector<u8> blitBytes = d3d12Mirror
+        ? tryPath(utils::ShaderRegistry::ResolveShaderPath(device->GetPlatform(), blitPath))
+        : tryPath(blitPath);
+    if (!d3d12Mirror)
+        for (int i = 1; i <= 6 && blitBytes.empty(); ++i) {
+            std::string pfx;
+            for (int j = 0; j < i; ++j) pfx += "../";
+            blitBytes = tryPath(pfx + blitPath);
+        }
     ShaderHandle blitPs = handles::INVALID_SHADER;
     if (!blitBytes.empty())
         blitPs = device->CreateShader(blitBytes.data(), blitBytes.size(),

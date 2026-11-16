@@ -1,6 +1,7 @@
 #include "DebugProbeSphereModule.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
 #include "Graphics/RenderGraph/RenderGraphBuilder.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -15,12 +16,15 @@ using namespace rendergraph;
 namespace {
 // B1 L3: 自加载着色器字节码（GPUDrivenDrawPipeline::LoadShaderBytecode 同款
 // 双候选路径风格）。Metal 读 MSL 源（device 运行时编译）；Vulkan 读 Debug/
-// ProbeSphere.{vert,frag}.spv（精确字节数）。其它平台返回空——probe 球
+// ProbeSphere.{vert,frag}.spv（精确字节数）；R13 起 D3D12 同 Vulkan 形——读
+// EngineTest/shaders/d3d12/Debug/ 镜像 .cso。其余平台返回空——probe 球
 // overlay 在无填充后端上禁用。
 std::vector<u8> LoadProbeSphereBytecode(rhi::RHIDeviceBase* device, const char* name) {
     const auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
     std::vector<std::string> candidates;
-    if (platform == rhi::RHIPlatform::Vulkan) {
+    if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
+        // R13: D3D12 与 Vulkan 同形——候选经 ShaderRegistry 平台感知解析换
+        // DXIL 镜像（EngineTest/shaders/d3d12/Debug/<name>.cso）。
         std::string file = std::string(name) + ".spv";
         candidates.push_back("Engine/Graphics/Vulkan/shaders/Debug/" + file);
         candidates.push_back("/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/Engine/Graphics/Vulkan/shaders/Debug/" + file);
@@ -40,14 +44,16 @@ std::vector<u8> LoadProbeSphereBytecode(rhi::RHIDeviceBase* device, const char* 
     }
 
     for (const auto& path : candidates) {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        const std::string openPath = (platform == rhi::RHIPlatform::D3D12)
+            ? utils::ShaderRegistry::ResolveShaderPath(platform, path) : path;
+        std::ifstream file(openPath, std::ios::binary | std::ios::ate);
         if (!file.is_open()) continue;
         std::streamsize size = file.tellg();
         file.seekg(0, std::ios::beg);
         std::vector<u8> bytes(static_cast<size_t>(size));
         if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) continue;
         if (platform == rhi::RHIPlatform::Metal) return bytes;           // MSL 源
-        if (size % 4 != 0) continue;                                      // SPIR-V 4B 对齐
+        if (platform != rhi::RHIPlatform::D3D12 && size % 4 != 0) continue; // SPIR-V 4B 对齐（DXIL 无此约束）
         return bytes;
     }
     PRIMAL_LOG_STREAM(Error, "Render") << "[ProbeSpheres] shader bytecode not found for '"

@@ -1,6 +1,7 @@
 #include "LineBatchRenderer.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "CommonHeaders.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -63,11 +64,29 @@ bool LineBatchRenderer::Initialize(RHIDeviceBase* device) {
     return true;
 #else
     // T4.6.5 part 16.4: Load SPIR-V (Vulkan) or .metal (Metal) shaders.
+    // R13: D3D12 与 Vulkan 同走预编译分支——经 ShaderRegistry 平台感知解析换
+    // DXIL 镜像（EngineTest/shaders/d3d12/Forward/Line.vert|frag.cso）；此前
+    // D3D12 落到 Metal 文本分支（CI 上干净失败，模块惰性）。
     vertex_shader_ = handles::INVALID_SHADER;
     pixel_shader_ = handles::INVALID_SHADER;
-    if (isVulkan) {
-        // SPIR-V path: try relative, then dev-machine fallback.
-        auto loadSpv = [](const char* relPath) -> std::vector<u8> {
+    if (isVulkan || device->GetPlatform() == RHIPlatform::D3D12) {
+        // SPIR-V / DXIL path: try relative, then dev-machine fallback (Vulkan).
+        // D3D12: relPath 先经 ShaderRegistry 平台感知解析换镜像 .cso。
+        RHIDeviceBase* deviceForLoader = device;
+        auto loadSpv = [deviceForLoader](const char* relPath) -> std::vector<u8> {
+            if (deviceForLoader->GetPlatform() == RHIPlatform::D3D12) {
+                const std::string resolved = utils::ShaderRegistry::ResolveShaderPath(
+                    deviceForLoader->GetPlatform(), relPath);
+                std::ifstream fd(resolved, std::ios::binary | std::ios::ate);
+                if (fd.is_open()) {
+                    const size_t sz = static_cast<size_t>(fd.tellg());
+                    std::vector<u8> buf(sz);
+                    fd.seekg(0);
+                    fd.read(reinterpret_cast<char*>(buf.data()), sz);
+                    return buf;
+                }
+                return {};
+            }
             {
                 std::ifstream f(relPath, std::ios::binary | std::ios::ate);
                 if (f.is_open()) {

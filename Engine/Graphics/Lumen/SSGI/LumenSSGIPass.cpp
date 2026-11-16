@@ -135,22 +135,30 @@ static std::string ResolveIncludes(const std::string& source, const std::string&
 static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char* shaderName) {
     auto platform = device ? device->GetPlatform() : rhi::RHIPlatform::Metal;
 
-    if (platform == rhi::RHIPlatform::Vulkan) {
+    if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
         // All SSGI shaders are hand-written GLSL compiled to .comp.spv in Lumen/.
-        std::string relPath = utils::ShaderRegistry::GetShaderBaseDir(platform) +
+        // R13: D3D12 与 Vulkan 同形——DXIL 镜像 EngineTest/shaders/d3d12/Lumen/
+        // <name>.comp.cso（ShaderRegistry 平台感知解析；D3D12Shader 入口恒
+        // "main"，CompileShader 传入的功能入口名被后端忽略）。
+        std::string relPath = utils::ShaderRegistry::GetShaderBaseDir(rhi::RHIPlatform::Vulkan) +
                               "Lumen/" + shaderName + ".comp.spv";
         const std::vector<std::string> candidates = {
             relPath,
             "Engine/Graphics/Vulkan/shaders/Lumen/" + std::string(shaderName) + ".comp.spv",
         };
         for (const auto& path : candidates) {
-            std::ifstream file(path, std::ios::binary | std::ios::ate);
+            // Vulkan 保持裸路径直开（原行为零变化）；D3D12 换镜像路径后走
+            // CWD-walk 解析，缺失时返回原样路径 → open 失败 → 下面的统一报错。
+            const std::string openPath = (platform == rhi::RHIPlatform::D3D12)
+                ? utils::ShaderRegistry::ResolveShaderPath(platform, path)
+                : path;
+            std::ifstream file(openPath, std::ios::binary | std::ios::ate);
             if (!file.is_open()) continue;
             std::streamsize size = file.tellg();
             file.seekg(0, std::ios::beg);
             std::vector<u8> bytecode(static_cast<size_t>(size));
             if (!file.read(reinterpret_cast<char*>(bytecode.data()), size)) {
-                PRIMAL_LOG_STREAM(Error, "Render") << "[LumenSSGI] Failed to read SPIR-V: " << path << std::endl;
+                PRIMAL_LOG_STREAM(Error, "Render") << "[LumenSSGI] Failed to read SPIR-V: " << openPath << std::endl;
                 return {};
             }
             return bytecode;
@@ -253,7 +261,10 @@ void LumenSSGIPass::CreateDescriptorSetLayouts() {
     // --- Descriptor layouts: platform-branched ---
     // Metal: overlapping texture/buffer namespaces.
     // Vulkan/Dawn: flat sequential bindings matching WGSL @binding(N).
-    const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+    // R13: D3D12 与 Vulkan 同形——DXIL 镜像由同一份 GLSL 经 spirv-cross 产出，
+    // 保持同一组 flat bindings（与 GIGatherModule isVk 含 D3D12 的先例一致）。
+    const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan ||
+                      device_->GetPlatform() == RHIPlatform::D3D12;
 
     // --- Trace ---
     if (isVk) {
@@ -600,7 +611,9 @@ LumenSSGIOutput LumenSSGIPass::AddPass(
                 b.subresource = 0xFFFFFFFF;
                 cmd->InsertBarrier(&b, 1);
             };
-            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan;
+            // R13: D3D12 与 Vulkan 同形（DXIL 镜像同 GLSL flat bindings）。
+            const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan ||
+                              device_->GetPlatform() == RHIPlatform::D3D12;
             static int s_ssgi_exec = 0;
             if (s_ssgi_exec < 3) { PRIMAL_LOG_STREAM(Error, "Render") << "[SSGI_EXEC] frame " << s_ssgi_exec
                 << " trace=" << (trace_pipeline_ != handles::INVALID_PIPELINE ? "OK" : "INVALID")

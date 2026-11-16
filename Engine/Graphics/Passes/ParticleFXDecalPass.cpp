@@ -3,6 +3,7 @@
 #include "ParticleFXDecalPass.h"
 #include "ParticleFX/PfxTypes.h"
 #include "Common/CoreLogStream.h"
+#include "Graphics/Utils/ShaderRegistry.h"
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
 #include "Graphics/RHI/Core/RHIMath.h"
 
@@ -41,10 +42,28 @@ bool ParticleFXDecalPass::initialize(rhi::RHIDeviceBase* device) {
     if (device_) return true;
 
     device_ = device;
-        const bool isVulkan = (device->GetPlatform() == rhi::RHIPlatform::Vulkan);
+        // R13: D3D12 与 Vulkan 同走预编译字节码分支——D3D12 经 ShaderRegistry
+        // 平台感知解析换 DXIL 镜像（EngineTest/shaders/d3d12/PFX/*.cso，含大写
+        // Shaders/ 前缀变体）；此前 D3D12 落到 Metal 文本分支。
+        const rhi::RHIPlatform platform_ = device->GetPlatform();
+        const bool isVulkan = (platform_ == rhi::RHIPlatform::Vulkan ||
+                               platform_ == rhi::RHIPlatform::D3D12);
     if (isVulkan) {
-        // ---- Vulkan：加载预编译 SPIR-V（N2 对称路径）----
-        auto loadSpvBinary = [](const char* relPath) -> std::vector<u8> {
+        // ---- Vulkan/D3D12：加载预编译字节码（N2 对称路径）----
+        auto loadSpvBinary = [platform_](const char* relPath) -> std::vector<u8> {
+            if (platform_ == rhi::RHIPlatform::D3D12) {
+                const std::string resolved =
+                    primal::graphics::utils::ShaderRegistry::ResolveShaderPath(platform_, relPath);
+                std::ifstream fd(resolved, std::ios::ate | std::ios::binary);
+                if (fd.is_open()) {
+                    const std::streamsize sz = fd.tellg();
+                    fd.seekg(0, std::ios::beg);
+                    std::vector<u8> bytes(static_cast<size_t>(sz));
+                    fd.read(reinterpret_cast<char*>(bytes.data()), sz);
+                    return bytes;
+                }
+                return {};
+            }
             std::ifstream f0(relPath, std::ios::ate | std::ios::binary);
             if (f0.is_open()) {
                 const std::streamsize sz = f0.tellg();

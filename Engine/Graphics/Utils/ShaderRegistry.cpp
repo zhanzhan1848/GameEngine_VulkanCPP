@@ -75,4 +75,28 @@ std::string ShaderRegistry::ResolveShaderPath(const std::string& relPath) {
     return relPath;
 }
 
+std::string ShaderRegistry::ResolveShaderPath(rhi::RHIPlatform platform,
+                                              const std::string& relPath) {
+    // Non-D3D12: identical to the single-arg resolution (zero behavior change
+    // for Vulkan/Metal/Dawn).
+    if (platform != rhi::RHIPlatform::D3D12)
+        return ResolveShaderPath(relPath);
+
+    // D3D12: remap the Vulkan-tree path to the DXIL mirror layout before the
+    // CWD-walk (GIGatherModule ResolveVariantShaderPath / tvsrg
+    // MapShaderPathForD3D12 convention: base swap + trailing .spv -> .cso).
+    std::string path = relPath;
+    static const char kVulkanBase[] = "Engine/Graphics/Vulkan/shaders/";
+    static const char kVulkanBaseCap[] = "Engine/Graphics/Vulkan/Shaders/";
+    if (path.rfind(kVulkanBase, 0) == 0)
+        path = "EngineTest/shaders/d3d12/" + path.substr(sizeof(kVulkanBase) - 1);
+    else if (path.rfind(kVulkanBaseCap, 0) == 0)
+        path = "EngineTest/shaders/d3d12/" + path.substr(sizeof(kVulkanBaseCap) - 1);
+    if (path.size() > 4 && path.compare(path.size() - 4, 4, ".spv") == 0) {
+        path.resize(path.size() - 4);
+        path += ".cso";
+    }
+    return ResolveShaderPath(path);
+}
+
 } // namespace primal::graphics::utils

@@ -47,22 +47,14 @@ static const char* GatherAuditFormatName(DataFormat format) {
 // D3D12 → 与 tvsrg 的 MapShaderPathForD3D12（TestVulkanSponzaRenderGraph.cpp
 // :230-245）同规则：Engine/Graphics/Vulkan/shaders/ 基座换成
 // EngineTest/shaders/d3d12/、尾缀 .spv → .cso（build_d3d12_shaders.py 镜像
-// 布局）。CreateShader 入口名不需按平台切换：D3D12 实现忽略入口名参数
+// 布局）。R13 起该映射中央化到 ShaderRegistry::ResolveShaderPath(platform,
+// relPath)（本文件内的 r5 内联实现与 PFX 大写 Shaders/ 前缀变体已合并）。
+// CreateShader 入口名不需按平台切换：D3D12 实现忽略入口名参数
 // （D3D12Shader 构造契约——DXIL 容器入口恒 main，D3D12Shader.cpp:14-18），
 // Vulkan 用真实 OpEntryPoint，故装载点保持 "ddgi_gi_gather" 实参不变。
 static std::string ResolveVariantShaderPath(const char* vulkanSpvPath,
                                             RHIPlatform platform) {
-    std::string path = vulkanSpvPath;
-    if (platform == RHIPlatform::D3D12) {
-        static const char kVulkanBase[] = "Engine/Graphics/Vulkan/shaders/";
-        if (path.rfind(kVulkanBase, 0) == 0)
-            path = "EngineTest/shaders/d3d12/" + path.substr(sizeof(kVulkanBase) - 1);
-        if (path.size() > 4 && path.compare(path.size() - 4, 4, ".spv") == 0) {
-            path.resize(path.size() - 4);
-            path += ".cso";
-        }
-    }
-    return utils::ShaderRegistry::ResolveShaderPath(path);
+    return utils::ShaderRegistry::ResolveShaderPath(platform, vulkanSpvPath);
 }
 
 struct GIGatherCB {
@@ -371,7 +363,7 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             !traversal_audit_requested_ && !glossyAuditRequested && !exact("PRIMAL_DDGI_GEOMETRY_EQUAL_BOX") && !exact("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS") &&
             !exact("PRIMAL_DDGI_GEOMETRY_UPPER_BVH") && !exact("PRIMAL_DDGI_GEOMETRY_BOUNDS_FIRST") && !exact("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE") &&
             !exact("PRIMAL_DDGI_INSTANCE_PAYLOAD_CACHE") && (!wg||std::strcmp(wg,"0")==0);
-        if(compatible){const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_pair.comp.spv");
+        if(compatible){const auto path=utils::ShaderRegistry::ResolveShaderPath(device->GetPlatform(),"Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_pair.comp.spv");
             std::ifstream f(path,std::ios::binary|std::ios::ate);if(f&&f.tellg()>0){auto count=static_cast<size_t>(f.tellg());f.seekg(0);std::vector<u8> bytes(count);
                 if(f.read(reinterpret_cast<char*>(bytes.data()),count)){pair_shader_hash_=TraversalAuditByteHash(bytes);pair_shader_=device->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"ddgi_gi_gather");}}
             if(pair_shader_!=handles::INVALID_SHADER){ComputePipelineDesc pp=pd;pp.computeShader=pair_shader_;pair_pipeline_=device->CreateComputePipeline(pp);}pair_requested_=pair_pipeline_!=handles::INVALID_PIPELINE;}
@@ -386,7 +378,7 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             !exact("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS") && !exact("PRIMAL_DDGI_GEOMETRY_UPPER_BVH") &&
             !exact("PRIMAL_DDGI_GEOMETRY_BOUNDS_FIRST") && !exact("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE") && (!wg || std::strcmp(wg,"0")==0);
         if(compatible) {
-            const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_instance_payload.comp.spv");
+            const auto path=utils::ShaderRegistry::ResolveShaderPath(device->GetPlatform(),"Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_instance_payload.comp.spv");
             std::ifstream file(path,std::ios::binary|std::ios::ate);
             if(file && file.tellg()>0){const auto count=static_cast<size_t>(file.tellg());file.seekg(0);std::vector<u8> bytes(count);
                 if(file.read(reinterpret_cast<char*>(bytes.data()),count)){payload_shader_hash_=TraversalAuditByteHash(bytes);payload_shader_=device->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"ddgi_gi_gather");}}
@@ -400,7 +392,7 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
         if(!equalBoxBindings.empty() && query_pipeline_!=handles::INVALID_PIPELINE) {
             equal_box_set_layout_=device->CreateDescriptorSetLayout({u32(equalBoxBindings.size()),equalBoxBindings.data()});
             if(equal_box_set_layout_!=handles::INVALID_DESCRIPTOR_SET_LAYOUT)equal_box_layout_=device->CreatePipelineLayout({1,&equal_box_set_layout_});
-            const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_equal_box.comp.spv");
+            const auto path=utils::ShaderRegistry::ResolveShaderPath(device->GetPlatform(),"Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_equal_box.comp.spv");
             std::ifstream file(path,std::ios::binary|std::ios::ate);
             if(file && file.tellg()>0) {const auto count=static_cast<size_t>(file.tellg());file.seekg(0);std::vector<u8> bytes(count);
                 if(file.read(reinterpret_cast<char*>(bytes.data()),count)){equal_box_shader_hash_=TraversalAuditByteHash(bytes);equal_box_shader_=device->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"ddgi_gi_gather");}}
@@ -421,7 +413,7 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             !exact("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS") && !exact("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE") &&
             !exact("PRIMAL_DDGI_GEOMETRY_BOUNDS_FIRST");
         if(compatible) {
-            const auto path=utils::ShaderRegistry::ResolveShaderPath(workgroup_requested_==32 ?
+            const auto path=utils::ShaderRegistry::ResolveShaderPath(device->GetPlatform(),workgroup_requested_==32 ?
                 "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_cacheless32.comp.spv" :
                 "Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_cacheless64.comp.spv");
             std::ifstream file(path,std::ios::binary|std::ios::ate);
@@ -437,7 +429,7 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
         const bool compatible=queryEnabled && query_pipeline_!=handles::INVALID_PIPELINE && !referenceVisibility &&
             !traversal_audit_requested_ && !glossyAuditRequested && !exact("PRIMAL_DDGI_GEOMETRY_UPPER_BVH") &&
             !exact("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS") && !exact("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE");
-        const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_bounds_first.comp.spv");
+        const auto path=utils::ShaderRegistry::ResolveShaderPath(device->GetPlatform(),"Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_bounds_first.comp.spv");
         if(compatible) {
             std::ifstream file(path,std::ios::binary|std::ios::ate);
             if(file && file.tellg()>0) {
@@ -693,7 +685,7 @@ bool GIGatherModule::PrepareTraversalAudit(u32 nativeFrame,u32 slot) {
     traversal_audit_attempted_=true;
     const Pixel roi[]={{797,600},{798,600},{520,600},{500,600},{790,600},{800,600},{650,500},{640,500}};
     if(!BuildTraversalAuditSelection(gather_width_,gather_height_,32,18,roi,nativeFrame,slot,traversal_selection_,traversal_pixels_))return false;
-    const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_traversal_audit.comp.spv");
+    const auto path=utils::ShaderRegistry::ResolveShaderPath(device_->GetPlatform(),"Engine/Graphics/Vulkan/shaders/Lumen/DDGIGIGather_geometry_traversal_audit.comp.spv");
     std::ifstream file(path,std::ios::binary|std::ios::ate);if(!file || file.tellg()<=0)return false;
     auto count=static_cast<size_t>(file.tellg());file.seekg(0);std::vector<u8> bytes(count);
     if(!file.read(reinterpret_cast<char*>(bytes.data()),count))return false;

@@ -102,13 +102,24 @@ bool PlanarReflectionModule::Initialize(RHIDeviceBase* device,
 
 bool PlanarReflectionModule::LoadCompositeShaders() {
     const bool isVulkan = (device_->GetPlatform() == RHIPlatform::Vulkan);
+    // R13: D3D12 与 Vulkan 同走预编译分支——路径经 ShaderRegistry 平台感知
+    // 解析换 DXIL 镜像（EngineTest/shaders/d3d12/PostProcess/
+    // MirrorComposite.vert|frag.cso）；此前 D3D12 走 else 分支按 Metal 多入口
+    // 源文本消费（平铺布局 GetShaderPath 恒落空）。
+    const bool d3d12 = (device_->GetPlatform() == RHIPlatform::D3D12);
 
     ShaderHandle vs = handles::INVALID_SHADER;
     ShaderHandle fs = handles::INVALID_SHADER;
-    if (isVulkan) {
+    if (isVulkan || d3d12) {
         std::vector<u8> vsBytes, fsBytes;
-        if (!ReadShaderBytes("Engine/Graphics/Vulkan/shaders/PostProcess/MirrorComposite.vert.spv", vsBytes) ||
-            !ReadShaderBytes("Engine/Graphics/Vulkan/shaders/PostProcess/MirrorComposite.frag.spv", fsBytes)) {
+        std::string vsRel = "Engine/Graphics/Vulkan/shaders/PostProcess/MirrorComposite.vert.spv";
+        std::string fsRel = "Engine/Graphics/Vulkan/shaders/PostProcess/MirrorComposite.frag.spv";
+        if (d3d12) {
+            vsRel = utils::ShaderRegistry::ResolveShaderPath(device_->GetPlatform(), vsRel);
+            fsRel = utils::ShaderRegistry::ResolveShaderPath(device_->GetPlatform(), fsRel);
+        }
+        if (!ReadShaderBytes(vsRel, vsBytes) ||
+            !ReadShaderBytes(fsRel, fsBytes)) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[PlanarReflection] Failed to load MirrorComposite SPIR-V" << std::endl;
             return false;
         }

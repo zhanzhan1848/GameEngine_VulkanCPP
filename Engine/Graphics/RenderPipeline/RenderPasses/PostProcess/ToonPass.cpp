@@ -37,12 +37,14 @@ static void* s_ParamsMapped[MAX_FRAMES] = {};
 // Platform-branched shader loader (same convention as TAAPass):
 //   Vulkan: PostProcess/Toon.comp.spv (hand-written GLSL), entry "main".
 //   Metal:  Metal/shaders/ToonShader.metal source, entry "toon_main".
+//   D3D12 (R13): 与 Vulkan 同形——PostProcess/Toon.comp.cso 镜像（ShaderRegistry
+//   平台感知解析；D3D12Shader 入口恒 "main"，toon_main 入口名被忽略）。
 static std::vector<u8> LoadShaderBytes(RHIPlatform platform) {
-    if (platform == RHIPlatform::Vulkan) {
+    if (platform == RHIPlatform::Vulkan || platform == RHIPlatform::D3D12) {
         const std::string relPath = "Engine/Graphics/Vulkan/shaders/PostProcess/Toon.comp.spv";
         const std::vector<std::string> candidates = {
             relPath,
-            utils::ShaderRegistry::ResolveShaderPath(relPath),
+            utils::ShaderRegistry::ResolveShaderPath(platform, relPath),
         };
         for (const auto& path : candidates) {
             std::ifstream file(path, std::ios::binary | std::ios::ate);

@@ -104,15 +104,22 @@ struct GeometryDebugContext {
 
     // Loads one debug shader (VS or FS). vsEntry/fsEntry are the Metal entry
     // names; Vulkan SPIR-V always uses "main".
+    // R13: D3D12 与 Vulkan 同走预编译分支——DXIL 镜像 EngineTest/shaders/d3d12/
+    // Debug/<name>.<stage>.cso（ShaderRegistry 平台感知解析；D3D12Shader 入口
+    // 恒 "main"，metalEntry 不消费）；此前 D3D12 读 Metal 源文本。
     ShaderHandle LoadDebugShader(RHIDeviceBase& device, bool isVulkan,
                                  const char* name, bool isVertex,
                                  const char* metalEntry) {
         utl::vector<char> data;
-        if (isVulkan) {
+        const bool d3d12 = (device.GetPlatform() == RHIPlatform::D3D12);
+        if (isVulkan || d3d12) {
             std::string stage = isVertex ? "vert" : "frag";
-            if (!ReadShaderFile(std::string("Engine/Graphics/Vulkan/shaders/Debug/") +
-                                name + "." + stage + ".spv", data) ||
-                data.empty()) {
+            std::string rel = std::string("Engine/Graphics/Vulkan/shaders/Debug/") +
+                              name + "." + stage + ".spv";
+            bool ok = d3d12
+                ? ReadShaderFile(utils::ShaderRegistry::ResolveShaderPath(device.GetPlatform(), rel), data)
+                : ReadShaderFile(rel, data);
+            if (!ok || data.empty()) {
                 PRIMAL_LOG_STREAM(Error, "Render") << "[GeometryDebug] Failed to load SPIR-V: Debug/" << name
                           << "." << stage << ".spv" << std::endl;
                 return handles::INVALID_SHADER;

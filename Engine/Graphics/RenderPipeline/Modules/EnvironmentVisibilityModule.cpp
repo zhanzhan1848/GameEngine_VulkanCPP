@@ -154,7 +154,7 @@ bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle 
         const bool compatible=(!wg||std::strcmp(wg,"0")==0) && !exact("PRIMAL_EXPERIMENT_ENV_SAH") &&
             !exact("PRIMAL_DDGI_GEOMETRY_EQUAL_BOX") && !exact("PRIMAL_DDGI_GEOMETRY_UPPER_BVH") && !exact("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS") &&
             !exact("PRIMAL_DDGI_GEOMETRY_BOUNDS_FIRST") && !exact("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE") && !exact("PRIMAL_DDGI_INSTANCE_PAYLOAD_CACHE");
-        if(compatible){const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/EnvironmentVisibility_trace_pair.comp.spv");
+        if(compatible){const auto path=utils::ShaderRegistry::ResolveShaderPath(device_->GetPlatform(),"Engine/Graphics/Vulkan/shaders/Lumen/EnvironmentVisibility_trace_pair.comp.spv");
             std::ifstream f(path,std::ios::binary|std::ios::ate);if(f&&f.tellg()>0){auto count=static_cast<size_t>(f.tellg());f.seekg(0);std::vector<u8> bytes(count);
                 if(f.read(reinterpret_cast<char*>(bytes.data()),count)){pair_shader_hash_=14695981039346656037ull;for(u8 byte:bytes){pair_shader_hash_^=byte;pair_shader_hash_*=1099511628211ull;}pair_shader_=device_->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"main");}}
             if(pair_shader_!=handles::INVALID_SHADER){ComputePipelineDesc pd{};pd.computeShader=pair_shader_;pd.layout=layout_;pd.threadGroupSize={8,8,1};pair_pipeline_=device_->CreateComputePipeline(pd);}pair_requested_=pair_pipeline_!=handles::INVALID_PIPELINE;
@@ -165,7 +165,7 @@ bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle 
     const bool workgroupValid=workgroup_experiment::Parse(workgroupEnv,false,workgroup_requested_);
     if(workgroupEnv) {
         if(workgroupValid && workgroup_requested_==32) {
-            const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Vulkan/shaders/Lumen/EnvironmentVisibility_trace_wg32.comp.spv");
+            const auto path=utils::ShaderRegistry::ResolveShaderPath(device_->GetPlatform(),"Engine/Graphics/Vulkan/shaders/Lumen/EnvironmentVisibility_trace_wg32.comp.spv");
             std::ifstream file(path,std::ios::binary|std::ios::ate);
             if(file && file.tellg()>0) {const auto count=static_cast<size_t>(file.tellg());file.seekg(0);std::vector<u8> bytes(count);
                 if(file.read(reinterpret_cast<char*>(bytes.data()),count)){if(frame_audit_enabled_){frame_audit_workgroup_hash_=14695981039346656037ull;for(u8 byte:bytes){frame_audit_workgroup_hash_^=byte;frame_audit_workgroup_hash_*=1099511628211ull;}}workgroup_shader_=device_->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"main");}}
