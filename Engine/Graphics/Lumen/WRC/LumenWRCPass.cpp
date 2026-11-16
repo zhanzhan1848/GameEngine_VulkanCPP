@@ -111,20 +111,33 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
 
     // 探针 radiance storage（单缓冲持久；stride 见 WRCTypes.h；内存预算
     // 复核 ~8.5 MB @ 16k probes，见 WRCTypes.h 注释）。
+    // R20（run 43896150080 canary 131072/262144 族）：WRC 的 compute GPU 写
+    // 目标（probe_data/ray_data/hit_distance/consume_counter/prefilter_sh）
+    // 补显式 UA 位——D3D12 端 reroute DEFAULT+ALLOW_UNORDERED_ACCESS（canary
+    // 点名的 set=412/415/419/422 UAV 写随标志齐备合法化）。update_list_
+    // 保持 Storage-only（CPU 每帧 Map 填充，见下）。
     {
         BufferDesc desc{};
         desc.size = u64(probeTotal) * kWRCProbeStrideU32 * sizeof(u32);
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                         static_cast<u32>(ResourceUsage::UnorderedAccess);
         desc.structured.elementCount = probeTotal;
         desc.structured.elementStride = kWRCProbeStrideU32 * sizeof(u32);
         probe_data_ = device->CreateBuffer(desc);
         if (probe_data_ == handles::INVALID_RESOURCE) return false;
-        if (void* mapped = device->MapBuffer(probe_data_)) {
-            std::memset(mapped, 0, static_cast<size_t>(desc.size));
-            device->UnmapBuffer(probe_data_);
+        // R20：清零 Map 命中后端逐字节同旧路；D3D12 DEFAULT 改道后回落
+        // UpdateBufferData（staging 环拷贝）。
+        {
+            const std::vector<u8> zeros(static_cast<size_t>(desc.size));
+            if (void* mapped = device->MapBuffer(probe_data_)) {
+                std::memcpy(mapped, zeros.data(), static_cast<size_t>(desc.size));
+                device->UnmapBuffer(probe_data_);
+            } else {
+                device->UpdateBufferData(probe_data_, zeros.data(), desc.size, 0);
+            }
         }
     }
     // 逐射线 scratch（绝对探针索引 × K × vec4）。
@@ -134,7 +147,8 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                         static_cast<u32>(ResourceUsage::UnorderedAccess);  // R20 UA 位（同上注）
         desc.structured.elementCount = probeTotal * K;
         desc.structured.elementStride = sizeof(math::v4);
         ray_data_ = device->CreateBuffer(desc);
@@ -147,7 +161,8 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                         static_cast<u32>(ResourceUsage::UnorderedAccess);  // R20 UA 位（同上注）
         desc.structured.elementCount = probeTotal * (K + 1);
         desc.structured.elementStride = sizeof(f32);
         hit_distance_ = device->CreateBuffer(desc);
@@ -160,7 +175,8 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                         static_cast<u32>(ResourceUsage::UnorderedAccess);  // R20 UA 位（同上注）
         desc.structured.elementCount = probeTotal;
         desc.structured.elementStride = sizeof(u32);
         consume_counter_ = device->CreateBuffer(desc);
@@ -173,7 +189,8 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                         static_cast<u32>(ResourceUsage::UnorderedAccess);  // R20 UA 位（同上注）
         desc.structured.elementCount = probeTotal * 9u;
         desc.structured.elementStride = sizeof(math::v4);
         prefilter_sh_ = device->CreateBuffer(desc);

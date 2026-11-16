@@ -1152,8 +1152,15 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         fbDesc.type = BufferType::Structured;
                         fbDesc.usage = GPUMemoryUsage::Dynamic;
                         fbDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+                        // R20（run 43896150080）：+显式 UA 位——flat 装配 buffer
+                        // 是 CopyBuffer 目标 + compute 读写，D3D12 端必须落
+                        // DEFAULT 堆（UPLOAD 堆规定态 GENERIC_READ 进不了
+                        // COPY_DEST：拷入即 GPU 楔死，R19 CopyBuffer 闸门已
+                        // 拦但数据永不到 GPU）。reroute 后头部 Map 写走下方
+                        // UpdateBufferData 回落。
                         fbDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
-                                           static_cast<u32>(BufferUsageFlags::TransferDst);
+                                           static_cast<u32>(BufferUsageFlags::TransferDst) |
+                                           static_cast<u32>(ResourceUsage::UnorderedAccess);
                         fbDesc.name = "GIGather_FlatIrr";
                         flat_irr_buffer_[s] = device_->CreateBuffer(fbDesc);
                         flat_irr_capacity_[s] = needed;
@@ -1161,13 +1168,21 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 }
                 flatBuf = flat_irr_buffer_[bindingIdx];
                 // 头部（host 写，立即驻留；后续 CopyBuffer 只写 [256, ...)）。
-                auto* hdr = static_cast<u32*>(device_->MapBuffer(flatBuf));
-                if (hdr) {
-                    hdr[0] = fvTotalProbes;
-                    hdr[1] = nvolCount;
-                    hdr[2] = 0;
-                    hdr[3] = 0;
-                    device_->UnmapBuffer(flatBuf);
+                // R20：Map 命中（Metal/Vulkan/Dawn 宿主可见堆）逐字节同旧路；
+                // D3D12 改道 DEFAULT 后 Map 失效 → UpdateBufferData（staging
+                // 环拷贝；帧内排队到下一 Begin，头内容跨帧稳定仅计数变化时
+                // 有一帧延迟）。
+                {
+                    u32 hdrTemp[4] = {fvTotalProbes, nvolCount, 0, 0};
+                    if (auto* hdr = static_cast<u32*>(device_->MapBuffer(flatBuf))) {
+                        hdr[0] = hdrTemp[0];
+                        hdr[1] = hdrTemp[1];
+                        hdr[2] = hdrTemp[2];
+                        hdr[3] = hdrTemp[3];
+                        device_->UnmapBuffer(flatBuf);
+                    } else {
+                        device_->UpdateBufferData(flatBuf, hdrTemp, sizeof(hdrTemp), 0);
+                    }
                 }
                 // GI 根治 Phase 3.2 + 能量所有权 Phase 4a: flat openSky 缓冲
                 // （256B 头 + probes×8B，float2/探针 = {escapeRatio, sER}），
@@ -1184,7 +1199,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         osDesc.usage = GPUMemoryUsage::Dynamic;
                         osDesc.memoryUsage = GPUMemoryUsage::Dynamic;
                         osDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
-                                           static_cast<u32>(BufferUsageFlags::TransferDst);
+                                           static_cast<u32>(BufferUsageFlags::TransferDst) |
+                                           static_cast<u32>(ResourceUsage::UnorderedAccess);  // R20 UA 位（同 FlatIrr 注）
                         osDesc.name = "GIGather_FlatOpenSky";
                         flat_opensky_buffer_[s2] = device_->CreateBuffer(osDesc);
                         flat_opensky_capacity_[s2] = neededSky;

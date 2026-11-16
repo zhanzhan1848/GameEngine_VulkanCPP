@@ -39,6 +39,7 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include <vector>
 #include <algorithm>
 #include "Engine/Common/CoreLogStream.h"
 
@@ -46,6 +47,27 @@ namespace primal::graphics::lumen {
 
 using namespace rhi;
 using namespace rendergraph;
+
+namespace {
+// R20（2026-11-17，run 43896150080 canary/id=524 跟进）：probe 族 buffer 的
+// 宿主可见填充 helper。本文件 GPU 写目标 buffer（irradiance/depth/confidence/
+// opensky/ray_data/hit_distance/hit_normal/update_list/relocated_origins/
+// dispatch_count）desc 补显式 UnorderedAccess 位后，D3D12 端经 R16 reroute 落
+// DEFAULT+ALLOW_UNORDERED_ACCESS，持久 Map 失效——Map 命中路径
+//（Metal/Vulkan/Dawn，宿主可见堆）逐字节不变；失败回落 UpdateBufferData
+//（staging 环拷贝，buffer 的 COMMON→COPY_DEST 隐式提升）。MB 级 probeCount
+// 缓冲的临时 vector 只发生在创建/重置期，非逐探针热路径。
+bool FillProbeBufferBytes(RHIDeviceBase* device, ResourceHandle buffer,
+                          const void* data, u64 bytes) {
+    if (bytes == 0) return true;
+    if (void* mapped = device->MapBuffer(buffer)) {
+        std::memcpy(mapped, data, bytes);
+        device->UnmapBuffer(buffer);
+        return true;
+    }
+    return device->UpdateBufferData(buffer, data, bytes, 0);
+}
+}  // namespace
 
 #include "DDGIShProducerAudit.inl"
 
@@ -495,7 +517,9 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
         updateListDesc.type = BufferType::Structured;
         updateListDesc.usage = GPUMemoryUsage::Dynamic;
         updateListDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-        updateListDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        // R20：+显式 UA 位（trace compute GPU 写目标——D3D12 reroute DEFAULT）
+        updateListDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                                   static_cast<u32>(ResourceUsage::UnorderedAccess);
         for (u32 i = 0; i < 3; ++i) {
             probe_update_list_buffers_[i] = device_->CreateBuffer(updateListDesc);
         }
@@ -1974,8 +1998,11 @@ void LumenDDGIPass::CreateDepthReadbackRing() {
         desc.size = 16;   // 3×u32 + pad
         desc.type = BufferType::Structured;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        // R20：+UA 位——compute 写入的间接调度计数（D3D12 reroute DEFAULT，
+        // 与 R16 GPUCulling indirect_args 同款）
         desc.bindFlags = static_cast<u32>(ResourceUsage::IndirectArg) |
-                         static_cast<u32>(BufferUsageFlags::TransferDst);
+                         static_cast<u32>(BufferUsageFlags::TransferDst) |
+                         static_cast<u32>(ResourceUsage::UnorderedAccess);
         probe_dispatch_count_buffer_ = device_->CreateBuffer(desc);
     }
 }
@@ -2035,7 +2062,13 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        // R20：probe 族 GPU 写目标补显式 UA 位（本族 irradiance/depth/
+        // provenance/confidence/opensky/ray_data/hit_distance(+hit_normal 共
+        // 用 desc)/relocated_origins 同款）——D3D12 端 R16 reroute 落
+        // DEFAULT+ALLOW_UNORDERED_ACCESS，UAV 写入与 GIGather L1346+ 的
+        // UAV→SRV barrier 随之合法；填充走 FillProbeBufferBytes。
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                         static_cast<u32>(ResourceUsage::UnorderedAccess);
         desc.structured.elementCount = totalProbes * 9;
         desc.structured.elementStride = sizeof(math::v4);
         irradiance_buffers_[i] = device_->CreateBuffer(desc);
@@ -2066,22 +2099,25 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                         static_cast<u32>(ResourceUsage::UnorderedAccess);  // R20 UA 位（同 irradiance 注）
         desc.structured.elementCount = totalProbes * DDGI_FLOATS_PER_PROBE;
         desc.structured.elementStride = sizeof(float);
         depth_buffers_[i] = device_->CreateBuffer(desc);
 
-        // Initialize with sensible defaults
-        float* mapped = static_cast<float*>(device_->MapBuffer(depth_buffers_[i]));
-        if (mapped) {
+        // Initialize with sensible defaults（R20：经 FillProbeBufferBytes——
+        // D3D12 端 buffer 已改道 DEFAULT，Map 可能失效）
+        {
+            std::vector<float> depthInit(
+                static_cast<size_t>(totalProbes) * DDGI_FLOATS_PER_PROBE);
             for (u32 p = 0; p < totalProbes; ++p) {
-                float* probe = mapped + p * DDGI_FLOATS_PER_PROBE;
+                float* probe = depthInit.data() + static_cast<size_t>(p) * DDGI_FLOATS_PER_PROBE;
                 // First 64 floats: depth mean — fill with ray_max_distance (open)
                 for (u32 j = 0; j < DDGI_DEPTH_TEXELS; ++j) probe[j] = depthMeanInit;
                 // Next 64 floats: depth variance — non-zero to avoid Chebyshev singularity
                 for (u32 j = DDGI_DEPTH_TEXELS; j < DDGI_FLOATS_PER_PROBE; ++j) probe[j] = depthVarInit;
             }
-            device_->UnmapBuffer(depth_buffers_[i]);
+            FillProbeBufferBytes(device_, depth_buffers_[i], depthInit.data(), depthInit.size() * sizeof(float));
         }
     }
 
@@ -2092,14 +2128,14 @@ void LumenDDGIPass::CreateProbeTextures() {
             BufferDesc desc{};desc.size=u64(totalProbes)*64u*8u*sizeof(u32);
             desc.type=BufferType::Structured;
             desc.usage=desc.memoryUsage=GPUMemoryUsage::Dynamic;
-            desc.bindFlags=u32(BufferUsageFlags::Storage);
+            desc.bindFlags=u32(BufferUsageFlags::Storage)|u32(ResourceUsage::UnorderedAccess);  // R20 UA 位
             desc.structured.elementCount=totalProbes*64u*2u;
             desc.structured.elementStride=sizeof(math::v4);
             buffer=device_->CreateBuffer(desc);
             if (buffer!=handles::INVALID_RESOURCE) {
-                if (auto* p=device_->MapBuffer(buffer)) {
-                    std::memset(p,0,desc.size);device_->UnmapBuffer(buffer);
-                } else {
+                // R20：清零走 FillProbeBufferBytes（Map 失效时 staging 回落）
+                const std::vector<u8> zeros(static_cast<size_t>(desc.size));
+                if (!FillProbeBufferBytes(device_, buffer, zeros.data(), desc.size)) {
                     device_->DestroyBuffer(buffer);buffer=handles::INVALID_RESOURCE;
                 }
             }
@@ -2118,22 +2154,24 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                         static_cast<u32>(ResourceUsage::UnorderedAccess);  // R20 UA 位（同 irradiance 注）
         desc.structured.elementCount = totalProbes * 4;
         desc.structured.elementStride = sizeof(float);
 
         float initAge = (static_volume_ && static_volume_->IsLoaded() && ray_sample_mode_ != 7u) ? 0.5f : 0.0f;
         confidence_buffer_ = device_->CreateBuffer(desc);
 
-        float* mapped = static_cast<float*>(device_->MapBuffer(confidence_buffer_));
-        if (mapped) {
+        // R20：经 FillProbeBufferBytes（D3D12 DEFAULT 改道后 Map 可能失效）
+        {
+            std::vector<float> confInit(static_cast<size_t>(totalProbes) * 4);
             for (u32 p = 0; p < totalProbes; p++) {
-                mapped[p * 4 + 0] = 0.0f;     // rayHitRatio
-                mapped[p * 4 + 1] = 0.0f;     // temporalStability
-                mapped[p * 4 + 2] = 1.0f;     // visibilityConf (optimistic)
-                mapped[p * 4 + 3] = initAge;  // convergenceAge
+                confInit[static_cast<size_t>(p) * 4 + 0] = 0.0f;     // rayHitRatio
+                confInit[static_cast<size_t>(p) * 4 + 1] = 0.0f;     // temporalStability
+                confInit[static_cast<size_t>(p) * 4 + 2] = 1.0f;     // visibilityConf (optimistic)
+                confInit[static_cast<size_t>(p) * 4 + 3] = initAge;  // convergenceAge
             }
-            device_->UnmapBuffer(confidence_buffer_);
+            FillProbeBufferBytes(device_, confidence_buffer_, confInit.data(), confInit.size() * sizeof(float));
         }
     }
 
@@ -2149,13 +2187,15 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                         static_cast<u32>(ResourceUsage::UnorderedAccess);  // R20 UA 位（同 irradiance 注）
         desc.structured.elementCount = totalProbes;
         desc.structured.elementStride = 2u * sizeof(float);
         opensky_buffer_ = device_->CreateBuffer(desc);
-        if (float* mapped = static_cast<float*>(device_->MapBuffer(opensky_buffer_))) {
-            for (u32 p = 0; p < totalProbes * 2u; p++) mapped[p] = 0.0f;
-            device_->UnmapBuffer(opensky_buffer_);
+        // R20：清零经 FillProbeBufferBytes（Map 失效时 staging 回落）
+        {
+            const std::vector<float> skyInit(static_cast<size_t>(totalProbes) * 2u, 0.0f);
+            FillProbeBufferBytes(device_, opensky_buffer_, skyInit.data(), skyInit.size() * sizeof(float));
         }
     }
 
@@ -2169,7 +2209,8 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                         static_cast<u32>(ResourceUsage::UnorderedAccess);  // R20 UA 位（同 irradiance 注）
         desc.structured.elementCount = totalProbes * params_.rays_per_probe;
         desc.structured.elementStride = sizeof(DDGIRayData);
         ray_data_buffer_ = device_->CreateBuffer(desc);
@@ -2186,6 +2227,11 @@ void LumenDDGIPass::CreateProbeTextures() {
         desc.type = BufferType::Structured;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        // R20：hit_distance/hit_normal（下方复用本 desc）为 trace/finalize
+        // compute 的 GPU 写目标——补 Storage|UA（原 bindFlags 缺失，D3D12 端
+        // desc 位为 0 时 UAV 视图与拷贝态均无法落 DEFAULT 路由）。
+        desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                         static_cast<u32>(ResourceUsage::UnorderedAccess);
         desc.structured.elementCount = distanceCount;
         desc.structured.elementStride = sizeof(float);
         hit_distance_buffer_ = device_->CreateBuffer(desc);
@@ -2257,16 +2303,15 @@ void LumenDDGIPass::CreateProbeTextures() {
             roDesc.type = BufferType::Structured;
             roDesc.usage = GPUMemoryUsage::Dynamic;
             roDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-            roDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+            roDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
+                               static_cast<u32>(ResourceUsage::UnorderedAccess);  // R20 UA 位（同 irradiance 注）
             roDesc.structured.elementCount = totalProbes;
             roDesc.structured.elementStride = sizeof(math::v4);
             relocated_origins_ = device_->CreateBuffer(roDesc);
             if (relocated_origins_ != handles::INVALID_RESOURCE) {
-                if (auto* mapped =
-                        static_cast<math::v4*>(device_->MapBuffer(relocated_origins_))) {
-                    std::memset(mapped, 0, (size_t)roDesc.size);
-                    device_->UnmapBuffer(relocated_origins_);
-                }
+                // R20：清零经 FillProbeBufferBytes（Map 失效时 staging 回落）
+                const std::vector<u8> roZeros(static_cast<size_t>(roDesc.size));
+                FillProbeBufferBytes(device_, relocated_origins_, roZeros.data(), roDesc.size);
             }
         }
     }
@@ -2523,38 +2568,48 @@ void LumenDDGIPass::ClearProbeField() {
         return;
     }
     const u32 probeCount = params_.probe_count_x * params_.probe_count_y * params_.probe_count_z;
+    // R20：重置填充改为"构造成 std::vector 后经 FillProbeBufferBytes"——
+    // D3D12 端 probe 族 buffer 已改道 DEFAULT 堆（Map 失效，staging 回落）；
+    // Map 命中后端逐字节同旧路径。重置数据在循环外构造一次，三槽复用。
+    const std::vector<u8> provZeros(static_cast<size_t>(probeCount) * 64u * 8u * sizeof(u32));
+    const std::vector<u8> irrZeros(static_cast<size_t>(probeCount) * 9 * sizeof(math::v4));
+    std::vector<float> depthReset;
+    {
+        constexpr u32 kDepthTexels = 64;            // 8×8 octahedral
+        constexpr u32 kFloatsPerProbe = kDepthTexels * 2;
+        const float depthMeanInit = ray_sample_mode_ == 7u ? -1.0f : params_.ray_max_distance;
+        const float depthVarInit = ray_sample_mode_ == 7u ? 0.0f : params_.probe_spacing * params_.probe_spacing * 0.25f;
+        depthReset.resize(static_cast<size_t>(probeCount) * kFloatsPerProbe);
+        for (u32 pIdx = 0; pIdx < probeCount; ++pIdx) {
+            float* probe = depthReset.data() + static_cast<size_t>(pIdx) * kFloatsPerProbe;
+            for (u32 j = 0; j < kDepthTexels; ++j) probe[j] = depthMeanInit;
+            for (u32 j = kDepthTexels; j < kFloatsPerProbe; ++j) probe[j] = depthVarInit;
+        }
+    }
+    const float initAge = (static_volume_ && static_volume_->IsLoaded() && ray_sample_mode_ != 7u) ? 0.5f : 0.0f;
+    std::vector<float> confReset(static_cast<size_t>(probeCount) * 4);
+    for (u32 p = 0; p < probeCount; ++p) {
+        confReset[static_cast<size_t>(p) * 4 + 0] = 0.0f;
+        confReset[static_cast<size_t>(p) * 4 + 1] = 0.0f;
+        confReset[static_cast<size_t>(p) * 4 + 2] = 1.0f;
+        confReset[static_cast<size_t>(p) * 4 + 3] = initAge;
+    }
+    const std::vector<float> skyZeros(static_cast<size_t>(probeCount) * 2u, 0.0f);
     for (int f = 0; f < 3; f++) {
         if (depth_provenance_buffers_[f]!=handles::INVALID_RESOURCE) {
-            if (auto* p=device_->MapBuffer(depth_provenance_buffers_[f])) {
-                std::memset(p,0,u64(probeCount)*64u*8u*sizeof(u32));
-                device_->UnmapBuffer(depth_provenance_buffers_[f]);
-            }
+            FillProbeBufferBytes(device_, depth_provenance_buffers_[f], provZeros.data(), provZeros.size());
         }
         // Irradiance: 9 vec4 coefficients per probe.  The shader/C++ buffer
         // ABI uses a 16-byte stride per coefficient; clearing only float3
         // leaves every fourth lane (and the tail of the allocation) stale.
         if (irradiance_buffers_[f] != rhi::handles::INVALID_RESOURCE) {
-            if (float* irr = static_cast<float*>(device_->MapBuffer(irradiance_buffers_[f]))) {
-                memset(irr, 0, static_cast<u64>(probeCount) * 9 * sizeof(math::v4));
-                device_->UnmapBuffer(irradiance_buffers_[f]);
-            }
+            FillProbeBufferBytes(device_, irradiance_buffers_[f], irrZeros.data(), irrZeros.size());
         }
         // Depth history: 128 floats/probe — reset to the same "open" defaults
         // CreateProbeTextures uses (mean = ray_max_distance, var = small
         // non-zero: zero variance trips the Chebyshev singularity).
         if (depth_buffers_[f] != rhi::handles::INVALID_RESOURCE) {
-            constexpr u32 kDepthTexels = 64;            // 8×8 octahedral
-            constexpr u32 kFloatsPerProbe = kDepthTexels * 2;
-            const float depthMeanInit = ray_sample_mode_ == 7u ? -1.0f : params_.ray_max_distance;
-            const float depthVarInit = ray_sample_mode_ == 7u ? 0.0f : params_.probe_spacing * params_.probe_spacing * 0.25f;
-            if (float* dep = static_cast<float*>(device_->MapBuffer(depth_buffers_[f]))) {
-                for (u32 pIdx = 0; pIdx < probeCount; ++pIdx) {
-                    float* probe = dep + (u64)pIdx * kFloatsPerProbe;
-                    for (u32 j = 0; j < kDepthTexels; ++j) probe[j] = depthMeanInit;
-                    for (u32 j = kDepthTexels; j < kFloatsPerProbe; ++j) probe[j] = depthVarInit;
-                }
-                device_->UnmapBuffer(depth_buffers_[f]);
-            }
+            FillProbeBufferBytes(device_, depth_buffers_[f], depthReset.data(), depthReset.size() * sizeof(float));
         }
     }
 
@@ -2563,22 +2618,10 @@ void LumenDDGIPass::ClearProbeField() {
     // registration enter the settled injection path with stale visibility,
     // selecting a different fixed point than a frame-0 registration.
     if (confidence_buffer_ != rhi::handles::INVALID_RESOURCE) {
-        if (float* conf = static_cast<float*>(device_->MapBuffer(confidence_buffer_))) {
-            const float initAge = (static_volume_ && static_volume_->IsLoaded() && ray_sample_mode_ != 7u) ? 0.5f : 0.0f;
-            for (u32 p = 0; p < probeCount; ++p) {
-                conf[p * 4 + 0] = 0.0f;
-                conf[p * 4 + 1] = 0.0f;
-                conf[p * 4 + 2] = 1.0f;
-                conf[p * 4 + 3] = initAge;
-            }
-            device_->UnmapBuffer(confidence_buffer_);
-        }
+        FillProbeBufferBytes(device_, confidence_buffer_, confReset.data(), confReset.size() * sizeof(float));
     }
     if (opensky_buffer_ != rhi::handles::INVALID_RESOURCE) {
-        if (float* sky = static_cast<float*>(device_->MapBuffer(opensky_buffer_))) {
-            std::memset(sky, 0, static_cast<u64>(probeCount) * 2u * sizeof(float));
-            device_->UnmapBuffer(opensky_buffer_);
-        }
+        FillProbeBufferBytes(device_, opensky_buffer_, skyZeros.data(), skyZeros.size() * sizeof(float));
     }
     for (auto& ps : probe_states_) ps = {};
     probe_update_offset_ = 0;
@@ -2620,34 +2663,39 @@ void LumenDDGIPass::InitializeProbesFromStatic() {
         const float* staticMean = static_volume_->GetDepthMeanData();
         const float* staticVar = static_volume_->GetDepthVarData();
 
-        for (int f = 0; f < 3; f++) {
+        // R20：经 FillProbeBufferBytes（D3D12 端 probe buffer 已改道 DEFAULT，
+        // Map 失效时 staging 回落）；数据在循环外构造一次，三槽复用。
+        std::vector<float> irrInit;
+        {
+            u32 totalCoeffs = probeCount * 9;
             // Irradiance: simd::float3 has 16-byte stride (4 bytes padding).
             // DDGI buffer expects flat float[3] per coefficient. Must copy element-by-element.
-            float* irrMapped = static_cast<float*>(device_->MapBuffer(irradiance_buffers_[f]));
-            if (irrMapped) {
-                u32 totalCoeffs = probeCount * 9;
-                for (u32 i = 0; i < totalCoeffs; ++i) {
-                    irrMapped[i * 3 + 0] = staticIrr[i].x;
-                    irrMapped[i * 3 + 1] = staticIrr[i].y;
-                    irrMapped[i * 3 + 2] = staticIrr[i].z;
-                }
-                device_->UnmapBuffer(irradiance_buffers_[f]);
+            irrInit.resize(static_cast<size_t>(totalCoeffs) * 3u);
+            for (u32 i = 0; i < totalCoeffs; ++i) {
+                irrInit[static_cast<size_t>(i) * 3 + 0] = staticIrr[i].x;
+                irrInit[static_cast<size_t>(i) * 3 + 1] = staticIrr[i].y;
+                irrInit[static_cast<size_t>(i) * 3 + 2] = staticIrr[i].z;
             }
-
+        }
+        std::vector<float> depthInit2;
+        {
             // Depth: DDGI has 128 floats/probe (64 mean + 64 var)
             //         Static has separate arrays of 64 each
-            float* depthMapped = static_cast<float*>(device_->MapBuffer(depth_buffers_[f]));
-            if (depthMapped) {
-                for (u32 p = 0; p < probeCount; p++) {
-                    u32 ddgiBase = p * 128;
-                    u32 staticBase = p * 64;
-                    for (u32 oct = 0; oct < 64; oct++) {
-                        depthMapped[ddgiBase + oct] = staticMean[staticBase + oct];       // mean
-                        depthMapped[ddgiBase + 64 + oct] = staticVar[staticBase + oct];   // variance
-                    }
+            depthInit2.resize(static_cast<size_t>(probeCount) * 128u);
+            for (u32 p = 0; p < probeCount; p++) {
+                u32 ddgiBase = p * 128;
+                u32 staticBase = p * 64;
+                for (u32 oct = 0; oct < 64; oct++) {
+                    depthInit2[ddgiBase + oct] = staticMean[staticBase + oct];       // mean
+                    depthInit2[ddgiBase + 64 + oct] = staticVar[staticBase + oct];   // variance
                 }
-                device_->UnmapBuffer(depth_buffers_[f]);
             }
+        }
+        for (int f = 0; f < 3; f++) {
+            FillProbeBufferBytes(device_, irradiance_buffers_[f], irrInit.data(),
+                                 irrInit.size() * sizeof(float));
+            FillProbeBufferBytes(device_, depth_buffers_[f], depthInit2.data(),
+                                 depthInit2.size() * sizeof(float));
         }
 
         PRIMAL_LOG_STREAM(Info, "Render") << "[LumenDDGI] Initialized probes from static bake data ("
@@ -2663,20 +2711,17 @@ sky_estimate:
     // intensity approximates ambient bounce without visible color cast.
     // Must use float* (not math::v3*) — buffer is 12 bytes/element, math::v3 is 16 bytes.
     math::v3 skyL0 = math::v3{0.03f, 0.03f, 0.035f}; // dim neutral ambient
+    // R20：经 FillProbeBufferBytes（Map 失效时 staging 回落），数据循环外一次
+    std::vector<float> skyIrr(static_cast<size_t>(probeCount) * 36u, 0.0f);
+    for (u32 p = 0; p < probeCount; p++) {
+        // L0 coeff = vec4(skyL0.xyz, 0)
+        skyIrr[static_cast<size_t>(p) * 36 + 0] = skyL0.x;
+        skyIrr[static_cast<size_t>(p) * 36 + 1] = skyL0.y;
+        skyIrr[static_cast<size_t>(p) * 36 + 2] = skyL0.z;
+    }
     for (int f = 0; f < 3; f++) {
-        // vec4 layout: 9 coeffs × 4 floats = 36 floats per probe
-        u64 irrSize = (u64)probeCount * 9 * sizeof(math::v4);
-        float* mapped = static_cast<float*>(device_->MapBuffer(irradiance_buffers_[f]));
-        if (mapped) {
-            memset(mapped, 0, irrSize);
-            for (u32 p = 0; p < probeCount; p++) {
-                // L0 coeff = vec4(skyL0.xyz, 0)
-                mapped[p * 36 + 0] = skyL0.x;
-                mapped[p * 36 + 1] = skyL0.y;
-                mapped[p * 36 + 2] = skyL0.z;
-            }
-            device_->UnmapBuffer(irradiance_buffers_[f]);
-        }
+        FillProbeBufferBytes(device_, irradiance_buffers_[f], skyIrr.data(),
+                             skyIrr.size() * sizeof(float));
     }
 
     PRIMAL_LOG_STREAM(Info, "Render") << "[LumenDDGI] Initialized probes with sky estimate fallback" << std::endl;
