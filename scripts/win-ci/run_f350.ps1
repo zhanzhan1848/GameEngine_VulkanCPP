@@ -92,7 +92,13 @@ foreach ($g in $groups) {
     $ppmPath = Join-Path $OutDir $g.ppm
     $env:SPONZA_CAPTURE = $ppmPath
 
-    if ($g.api -eq 'd3d12') { $env:RHI_TEST_PLATFORM = 'd3d12' }
+    if ($g.api -eq 'd3d12') {
+        $env:RHI_TEST_PLATFORM = 'd3d12'
+        # R16：D3D12 组启用逐调用 trace——定位 init 期静默设备移除的
+        # 确切 API（移除原因已实测 DXGI_ERROR_INVALID_CALL，详见
+        # taskG_giud_draw_invalid_call_r16.md）
+        $env:PRIMAL_D3D12_API_TRACE = '1'
+    }
     if ($g.gi -eq 1) { $env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL = '1' }
     else { $env:GI_ISOLATE = 'all' }
 
