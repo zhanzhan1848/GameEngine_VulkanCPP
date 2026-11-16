@@ -34,6 +34,7 @@ import zlib
 
 REF_SHA256 = ("f0b032b3b006f6655e510f77c0ece832341678215df9fb3b2cd5272fa"
               "9477158")
+GIOFF_REF_SHA256 = ("358be857973d4cffd30deaeabfffd13374d5c9ea40f4b7c0f26c35e8b633a450")
 PSNR_GATE_DB = 43.5
 DIFF_GAIN = 8  # heatmap amplification: 8*abs(a-b), clamped to 255
 
@@ -175,6 +176,19 @@ def main():
         row = {"group": name, "label": label,
                "exit": g.get("exit_code"),
                "watchdog": g.get("watchdog", False)}
+        # gi=0 (GI-off) captures are not comparable against the GI-on
+        # reference (removing indirect light naturally lands ~16 dB): use
+        # the Mac GI-off capture as the same-mode cross-platform reference.
+        if g.get("gi") == 0:
+            ref = os.path.join(repo, ".github", "ci-assets",
+                               "ref_mac_vulkan_gioff_f350.ppm")
+            got = sha256_file(ref)
+            if got != GIOFF_REF_SHA256:
+                print("[parity] FATAL GI-off reference SHA mismatch: %s" % got)
+                sys.exit(2)
+        else:
+            ref = os.path.join(repo, ".github", "ci-assets",
+                               "ref_mac_vulkan_RG_f350.ppm")
         ppm_path = os.path.join(ppm_dir, g["ppm"])
         if not g.get("ppm_exists") or not os.path.isfile(ppm_path):
             row["capture"] = "MISSING"
@@ -222,7 +236,7 @@ def main():
               (name, psnr, row["ssim"], row["gate"]))
 
     lines = []
-    lines.append("### Windows parity f350 vs Mac Vulkan reference")
+    lines.append("### Windows parity f350 vs Mac same-mode reference")
     lines.append("")
     lines.append("Reference: `.github/ci-assets/ref_mac_vulkan_RG_f350.ppm` "
                  "(SHA256 `%s`, verified)." % REF_SHA256)
