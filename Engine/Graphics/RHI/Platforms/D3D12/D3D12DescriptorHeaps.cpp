@@ -613,6 +613,8 @@ bool D3D12DescriptorSetLayout::Initialize() {
         const u32 computeBit = static_cast<u32>(ShaderStage::Compute);
         struct TwinRow { u32 binding; u32 count; D3D12_DESCRIPTOR_RANGE_TYPE type; };
         utl::vector<TwinRow> twinRows;
+        // 已获孪生的 binding 集（防御性去重——单声明 binding 本不会重复入循环）
+        utl::vector<u32> seenTwinBindings;
         // 跳过 0：同 binding 号多条声明（r12 ShadowFilter b0 = UBO +
         // SampledImage 双行）不合成孪生——孪生配对语义只对"单声明 binding"
         // 成立（UBO 写入的补位写入会把 buffer UAV 落进无关孪生槽，破坏
