@@ -105,7 +105,7 @@ class D3D12DescriptorHeapManager;
 // 材质采样器，十七测实测 33 即耗尽 → 512 ≈ 15x 余量）；线性区
 // (2048-512)/3 = 512/slot（十七测 32/slot 即耗尽 → 16x 余量）。
 // ============================================================================
-inline constexpr u32 kCbvSrvUavHeapCapacity = 40960;        ///< 主堆总容量（距 TIER 上限 ~40x）。R14 孪生行走 frame-slot 堆，观测 per-slot 高水位 4096 打满 → 1.5x 扩容留孪生+增长余量
+inline constexpr u32 kCbvSrvUavHeapCapacity = 65536;        ///< 主堆总容量（距 TIER 上限 ~40x）。R14 孪生行走 frame-slot 堆，观测 per-slot 高水位 4096 打满 → 1.5x 扩容留孪生+增长余量
 inline constexpr u32 kCbvSrvUavPersistentCapacity = 4096;    ///< 纹理 SRV/UAV 持久槽位
 inline constexpr u32 kSamplerHeapCapacity =
     D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE;              ///< 2048，规范上限满配
