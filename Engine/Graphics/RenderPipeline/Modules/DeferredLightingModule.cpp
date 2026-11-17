@@ -159,11 +159,13 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
     for (int i = 0; i < 3; ++i) {
         output_textures_[i] = device->CreateTexture(outputDesc);
         // MRT2 EnvironmentSpecular 附件：Vulkan/D3D12 同形（deferred frag 的
-        // location 1 输出走同一 20-binding flat set；Metal 无此附件）。
+        // location 1 输出走同一 20-binding flat set；Metal 原生 MRT 同形）。
         if (device->GetPlatform() == RHIPlatform::Vulkan ||
+            device->GetPlatform() == RHIPlatform::Metal ||
             device->GetPlatform() == RHIPlatform::D3D12)
             environment_textures_[i] = device->CreateTexture(outputDesc);
         if ((device->GetPlatform() == RHIPlatform::Vulkan ||
+            device->GetPlatform() == RHIPlatform::Metal ||
              device->GetPlatform() == RHIPlatform::D3D12) &&
             environment_textures_[i] == handles::INVALID_RESOURCE) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[DeferredLighting] Environment attachment allocation failed" << std::endl;
@@ -350,6 +352,7 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         pd.renderTargetFormats[0] = DataFormat::RGBA16_Float;
         pd.renderTargetCount = 1;
         if (device->GetPlatform() == RHIPlatform::Vulkan ||
+            device->GetPlatform() == RHIPlatform::Metal ||
             device->GetPlatform() == RHIPlatform::D3D12) {
             pd.renderTargetFormats[1] = DataFormat::RGBA16_Float;
             pd.renderTargetCount = 2;
@@ -466,7 +469,7 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                     .storeOp = StoreAction::Store, .clearColor = {math::v4{0, 0, 0, 0}}});
             builder.DeclareRenderPass(rpDesc);
         },
-        [this, inputs, cbIdx](const PassData& data, rendergraph::RenderGraphContext& context) {
+        [this, inputs, cbIdx, currentTex](const PassData& data, rendergraph::RenderGraphContext& context) {
             auto cmd = context.cmdBuffer;
 
             // Upload ViewData
@@ -677,7 +680,6 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                         << " cbIdx=" << cbIdx
                         << " pipeline=" << pipeline_
                         << " set=" << descriptor_sets_[cbIdx]
-                        << " outTex=" << currentTex
                         << " envTex=" << environment_textures_[cbIdx]
                         << " binds: albedo=" << albedoTex
                         << " normal=" << normalTex

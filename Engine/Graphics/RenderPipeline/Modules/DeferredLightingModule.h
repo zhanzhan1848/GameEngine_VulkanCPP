@@ -77,6 +77,7 @@ public:
     DeferredLightingOutputs AddPasses(rendergraph::RenderGraph& graph, const DeferredLightingInputs& inputs);
 
     rhi::ResourceHandle GetOutputTexture(u32 buffer_index) const;
+    rhi::ResourceHandle GetEnvironmentTexture(u32 slot) const { return slot<3?environment_textures_[slot]:rhi::handles::INVALID_RESOURCE; }
 
     // T4.6.5 part 37: IBL resources (Tier 5 visual fidelity). Call after
     // Initialize. Pass INVALID_RESOURCE to disable IBL (shader falls back to
