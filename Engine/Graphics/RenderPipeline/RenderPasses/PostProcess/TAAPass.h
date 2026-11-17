@@ -59,5 +59,8 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
 // scene transitions to prevent ghosting from the previous mode's image.
 void ResetTAAHistory();
 
+// Completed-frame diagnostics; frameIndex is the native pipeline frame.
+rhi::ResourceHandle GetTAAOutputTexture(u32 frameIndex);
+
 } // namespace PostProcess
 } // namespace primal::graphics

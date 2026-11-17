@@ -615,6 +615,10 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
     );
 }
 
+rhi::ResourceHandle GetTAAOutputTexture(u32 frameIndex) {
+    return s_OutputTex[frameIndex % MAX_FRAMES];
+}
+
 void ResetTAAHistory() {
     ++s_ResetGeneration;
     // Forcing re-init causes next TAA pass to skip blending with the stale
