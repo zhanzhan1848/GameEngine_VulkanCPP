@@ -98,6 +98,9 @@ foreach ($g in $groups) {
         # 确切 API（移除原因已实测 DXGI_ERROR_INVALID_CALL，详见
         # taskG_giud_draw_invalid_call_r16.md）
         $env:PRIMAL_D3D12_API_TRACE = '1'
+        # R23：黑帧六阶段内容 dump（gbuffer/deferred/fusion 前后/
+        # tonemap/捕获链，taskI §6 判定表定界全黑阶段）
+        $env:PRIMAL_D3D12_BLACK_STAGE_DUMP = '1'
     }
     if ($g.gi -eq 1) { $env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL = '1' }
     else { $env:GI_ISOLATE = 'all' }
