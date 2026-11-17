@@ -50,6 +50,16 @@
 //   - CbvSrvUavShadowCpuHandle / SamplerShadowCpuHandle = **shadow 堆** CPU
 //     句柄（read-write：Create*View 目标 + 一切拷贝的源/中转）。
 // GPU 句柄由 visible 堆换算。kInvalidSlot = 无效。
+//
+// R23 limbo 堆（同槽旧纪元迁移源修复，2026-11-17）：cbIdx 三缓冲 set 每
+// 第 3 帧回归同一帧槽 → R21-C 纪元判定必触发"同槽迁移"。同槽旧区段在本帧
+// BeginFrame 已被回收（bump 归零），从 shadow 拷贝既可能区间重叠（debug-
+// layer #653 UB——Windows CI 400 帧实测 22147 次，~55/帧），也可能静默拷入
+// 本帧更早分配已覆写的垃圾内容。修法：BeginFrame 在任何覆写发生前把刚回收
+// 槽线性区上一轮的内容整段快照进 limbo 堆（非 shader-visible → CPU 句柄
+// 可读，与 shadow 同为合法 CopyDescriptors 源）；同槽旧纪元迁移从 limbo 取
+// 源。快照只保真"上一轮"（limboEpoch 匹配判定）；隔 ≥2 个槽周期未触碰的
+// set 内容已不可恢复，迁移跳过内容拷贝（见 EnsureSetRegionCurrent R23 注）。
 #pragma once
 #if defined(_WIN32) && defined(ENABLE_D3D12) && ENABLE_D3D12
 
@@ -362,6 +372,34 @@ public:
     void CopySamplerShadowToVisible(u32 slot, u32 count = 1);
 
     // ------------------------------------------------------------------
+    // R23 limbo 堆（语义见文件头 R23 段）：BeginFrame 在槽回收后、任何新
+    // 分配前，把该槽线性区上一轮的 shadow 内容整段快照进 limbo（非可见堆，
+    // 绝对槽位坐标与 visible/shadow 1:1）。同槽旧纪元 set 的迁移从 limbo
+    /// 拷贝；跨槽迁移源槽尚未回收，维持 shadow 源不变。
+    // ------------------------------------------------------------------
+    /// limbo CPU 句柄（绝对槽位坐标；非可见堆句柄可读，合法拷贝源）。
+    D3D12_CPU_DESCRIPTOR_HANDLE CbvSrvUavLimboCpuHandle(u32 slot) const {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = cbvSrvUavLimboCpuStart_;
+        h.ptr += static_cast<SIZE_T>(slot) * cbvSrvUavDescriptorSize_;
+        return h;
+    }
+    D3D12_CPU_DESCRIPTOR_HANDLE SamplerLimboCpuHandle(u32 slot) const {
+        D3D12_CPU_DESCRIPTOR_HANDLE h = samplerLimboCpuStart_;
+        h.ptr += static_cast<SIZE_T>(slot) * samplerDescriptorSize_;
+        return h;
+    }
+    /// limbo 是否保真持有 (frameSlot, ownerEpoch) 那一轮的线性区内容
+    ///（epoch==0 为"无快照"哨兵——槽上一轮无分配或首周期）。
+    bool CbvSrvUavLimboMatches(u32 frameSlot, u64 ownerEpoch) const {
+        const u32 s = frameSlot % frameSlotCount_;
+        return ownerEpoch != 0 && mainLimboEpoch_[s] == ownerEpoch;
+    }
+    bool SamplerLimboMatches(u32 frameSlot, u64 ownerEpoch) const {
+        const u32 s = frameSlot % frameSlotCount_;
+        return ownerEpoch != 0 && samplerLimboEpoch_[s] == ownerEpoch;
+    }
+
+    // ------------------------------------------------------------------
     // 持久槽位（RTV/DSV 非可见堆 + sampler shader-visible 堆）
     // ------------------------------------------------------------------
     u32 AllocRtv();
@@ -461,6 +499,10 @@ private:
     //（拷贝源 + Create*View 落点；语义见文件头双堆模型）。
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> cbvSrvUavShadowHeap_;
     Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> samplerShadowHeap_;
+    // R23 limbo 堆：同容量非可见堆，BeginFrame 快照刚回收槽上一轮线性区
+    //（同槽旧纪元迁移的保真源；语义见文件头 R23 段）。
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> cbvSrvUavLimboHeap_;
+    Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> samplerLimboHeap_;
 
     u32 cbvSrvUavDescriptorSize_ = 0;
     u32 samplerDescriptorSize_ = 0;
@@ -476,6 +518,8 @@ private:
     D3D12_GPU_DESCRIPTOR_HANDLE samplerGpuStart_{};
     D3D12_CPU_DESCRIPTOR_HANDLE cbvSrvUavShadowCpuStart_{};  // R13/T1
     D3D12_CPU_DESCRIPTOR_HANDLE samplerShadowCpuStart_{};    // R13/T1
+    D3D12_CPU_DESCRIPTOR_HANDLE cbvSrvUavLimboCpuStart_{};    // R23
+    D3D12_CPU_DESCRIPTOR_HANDLE samplerLimboCpuStart_{};     // R23
     D3D12_CPU_DESCRIPTOR_HANDLE rtvCpuStart_{};
     D3D12_CPU_DESCRIPTOR_HANDLE dsvCpuStart_{};
 
@@ -495,6 +539,8 @@ private:
     DescriptorFrameSlotPolicy samplerLinear_; ///< sampler 堆线性区（同上）
     SamplerTableSharingPolicy samplerSharing_; ///< R22-S1：sampler 表内容级共享记账
     std::vector<u64> perSlotGuardTarget_;  ///< 各槽上次提交护拦（复用判定）
+    std::vector<u64> mainLimboEpoch_;      ///< R23：各槽 limbo 快照所属纪元（0=无）
+    std::vector<u64> samplerLimboEpoch_;   ///< R23：同上（sampler 线性区）
 
     SlotPool cbvSrvUavPersistentSlots_;
     SlotPool rtvSlots_;

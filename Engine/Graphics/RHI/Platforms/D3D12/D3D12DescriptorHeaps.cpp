@@ -126,6 +126,27 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
 
     frameSlotCount_ = config.frameSlotCount;
     perSlotGuardTarget_.assign(frameSlotCount_, 0);
+    // R23 limbo 堆：与 visible/shadow 同容量非可见堆（绝对槽位坐标 1:1）。
+    // 失败非 fatal——退化行为 = 同槽旧纪元迁移跳过内容拷贝（写入路径全量
+    // 重写的 set 不受影响；见 EnsureSetRegionCurrent R23 注），记 Error 留痕。
+    if (!CreateTypedHeap(device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                         config.cbvSrvUavCapacity, false, cbvSrvUavLimboHeap_)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12DescriptorHeaps] CBV/SRV/UAV limbo heap creation failed"
+            << " (same-slot stale migration content will not be preserved)" << std::endl;
+    } else {
+        cbvSrvUavLimboCpuStart_ = cbvSrvUavLimboHeap_->GetCPUDescriptorHandleForHeapStart();
+    }
+    if (!CreateTypedHeap(device, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+                         config.samplerCapacity, false, samplerLimboHeap_)) {
+        PRIMAL_LOG_STREAM(Error, "RHI")
+            << "[D3D12DescriptorHeaps] sampler limbo heap creation failed"
+            << " (same-slot stale sampler migration content will not be preserved)" << std::endl;
+    } else {
+        samplerLimboCpuStart_ = samplerLimboHeap_->GetCPUDescriptorHandleForHeapStart();
+    }
+    mainLimboEpoch_.assign(frameSlotCount_, 0);
+    samplerLimboEpoch_.assign(frameSlotCount_, 0);
     // CBV/SRV/UAV 主堆布局：前段持久（纹理 SRV/UAV 拷贝源），后段帧槽线性
     // （set 实例表）。
     if (config.cbvSrvUavPersistentCapacity >= config.cbvSrvUavCapacity) {
@@ -182,7 +203,11 @@ void D3D12DescriptorHeapManager::Shutdown() {
     dsvHeap_.Reset();
     cbvSrvUavShadowHeap_.Reset();
     samplerShadowHeap_.Reset();
+    cbvSrvUavLimboHeap_.Reset();   // R23
+    samplerLimboHeap_.Reset();     // R23
     perSlotGuardTarget_.clear();
+    mainLimboEpoch_.clear();       // R23
+    samplerLimboEpoch_.clear();    // R23
 }
 
 // ============================================================================
@@ -218,6 +243,43 @@ void D3D12DescriptorHeapManager::BeginFrame(u32 frameSlot, D3D12FencePool& fence
             << " descriptor region still in flight (fence target " << guard
             << ") — CPU waiting before reuse" << std::endl;
         fence.Wait(guard, 10000);
+    }
+    // R23 limbo 快照：把刚回收槽上一轮的线性区内容（shadow 副本）在任何新
+    // 分配覆写之前整段拷入 limbo 堆。此后同槽旧纪元 set 的迁移（cbIdx 三缓
+    // 冲 set 每第 3 帧回归）从 limbo 取源——既消除 debug-layer #653 的区间
+    // 重叠 UB，也消除"源区段已被本帧更早分配覆写→静默拷入垃圾"的通路。
+    // 快照纪元 = 刚结束那一轮的纪元（SlotEpoch 已自增，-1 即上一轮）；
+    // 槽上一轮无分配（首周期 / 空轮）时清零哨兵（LimboMatches 恒 false）。
+    // 开销：每 3 帧一次 lastCycleHigh 个描述符的 CPU 拷贝（CI 实测高水位
+    // ~2868/槽 ≈ 90KB，可忽略）。
+    if (device_ && mainLinear_.SlotEpoch(currentSlot_) >= 2) {
+        const u64 prevEpoch = mainLinear_.SlotEpoch(currentSlot_) - 1;
+        const u32 n = mainLinear_.LastCycleHighFor(currentSlot_);
+        if (n > 0 && cbvSrvUavLimboHeap_) {
+            D3D12_CPU_DESCRIPTOR_HANDLE dst = cbvSrvUavLimboCpuStart_;
+            dst.ptr += static_cast<SIZE_T>(mainLinear_.SlotBaseFor(currentSlot_))
+                       * cbvSrvUavDescriptorSize_;
+            D3D12_CPU_DESCRIPTOR_HANDLE src = cbvSrvUavShadowCpuStart_;
+            src.ptr += static_cast<SIZE_T>(mainLinear_.SlotBaseFor(currentSlot_))
+                       * cbvSrvUavDescriptorSize_;
+            device_->CopyDescriptorsSimple(n, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+            mainLimboEpoch_[currentSlot_] = prevEpoch;
+        } else {
+            mainLimboEpoch_[currentSlot_] = 0;
+        }
+        const u32 sn = samplerLinear_.LastCycleHighFor(currentSlot_);
+        if (sn > 0 && samplerLimboHeap_) {
+            D3D12_CPU_DESCRIPTOR_HANDLE dst = samplerLimboCpuStart_;
+            dst.ptr += static_cast<SIZE_T>(samplerLinear_.SlotBaseFor(currentSlot_))
+                       * samplerDescriptorSize_;
+            D3D12_CPU_DESCRIPTOR_HANDLE src = samplerShadowCpuStart_;
+            src.ptr += static_cast<SIZE_T>(samplerLinear_.SlotBaseFor(currentSlot_))
+                       * samplerDescriptorSize_;
+            device_->CopyDescriptorsSimple(sn, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+            samplerLimboEpoch_[currentSlot_] = prevEpoch;
+        } else {
+            samplerLimboEpoch_[currentSlot_] = 0;
+        }
     }
     if (FrameTraceEnabled()) {
         PRIMAL_LOG_STREAM(Info, "RHI.D3D12")

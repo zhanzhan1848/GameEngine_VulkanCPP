@@ -1395,15 +1395,14 @@ static std::vector<u8> SelfLoadShaderSource(const char* file, rhi::RHIPlatform p
         // mirroring the same relative path (build_d3d12_shaders.py layout);
         // spirv-cross rewrites every entry point to "main" so the cso is
         // consumed with the same one-file-per-stage shape as the spv.
-        // R13: 镜像映射（基座换替 + .spv→.cso）中央化到 ShaderRegistry::
-        // ResolveShaderPath(platform, relPath)，本处不再内联拼 d3d12 路径。
-        const char* suffix = (stage == ShaderStage::Vertex) ? ".vert.spv"
-                           : (stage == ShaderStage::Pixel) ? ".frag.spv"
-                           : ".spv";
-        const std::string rel =
-            std::string("Engine/Graphics/Vulkan/shaders/") + file + suffix;
-        const std::string path =
-            utils::ShaderRegistry::ResolveShaderPath(platform, rel);
+        const bool d3d12 = (platform == rhi::RHIPlatform::D3D12);
+        const char* suffix = (stage == ShaderStage::Vertex) ? (d3d12 ? ".vert.cso" : ".vert.spv")
+                           : (stage == ShaderStage::Pixel) ? (d3d12 ? ".frag.cso" : ".frag.spv")
+                           : (d3d12 ? ".cso" : ".spv");
+        std::string rel = d3d12
+            ? std::string("EngineTest/shaders/d3d12/") + file + suffix
+            : std::string("Engine/Graphics/Vulkan/shaders/") + file + suffix;
+        std::string path = SelfLoadResolve(rel);
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f.is_open()) return {};
         std::streamsize size = f.tellg();
@@ -3314,6 +3313,10 @@ void StandardRenderPipeline::SyncEntitiesToRenderScene(RenderScene& scene) {
             id::id_type materialId = meshInfo->gpuMaterialId;
 
             RenderProxy proxy = RenderProxy::Create(eid, meshId, materialId);
+            // content geometry id（geometry_hierarchies 空间）——meshId 在编辑器
+            // 管线路径是 mesh 资源绑定的 ECS 实体 id，不能进 content 两步解析
+            // （2026-11-05 lightmap per-instance 排查；离线路径二者同值不变）。
+            proxy.contentMeshId = meshInfo->meshEntityId;
             proxy.UpdateTransform(world);
 
             game_entity::entity entity{game_entity::entity_id{eid}};

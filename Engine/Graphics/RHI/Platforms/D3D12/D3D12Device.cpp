@@ -1599,11 +1599,33 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
     // #654 COPY_DESCRIPTORS_WRITE_ONLY_DESCRIPTOR，Windows 十二测全部
     // exit 2170 的直接根因）；迁移同时维护镜像不变量（shadow(new) 先收
     // 下旧内容，再 shadow(new)→visible(new) 合法方向下发）。
+    // R23：同槽旧纪元（cbIdx 三缓冲 set 每第 3 帧回归本槽）时 shadow 旧
+    // 区段已随本帧 BeginFrame 回收、可能被本帧更早分配覆写——直接从 shadow
+    // 拷贝既触发 #653 区间重叠 UB（Windows CI 400 帧实测 22147 次，
+    // ~55/帧），也可能静默拷入垃圾描述符。修法：同槽且 limbo 快照纪元匹配
+    //（上一轮）→ 从 limbo 堆取保真源；同槽但隔 ≥2 个槽周期（内容已不可
+    // 恢复）→ 跳过内容拷贝（区域交由写入路径重建——主链路逐帧 set 均全量
+    // 重写，实测唯一依赖迁移内容的是不完整重写的边角 set，其内容在该场景
+    // 下本已丢失）；跨槽源槽未回收，维持 shadow 源不变。
     if (migrateMain) {
-        native->CopyDescriptorsSimple(
-            set->MainCount(), heaps.CbvSrvUavShadowCpuHandle(newBase),
-            heaps.CbvSrvUavShadowCpuHandle(set->BaseSlot()),
-            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        const bool sameSlotStale = oldOwnerSlot == currentFrameIndex_;
+        const bool fromLimbo = sameSlotStale
+            && heaps.CbvSrvUavLimboMatches(oldOwnerSlot, oldOwnerEpoch);
+        if (sameSlotStale && !fromLimbo && !warnedStaleBeyondLimbo_) {
+            warnedStaleBeyondLimbo_ = true;
+            PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
+                << "[D3D12Device] set migration beyond limbo snapshot (slot "
+                << oldOwnerSlot << " epoch " << oldOwnerEpoch
+                << "): content not recoverable, skipping copy (region left "
+                   "for write-path rebuild; warned once)" << std::endl;
+        }
+        if (!sameSlotStale || fromLimbo) {
+            native->CopyDescriptorsSimple(
+                set->MainCount(), heaps.CbvSrvUavShadowCpuHandle(newBase),
+                fromLimbo ? heaps.CbvSrvUavLimboCpuHandle(set->BaseSlot())
+                          : heaps.CbvSrvUavShadowCpuHandle(set->BaseSlot()),
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        }
         heaps.CopyCbvSrvUavShadowToVisible(newBase, set->MainCount());
         set->baseSlot_ = newBase;
     }
@@ -1611,10 +1633,17 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
     if (resolveSharedSampler) {
         samplerResolved = ResolveSharedSamplerRegion(set);
     } else if (migratePrivateSampler) {
-        native->CopyDescriptorsSimple(
-            set->SamplerCount(), heaps.SamplerShadowCpuHandle(newSamplerBase),
-            heaps.SamplerShadowCpuHandle(set->SamplerBaseSlot()),
-            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        // R23：私有 sampler 区段同款三路源选择（语义同主区段注释）。
+        const bool sameSlotStaleSampler = oldOwnerSlot == currentFrameIndex_;
+        const bool fromLimboSampler = sameSlotStaleSampler
+            && heaps.SamplerLimboMatches(oldOwnerSlot, oldOwnerEpoch);
+        if (!sameSlotStaleSampler || fromLimboSampler) {
+            native->CopyDescriptorsSimple(
+                set->SamplerCount(), heaps.SamplerShadowCpuHandle(newSamplerBase),
+                fromLimboSampler ? heaps.SamplerLimboCpuHandle(set->SamplerBaseSlot())
+                                 : heaps.SamplerShadowCpuHandle(set->SamplerBaseSlot()),
+                D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+        }
         heaps.CopySamplerShadowToVisible(newSamplerBase, set->SamplerCount());
         set->samplerBaseSlot_ = newSamplerBase;
     }

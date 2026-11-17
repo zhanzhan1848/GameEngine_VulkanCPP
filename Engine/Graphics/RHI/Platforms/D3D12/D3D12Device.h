@@ -332,6 +332,9 @@ private:
     bool loggedInitSamplerStats_ = false;
     /// R22-S1：共享 sampler 条目缺失（set 引用已销毁 sampler）一次性告警。
     bool warnedSharedSamplerRegionMissing_ = false;
+    /// R23：同槽旧纪元迁移超出 limbo 快照范围（隔 ≥2 个槽周期，内容不可
+    /// 恢复→跳过拷贝）一次性告警。
+    bool warnedStaleBeyondLimbo_ = false;
 
     // --- M5 F5-2/F5-3 ---
     Microsoft::WRL::ComPtr<ID3D12CommandSignature> drawIndirectSignature_;
