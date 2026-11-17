@@ -1395,14 +1395,15 @@ static std::vector<u8> SelfLoadShaderSource(const char* file, rhi::RHIPlatform p
         // mirroring the same relative path (build_d3d12_shaders.py layout);
         // spirv-cross rewrites every entry point to "main" so the cso is
         // consumed with the same one-file-per-stage shape as the spv.
-        const bool d3d12 = (platform == rhi::RHIPlatform::D3D12);
-        const char* suffix = (stage == ShaderStage::Vertex) ? (d3d12 ? ".vert.cso" : ".vert.spv")
-                           : (stage == ShaderStage::Pixel) ? (d3d12 ? ".frag.cso" : ".frag.spv")
-                           : (d3d12 ? ".cso" : ".spv");
-        std::string rel = d3d12
-            ? std::string("EngineTest/shaders/d3d12/") + file + suffix
-            : std::string("Engine/Graphics/Vulkan/shaders/") + file + suffix;
-        std::string path = SelfLoadResolve(rel);
+        // R13: 镜像映射（基座换替 + .spv→.cso）中央化到 ShaderRegistry::
+        // ResolveShaderPath(platform, relPath)，本处不再内联拼 d3d12 路径。
+        const char* suffix = (stage == ShaderStage::Vertex) ? ".vert.spv"
+                           : (stage == ShaderStage::Pixel) ? ".frag.spv"
+                           : ".spv";
+        const std::string rel =
+            std::string("Engine/Graphics/Vulkan/shaders/") + file + suffix;
+        const std::string path =
+            utils::ShaderRegistry::ResolveShaderPath(platform, rel);
         std::ifstream f(path, std::ios::binary | std::ios::ate);
         if (!f.is_open()) return {};
         std::streamsize size = f.tellg();
@@ -5611,6 +5612,159 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 
 
 // ============================================================================
+// R23（D3D12 黑帧分阶段定位）：离屏内容逐阶段统计 dump——env 门控，默认关。
+//   PRIMAL_D3D12_BLACK_STAGE_DUMP=1            开启（仅 D3D12 平台生效）
+//   PRIMAL_D3D12_BLACK_STAGE_FRAME=<N>         目标帧（默认 350）
+// dump 发生在 N+1 帧的 RWCB 入口：目标帧的提交已在帧 fence 上完成
+//（BeginFrame 等待过），G-buffer / 延迟光照 / 融合间接 / 融合合成等三缓冲
+// 阶段纹理此刻持有目标帧内容（ToneMapping/TAA 输出是 RG 瞬态纹理，N+1 帧
+// 无法保真回读，不在 dump 面）。读回走与 harness 捕获同一已验证通道
+//（独立命令缓冲 barrier→CopyTextureToBuffer→Submit→WaitForCompletion→Map），
+// 逐张算采样网格 mean/max，一行一阶段写 stderr：首个 mean=0 的阶段即黑帧
+// 的"无写入"分界。诊断专用：不参与渲染，不改变任何管线行为。
+// ============================================================================
+namespace {
+/// RGBA16F 半精度解码（与 FusionCompositeModule IND_STATS 同款实现）。
+float R23F16Decode(u16 h16) {
+    const u32 sign = (h16 >> 15) & 1u, exp = (h16 >> 10) & 0x1Fu, mant = h16 & 0x3FFu;
+    if (exp == 0u) return 0.0f;
+    const u32 bits = (sign << 31) | ((exp + 112u) << 23) | (mant << 13);
+    float f;
+    std::memcpy(&f, &bits, 4);
+    return f;
+}
+
+void R23BlackStageDumpTexture(rhi::RHIDeviceBase* device, const char* name,
+                              rhi::ResourceHandle tex) {
+    using namespace rhi;
+    if (!device) return;
+    if (tex == handles::INVALID_RESOURCE) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[D3D12_BLACK_STAGE] " << name << " tex=INVALID" << std::endl;
+        return;
+    }
+    const DataFormat fmt = device->GetTextureFormat(tex);
+    u32 w = 0, h = 0;
+    if (!device->GetTextureSize(tex, w, h) || w == 0 || h == 0) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[D3D12_BLACK_STAGE] " << name << " size unavailable" << std::endl;
+        return;
+    }
+    u32 bytesPerPixel = 0, channels = 0;
+    if (fmt == DataFormat::RGBA16_Float) { bytesPerPixel = 8; channels = 4; }
+    else if (fmt == DataFormat::RGBA8_UNorm || fmt == DataFormat::BGRA8_UNorm) { bytesPerPixel = 4; channels = 4; }
+    else if (fmt == DataFormat::R32_Float) { bytesPerPixel = 4; channels = 1; }
+    if (bytesPerPixel == 0) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[D3D12_BLACK_STAGE] " << name << " " << w << "x" << h
+            << " fmt=" << static_cast<unsigned>(fmt) << " unsupported (skipped)" << std::endl;
+        return;
+    }
+
+    BufferDesc bd{};
+    bd.size = static_cast<u64>(w) * h * bytesPerPixel;
+    bd.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+    bd.memoryUsage = GPUMemoryUsage::Readback;
+    ResourceHandle stage = device->CreateBuffer(bd);
+    if (stage == handles::INVALID_RESOURCE) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[D3D12_BLACK_STAGE] " << name << " staging buffer creation failed" << std::endl;
+        return;
+    }
+    bool ok = false;
+    CommandBufferHandle ch = device->CreateCommandBuffer(CommandQueueType::Graphics);
+    if (ch != handles::INVALID_COMMAND_BUFFER) {
+        if (RHICommandBuffer* c = GetCommandBuffer(ch)) {
+            if (c->Begin()) {
+                // beforeState=Unknown：tracker 权威解析当前态（D3D12CommandBuffer
+                // R21-A 语义），避免对阶段纹理实际遗留态做错误假设。
+                ResourceBarrier toCopy{};
+                toCopy.resource = tex;
+                toCopy.beforeState = ResourceState::Unknown;
+                toCopy.afterState = ResourceState::CopySource;
+                toCopy.subresource = RHI_ALL_SUBRESOURCES;
+                toCopy.queueFamily = 0xFFFFFFFF;
+                c->InsertBarrier(&toCopy, 1);
+                BufferTextureCopyRegion rr{};
+                rr.imageSubresource.mipLevel = 0;
+                rr.imageSubresource.baseArrayLayer = 0;
+                rr.imageSubresource.layerCount = 1;
+                rr.imageExtent = {w, h, 1};
+                c->CopyTextureToBuffer(tex, stage, &rr, 1);
+                c->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
+                                  AccessFlag::TransferWrite, AccessFlag::HostRead);
+                ResourceBarrier back{};
+                back.resource = tex;
+                back.beforeState = ResourceState::CopySource;
+                back.afterState = ResourceState::ShaderResource;
+                back.subresource = RHI_ALL_SUBRESOURCES;
+                back.queueFamily = 0xFFFFFFFF;
+                c->InsertBarrier(&back, 1);
+                ok = c->End() && c->Submit() && c->WaitForCompletion();
+            }
+        }
+        device->DestroyCommandBuffer(ch);
+    }
+    if (ok) {
+        if (const u8* p = static_cast<const u8*>(device->MapBuffer(stage, 0, bd.size))) {
+            // 采样网格 ≤64×64：黑/非黑的判别不需要全像素统计。
+            const u32 stepX = w / 64u ? w / 64u : 1u;
+            const u32 stepY = h / 64u ? h / 64u : 1u;
+            double sum[4] = {0.0, 0.0, 0.0, 0.0};
+            float maxLum = 0.0f;
+            u64 n = 0;
+            for (u32 y = 0; y < h; y += stepY) {
+                for (u32 x = 0; x < w; x += stepX) {
+                    const u8* t = p + (static_cast<size_t>(y) * w + x) * bytesPerPixel;
+                    float c[4] = {0.f, 0.f, 0.f, 0.f};
+                    if (fmt == DataFormat::RGBA16_Float) {
+                        for (u32 k = 0; k < 4; ++k)
+                            c[k] = R23F16Decode(reinterpret_cast<const u16*>(t)[k]);
+                    } else if (fmt == DataFormat::R32_Float) {
+                        float f;
+                        std::memcpy(&f, t, 4);
+                        c[0] = f;
+                    } else {
+                        for (u32 k = 0; k < 4; ++k) c[k] = t[k] / 255.0f;
+                    }
+                    const float lum = 0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2];
+                    if (lum == lum) {  // NaN 跳过（与 IND_STATS 同口径）
+                        for (u32 k = 0; k < channels; ++k) sum[k] += c[k];
+                        if (lum > maxLum) maxLum = lum;
+                        ++n;
+                    }
+                }
+            }
+            if (n > 0) {
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[D3D12_BLACK_STAGE] " << name << " " << w << "x" << h
+                    << " fmt=" << static_cast<unsigned>(fmt)
+                    << " rgb=(" << (sum[0] / n) << "," << (sum[1] / n) << "," << (sum[2] / n) << ")"
+                    << " meanLum=" << ((0.2126 * sum[0] + 0.7152 * sum[1] + 0.0722 * sum[2]) / n)
+                    << " maxLum=" << maxLum << std::endl;
+            } else {
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[D3D12_BLACK_STAGE] " << name << " all sampled texels NaN" << std::endl;
+            }
+            device->UnmapBuffer(stage);
+        } else {
+            ok = false;
+        }
+    }
+    if (!ok) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[D3D12_BLACK_STAGE] " << name << " readback failed" << std::endl;
+    }
+    device->DestroyBuffer(stage);
+}
+} // namespace
+
+
+// RenderWithCommandBuffer (uses caller's pre-allocated CB — matches working pattern)
+// ============================================================================
+
+
+// ============================================================================
 // T8.13 P0: GPU per-pass profiler (RG_PROF=1). The RenderGraph already records
 // per-pass GPU timestamps (RenderPass desc bracketing for graphics passes,
 // WriteTimestamp for compute) and resolves them at the next Execute entry;
@@ -5780,6 +5934,51 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     ApplyConfigChanges();
 
     u32 cbIdx = bufferIndex;
+
+    // R23（D3D12 黑帧分阶段定位）：目标帧的下一帧入口做一次阶段内容 dump
+    //（env 门控默认关，仅 D3D12 平台；语义见 R23BlackStageDumpTexture 注）。
+    // 此刻目标帧提交已在帧 fence 上完成，G-buffer/延迟光照/融合三缓冲纹理
+    // 持目标帧内容；首帧（无上一帧）不适用。
+    if (device_->GetPlatform() == RHIPlatform::D3D12) {
+        static const bool dumpEnabled = [] {
+            const char* v = std::getenv("PRIMAL_D3D12_BLACK_STAGE_DUMP");
+            return v && std::strcmp(v, "1") == 0;
+        }();
+        static const u64 dumpTargetFrame = [] {
+            const char* v = std::getenv("PRIMAL_D3D12_BLACK_STAGE_FRAME");
+            return v ? std::strtoull(v, nullptr, 10) : 350ull;
+        }();
+        static bool dumpDone = false;
+        if (dumpEnabled && !dumpDone
+            && frameCount_ == dumpTargetFrame + 1ull) {
+            dumpDone = true;
+            auto& gpuDrawStage = nanite::GPUDrivenDrawPipeline::Get();
+            const u32 prevSlot = (cbIdx + 2u) % 3u;  // 上一完成帧的三缓冲槽
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[D3D12_BLACK_STAGE] begin frame " << frameCount_
+                << " (dumping completed frame " << dumpTargetFrame
+                << ", prevSlot=" << prevSlot << ")" << std::endl;
+            R23BlackStageDumpTexture(device_, "gbuffer_albedo", gpuDrawStage.GetGBufferAlbedo());
+            R23BlackStageDumpTexture(device_, "gbuffer_normal", gpuDrawStage.GetGBufferNormal());
+            R23BlackStageDumpTexture(device_, "gbuffer_depth", gpuDrawStage.GetGBufferDepthSampleable());
+            if (deferred_module_)
+                R23BlackStageDumpTexture(device_, "deferred_out",
+                                         deferred_module_->GetOutputTexture(prevSlot));
+            if (fusion_module_) {
+                // GetIndirectOutput(frame) = 上一完成槽；GetFusionOutput(frame-1)
+                // = frame-1 的当帧完成槽——两者都指向目标帧刚写完的纹理。
+                R23BlackStageDumpTexture(
+                    device_, "fusion_indirect",
+                    fusion_module_->GetIndirectOutput(static_cast<u32>(frameCount_)));
+                if (frameCount_ >= 1ull) {
+                    R23BlackStageDumpTexture(
+                        device_, "fusion_composite",
+                        fusion_module_->GetFusionOutput(static_cast<u32>(frameCount_ - 1ull)));
+                }
+            }
+            PRIMAL_LOG_STREAM(Error, "Render") << "[D3D12_BLACK_STAGE] end" << std::endl;
+        }
+    }
 
     if (targetDesc.size.x > 0 && targetDesc.size.y > 0) {
         target_width_ = targetDesc.size.x;
