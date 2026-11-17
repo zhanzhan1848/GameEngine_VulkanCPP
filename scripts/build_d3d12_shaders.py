@@ -415,6 +415,16 @@ SHADER_LIST = [
     ("Nanite/CardCapture.frag", "main"),
     ("Nanite/MirrorReflection.vert", "main"),
     ("Nanite/MirrorReflection.frag", "main"),
+    # R31（2026-11-18）：ShadowMoments.frag——**全平台阴影资源链的硬前置**，
+    # 不是"VSM 可选件"：InitializeShadowResources 无条件创建 moments 管线，
+    # 此前 D3D12 镜像缺失 → 该函数静默 return false → 全部阴影资源
+    # （shadow_depth_rt/shadow_map/moments/cull 缓冲）从未创建 → ShadowFilter
+    # 无米之炊 → shadow_vis 全零 → deferred 直射链整链死
+    #（run 44114290122 [D3D12_SHADOW_INIT] line 3658 实测；加载点 GPUDrivenDraw
+    # InitializeShadowResources R31 起 D3D12 走自然名——同 MirrorReflection
+    # R28 / ShadowFilter isVkShadow R27 口径）。VSM 分支选择由 harness 级
+    # SetVSMShadows(false)（TVSRG 无条件 PCSS 切换）对称决定，与本修复正交。
+    ("Nanite/ShadowMoments.frag", "main"),
     # LumenSSGI 四件（LumenSSGIPass.cpp R13 D3D12 分支；SSGITrace 源入口
     # 是功能名 ssgi_trace，与引擎 CreateShader 实参一致，其余三件源入口
     # main）：

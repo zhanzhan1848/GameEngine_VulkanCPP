@@ -3650,16 +3650,26 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         // Vulkan SPIR-V carries a stage suffix in the file name
         // (Nanite/ShadowMoments.frag.spv); Metal source is
         // EngineTest/shaders/ShadowMoments.metal.
-        const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
-        auto momentsCode = LoadShaderBytecode(isVulkan ? "ShadowMoments.frag" : "ShadowMoments",
-                                              "shadow_moments_fs", device_);
+        // R31：D3D12 镜像同 GLSL 链（build_d3d12_shaders.py Nanite/ShadowMoments.frag）
+        // ——此前 isVulkan 排他使 D3D12 落 Metal 裸名分支，镜像树无该产物 →
+        // **InitializeShadowResources 在此 return false → 全部阴影资源
+        // （shadow_depth_rt/shadow_map/moments/cull 缓冲）从未创建** →
+        // ShadowFilter 无米之炊 → shadow_vis 全零 → deferred 直射链死
+        //（run 44114290122 [D3D12_SHADOW_INIT] line 3658 实测；同 MirrorReflection
+        // R28 / ShadowFilter isVkShadow R27 口径：D3D12 恒随 GLSL 链）。
+        // 注：VSM moments 是否启用由 harness 级 SetVSMShadows(false)（TVSRG
+        // 无条件 PCSS 切换）对称决定，本修复只解锁资源创建，不改变分支选择。
+        const bool isVulkanChain = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                                    device_->GetPlatform() == rhi::RHIPlatform::D3D12);
+        auto momentsCode = LoadShaderBytecode(isVulkanChain ? "ShadowMoments.frag" : "ShadowMoments",
+                                              "main", device_);
         if (momentsCode.empty()) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to load ShadowMoments fragment shader" << std::endl;
             PRIMAL_SHADOW_INIT_FAIL();
         }
         auto momentsFS = device_->CreateShader(momentsCode.data(), momentsCode.size(),
                                                rhi::ShaderStage::Pixel,
-                                               isVulkan ? "main" : "shadow_moments_fs");
+                                               isVulkanChain ? "main" : "shadow_moments_fs");
         if (momentsFS == rhi::handles::INVALID_SHADER) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to create ShadowMoments fragment shader" << std::endl;
             PRIMAL_SHADOW_INIT_FAIL();
