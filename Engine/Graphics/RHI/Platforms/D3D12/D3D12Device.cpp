@@ -1998,10 +1998,37 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                 const DescriptorImageInfo& ii = write.imageInfo[e];
                 if (rowInfo.hasMain) {
                     d3d12::D3D12Texture* texture = GetTexture(ii.imageView);
-                    if (!texture) continue;
+                    if (!texture) {
+                        // R29：此处此前静默 continue——imageInfo 句柄解析失败
+                        // 是"输出恒零"家族（TAA/shadow imageStore 链）的候选
+                        // 死因之一，一次性点名（32 条封顶同 UAV buffer 口径）。
+                        static std::atomic<u32> s_unresolvedImageReports{0};
+                        if (s_unresolvedImageReports.fetch_add(1, std::memory_order_relaxed) < 32) {
+                            PRIMAL_LOG_STREAM(Error, "RHI")
+                                << "[D3D12Device] image desc write skipped: texture "
+                                   "handle unresolved: set="
+                                << write.dstSet << " binding=" << write.dstBinding
+                                << " imageView=" << ii.imageView << std::endl;
+                        }
+                        continue;
+                    }
                     const u32 srcSlot = rowInfo.mainType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV
                         ? texture->UavSlot() : texture->SrvSlot();
-                    if (srcSlot == d3d12::D3D12Texture::kInvalidDescriptorSlot) continue;
+                    if (srcSlot == d3d12::D3D12Texture::kInvalidDescriptorSlot) {
+                        // R29：同上——纹理无持久 SRV/UAV 槽（desc 缺 usage 位）
+                        // 时此分支静默丢弃描述符写入，输出纹理恒零。
+                        static std::atomic<u32> s_noslotImageReports{0};
+                        if (s_noslotImageReports.fetch_add(1, std::memory_order_relaxed) < 32) {
+                            PRIMAL_LOG_STREAM(Error, "RHI")
+                                << "[D3D12Device] image desc write skipped: texture has no "
+                                << (rowInfo.mainType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV
+                                        ? "UAV" : "SRV")
+                                << " slot: set=" << write.dstSet
+                                << " binding=" << write.dstBinding
+                                << " texId=" << ii.imageView << std::endl;
+                        }
+                        continue;
+                    }
                     const u32 dstSlot = set->BaseSlot() + rowInfo.mainOffset
                                         + write.dstArrayElement + e;
                     // R20-B 埋点（PRIMAL_D3D12_UPLOAD_TRACE 同门）：纹理 SRV

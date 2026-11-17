@@ -6002,6 +6002,14 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     device_, "tonemap_output",
                     PostProcess::GetToneMappingOutputTexture(static_cast<u32>(frameCount_ - 1ull)));
             }
+            // R29：RT1 死因与 shadow 上游定界——
+            //  gbuffer_orm：deferred frag ambientLight.w>1.5（探针实测 =2）分支
+            //    RT1 = specularIBL·0.35·clamp(orm.x,0,1)，orm SRV 读零即 RT1 零；
+            //  shadow_map_c0：ShadowFilter 的 sm 输入（阴影链上游；shadow_vis
+            //    在 R27 绑定纠偏后仍零，判 filter 输入侧阴影图是否本身零）。
+            R23BlackStageDumpTexture(device_, "gbuffer_orm", gpuDrawStage.GetGBufferORM());
+            R23BlackStageDumpTexture(device_, "shadow_map_c0",
+                                     gpuDrawStage.GetShadowMap(0, prevSlot));
             PRIMAL_LOG_STREAM(Error, "Render") << "[D3D12_BLACK_STAGE] end" << std::endl;
         }
     }

@@ -734,6 +734,31 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                 cmd->BindComputePipeline(shadow_filter_pipeline_);
                 const DescriptorSetHandle sets[] = { shadow_filter_ds_[cbIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, shadow_filter_layout_, 0, 1, sets, 0, nullptr);
+                // R29 dispatch 审计（PRIMAL_D3D12_BLACK_STAGE_DUMP 门控一次性）：
+                // shadow_vis 恒零的"dispatch 是否被录制/管线描述符是否有效"
+                // CPU 可见面（TAA 同族问题在 r28 run 已由既有 abort 日志排除
+                // 录制侧，本行补齐 shadow 侧对称证据）。
+                {
+                    static const bool s_filterAudit = [] {
+                        const char* v = std::getenv("PRIMAL_D3D12_BLACK_STAGE_DUMP");
+                        return v && v[0] == '1' && v[1] == '\0';
+                    }();
+                    static bool s_filterAuditDone = false;
+                    if (s_filterAudit && !s_filterAuditDone) {
+                        s_filterAuditDone = true;
+                        PRIMAL_LOG_STREAM(Error, "Render")
+                            << "[D3D12_FILTER_AUDIT] pipeline_valid="
+                            << (shadow_filter_pipeline_ != handles::INVALID_PIPELINE)
+                            << " ds_valid="
+                            << (shadow_filter_ds_[cbIdx] != handles::INVALID_RESOURCE)
+                            << " cbIdx=" << cbIdx
+                            << " sm0=" << sm[0]
+                            << " vis=" << shadow_visibility_tex_
+                            << " depth=" << gpu_draw_pipeline_->GetGBufferDepthSampleable()
+                            << " groups=" << (render_width_ / 2 + 7) / 8 << "x"
+                            << (render_height_ / 2 + 7) / 8 << std::endl;
+                    }
+                }
                 cmd->Dispatch((render_width_ / 2 + 7) / 8, (render_height_ / 2 + 7) / 8, 1);
 
                 // 2026-09-07 修复：imageStore 使 vis 纹理处于 GENERAL 布局，

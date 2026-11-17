@@ -39,9 +39,20 @@ if (-not (Test-Path $Exe)) {
 $groups = @(
     @{ name = 'd3d12-gion';  api = 'd3d12';  gi = 1; ppm = 'art2_win_d3d12_f350.ppm'  },
     @{ name = 'd3d12-gioff'; api = 'd3d12';  gi = 0; ppm = 'art2_win_d3d12_gioff_f350.ppm' },
-    @{ name = 'vulkan-gion'; api = 'vulkan'; gi = 1; ppm = 'art2_win_vulkan_f350.ppm' },
+    @{ name = 'vulkan-gion'; api = 'vulkan'; gi = 1; ppm = 'art2_win_vulkan_f350.ppm'  },
     @{ name = 'vulkan-gioff'; api = 'vulkan'; gi = 0; ppm = 'art2_win_vulkan_gioff_f350.ppm' }
 )
+
+# R29 诊断消融组（PRIMAL_F350_TAAOFF_DIAG=1 时启用；写独立 diag_gates.json，
+# 不进主 f350_gates.json——parity_report.py FATAL "expected 4 groups" 不受影响）。
+# TAA_OFF=1：composite（实测 0.0149 有内容）直通 tonemap→FinalBlit→捕获——
+# 捕获非零即证明 composite→捕获 断链=TAA 单点且 tonemap/blit 链活
+#（run 44101462839 判读：taa_output=0 而上游 composite 有内容）。
+$diagGroups = @()
+if ($env:PRIMAL_F350_TAAOFF_DIAG -eq '1') {
+    $diagGroups += @{ name = 'd3d12-gion-taaoff'; api = 'd3d12'; gi = 1;
+                      ppm = 'art2_win_d3d12_taaoff_f350.ppm'; diag = 1 }
+}
 
 # Asset gates (same files the r11 launchers hard-require before running).
 $assetGates = @(
@@ -52,8 +63,9 @@ $assetGates = @(
 )
 
 $results = @()
+$diagResults = @()
 
-foreach ($g in $groups) {
+foreach ($g in ($groups + $diagGroups)) {
     $missing = @()
     foreach ($a in $assetGates) {
         if (-not (Test-Path (Join-Path $Repo $a))) { $missing += $a }
@@ -61,11 +73,12 @@ foreach ($g in $groups) {
     if ($missing.Count -gt 0) {
         Write-Output "[f350] $($g.name) SKIP - missing asset gates:"
         foreach ($m in $missing) { Write-Output "[f350]   $m" }
-        $results += [pscustomobject]@{
+        $skipEntry = [pscustomobject]@{
             group = $g.name; exit_code = 'asset-gate'; ppm = $g.ppm;
             ppm_exists = $false; ppm_sha256 = ''; watchdog = $false;
             anchors = @(); missing_assets = $missing
         }
+        if ($g.diag) { $diagResults += $skipEntry } else { $results += $skipEntry }
         continue
     }
 
@@ -110,6 +123,9 @@ foreach ($g in $groups) {
     }
     if ($g.gi -eq 1) { $env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL = '1' }
     else { $env:GI_ISOLATE = 'all' }
+    # R29 诊断组开关（diag 组 TAA_OFF=1，canonical 组确保无残留）
+    if ($g.diag) { $env:TAA_OFF = '1' }
+    else { Remove-Item Env:TAA_OFF -ErrorAction SilentlyContinue }
 
     $so = Join-Path $OutDir ($g.name + '.stdout.log')
     $se = Join-Path $OutDir ($g.name + '.stderr.log')
@@ -167,15 +183,23 @@ foreach ($g in $groups) {
     }
     Write-Output "[f350] $($g.name) exit=$rc ppm_exists=$ppmExists watchdog=$watchdogFired sha256=$sha"
 
-    $results += [pscustomobject]@{
+    $entry = [pscustomobject]@{
         group = $g.name; api = $g.api; gi = $g.gi;
         exit_code = $rc; ppm = $g.ppm; ppm_exists = $ppmExists;
         ppm_sha256 = $sha; watchdog = $watchdogFired; anchors = $anchors;
         missing_assets = @()
     }
+    if ($g.diag) { $diagResults += $entry } else { $results += $entry }
 }
 
 $json = ConvertTo-Json -InputObject $results -Depth 4
 Set-Content -Path (Join-Path $OutDir 'f350_gates.json') -Value $json -Encoding UTF8
 Write-Output '[f350] all groups done; gates written to f350_gates.json'
+if ($diagResults.Count -gt 0) {
+    # R29 诊断组独立 gates 文件——parity_report 只消费 f350_gates.json，
+    # 诊断组不影响任何门禁裁决。
+    $diagJson = ConvertTo-Json -InputObject $diagResults -Depth 4
+    Set-Content -Path (Join-Path $OutDir 'diag_gates.json') -Value $diagJson -Encoding UTF8
+    Write-Output '[f350] diagnostic groups done; gates written to diag_gates.json'
+}
 exit 0
