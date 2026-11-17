@@ -1798,6 +1798,22 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
     if (!writes || writeCount == 0) return;
     ID3D12Device* native = device_.Get();
 
+    // R30：image desc 写跳过去重（(set,binding,kind) 一次性）——r29 实证
+    // 封顶 32×2 全被 init 期孪生行合法跳过占满，帧期信号（TAA/tonemap/
+    // deferred set 若真有跳过）被淹没。去重后每 (set,binding,kind) 至多一行。
+    struct SkipKey { u32 set; u32 binding; u32 kind; };
+    static SkipKey s_seen[128];
+    static std::atomic<u32> s_seenCount{0};
+    auto skipSeenOrRecord = [&](u32 s, u32 b, u32 k) {
+        const u32 n = s_seenCount.load(std::memory_order_relaxed);
+        const u32 cap = n < 128u ? n : 128u;
+        for (u32 i = 0; i < cap; ++i)
+            if (s_seen[i].set == s && s_seen[i].binding == b && s_seen[i].kind == k) return true;
+        const u32 idx = s_seenCount.fetch_add(1, std::memory_order_relaxed);
+        if (idx < 128u) { s_seen[idx] = {s, b, k}; return false; }
+        return true;
+    };
+
     for (u32 w = 0; w < writeCount; ++w) {
         const WriteDescriptorSet& write = writes[w];
         d3d12::D3D12DescriptorSet* set = GetDescriptorSet(write.dstSet);
@@ -1998,16 +2014,19 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                 const DescriptorImageInfo& ii = write.imageInfo[e];
                 if (rowInfo.hasMain) {
                     d3d12::D3D12Texture* texture = GetTexture(ii.imageView);
+                    const u32 kindBase = rowInfo.mainType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV ? 0u : 2u;
                     if (!texture) {
-                        // R29：此处此前静默 continue——imageInfo 句柄解析失败
-                        // 是"输出恒零"家族（TAA/shadow imageStore 链）的候选
-                        // 死因之一，一次性点名（32 条封顶同 UAV buffer 口径）。
-                        static std::atomic<u32> s_unresolvedImageReports{0};
-                        if (s_unresolvedImageReports.fetch_add(1, std::memory_order_relaxed) < 32) {
+                        // R29/R30：此处此前静默 continue——imageInfo 句柄解析失败
+                        // 是"输出恒零"家族（TAA/shadow imageStore 链）的候选死因
+                        // 之一；(set,binding,kind) 去重点名（init 期孪生行合法
+                        // 跳过不再淹没帧期信号）。
+                        if (!skipSeenOrRecord(write.dstSet, write.dstBinding, kindBase)) {
                             PRIMAL_LOG_STREAM(Error, "RHI")
                                 << "[D3D12Device] image desc write skipped: texture "
                                    "handle unresolved: set="
                                 << write.dstSet << " binding=" << write.dstBinding
+                                << " kind=" << (kindBase == 0u ? "uav" : "srv")
+                                << " twin=" << (rowInfo.twin ? 1 : 0)
                                 << " imageView=" << ii.imageView << std::endl;
                         }
                         continue;
@@ -2015,16 +2034,15 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                     const u32 srcSlot = rowInfo.mainType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV
                         ? texture->UavSlot() : texture->SrvSlot();
                     if (srcSlot == d3d12::D3D12Texture::kInvalidDescriptorSlot) {
-                        // R29：同上——纹理无持久 SRV/UAV 槽（desc 缺 usage 位）
-                        // 时此分支静默丢弃描述符写入，输出纹理恒零。
-                        static std::atomic<u32> s_noslotImageReports{0};
-                        if (s_noslotImageReports.fetch_add(1, std::memory_order_relaxed) < 32) {
+                        // R29/R30：同上——纹理无持久 SRV/UAV 槽（desc 缺 usage
+                        // 位）时此分支静默丢弃描述符写入，输出纹理恒零。
+                        if (!skipSeenOrRecord(write.dstSet, write.dstBinding, kindBase + 1u)) {
                             PRIMAL_LOG_STREAM(Error, "RHI")
                                 << "[D3D12Device] image desc write skipped: texture has no "
-                                << (rowInfo.mainType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV
-                                        ? "UAV" : "SRV")
+                                << (kindBase == 0u ? "UAV" : "SRV")
                                 << " slot: set=" << write.dstSet
                                 << " binding=" << write.dstBinding
+                                << " twin=" << (rowInfo.twin ? 1 : 0)
                                 << " texId=" << ii.imageView << std::endl;
                         }
                         continue;

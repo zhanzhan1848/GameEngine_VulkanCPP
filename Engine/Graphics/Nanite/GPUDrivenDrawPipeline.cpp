@@ -3505,9 +3505,15 @@ void GPUDrivenDrawPipeline::ResolveVisibilityBuffer(rhi::RHICommandBuffer* cmd_b
 // Shadow Mapping Implementation
 // ============================================================================
 
+// R30：InitializeShadowResources 静默 return false 点名（行号定位）。
+#define PRIMAL_SHADOW_INIT_FAIL() \
+    do { PRIMAL_LOG_STREAM(Error, "Render") \
+             << "[D3D12_SHADOW_INIT] step failed at line " << __LINE__ << std::endl; \
+         return false; } while (0)
+
 bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max_clusters) {
     if (shadow_initialized_) return true;
-    if (!device_) return false;
+    if (!device_) PRIMAL_SHADOW_INIT_FAIL();
 
     shadow_max_clusters_ = max_clusters;
 
@@ -3521,7 +3527,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
 
     if (cullCode.empty() || finalizeCode.empty() || depthVSCode.empty() || blitCode.empty()) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to load shadow shaders" << std::endl;
-        return false;
+        PRIMAL_SHADOW_INIT_FAIL();
     }
 
     auto cullShader = device_->CreateShader(cullCode.data(), cullCode.size(), rhi::ShaderStage::Compute, "shadow_cluster_culling");
@@ -3532,7 +3538,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
     if (cullShader == rhi::handles::INVALID_SHADER || finalizeShader == rhi::handles::INVALID_SHADER ||
         depthVS == rhi::handles::INVALID_SHADER || blitShader == rhi::handles::INVALID_SHADER) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to create shadow shader handles" << std::endl;
-        return false;
+        PRIMAL_SHADOW_INIT_FAIL();
     }
 
     // --- Shadow cull descriptor layout (7 bindings) ---
@@ -3556,11 +3562,11 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
 
         rhi::DescriptorSetLayoutDesc cullLayoutDesc{ .bindingCount = 7, .bindings = cullBindings };
         shadow_cull_set_layout_ = device_->CreateDescriptorSetLayout(cullLayoutDesc);
-        if (shadow_cull_set_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) return false;
+        if (shadow_cull_set_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) PRIMAL_SHADOW_INIT_FAIL();
 
         rhi::PipelineLayoutDesc cullPLDesc{ .setLayoutCount = 1, .setLayouts = &shadow_cull_set_layout_ };
         shadow_cull_layout_ = device_->CreatePipelineLayout(cullPLDesc);
-        if (shadow_cull_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) return false;
+        if (shadow_cull_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) PRIMAL_SHADOW_INIT_FAIL();
     }
 
     // Shadow cull pipeline
@@ -3570,7 +3576,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         desc.computeShader = cullShader;
         desc.threadGroupSize = {64, 1, 1};
         shadow_cull_pipeline_ = device_->CreateComputePipeline(desc);
-        if (shadow_cull_pipeline_ == rhi::handles::INVALID_PIPELINE) return false;
+        if (shadow_cull_pipeline_ == rhi::handles::INVALID_PIPELINE) PRIMAL_SHADOW_INIT_FAIL();
     }
 
     // Shadow finalize pipeline (reuses same layout as cull)
@@ -3580,7 +3586,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         desc.computeShader = finalizeShader;
         desc.threadGroupSize = {64, 1, 1};
         shadow_finalize_pipeline_ = device_->CreateComputePipeline(desc);
-        if (shadow_finalize_pipeline_ == rhi::handles::INVALID_PIPELINE) return false;
+        if (shadow_finalize_pipeline_ == rhi::handles::INVALID_PIPELINE) PRIMAL_SHADOW_INIT_FAIL();
     }
 
     // --- Shadow depth descriptor layout (8 bindings) ---
@@ -3602,11 +3608,11 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
 
         rhi::DescriptorSetLayoutDesc depthLayoutDesc{ .bindingCount = 8, .bindings = depthBindings };
         shadow_depth_set_layout_ = device_->CreateDescriptorSetLayout(depthLayoutDesc);
-        if (shadow_depth_set_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) return false;
+        if (shadow_depth_set_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) PRIMAL_SHADOW_INIT_FAIL();
 
         rhi::PipelineLayoutDesc depthPLDesc{ .setLayoutCount = 1, .setLayouts = &shadow_depth_set_layout_ };
         shadow_depth_layout_ = device_->CreatePipelineLayout(depthPLDesc);
-        if (shadow_depth_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) return false;
+        if (shadow_depth_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) PRIMAL_SHADOW_INIT_FAIL();
     }
 
     // Shadow depth graphics pipeline (depth-only, no fragment shader)
@@ -3631,7 +3637,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         shadow_depth_pipeline_ = device_->CreateGraphicsPipeline(desc);
         if (shadow_depth_pipeline_ == rhi::handles::INVALID_PIPELINE) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to create shadow depth graphics pipeline" << std::endl;
-            return false;
+            PRIMAL_SHADOW_INIT_FAIL();
         }
     }
 
@@ -3649,14 +3655,14 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                                               "shadow_moments_fs", device_);
         if (momentsCode.empty()) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to load ShadowMoments fragment shader" << std::endl;
-            return false;
+            PRIMAL_SHADOW_INIT_FAIL();
         }
         auto momentsFS = device_->CreateShader(momentsCode.data(), momentsCode.size(),
                                                rhi::ShaderStage::Pixel,
                                                isVulkan ? "main" : "shadow_moments_fs");
         if (momentsFS == rhi::handles::INVALID_SHADER) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to create ShadowMoments fragment shader" << std::endl;
-            return false;
+            PRIMAL_SHADOW_INIT_FAIL();
         }
 
         rhi::GraphicsPipelineDesc desc{};
@@ -3682,7 +3688,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         shadow_moments_pipeline_ = device_->CreateGraphicsPipeline(desc);
         if (shadow_moments_pipeline_ == rhi::handles::INVALID_PIPELINE) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[Shadow] Failed to create shadow moments graphics pipeline" << std::endl;
-            return false;
+            PRIMAL_SHADOW_INIT_FAIL();
         }
     }
 
@@ -3712,11 +3718,11 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
 
         rhi::DescriptorSetLayoutDesc blitLayoutDesc{ 3, blitBindings };
         shadow_blit_set_layout_ = device_->CreateDescriptorSetLayout(blitLayoutDesc);
-        if (shadow_blit_set_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) return false;
+        if (shadow_blit_set_layout_ == rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT) PRIMAL_SHADOW_INIT_FAIL();
 
         rhi::PipelineLayoutDesc blitPLDesc{ 1, &shadow_blit_set_layout_, 0, nullptr };
         shadow_blit_layout_ = device_->CreatePipelineLayout(blitPLDesc);
-        if (shadow_blit_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) return false;
+        if (shadow_blit_layout_ == rhi::handles::INVALID_PIPELINE_LAYOUT) PRIMAL_SHADOW_INIT_FAIL();
     }
 
     // Shadow blit compute pipeline
@@ -3726,7 +3732,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         desc.computeShader = blitShader;
         desc.threadGroupSize = {8, 8, 1};
         shadow_blit_pipeline_ = device_->CreateComputePipeline(desc);
-        if (shadow_blit_pipeline_ == rhi::handles::INVALID_PIPELINE) return false;
+        if (shadow_blit_pipeline_ == rhi::handles::INVALID_PIPELINE) PRIMAL_SHADOW_INIT_FAIL();
     }
 
     // --- Per-frame per-cascade resources ---
@@ -3743,7 +3749,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 desc.memoryUsage = rhi::GPUMemoryUsage::Static;
                 auto& rt = frame.shadow_depth_rt[cascade];
                 rt = device_->CreateTexture(desc);
-                if (rt == rhi::handles::INVALID_RESOURCE) return false;
+                if (rt == rhi::handles::INVALID_RESOURCE) PRIMAL_SHADOW_INIT_FAIL();
             }
 
             // VSM moments (RG32_Float, 2048x2048) — color target of the
@@ -3759,7 +3765,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 mom = device_->CreateTexture(desc);
                 PRIMAL_LOG_STREAM(Error, "Render") << "[SHADOW_TEX] cascade=" << cascade
                           << " handle=" << mom << " usage=" << (int)desc.usage << std::endl;
-                if (mom == rhi::handles::INVALID_RESOURCE) return false;
+                if (mom == rhi::handles::INVALID_RESOURCE) PRIMAL_SHADOW_INIT_FAIL();
             }
 
             // Shadow map sampleable (R32_Float, 2048x2048)
@@ -3771,7 +3777,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 desc.memoryUsage = rhi::GPUMemoryUsage::Static;
                 auto& sm = frame.shadow_map[cascade];
                 sm = device_->CreateTexture(desc);
-                if (sm == rhi::handles::INVALID_RESOURCE) return false;
+                if (sm == rhi::handles::INVALID_RESOURCE) PRIMAL_SHADOW_INIT_FAIL();
             }
 
             // Visible clusters buffer
@@ -3781,7 +3787,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 desc.bindFlags = (u32)rhi::BufferUsageFlags::Storage;
                 desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
                 frame.visible_clusters_buffer[cascade] = device_->CreateBuffer(desc);
-                if (frame.visible_clusters_buffer[cascade] == rhi::handles::INVALID_RESOURCE) return false;
+                if (frame.visible_clusters_buffer[cascade] == rhi::handles::INVALID_RESOURCE) PRIMAL_SHADOW_INIT_FAIL();
             }
 
             // Per-cascade atomic counter (no longer shared between cascades/frames)
@@ -3791,7 +3797,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 desc.bindFlags = (u32)(rhi::BufferUsageFlags::Storage | rhi::BufferUsageFlags::TransferDst);
                 desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
                 frame.visible_counter_buffer[cascade] = device_->CreateBuffer(desc);
-                if (frame.visible_counter_buffer[cascade] == rhi::handles::INVALID_RESOURCE) return false;
+                if (frame.visible_counter_buffer[cascade] == rhi::handles::INVALID_RESOURCE) PRIMAL_SHADOW_INIT_FAIL();
             }
 
             // Indirect draw buffer
@@ -3801,7 +3807,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 desc.bindFlags = (u32)(rhi::BufferUsageFlags::Indirect | rhi::BufferUsageFlags::Storage);
                 desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
                 frame.indirect_draw_buffer[cascade] = device_->CreateBuffer(desc);
-                if (frame.indirect_draw_buffer[cascade] == rhi::handles::INVALID_RESOURCE) return false;
+                if (frame.indirect_draw_buffer[cascade] == rhi::handles::INVALID_RESOURCE) PRIMAL_SHADOW_INIT_FAIL();
             }
 
             // Light frustum CB
@@ -3811,7 +3817,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 desc.bindFlags = (u32)rhi::BufferUsageFlags::Uniform;
                 desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
                 frame.light_frustum_cb[cascade] = device_->CreateBuffer(desc);
-                if (frame.light_frustum_cb[cascade] == rhi::handles::INVALID_RESOURCE) return false;
+                if (frame.light_frustum_cb[cascade] == rhi::handles::INVALID_RESOURCE) PRIMAL_SHADOW_INIT_FAIL();
             }
 
             // Shadow depth CB (ShadowDepthUniforms)
@@ -3821,7 +3827,7 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 desc.bindFlags = (u32)rhi::BufferUsageFlags::Uniform;
                 desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
                 frame.shadow_depth_cb[cascade] = device_->CreateBuffer(desc);
-                if (frame.shadow_depth_cb[cascade] == rhi::handles::INVALID_RESOURCE) return false;
+                if (frame.shadow_depth_cb[cascade] == rhi::handles::INVALID_RESOURCE) PRIMAL_SHADOW_INIT_FAIL();
             }
 
             // Blit resolution CB
@@ -3831,28 +3837,28 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
                 desc.bindFlags = (u32)rhi::BufferUsageFlags::Uniform;
                 desc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
                 frame.blit_resolution_cb[cascade] = device_->CreateBuffer(desc);
-                if (frame.blit_resolution_cb[cascade] == rhi::handles::INVALID_RESOURCE) return false;
+                if (frame.blit_resolution_cb[cascade] == rhi::handles::INVALID_RESOURCE) PRIMAL_SHADOW_INIT_FAIL();
             }
 
             // Shadow cull descriptor set
             {
                 rhi::DescriptorSetDesc dsDesc{ .layout = shadow_cull_set_layout_ };
                 frame.shadow_cull_descriptor_set[cascade] = device_->CreateDescriptorSet(dsDesc);
-                if (frame.shadow_cull_descriptor_set[cascade] == rhi::handles::INVALID_DESCRIPTOR_SET) return false;
+                if (frame.shadow_cull_descriptor_set[cascade] == rhi::handles::INVALID_DESCRIPTOR_SET) PRIMAL_SHADOW_INIT_FAIL();
             }
 
             // Shadow depth descriptor set
             {
                 rhi::DescriptorSetDesc dsDesc{ .layout = shadow_depth_set_layout_ };
                 frame.shadow_depth_descriptor_set[cascade] = device_->CreateDescriptorSet(dsDesc);
-                if (frame.shadow_depth_descriptor_set[cascade] == rhi::handles::INVALID_DESCRIPTOR_SET) return false;
+                if (frame.shadow_depth_descriptor_set[cascade] == rhi::handles::INVALID_DESCRIPTOR_SET) PRIMAL_SHADOW_INIT_FAIL();
             }
 
             // Shadow blit descriptor set
             {
                 rhi::DescriptorSetDesc dsDesc{ .layout = shadow_blit_set_layout_ };
                 frame.shadow_blit_descriptor_set[cascade] = device_->CreateDescriptorSet(dsDesc);
-                if (frame.shadow_blit_descriptor_set[cascade] == rhi::handles::INVALID_DESCRIPTOR_SET) return false;
+                if (frame.shadow_blit_descriptor_set[cascade] == rhi::handles::INVALID_DESCRIPTOR_SET) PRIMAL_SHADOW_INIT_FAIL();
             }
         }
     }
@@ -3872,6 +3878,8 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
     shadow_initialized_ = true;
     return true;
 }
+
+#undef PRIMAL_SHADOW_INIT_FAIL
 
 void GPUDrivenDrawPipeline::ShutdownShadowResources() {
     if (!shadow_initialized_ || !device_) return;
