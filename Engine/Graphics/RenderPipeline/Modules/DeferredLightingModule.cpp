@@ -658,6 +658,67 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                 device_->UpdateBufferData(probe_param_cb_[cbIdx], &pp, sizeof(pp), 0);
             }
 
+            // R25（deferred_out 全黑探针，D3D12+env 双门控默认关）：
+            // PRIMAL_D3D12_DEFERRED_PROBE=1 时前 2 次执行打印绑定面与常量
+            // 内容的运行时真值。r24b 六阶段 dump 中 G-buffer 有内容而
+            // deferred_out 精确为 0，静态审计（PSO/根签名/槽位偏移/culling）
+            // 全部自洽——该探针把"绑定句柄是否被 fallback 顶替""SceneData/
+            // ViewData 是否真实写入"两条 CPU 可见链在下轮 CI 落到日志面。
+            if (device_->GetPlatform() == RHIPlatform::D3D12) {
+                static const bool s_defProbe = [] {
+                    const char* e = std::getenv("PRIMAL_D3D12_DEFERRED_PROBE");
+                    return e && e[0] == '1' && e[1] == '\0';
+                }();
+                static int s_defProbeCount = 0;
+                if (s_defProbe && s_defProbeCount < 2) {
+                    ++s_defProbeCount;
+                    PRIMAL_LOG_STREAM(Error, "Render")
+                        << "[D3D12_DEFERRED_PROBE] exec#" << (s_defProbeCount - 1)
+                        << " cbIdx=" << cbIdx
+                        << " pipeline=" << pipeline_
+                        << " set=" << descriptor_sets_[cbIdx]
+                        << " outTex=" << currentTex
+                        << " envTex=" << environment_textures_[cbIdx]
+                        << " binds: albedo=" << albedoTex
+                        << " normal=" << normalTex
+                        << " orm=" << ormTex
+                        << " depth=" << depthTex
+                        << "(sampleable=" << depthSampleable << ")"
+                        << " shadowVis=" << shadowVisTex
+                        << " ssao=" << ssaoTex
+                        << " fallbackTex=" << fallback_tex_
+                        << " iblIrr=" << ibl_irradiance_
+                        << " iblPre=" << ibl_prefilter_
+                        << " iblLut=" << ibl_brdf_lut_ << std::endl;
+                    // SceneData/ViewData 写后回读（UPLOAD 持久映射，CPU 侧真值）
+                    if (const auto* sd = static_cast<const SceneData*>(
+                            device_->MapBuffer(scene_cb_[cbIdx]))) {
+                        PRIMAL_LOG_STREAM(Error, "Render")
+                            << "[D3D12_DEFERRED_PROBE] scene_cb: lightPos=("
+                            << sd->lightPos.x << "," << sd->lightPos.y << "," << sd->lightPos.z
+                            << ") lightColor=(" << sd->lightColor.x << "," << sd->lightColor.y
+                            << "," << sd->lightColor.z << ") shadowParams=("
+                            << sd->shadowParams.x << "," << sd->shadowParams.y << ","
+                            << sd->shadowParams.z << "," << sd->shadowParams.w
+                            << ") ambientW=" << sd->ambientLight.w
+                            << " viewPos=(" << sd->viewPos.x << "," << sd->viewPos.y
+                            << "," << sd->viewPos.z << ") shadowMat0_00="
+                            << math::elem(sd->shadowMatrix0, 0, 0) << std::endl;
+                        device_->UnmapBuffer(scene_cb_[cbIdx]);
+                    }
+                    if (const auto* vd = static_cast<const ViewData*>(
+                            device_->MapBuffer(view_cb_[cbIdx]))) {
+                        PRIMAL_LOG_STREAM(Error, "Render")
+                            << "[D3D12_DEFERRED_PROBE] view_cb: vp00="
+                            << math::elem(vd->viewProjection, 0, 0)
+                            << " vp23=" << math::elem(vd->viewProjection, 2, 3)
+                            << " invVP33=" << math::elem(vd->invViewProjection, 3, 3)
+                            << std::endl;
+                        device_->UnmapBuffer(view_cb_[cbIdx]);
+                    }
+                }
+            }
+
             cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_), static_cast<float>(render_height_)}, 0, 1});
             cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
 

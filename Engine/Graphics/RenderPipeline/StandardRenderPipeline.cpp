@@ -5649,7 +5649,12 @@ void R23BlackStageDumpTexture(rhi::RHIDeviceBase* device, const char* name,
     u32 bytesPerPixel = 0, channels = 0;
     if (fmt == DataFormat::RGBA16_Float) { bytesPerPixel = 8; channels = 4; }
     else if (fmt == DataFormat::RGBA8_UNorm || fmt == DataFormat::BGRA8_UNorm) { bytesPerPixel = 4; channels = 4; }
-    else if (fmt == DataFormat::R32_Float) { bytesPerPixel = 4; channels = 1; }
+    // R25：D32（r24b dump 面上 fmt=78 被 skip——deferred frag 的 depth>=1
+    // 天空分支判定直接消费该纹理，是 deferred_out 黑帧定位的关键缺口）与
+    // R8（ShadowFilter 半分辨率可见性，shadowVisibility=Lo 的乘法因子）补
+    // 进 dump 面。D32 单平面无模板，footprint 按位布局=R32F 同式解码。
+    else if (fmt == DataFormat::R32_Float || fmt == DataFormat::D32_Float) { bytesPerPixel = 4; channels = 1; }
+    else if (fmt == DataFormat::R8_UNorm) { bytesPerPixel = 1; channels = 1; }
     if (bytesPerPixel == 0) {
         PRIMAL_LOG_STREAM(Error, "Render")
             << "[D3D12_BLACK_STAGE] " << name << " " << w << "x" << h
@@ -5716,7 +5721,7 @@ void R23BlackStageDumpTexture(rhi::RHIDeviceBase* device, const char* name,
                     if (fmt == DataFormat::RGBA16_Float) {
                         for (u32 k = 0; k < 4; ++k)
                             c[k] = R23F16Decode(reinterpret_cast<const u16*>(t)[k]);
-                    } else if (fmt == DataFormat::R32_Float) {
+                    } else if (fmt == DataFormat::R32_Float || fmt == DataFormat::D32_Float) {
                         float f;
                         std::memcpy(&f, t, 4);
                         c[0] = f;
@@ -5960,6 +5965,16 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             if (deferred_module_)
                 R23BlackStageDumpTexture(device_, "deferred_out",
                                          deferred_module_->GetOutputTexture(prevSlot));
+            // R25 判别扩展：deferred_env（MRT1 环境镜面输出）≠0 而 deferred_out
+            // =0 ⟹ PS 在执行、IBL 链活、直射链（shadowVisibility 乘子）归零；
+            // 两者皆 0 ⟹ 绘制未落地或采样面整体为零。shadow_vis 直接判定
+            // PCSS 可见性纹理（Lo 的乘法因子）是否全零。
+            if (deferred_module_)
+                R23BlackStageDumpTexture(device_, "deferred_env",
+                                         deferred_module_->GetEnvironmentTexture(prevSlot));
+            if (shadow_module_)
+                R23BlackStageDumpTexture(device_, "shadow_vis",
+                                         shadow_module_->GetShadowVisibilityTexture(0));
             if (fusion_module_) {
                 // GetIndirectOutput(frame) = 上一完成槽；GetFusionOutput(frame-1)
                 // = frame-1 的当帧完成槽——两者都指向目标帧刚写完的纹理。

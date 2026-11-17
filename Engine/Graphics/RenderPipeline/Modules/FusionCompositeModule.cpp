@@ -284,7 +284,19 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
                             cmd->Begin();
                             BufferTextureCopyRegion region{};
                             region.bufferOffset = 0;
-                            region.bufferRowLength = 256 / 4; // aligned row in pixels (RGBA16 = 4 bytes/pixel for 2 channels... actually 8 bytes for RGBA16)
+                            // R25（D3D12 fusion_composite 黑帧根修）：256/4=64px
+                            // 行距在 RGBA16F（8B/px）下使 placed footprint =
+                            // 64×8=512B > 256B staging，D3D12 CopyBufferToTexture
+                            // 守卫拒拷（CI r24b stderr：『placed footprint
+                            // exceeds source buffer: required=512 buffer=256』）
+                            // → identity 纹理保持创建零值 (0,0,0,0) →
+                            // FusionComposite 输出恒为 (…)·vol.w+vol.xyz=0。
+                            // 1×1 拷贝只读首纹素，紧排（=0）与行距 64 的语义
+                            // 完全一致；非 D3D12 平台保持原值——Mac 输出零变化。
+                            region.bufferRowLength =
+                                device->GetPlatform() == RHIPlatform::D3D12
+                                    ? 0
+                                    : 256 / 4; // aligned row in pixels (RGBA16 = 4 bytes/pixel for 2 channels... actually 8 bytes for RGBA16)
                             region.imageSubresource = {0, 0, 1};
                             region.imageExtent = {1, 1, 1};
                             cmd->CopyBufferToTexture(staging, volume_identity_tex_, &region, 1);
