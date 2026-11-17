@@ -30,19 +30,23 @@
     <None Update="Fixtures\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libContentTools.dylib">
+    <None Include="..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libContentTools.dylib"
+          Condition="Exists('..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libContentTools.dylib')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>libContentTools.dylib</Link>
     </None>
-    <None Include="..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libfbxsdk.dylib">
+    <None Include="..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libfbxsdk.dylib"
+          Condition="Exists('..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libfbxsdk.dylib')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>libfbxsdk.dylib</Link>
     </None>
-    <None Include="..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libPrimalEngine.dylib">
+    <None Include="..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libPrimalEngine.dylib"
+          Condition="Exists('..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libPrimalEngine.dylib')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>libPrimalEngine.dylib</Link>
     </None>
-    <None Include="..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libEngineDLL.dylib">
+    <None Include="..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libEngineDLL.dylib"
+          Condition="Exists('..\Darwin\PrimalEditor_Avalonia\$(Configuration)\libEngineDLL.dylib')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>libEngineDLL.dylib</Link>
     </None>
