@@ -403,6 +403,18 @@ SHADER_LIST = [
     ("Forward/ForwardTransparent.frag", "main"),
     ("Forward/StreamingGBuffer.vert", "main"),
     ("Forward/StreamingGBuffer.frag", "main"),
+    # R28（2026-11-17）：Nanite SC 卡运行时捕获 + 平面反射——Vulkan 参照路径
+    # 静默成功（LoadShaderBytecode 成功不打日志），D3D12 镜像缺失 → 每帧重试
+    # 加载失败（f350 单组 800 条 CardCapture 失败）且 SC 卡捕获/平面反射链死。
+    # 加载点：GPUDrivenDrawPipeline.cpp InitializeCardCaptureResources（非 Metal
+    # 本就取 "CardCapture.vert/.frag" 自然名，缺的只是镜像）与
+    # InitializeReflectionResources（R28 起 D3D12 走 "MirrorReflection.vert/.frag"
+    # 自然名——此前 isVulkan 排他使 D3D12 落 Metal 裸名+入口中缀分支，
+    # 同 ShadowFilter isVkShadow 纠偏口径：D3D12 恒随 GLSL 链）。
+    ("Nanite/CardCapture.vert", "main"),
+    ("Nanite/CardCapture.frag", "main"),
+    ("Nanite/MirrorReflection.vert", "main"),
+    ("Nanite/MirrorReflection.frag", "main"),
     # LumenSSGI 四件（LumenSSGIPass.cpp R13 D3D12 分支；SSGITrace 源入口
     # 是功能名 ssgi_trace，与引擎 CreateShader 实参一致，其余三件源入口
     # main）：

@@ -4488,19 +4488,24 @@ bool GPUDrivenDrawPipeline::InitializeReflectionResources(u32 max_clusters) {
 
     // Vulkan SPIR-V carries stage suffixes (Nanite/MirrorReflection.vert.spv);
     // Metal source is a single EngineTest/shaders/MirrorReflection.metal.
-    const bool isVulkan = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan);
-    auto vsCode = LoadShaderBytecode(isVulkan ? "MirrorReflection.vert" : "MirrorReflection",
-                                     "mirror_reflection_vs", device_);
-    auto fsCode = LoadShaderBytecode(isVulkan ? "MirrorReflection.frag" : "MirrorReflection",
-                                     "mirror_reflection_fs", device_);
+    // R28：D3D12 镜像同 GLSL 链（build_d3d12_shaders.py Nanite/MirrorReflection
+    // 两件，出 .vert/.frag 自然名）——此前 D3D12 落 Metal 名分支（裸
+    // "MirrorReflection"+入口中缀命名），镜像树无该产物 → 平面反射链死
+    // （Vulkan 参照静默成功=活路径，planar reflection 属 parity 面）。
+    const bool isVulkanChain = (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                                device_->GetPlatform() == rhi::RHIPlatform::D3D12);
+    auto vsCode = LoadShaderBytecode(isVulkanChain ? "MirrorReflection.vert" : "MirrorReflection",
+                                     "main", device_);
+    auto fsCode = LoadShaderBytecode(isVulkanChain ? "MirrorReflection.frag" : "MirrorReflection",
+                                     "main", device_);
     if (vsCode.empty() || fsCode.empty()) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[Mirror] Failed to load MirrorReflection shaders" << std::endl;
         return false;
     }
     auto vs = device_->CreateShader(vsCode.data(), vsCode.size(), rhi::ShaderStage::Vertex,
-                                    isVulkan ? "main" : "mirror_reflection_vs");
+                                    isVulkanChain ? "main" : "mirror_reflection_vs");
     auto fs = device_->CreateShader(fsCode.data(), fsCode.size(), rhi::ShaderStage::Pixel,
-                                    isVulkan ? "main" : "mirror_reflection_fs");
+                                    isVulkanChain ? "main" : "mirror_reflection_fs");
     if (vs == rhi::handles::INVALID_SHADER || fs == rhi::handles::INVALID_SHADER) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[Mirror] Failed to create MirrorReflection shader handles" << std::endl;
         return false;

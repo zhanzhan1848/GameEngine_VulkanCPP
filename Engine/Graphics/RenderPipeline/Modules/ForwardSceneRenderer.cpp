@@ -1018,7 +1018,11 @@ void ForwardSceneRenderer::CreateShaders() {
     // Forward pass shaders for Water/Transparent (inline PBR, rendered after deferred lighting).
     // T4.6.5 part 14: Metal funnels 4 entry points into one ForwardTransparency.metal; Vulkan
     // splits them into 4 SPIR-V files with a single `main` entry each.
-    if (platform == RHIPlatform::Vulkan) {
+    // R28：D3D12 镜像与 Vulkan 同源同形（build_d3d12_shaders.py 的
+    // Forward/ForwardWater|ForwardTransparent 四件），此前落入 Metal 命名分支
+    // 去 load("ForwardTransparency")——水/透明两 VS 共用一个 cso 名且镜像树里
+    // 根本没有该产物（init 期 4 条 fail-soft 加载失败）。
+    if (platform == RHIPlatform::Vulkan || platform == RHIPlatform::D3D12) {
         forward_water_vs_ = load("ForwardWater", "main", ShaderStage::Vertex);
         forward_water_ps_ = load("ForwardWater", "main", ShaderStage::Pixel);
         forward_transparent_vs_ = load("ForwardTransparent", "main", ShaderStage::Vertex);
