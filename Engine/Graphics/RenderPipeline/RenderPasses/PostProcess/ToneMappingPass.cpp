@@ -966,4 +966,8 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
     );
 }
 
+rhi::ResourceHandle GetToneMappingOutputTexture(u32 frameIndex) {
+    return s_OutputTex[frameIndex % MAX_FRAMES];
+}
+
 } // namespace primal::graphics::PostProcess

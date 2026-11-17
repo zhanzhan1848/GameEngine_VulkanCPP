@@ -5613,8 +5613,9 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
 //   PRIMAL_D3D12_BLACK_STAGE_FRAME=<N>         目标帧（默认 350）
 // dump 发生在 N+1 帧的 RWCB 入口：目标帧的提交已在帧 fence 上完成
 //（BeginFrame 等待过），G-buffer / 延迟光照 / 融合间接 / 融合合成等三缓冲
-// 阶段纹理此刻持有目标帧内容（ToneMapping/TAA 输出是 RG 瞬态纹理，N+1 帧
-// 无法保真回读，不在 dump 面）。读回走与 harness 捕获同一已验证通道
+// 阶段纹理此刻持有目标帧内容（TAA/ToneMapping 输出为模块自有持久纹理——
+// R27 起同样可保真回读，加入 dump 面；此前"RG 瞬态无法回读"的前提只对
+// 真·RG 瞬态成立）。读回走与 harness 捕获同一已验证通道
 //（独立命令缓冲 barrier→CopyTextureToBuffer→Submit→WaitForCompletion→Map），
 // 逐张算采样网格 mean/max，一行一阶段写 stderr：首个 mean=0 的阶段即黑帧
 // 的"无写入"分界。诊断专用：不参与渲染，不改变任何管线行为。
@@ -5986,6 +5987,20 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                         device_, "fusion_composite",
                         fusion_module_->GetFusionOutput(static_cast<u32>(frameCount_ - 1ull)));
                 }
+            }
+            // R27 后处理判别扩展：composite 有内容而最终捕获恒全零（run
+            // 44039269520：fusion_composite=0.0149 但 PPM 逐字节零且 SHA 不随
+            // composite 变化）——断点在 composite 与捕获之间（TAA compute 链/
+            // ToneMapping/FinalBlit 三选一）。taa_output 与 tonemap_output 两行
+            // 直接定界：taa=0 → TAA compute 链；taa>0 且 tonemap=0 → ToneMapping；
+            // 两者 >0 且捕获=0 → FinalBlit。
+            if (frameCount_ >= 1ull) {
+                R23BlackStageDumpTexture(
+                    device_, "taa_output",
+                    PostProcess::GetTAAOutputTexture(static_cast<u32>(frameCount_ - 1ull)));
+                R23BlackStageDumpTexture(
+                    device_, "tonemap_output",
+                    PostProcess::GetToneMappingOutputTexture(static_cast<u32>(frameCount_ - 1ull)));
             }
             PRIMAL_LOG_STREAM(Error, "Render") << "[D3D12_BLACK_STAGE] end" << std::endl;
         }

@@ -101,6 +101,12 @@ foreach ($g in $groups) {
         # R23：黑帧六阶段内容 dump（gbuffer/deferred/fusion 前后/
         # tonemap/捕获链，taskI §6 判定表定界全黑阶段）
         $env:PRIMAL_D3D12_BLACK_STAGE_DUMP = '1'
+        # R27：R25 探针启用（taskK §5 第 4 项当时漏落地）——绑定句柄真值
+        # + scene_cb/view_cb 写后回读，定 deferred set 描述符内容链
+        $env:PRIMAL_D3D12_DEFERRED_PROBE = '1'
+        # R27：TEMP-DIAG CPU 侧真值（vp/invVP/SCENE_MAT0/SCENE_MISC——
+        # DeferredLightingModule 内既有 env 门控，零代码）
+        $env:PRIMAL_DUMP_MATRIX = '1'
     }
     if ($g.gi -eq 1) { $env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL = '1' }
     else { $env:GI_ISOLATE = 'all' }

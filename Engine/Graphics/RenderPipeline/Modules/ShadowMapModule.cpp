@@ -690,14 +690,22 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                 }
 
                 // Texture slot conventions differ per backend:
-                //   Vulkan GLSL (ShadowFilter.comp): depth@5, normal@4,
-                //     sm0/sm1/out @1/2/3, sampler@6.
+                //   Vulkan GLSL (ShadowFilter.comp) AND its D3D12 mirror
+                //     (ShadowFilter.hlsl: depth@t5, sm@t1/t2/t7/t8, normal@t4,
+                //     vis@u3, translucent@u9, sampler@s6, params@b0): depth@5,
+                //     normal@4, sm0/sm1/out @1/2/3, sampler@6.
                 //   Metal kernel (ShadowFilter.metal): depthTex@0, sm0@1,
                 //     sm1@2, visibilityOut@3 — no normal/sampler params.
                 // The flat {1..6} table bound depth@5 on Metal too, leaving the
                 // kernel's texture(0) (depth) UNBOUND → vis sampled garbage →
                 // direct-light visibility dead on the whole Metal PCSS path.
-                const bool isVkShadow = device_->GetPlatform() == RHIPlatform::Vulkan;
+                // R27（2026-11-17，R12 移交项"ShadowMapModule.cpp:716 isVkShadow
+                // 需排 D3D12"落地）：Metal 表只允许 Metal 走——D3D12 此前落进
+                // Metal 分支，binding 5（GLSL 的 depth 槽）永不写入 → depth
+                // SRV 恒 NULL → PCSS 采到 depth=0 → shadow_vis 全零（run
+                // 44039269520 dump 实测 shadow_vis meanLum=0），deferred 直射
+                // 链（Lo×shadowVisibility）随之整链归零。
+                const bool isMetalShadow = device_->GetPlatform() == RHIPlatform::Metal;
                 // P2-B: binding 9（translucentOut）此前从未写入——DSL 声明了
                 // 该 storage image 但 filterParams 只填到 8，validation 报
                 // "never been updated"，且透光输出实际未落到任何资源。
@@ -713,7 +721,7 @@ ShadowMapOutputs ShadowMapModule::AddPasses(rendergraph::RenderGraph& graph, con
                     {8, DescriptorType::SampledImage, sm[3]},   // P4.2
                     {9, DescriptorType::StorageImage, shadow_translucent_tex_},  // P2-B
                 };
-                if (!isVkShadow) {
+                if (isMetalShadow) {
                     filterParams[1] = {0, DescriptorType::SampledImage, gpu_draw_pipeline_->GetGBufferDepthSampleable()};
                     filterParams[2] = {1, DescriptorType::SampledImage, sm[0]};
                     filterParams[3] = {2, DescriptorType::SampledImage, sm[1]};

@@ -33,6 +33,11 @@ struct ToneProvenance {
 /// 当前进程的有效调色参数（供采集 provenance；不动渲染状态）。
 ToneProvenance GetToneProvenance();
 
+// Completed-frame diagnostics; frameIndex is the native pipeline frame.
+// R27：输出纹理为模块自有持久纹理（见 TAAPass s_OutputTex 同款约定），
+// 黑帧 dump 面可于目标帧+1 安全回读。
+rhi::ResourceHandle GetToneMappingOutputTexture(u32 frameIndex);
+
 /**
  * @brief Adds a Tone Mapping Pass
  * @details Applies tone mapping (ACES, Reinhard, etc.) and gamma correction. 
