@@ -419,6 +419,32 @@ void D3D12CommandBufferImpl::EmitTrackerOps(const utl::vector<D3D12ResourceBarri
     if (count > 0) commandList_->ResourceBarrier(count, barriers);
 }
 
+namespace {
+// R24（同族扫点）：viewMode 纹理（CreateTextureView 产物）别名源资源但不
+// 在 tracker 注册（D3D12Device::createTextureViewImpl 注释）——以其句柄直接
+// Transition 查无条目而静默零 barrier（#538 家族的 view 入口：层视图作 RT
+// 写时父资源滞留 COMMON、写后读无转换）。此处把 (view 句柄, view 相对子
+// 资源) 重映射回 (源句柄, 源坐标系子资源)：view 的 texDesc_ 继承源全量
+//（mipLevels = 源 mip 数），调用方传入的 subresource 形如
+// mip + 源mipLevels*layer（view 相对坐标）——分解后加回 view 基
+//（mostDetailedMip / firstArraySlice）。ALL 子资源直通父资源 ALL。
+// 非 viewMode 纹理零行为变化。
+void ResolveViewStateKey(D3D12SubresourceKey& key, D3D12Texture* texture) {
+    if (!texture || !texture->IsViewMode()) return;
+    const TextureViewDesc& vd = texture->GetViewDesc();
+    if (vd.texture == handles::INVALID_RESOURCE) return;  // 防御：无源可映射
+    const u32 srcMips = texture->GetTextureDesc().mipLevels
+                        ? texture->GetTextureDesc().mipLevels : 1;
+    if (key.subresource != kD3D12ResourceBarrierAllSubresources) {
+        const u32 layer = key.subresource / srcMips;
+        const u32 mip = key.subresource % srcMips;
+        key.subresource = (vd.mostDetailedMip + mip)
+                          + srcMips * (vd.firstArraySlice + layer);
+    }
+    key.resource = vd.texture;
+}
+}
+
 void D3D12CommandBufferImpl::TransitionTexture(D3D12Texture* texture, ResourceHandle handle,
                                                ResourceState target, u32 subresource) {
     if (!texture || !commandList_) return;
@@ -427,6 +453,7 @@ void D3D12CommandBufferImpl::TransitionTexture(D3D12Texture* texture, ResourceHa
     key.resource = handle;
     key.subresource = subresource;
     key.isTexture = true;
+    ResolveViewStateKey(key, texture);
     EmitTrackerOps(dev.GetStateTracker().Transition(key, target),
                    texture->GetNativeResource(), key);
 }
@@ -468,6 +495,7 @@ void D3D12CommandBufferImpl::InsertBarrier(const ResourceBarrier* barriers, u32 
             key.resource = rb.resource;
             key.subresource = sub;
             key.isTexture = true;
+            ResolveViewStateKey(key, texture);  // R24：view 句柄重映射回源
             EmitTrackerOps(dev.GetStateTracker().Transition(key, rb.afterState),
                            texture->GetNativeResource(), key);
             continue;

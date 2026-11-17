@@ -18,8 +18,10 @@
 //   - 常规：D3D12MA 分配 + 创建，拥有资源与分配；
 //   - wrap：包裹外部 ID3D12Resource（交换链 backbuffer；ComPtr 持引用，
 //     交换链销毁前先销毁 wrap 层）；
-//   - view：包裹源纹理资源 + 受限 mip/array 范围的 SRV（M1 仅 SRV 视图；
-//     RTV/DSV 视图 NOT-IMPLEMENTED，显式日志）。
+//   - view：包裹源纹理资源 + 受限 mip/array 范围的视图（SRV 恒建；RTV 自
+//     R24 起源 usage 含 RenderTarget 时按 viewDesc_ 切片窗建立——此前
+//     NOT-IMPLEMENTED 使层视图作 RT 的 pass 静默空转；DSV 视图仍
+//     NOT-IMPLEMENTED，登记后续）。
 //
 // 多平面：D32_Float_S8X24 = 2 plane（深度/模板）。M1 支持 plane0（深度）
 // 的 SRV/DSV；模板面访问 NOT-IMPLEMENTED（登记 M2+）。
@@ -70,6 +72,9 @@ public:
 
     bool IsWrapMode() const { return wrapMode_; }
     bool IsViewMode() const { return viewMode_; }
+    /// view 模式的受限范围（R24：命令层 barrier 把 view 句柄/子资源重映射
+    /// 回源纹理坐标系时读取）。
+    const TextureViewDesc& GetViewDesc() const { return viewDesc_; }
     u32 PlaneCount() const { return planeCount_; }
     u32 SubresourceCount() const {
         return texDesc_.mipLevels * texDesc_.arraySize * planeCount_;

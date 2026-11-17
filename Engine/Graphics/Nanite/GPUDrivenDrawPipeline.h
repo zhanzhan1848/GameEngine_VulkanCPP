@@ -516,7 +516,8 @@ private:
     bool EnsureEditorCopyPipeline();
     rhi::ResourceHandle CreateEditorArrayLayerView(rhi::ResourceHandle array, u32 layer);
     bool EditorBlitToLayer(rhi::ResourceHandle src, rhi::RenderPassHandle pass,
-                           float uv_scale_x, float uv_scale_y);
+                           float uv_scale_x, float uv_scale_y,
+                           rhi::ResourceHandle dst_layer_view = rhi::handles::INVALID_RESOURCE);
     u32 total_meshlet_vertex_count_{ 0 };
     u32 total_meshlet_triangle_count_{ 0 };
     u32 total_vertex_count_{ 0 };

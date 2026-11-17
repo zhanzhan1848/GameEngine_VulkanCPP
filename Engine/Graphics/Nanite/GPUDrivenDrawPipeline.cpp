@@ -644,7 +644,8 @@ rhi::ResourceHandle GPUDrivenDrawPipeline::CreateEditorArrayLayerView(rhi::Resou
 }
 
 bool GPUDrivenDrawPipeline::EditorBlitToLayer(rhi::ResourceHandle src, rhi::RenderPassHandle pass,
-                                              float uv_scale_x, float uv_scale_y) {
+                                              float uv_scale_x, float uv_scale_y,
+                                              rhi::ResourceHandle dst_layer_view) {
     // 缩放常量
     rhi::BufferDesc cbDesc{};
     cbDesc.size = 16;
@@ -686,6 +687,20 @@ bool GPUDrivenDrawPipeline::EditorBlitToLayer(rhi::ResourceHandle src, rhi::Rend
         cmd->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, editor_copy_layout_, 0, 1, dsHandles, 0, nullptr);
         cmd->Draw(3, 0, 1, 0); // vertexCount=3, startVertex=0, instanceCount=1, startInstance=0
         cmd->EndRenderPass();
+        // R24：层 blit 写后把目标层（view 句柄；D3D12 经 view→源重映射落到
+        // 材质数组本体的对应子资源）转回 ShaderResource。层 blit 可发生在
+        // 任意注册时机（编辑器运行期注册材质时），不能依赖 Execute 首帧的
+        // 一次性数组 barrier（placeholder_textures_layout_done_）——运行期
+        // 注册时该 barrier 已消耗，层会滞留 RenderTarget 态被采样（D3D12
+        // 写类态不自动衰减）。Vulkan/Metal 端为幂等/合法转换，语义安全。
+        if (dst_layer_view != rhi::handles::INVALID_RESOURCE) {
+            rhi::ResourceBarrier toSRV{};
+            toSRV.resource = dst_layer_view;
+            toSRV.beforeState = rhi::ResourceState::RenderTarget;
+            toSRV.afterState = rhi::ResourceState::ShaderResource;
+            toSRV.subresource = rhi::RHI_ALL_SUBRESOURCES;
+            cmd->InsertBarrier(&toSRV, 1);
+        }
         cmd->End();
         rhi::QueueSubmitInfo submit{};
         submit.cmdBuffer = cbh;
@@ -781,7 +796,7 @@ u32 GPUDrivenDrawPipeline::RegisterEditorMaterial(rhi::ResourceHandle albedo_tex
     // 源纹理始终拉伸铺满整层（uv_scale=1）：层 = 该实体自己的纹理。
     // 之前用 src/canvas 缩放会让小纹理（如 1×1 白色回退）只占一层的一角，
     // 其余为 clear 黑色 → 对应实体在 albedo 里变黑。
-    if (!EditorBlitToLayer(albedo_tex, copyPass, 1.0f, 1.0f)) return 0;
+    if (!EditorBlitToLayer(albedo_tex, copyPass, 1.0f, 1.0f, albedoLayerView)) return 0;
 
     // [PassDebugView 排查] 回读 albedo 层 4×4 像素验证拷贝落地；写 /tmp 文件
     //（open 启动的 .app stderr 不落盘，CLI 日志环被刷屏）。

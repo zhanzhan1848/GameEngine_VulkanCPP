@@ -371,9 +371,15 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
         || texDesc_.format == DataFormat::D16_UNorm;
 
     // ---- RTV（RenderTarget usage；wrap backbuffer 走同一路径） ----
-    const bool wantRtv = viewMode_
-        ? false  // M1：RTV 视图 NOT-IMPLEMENTED（登记）
-        : (texDesc_.usage & TextureUsage::RenderTarget) != TextureUsage::Unknown;
+    // R24（同族扫点）：viewMode 视图此前直接跳过 RTV（M1 NOT-IMPLEMENTED
+    // 登记）——BeginRenderPass 对无 RTV 槽的附件静默 continue，viewMode 层
+    // 视图作为渲染目标时整个 pass 空转（OMSetRenderTargets(0,...)），层内容
+    // 保持资源创建零值（editor 材质层 blit 路径黑帧同族源）。修法：源 usage
+    // 含 RenderTarget 即为 view 建 RTV，切片窗取 viewDesc_。2D 家族维度按
+    // 源数组性选择——数组资源上的 TEXTURE2D 视图是 debug-layer 必错项
+    //（此前非视图 Texture2DArray（editor 材质数组本体）也落在 TEXTURE2D
+    // 维度上，属死槽无效视图，一并修正）。
+    const bool wantRtv = (texDesc_.usage & TextureUsage::RenderTarget) != TextureUsage::Unknown;
     if (wantRtv) {
         rtvSlot_ = heaps.AllocRtv();
         if (rtvSlot_ == D3D12DescriptorHeapManager::kInvalidSlot) return false;
@@ -384,13 +390,30 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
         // 3D 资源上是 debug-layer 必错项）。
         if (texDesc_.type == TextureType::Texture3D) {
             rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
-            rtvDesc.Texture3D.MipSlice = 0;
+            rtvDesc.Texture3D.MipSlice = viewMode_ ? viewDesc_.mostDetailedMip : 0;
             rtvDesc.Texture3D.FirstWSlice = 0;
             rtvDesc.Texture3D.WSize = texDesc_.size.z;
         } else {
-            rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-            rtvDesc.Texture2D.MipSlice = 0;
-            rtvDesc.Texture2D.PlaneSlice = 0;
+            // 数组性按原生资源 desc 判（而非 texDesc_.arraySize）：R12-C 起
+            // TextureCube 资源恒 6 层而宿主 desc 常留 arraySize=1——按宿主
+            // 值判会把 cube 漏进 TEXTURE2D 维度。
+            const D3D12_RESOURCE_DESC nativeRes = GetNativeDesc();
+            const bool isArray2D =
+                nativeRes.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D
+                && nativeRes.DepthOrArraySize > 1;
+            if (isArray2D) {
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+                rtvDesc.Texture2DArray.MipSlice = viewMode_ ? viewDesc_.mostDetailedMip : 0;
+                rtvDesc.Texture2DArray.FirstArraySlice = viewMode_ ? viewDesc_.firstArraySlice : 0;
+                rtvDesc.Texture2DArray.ArraySize = viewMode_
+                    ? viewDesc_.arraySize
+                    : static_cast<UINT>(nativeRes.DepthOrArraySize);
+                rtvDesc.Texture2DArray.PlaneSlice = 0;
+            } else {
+                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+                rtvDesc.Texture2D.MipSlice = viewMode_ ? viewDesc_.mostDetailedMip : 0;
+                rtvDesc.Texture2D.PlaneSlice = 0;
+            }
         }
         native->CreateRenderTargetView(resource_.Get(), &rtvDesc, heaps.RtvCpuHandle(rtvSlot_));
     }

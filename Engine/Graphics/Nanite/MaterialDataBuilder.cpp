@@ -308,6 +308,15 @@ namespace {
     }
 
     // 🎨 NEW: Get texture format — dispatch by RHI platform.
+    // R24（D3D12 黑帧根修）：此函数此前无 D3D12 分支——所有纹理恒回落
+    // RGBA8_UNorm 默认值（r22 CI 日志 4662 条 WARNING 实证）。sRGB albedo
+    // 源被误判后 canonical 格式错取 UNorm、数组以 UNorm 建立，而
+    // D3D12CommandBuffer::BlitTexture 的同格式守卫（UNorm≠sRGB）逐层拒绝
+    // 拷贝——393 层全部跳过（"BlitTexture format conversion NOT-IMPLEMENTED"
+    // ×393 实证）→ 材质数组全零 → GPUDrivenDraw PS 采样得 0 →
+    // gbuffer_albedo 全黑。normal/ORM 源恰为 UNorm 与默认值相同才幸免。
+    // 修法与上方 GetTextureSize 的 D3D12 分支同形：平台中立查询
+    // （D3D12Device::GetTextureFormat 返回纹理 desc 的真实格式）。
     rhi::DataFormat GetTextureFormat(rhi::RHIDeviceBase* device, rhi::ResourceHandle texture) {
         using namespace rhi;
 
@@ -356,6 +365,15 @@ namespace {
             }
         }
 #endif
+        // D3D12：平台中立 RHI 查询（见函数头 R24 注释；与 GetTextureSize 的
+        // D3D12 分支同位）。查询失败（Unknown）不拦截——回落下方默认值档并
+        // 留痕，与其它平台的 miss 语义一致。
+        if (platform == RHIPlatform::D3D12) {
+            const rhi::DataFormat fmt = device->GetTextureFormat(texture);
+            if (fmt != rhi::DataFormat::Unknown) {
+                return fmt;
+            }
+        }
 
         PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] WARNING: Could not get texture format, using RGBA8_UNorm" << std::endl;
         return rhi::DataFormat::RGBA8_UNorm;
