@@ -433,6 +433,10 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
              normalRG = inputs.gbuffer_normal_rg,
              ormRG = inputs.gbuffer_orm_rg,
              depthRG = inputs.gbuffer_depth_rg](PassData& data, rendergraph::RenderGraphBuilder& builder) {
+            // R25：灯光采样自身依赖宿主侧资源状态（宿主堆 barrier 闸门等），
+            // 与 FusionIndirect/Composite 同款显式 SideEffect 防 RG 裁剪
+            // （D3D12 上 Write(imported) 不足以保活，deferred_out 黑的根因候选）。
+            builder.SideEffect();
             data.output = builder.Write(deferredRG, ResourceState::RenderTarget);
             if (environmentRG.IsValid())
                 data.environment = builder.Write(environmentRG, ResourceState::RenderTarget);
