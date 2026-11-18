@@ -339,6 +339,12 @@ public:
         return shadow_frames_[buffer_index % 3].shadow_map[cascade_index % ShadowFrameResources::kShadowCascades];
     }
 
+    // R32 黑帧诊断：D32 深度原图（ShadowDepth 光栅产物，blit 源）——与
+    // GetShadowMap（R32 blit 目标）配对判读"depth pass 没画 vs blit 坏"。
+    rhi::ResourceHandle GetShadowDepthRenderTarget(u32 cascade_index, u32 buffer_index) const {
+        return shadow_frames_[buffer_index % 3].shadow_depth_rt[cascade_index % ShadowFrameResources::kShadowCascades];
+    }
+
     rhi::ResourceHandle GetShadowMoments(u32 cascade_index, u32 buffer_index) const {
         return shadow_frames_[buffer_index % 3].shadow_moments[cascade_index % ShadowFrameResources::kShadowCascades];
     }

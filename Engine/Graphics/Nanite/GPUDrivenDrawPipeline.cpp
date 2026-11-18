@@ -4490,6 +4490,25 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
     cmd_buffer->BindComputePipeline(shadow_blit_pipeline_);
     rhi::DescriptorSetHandle dsHandle = ds;
     cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute, shadow_blit_layout_, 0, 1, &dsHandle, 0, nullptr);
+    // R32 blit 审计（一次性）：shadow_map（R32）内容全零的上游判别——
+    // depth raster 有录制（RasterDiag pipeline=22）而 blit 目标零，此行
+    // 确认 blit dispatch 录制与管线/描述符有效性。
+    {
+        static const bool s_blitAudit = [] {
+            const char* v = std::getenv("PRIMAL_D3D12_BLACK_STAGE_DUMP");
+            return v && v[0] == '1' && v[1] == '\0';
+        }();
+        static bool s_blitAuditDone = false;
+        if (s_blitAudit && !s_blitAuditDone) {
+            s_blitAuditDone = true;
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[D3D12_BLIT_AUDIT] pipeline_valid="
+                << (shadow_blit_pipeline_ != rhi::handles::INVALID_PIPELINE)
+                << " ds_valid=" << (ds != rhi::handles::INVALID_RESOURCE)
+                << " groups=" << groups << "x" << groups
+                << " depthRT=" << depthRT << " shadowMap=" << shadowMap << std::endl;
+        }
+    }
     cmd_buffer->Dispatch(groups, groups, 1);
 
     return true;

@@ -5759,6 +5759,81 @@ void R23BlackStageDumpTexture(rhi::RHIDeviceBase* device, const char* name,
     }
     device->DestroyBuffer(stage);
 }
+
+/// R32：GPU structured buffer 内容统计探针（DDGI irradiance 等——MapBuffer
+/// 读不到 DEFAULT+UA buffer 的 GPU 内容，走 CopyBuffer→READBACK 同款通道），
+/// 输出前 sampleBytes 字节的 float mean/max/非零计数。诊断专用，同 env 门控。
+void R23BlackStageDumpBufferStats(rhi::RHIDeviceBase* device, const char* name,
+                                  rhi::ResourceHandle buf, u64 sampleBytes) {
+    using namespace rhi;
+    if (!device) return;
+    if (buf == handles::INVALID_RESOURCE) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[D3D12_BLACK_STAGE] " << name << " buf=INVALID" << std::endl;
+        return;
+    }
+    if (sampleBytes == 0 || sampleBytes > (1u << 20)) sampleBytes = 1024;
+    BufferDesc bd{};
+    bd.size = sampleBytes;
+    bd.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+    bd.memoryUsage = GPUMemoryUsage::Readback;
+    ResourceHandle stage = device->CreateBuffer(bd);
+    if (stage == handles::INVALID_RESOURCE) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[D3D12_BLACK_STAGE] " << name << " staging buffer creation failed" << std::endl;
+        return;
+    }
+    bool ok = false;
+    CommandBufferHandle ch = device->CreateCommandBuffer(CommandQueueType::Graphics);
+    if (ch != handles::INVALID_COMMAND_BUFFER) {
+        if (RHICommandBuffer* c = GetCommandBuffer(ch)) {
+            if (c->Begin()) {
+                ResourceBarrier toCopy{};
+                toCopy.resource = buf;
+                toCopy.beforeState = ResourceState::Unknown;
+                toCopy.afterState = ResourceState::CopySource;
+                toCopy.subresource = RHI_ALL_SUBRESOURCES;
+                toCopy.queueFamily = 0xFFFFFFFF;
+                c->InsertBarrier(&toCopy, 1);
+                c->CopyBuffer(buf, stage, 0, 0, sampleBytes);
+                c->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
+                                  AccessFlag::TransferWrite, AccessFlag::HostRead);
+                ok = c->End() && c->Submit() && c->WaitForCompletion();
+            }
+        }
+        device->DestroyCommandBuffer(ch);
+    }
+    if (ok) {
+        if (const float* p = static_cast<const float*>(device->MapBuffer(stage, 0, sampleBytes))) {
+            const u64 n = sampleBytes / sizeof(float);
+            double sum = 0.0;
+            float mx = 0.0f, mn = 0.0f;
+            u64 finite = 0;
+            for (u64 i = 0; i < n; ++i) {
+                const float f = p[i];
+                if (f != f) continue;  // NaN 跳过
+                sum += f;
+                if (i == 0) { mx = mn = f; }
+                if (f > mx) mx = f;
+                if (f < mn) mn = f;
+                ++finite;
+            }
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[D3D12_BLACK_STAGE] " << name << " bufStats floats=" << n
+                << " finite=" << finite
+                << " mean=" << (finite ? sum / finite : 0.0)
+                << " min=" << mn << " max=" << mx << std::endl;
+            device->UnmapBuffer(stage);
+        } else {
+            ok = false;
+        }
+    }
+    if (!ok) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[D3D12_BLACK_STAGE] " << name << " buffer readback failed" << std::endl;
+    }
+    device->DestroyBuffer(stage);
+}
 } // namespace
 
 
@@ -6010,6 +6085,18 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             R23BlackStageDumpTexture(device_, "gbuffer_orm", gpuDrawStage.GetGBufferORM());
             R23BlackStageDumpTexture(device_, "shadow_map_c0",
                                      gpuDrawStage.GetShadowMap(0, prevSlot));
+            // R32：D32 深度原图（blit 源）配对判读——depth 零=光栅/draw 侧死，
+            // depth 有而 shadow_map 零=blit 侧死。
+            R23BlackStageDumpTexture(device_, "shadow_depth_rt_c0",
+                                     gpuDrawStage.GetShadowDepthRenderTarget(0, prevSlot));
+            // R32：GI 内容源甄别——fusion_indirect 在 R31 回归全零而其输入绑定
+            // 两轮等价（FUSION_SLOTS），direct 判 DDGI/SPGI 哪个内容源死。
+            if (screen_probe_pass_ && screen_probe_pass_->IsInitialized())
+                R23BlackStageDumpTexture(device_, "spgi_output",
+                                         screen_probe_pass_->GetOutputTexture());
+            if (ddgi_pass_ && ddgi_pass_->IsInitialized())
+                R23BlackStageDumpBufferStats(device_, "ddgi_irradiance",
+                                             ddgi_pass_->GetIrradianceBufferLatest(), 1024);
             PRIMAL_LOG_STREAM(Error, "Render") << "[D3D12_BLACK_STAGE] end" << std::endl;
         }
     }
