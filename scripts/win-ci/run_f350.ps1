@@ -53,6 +53,13 @@ if ($env:PRIMAL_F350_TAAOFF_DIAG -eq '1') {
     $diagGroups += @{ name = 'd3d12-gion-taaoff'; api = 'd3d12'; gi = 1;
                       ppm = 'art2_win_d3d12_taaoff_f350.ppm'; diag = 1 }
 }
+# R33 因果对分组（PRIMAL_F350_SHADOW_RENDER_OFF_DIAG=1）：PRIMAL_SHADOW_RENDER_OFF=1
+# 跳过阴影 GPU 渲染录制——若 global_sdf/spgi/ddgi/indirect 复活即坐实
+# "R31 起阴影 GPU 路径插入后 UAV compute 写全灭"为 barrier/状态机污染。
+if ($env:PRIMAL_F350_SHADOW_RENDER_OFF_DIAG -eq '1') {
+    $diagGroups += @{ name = 'd3d12-gion-shroff'; api = 'd3d12'; gi = 1;
+                      ppm = 'art2_win_d3d12_shroff_f350.ppm'; diag = 2 }
+}
 
 # Asset gates (same files the r11 launchers hard-require before running).
 $assetGates = @(

@@ -378,6 +378,9 @@ jobs:
           Write-Output "[f350] exe = $exe"
           # R29：诊断消融组（TAA_OFF 直通链，写独立 diag_gates.json 不进门禁）
           $env:PRIMAL_F350_TAAOFF_DIAG = '1'
+          # R33：因果对分组（PRIMAL_SHADOW_RENDER_OFF 跳过阴影 GPU 渲染，
+          # 判 UAV 写全灭是否由阴影 GPU 路径插入引起）
+          $env:PRIMAL_F350_SHADOW_RENDER_OFF_DIAG = '1'
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350
           exit 0
 

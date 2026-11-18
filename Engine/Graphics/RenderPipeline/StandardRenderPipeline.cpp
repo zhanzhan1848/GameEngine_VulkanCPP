@@ -6097,6 +6097,13 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             if (ddgi_pass_ && ddgi_pass_->IsInitialized())
                 R23BlackStageDumpBufferStats(device_, "ddgi_irradiance",
                                              ddgi_pass_->GetIrradianceBufferLatest(), 1024);
+            // R33：GlobalSDF 内容——SPGI/DDGI 的 ray-trace 共同依赖（若零则
+            // GI 归零是其级联）；voxelization 本身也是 UAV compute，"UAV 写
+            // 全灭"假说的判别点（Texture3D，dump 读 z=0 切片）。
+            {
+                auto& globalSdf = nanite::GlobalSDF::Get();
+                R23BlackStageDumpTexture(device_, "global_sdf", globalSdf.GetGlobalTexture());
+            }
             PRIMAL_LOG_STREAM(Error, "Render") << "[D3D12_BLACK_STAGE] end" << std::endl;
         }
     }

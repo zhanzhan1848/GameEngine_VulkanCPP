@@ -4224,6 +4224,18 @@ bool GPUDrivenDrawPipeline::ExecuteShadowRaster(rhi::RHICommandBuffer* cmd_buffe
                                                   u32 buffer_index) {
     if (!shadow_initialized_ || !cmd_buffer) return false;
     if (cascade_index >= ShadowFrameResources::kShadowCascades) return false;
+    // R33 因果对分门（诊断用）：PRIMAL_SHADOW_RENDER_OFF=1 跳过阴影 GPU 渲染
+    // 录制（资源照建、cull 照跑）——定位"R31 起阴影 GPU 路径每帧插入后
+    // UAV compute 写全灭（SPGI/DDGI/blit 输出归零）"的因果性。对分预期：
+    // 关掉后 global_sdf/spgi_output/ddgi_irradiance 复活即坐实 barrier/
+    // 状态机污染面，下一步再缩到具体 barrier。
+    {
+        static const bool s_renderOff = [] {
+            const char* v = std::getenv("PRIMAL_SHADOW_RENDER_OFF");
+            return v && v[0] == '1' && v[1] == '\0';
+        }();
+        if (s_renderOff) return true;
+    }
 
     // TEMP DIAGNOSTIC
     static u32 rasterDiag = 0;
@@ -4421,6 +4433,14 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
                                                      u32 buffer_index) {
     if (!shadow_initialized_ || !cmd_buffer) return false;
     if (cascade_index >= ShadowFrameResources::kShadowCascades) return false;
+    // R33 因果对分门（诊断用，同 ExecuteShadowRaster 的 PRIMAL_SHADOW_RENDER_OFF）。
+    {
+        static const bool s_renderOff = [] {
+            const char* v = std::getenv("PRIMAL_SHADOW_RENDER_OFF");
+            return v && v[0] == '1' && v[1] == '\0';
+        }();
+        if (s_renderOff) return true;
+    }
 
     // T4.6.5 part 24.9 (B7 fix): mirror ExecuteShadowRaster's empty-scene
     // guard. In empty scene, ExecuteShadowRaster early-returns leaving
