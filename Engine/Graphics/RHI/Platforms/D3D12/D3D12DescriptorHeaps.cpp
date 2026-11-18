@@ -37,7 +37,17 @@ u32 D3D12DescriptorHeapManager::SlotPool::Alloc() {
         free_.pop_back();
         return slot;
     }
-    if (next_ < capacity_) return next_++;
+    if (next_ < capacity_) {
+        const u32 slot = next_++;
+        const u32 live = next_ - static_cast<u32>(free_.size());
+        if (live > highWater_) highWater_ = live;
+        return slot;
+    }
+    // R34：静默耗尽改留痕——调用方（纹理 SRV/UAV/RTV/DSV 槽）此前拿到
+    // kInvalidSlot 后各自静默失败（纹理 INVALID/视图死槽），黑帧排查无据。
+    PRIMAL_LOG_STREAM(Error, "RHI")
+        << "[D3D12DescriptorHeaps] persistent slot pool exhausted (capacity="
+        << capacity_ << " highWater=" << highWater_ << ")" << std::endl;
     return kInvalidSlot;
 }
 
@@ -229,6 +239,22 @@ bool FrameTraceEnabled() {
 
 void D3D12DescriptorHeapManager::BeginFrame(u32 frameSlot, D3D12FencePool& fence) {
     currentSlot_ = frameSlot % frameSlotCount_;
+    // R34：堆水位周期遥测（每 60 BeginFrame 一行）——rotation 惰性（harness
+    // 宿主形态）下线性 bump 单调涨，sharing stats 仅在新 sampler 内容时打、
+    // 会漏掉撞顶时刻；SPGI/blit 死写与线性/持久容量临界的判别面。
+    {
+        static u32 s_telemetryCount = 0;
+        if (++s_telemetryCount % 60u == 1u) {
+            PRIMAL_LOG_STREAM(Info, "RHI")
+                << "[D3D12DescHeaps] telemetry bf#" << s_telemetryCount
+                << " slot=" << currentSlot_
+                << " mainBump=" << mainLinear_.Bump()
+                << "/" << mainLinear_.SlotCapacity()
+                << " mainHW0=" << mainLinear_.HighWaterFor(0)
+                << " persistentHW=" << cbvSrvUavPersistentSlots_.HighWater()
+                << "/" << cbvSrvUavPersistentSlots_.Capacity() << std::endl;
+        }
+    }
     // R21-C：策略类推进（bump 归零 + 槽纪元自增——旧纪元的 set 区段全部
     // 作废，RegionIsCurrent 按 (slot, epoch) 双键判定，见策略头注）。
     mainLinear_.BeginFrame(frameSlot);

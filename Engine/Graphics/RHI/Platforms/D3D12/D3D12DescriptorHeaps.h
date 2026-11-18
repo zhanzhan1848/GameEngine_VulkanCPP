@@ -115,8 +115,15 @@ class D3D12DescriptorHeapManager;
 // 材质采样器，十七测实测 33 即耗尽 → 512 ≈ 15x 余量）；线性区
 // (2048-512)/3 = 512/slot（十七测 32/slot 即耗尽 → 16x 余量）。
 // ============================================================================
-inline constexpr u32 kCbvSrvUavHeapCapacity = 65536;        ///< 主堆总容量（距 TIER 上限 ~40x）。R14 孪生行走 frame-slot 堆，观测 per-slot 高水位 4096 打满 → 1.5x 扩容留孪生+增长余量
-inline constexpr u32 kCbvSrvUavPersistentCapacity = 4096;    ///< 纹理 SRV/UAV 持久槽位
+// R34（2026-11-18）：65536→131072、持久 4096→8192——R31 起阴影 GPU 路径
+// 每帧插入后 SPGI/DDGI/blit 输出非确定性归零（shroff 组同配置 SPGI 0.978
+// vs canonical 0、TAA 输出纹理 INVALID），且 per-slot 线性高水位 15502/20480
+// 是**早期快照**（sharing stats 仅新 sampler 内容时打，帧 351 实值未知）——
+// rotation 惰性（harness 宿主形态）下线性 bump 单调涨，撞 20480 即静默死写；
+// 持久槽静默失败同族（Alloc 返回 kInvalidSlot 无日志）。R21 同款扩容先例
+//（40960→65536）。距 TIER 上限仍 ~20x。
+inline constexpr u32 kCbvSrvUavHeapCapacity = 131072;       ///< 主堆总容量（距 TIER 上限 ~20x）。R14 孪生行走 frame-slot 堆，观测 per-slot 高水位 4096 打满 → R21 扩容；R34 再扩（per-slot (131072-8192)/3=40960，rotation 惰性下 400 帧单调涨的余量）
+inline constexpr u32 kCbvSrvUavPersistentCapacity = 8192;    ///< 纹理 SRV/UAV 持久槽位（R34：4096→8192——shroff 组 TAA 输出纹理 INVALID=持久槽/创建静默失败实证）
 inline constexpr u32 kSamplerHeapCapacity =
     D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE;              ///< 2048，规范上限满配
 inline constexpr u32 kSamplerPersistentCapacity = 512;       ///< SamplerHandle 对象持久槽位
@@ -473,6 +480,9 @@ public:
     u32 MainLinearCapacity() const { return mainLinear_.SlotCapacity(); }
     u32 MainLinearSlot() const { return mainLinear_.CurrentSlot(); }
     u32 MainHighWater(u32 slot) const { return mainLinear_.HighWaterFor(slot); }
+    // R34：持久槽水位遥测（静默耗尽判别）
+    u32 CbvSrvUavPersistentHighWater() const { return cbvSrvUavPersistentSlots_.HighWater(); }
+    u32 CbvSrvUavPersistentCap() const { return cbvSrvUavPersistentSlots_.Capacity(); }
     u32 SamplerLinearBump() const { return samplerLinear_.Bump(); }
     u32 SamplerLinearCapacity() const { return samplerLinear_.SlotCapacity(); }
 
@@ -483,9 +493,14 @@ private:
         void Init(u32 capacity);
         u32 Alloc();
         void Free(u32 slot);
+        // R34：静默耗尽判别遥测——Alloc 返回 kInvalidSlot 前调用方无水位
+        // 可看（TAA 输出纹理 INVALID 类问题的盲区）。
+        u32 Capacity() const { return capacity_; }
+        u32 HighWater() const { return highWater_; }
     private:
         u32 next_ = 0;
         u32 capacity_ = 0;
+        u32 highWater_ = 0;
         std::vector<u32> free_;
     };
 

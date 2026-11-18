@@ -130,9 +130,14 @@ foreach ($g in ($groups + $diagGroups)) {
     }
     if ($g.gi -eq 1) { $env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL = '1' }
     else { $env:GI_ISOLATE = 'all' }
-    # R29 诊断组开关（diag 组 TAA_OFF=1，canonical 组确保无残留）
-    if ($g.diag) { $env:TAA_OFF = '1' }
-    else { Remove-Item Env:TAA_OFF -ErrorAction SilentlyContinue }
+    # R29/R33 诊断组开关（diag=1 TAA_OFF，diag=2 PRIMAL_SHADOW_RENDER_OFF；
+    # canonical 组确保无残留）
+    if ($g.diag -eq 1) { $env:TAA_OFF = '1' }
+    elseif ($g.diag -eq 2) { $env:PRIMAL_SHADOW_RENDER_OFF = '1' }
+    else {
+        Remove-Item Env:TAA_OFF -ErrorAction SilentlyContinue
+        Remove-Item Env:PRIMAL_SHADOW_RENDER_OFF -ErrorAction SilentlyContinue
+    }
 
     $so = Join-Path $OutDir ($g.name + '.stdout.log')
     $se = Join-Path $OutDir ($g.name + '.stderr.log')
