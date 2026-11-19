@@ -6245,8 +6245,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 CommandBufferHandle rbch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
                 if (RHICommandBuffer* rc = GetCommandBuffer(rbch)) {
                     if (rc->Begin()) {
-                        const math::m4x4 identity = rhi::math::MatrixIdentity();
-                        gpuDrawStage.ExecuteShadowDepthBlit(rc, identity, 0, prevSlot);
+                        gpuDrawStage.ExecuteShadowDepthBlit(rc, 0, prevSlot);
                         if (!(rc->End() && rc->Submit() && rc->WaitForCompletion())) {
                             PRIMAL_LOG_STREAM(Error, "Render")
                                 << "[D3D12_BLACK_STAGE] shadow_map_reborn resubmit failed" << std::endl;
