@@ -6245,8 +6245,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 CommandBufferHandle rbch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
                 if (RHICommandBuffer* rc = GetCommandBuffer(rbch)) {
                     if (rc->Begin()) {
-                        math::m4x4 identity{};
-                        for (u32 i = 0; i < 4; ++i) math::elem(identity, i, i) = 1.0f;
+                        const math::m4x4 identity = rhi::math::MatrixIdentity();
                         gpuDrawStage.ExecuteShadowDepthBlit(rc, identity, 0, prevSlot);
                         if (!(rc->End() && rc->Submit() && rc->WaitForCompletion())) {
                             PRIMAL_LOG_STREAM(Error, "Render")
