@@ -5834,6 +5834,116 @@ void R23BlackStageDumpBufferStats(rhi::RHIDeviceBase* device, const char* name,
     }
     device->DestroyBuffer(stage);
 }
+
+/// R35：最小 UAV 写探针——自建 64×64 RGBA16F 纹理 + 单 binding StorageImage
+/// 管线 + set，imageStore 常数色后经既有 dump 通道读回。与业务 pass 零耦合
+///（业务绑定/根签名/RG 状态全不经过）：读回非零 = 引擎 UAV 写路径活
+///（死写为 pass 级问题）；读回零 = 引擎级 UAV 写失效（描述符物化/根签名/
+/// 状态机方向收敛）。taskM §12-13：四管线（voxelization/ShadowBlit/SPGI/
+/// DDGI）同形态"dispatch 录制有效 → imageStore 落零"且 RT 写全活。
+void R34UavWriteProbe(rhi::RHIDeviceBase* device) {
+    using namespace rhi;
+    // —— 资源（任一创建失败即退出，fail 声明进日志） ——
+    TextureDesc td{};
+    td.size = {64, 64, 1};
+    td.format = DataFormat::RGBA16_Float;
+    td.type = TextureType::Texture2D;
+    td.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource |
+               TextureUsage::CopySource;
+    td.memoryUsage = GPUMemoryUsage::Static;
+    ResourceHandle tex = device->CreateTexture(td);
+
+    DescriptorSetLayoutBinding b{};
+    b.binding = 0;
+    b.descriptorCount = 1;
+    b.descriptorType = DescriptorType::StorageImage;
+    b.stageFlags = ShaderStage::Compute;
+    DescriptorSetLayoutDesc layoutDesc{1, &b};
+    auto setLayout = device->CreateDescriptorSetLayout(layoutDesc);
+    PipelineLayoutDesc pipeLayoutDesc{1, &setLayout};
+    auto pipeLayout = device->CreatePipelineLayout(pipeLayoutDesc);
+    auto descSet = device->CreateDescriptorSet({setLayout});
+
+    const std::string relPath =
+        utils::ShaderRegistry::ResolveShaderPath(RHIPlatform::D3D12, "Debug/UavProbe.comp.spv");
+    std::ifstream file(relPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[D3D12_UAV_PROBE] shader open failed: " << relPath << std::endl;
+        return;
+    }
+    const std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<u8> code(static_cast<size_t>(size));
+    if (!file.read(reinterpret_cast<char*>(code.data()), size)) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[D3D12_UAV_PROBE] shader read failed: " << relPath << std::endl;
+        return;
+    }
+    auto shader = device->CreateShader(code.data(), code.size(),
+                                       ShaderStage::Compute, "main");
+
+    if (tex == handles::INVALID_RESOURCE || setLayout == handles::INVALID_RESOURCE ||
+        pipeLayout == handles::INVALID_PIPELINE_LAYOUT ||
+        descSet == handles::INVALID_RESOURCE || shader == handles::INVALID_SHADER) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[D3D12_UAV_PROBE] resource creation failed tex=" << tex
+            << " layout=" << setLayout << " pipeLayout=" << pipeLayout
+            << " set=" << descSet << " shader=" << shader << std::endl;
+        return;
+    }
+
+    ComputePipelineDesc pd{};
+    pd.layout = pipeLayout;
+    pd.computeShader = shader;
+    pd.threadGroupSize = {8, 8, 1};
+    auto pipe = device->CreateComputePipeline(pd);
+    if (pipe == handles::INVALID_PIPELINE) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[D3D12_UAV_PROBE] pipeline creation failed" << std::endl;
+        return;
+    }
+
+    DescData params{0, DescriptorType::StorageImage, tex};
+    UpdateDesc(device, descSet, &params, 1);
+
+    // —— dispatch（独立命令缓冲，与 dump 读回同一提交纪律） ——
+    bool dispatched = false;
+    CommandBufferHandle ch = device->CreateCommandBuffer(CommandQueueType::Graphics);
+    if (ch != handles::INVALID_COMMAND_BUFFER) {
+        if (RHICommandBuffer* c = GetCommandBuffer(ch)) {
+            if (c->Begin()) {
+                ResourceBarrier toUav{};
+                toUav.resource = tex;
+                toUav.beforeState = ResourceState::Unknown;
+                toUav.afterState = ResourceState::UnorderedAccess;
+                toUav.subresource = RHI_ALL_SUBRESOURCES;
+                toUav.queueFamily = 0xFFFFFFFF;
+                c->InsertBarrier(&toUav, 1);
+                c->BindComputePipeline(pipe);
+                c->BindDescriptorSets(PipelineBindPoint::Compute, pipeLayout,
+                                      0, 1, &descSet, 0, nullptr);
+                c->Dispatch(8, 8, 1);
+                dispatched = c->End() && c->Submit() && c->WaitForCompletion();
+            }
+        }
+        device->DestroyCommandBuffer(ch);
+    }
+    PRIMAL_LOG_STREAM(Error, "Render")
+        << "[D3D12_UAV_PROBE] dispatch " << (dispatched ? "submitted" : "FAILED")
+        << " — readback follows" << std::endl;
+
+    // —— 读回（既有 dump 通道；tracker 权威解析 UA→CopySource） ——
+    R23BlackStageDumpTexture(device, "uav_probe", tex);
+
+    // —— 清理 ——
+    device->DestroyTexture(tex);
+    device->DestroyDescriptorSet(descSet);
+    device->DestroyPipeline(pipe);
+    device->DestroyPipelineLayout(pipeLayout);
+    device->DestroyShader(shader);
+    device->DestroyDescriptorSetLayout(setLayout);
+}
 } // namespace
 
 
@@ -6104,6 +6214,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 auto& globalSdf = nanite::GlobalSDF::Get();
                 R23BlackStageDumpTexture(device_, "global_sdf", globalSdf.GetGlobalTexture());
             }
+            // R35：最小 UAV 写探针（自建资源自建 dispatch，与业务 pass 零
+            // 耦合）——非零=引擎 UAV 写活（死写为 pass 级）；零=引擎级失效。
+            R34UavWriteProbe(device_);
             PRIMAL_LOG_STREAM(Error, "Render") << "[D3D12_BLACK_STAGE] end" << std::endl;
         }
     }

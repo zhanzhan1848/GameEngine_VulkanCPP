@@ -380,6 +380,10 @@ SHADER_LIST = [
     ("Debug/SDFVisualization.comp", "main"),
     ("Debug/OfflineSDFViz.comp", "main"),
     ("Debug/SDFVizBlit.frag", "main"),
+    # R35：最小 UAV 写探针（SRP 黑帧诊断块 R34UavWriteProbe 专用——单 binding
+    # StorageImage 单 dispatch imageStore 常数色，引擎级 vs pass 级 UAV 死写
+    # 一刀切；taskM §12-13 四管线同形态"录制有效→imageStore 落零"）。
+    ("Debug/UavProbe.comp", "main"),
     # ForwardSceneRenderer 技术变体/Skybox/DepthOnly/Streaming 二十件
     # （LoadShaderSource R13 D3D12 分支按 Forward/<Name>.<stage>.spv 镜像；
     # MaterialGraphVertex 为 Metal-only 设计无 .spv，不编）：

@@ -1,0 +1,14 @@
+// R35（2026-11-18）：最小 UAV 写探针——引擎级 vs pass 级一刀切。
+// 背景：D3D12 生产 RenderGraph 上四条独立管线（GlobalSDF voxelization/
+// ShadowBlit/SPGI/DDGI update）同形态"dispatch 录制有效 → imageStore 落零"，
+// 而 RT 写全活、进程间非确定（taskM §12-13）。本探针绕开一切业务绑定：
+// 单 binding（StorageImage）单 dispatch，imageStore 常数色——读回非零 =
+// 引擎 UAV 写路径活（死写为 pass 级问题）；读回零 = 引擎级 UAV 写失效
+// （描述符物化/根签名/状态机方向收敛）。仅诊断注册，业务无感。
+#version 450
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0, rgba16f) writeonly uniform image2D u_probe;
+
+void main() {
+    imageStore(u_probe, ivec2(gl_GlobalInvocationID.xy), vec4(1.0, 0.75, 0.5, 1.0));
+}
