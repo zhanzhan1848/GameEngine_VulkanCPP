@@ -510,27 +510,38 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
     }
 
     // ---- UAV（UnorderedAccess usage；M1 无 view 变体） ----
-    if (!viewMode_
-        && (texDesc_.usage & TextureUsage::UnorderedAccess) != TextureUsage::Unknown) {
+    // R36（2026-11-19）：视图模式纹理放开 UAV——此前 `!viewMode_` 排除使
+    // 视图（mip 切片/数组切片）显式无 UAV 槽，描述符写入静默跳过（跳过行
+    // "no UAV slot twin=0"）→ 绑定该视图的管线 imageStore 全部落空。
+    // 实证：IBL_PrefilterMap 8 级 mip 切片视图族（arraySize=6 全脸、
+    // mostDetailedMip=mip，run 44467869550 去重跳过行 texId 1337-1347）
+    // → prefilter 逐 mip 写零 → 镜面 IBL 黑。视图维度按 viewDesc_ 映射
+    // （Texture2DArray 视图 = TextureCube 6 面资源全脸写，与 Vulkan
+    // texture_storage_2d_array 语义对齐）；SRV 路径本就 view-aware（L456+
+    // viewMode_ 三元），UAV 对齐之。
+    if ((texDesc_.usage & TextureUsage::UnorderedAccess) != TextureUsage::Unknown) {
         // 持久槽位（同 SRV——长寿命拷贝源）。
         uavSlot_ = heaps.AllocCbvSrvUavPersistent();
         if (uavSlot_ == D3D12DescriptorHeapManager::kInvalidSlot) return false;
         D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
         uavDesc.Format = static_cast<DXGI_FORMAT>(dxgiFull);
+        const bool viewArrayed = viewMode_ && viewDesc_.arraySize > 1;
         if (texDesc_.type == TextureType::Texture3D) {
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
-            uavDesc.Texture3D.MipSlice = 0;
-            uavDesc.Texture3D.FirstWSlice = 0;
-            uavDesc.Texture3D.WSize = texDesc_.size.z;
-        } else if (texDesc_.arraySize > 1) {
+            uavDesc.Texture3D.MipSlice = viewMode_ ? viewDesc_.mostDetailedMip : 0;
+            uavDesc.Texture3D.FirstWSlice = viewMode_ ? viewDesc_.firstArraySlice : 0;
+            uavDesc.Texture3D.WSize = viewMode_ ? viewDesc_.arraySize
+                                                 : texDesc_.size.z;
+        } else if (texDesc_.arraySize > 1 || viewArrayed) {
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-            uavDesc.Texture2DArray.MipSlice = 0;
-            uavDesc.Texture2DArray.FirstArraySlice = 0;
-            uavDesc.Texture2DArray.ArraySize = texDesc_.arraySize;
+            uavDesc.Texture2DArray.MipSlice = viewMode_ ? viewDesc_.mostDetailedMip : 0;
+            uavDesc.Texture2DArray.FirstArraySlice = viewMode_ ? viewDesc_.firstArraySlice : 0;
+            uavDesc.Texture2DArray.ArraySize = viewMode_ ? viewDesc_.arraySize
+                                                          : texDesc_.arraySize;
             uavDesc.Texture2DArray.PlaneSlice = 0;
         } else {
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-            uavDesc.Texture2D.MipSlice = 0;
+            uavDesc.Texture2D.MipSlice = viewMode_ ? viewDesc_.mostDetailedMip : 0;
             uavDesc.Texture2D.PlaneSlice = 0;
         }
         native->CreateUnorderedAccessView(resource_.Get(), nullptr, &uavDesc,

@@ -2049,7 +2049,10 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                                 << " slot: set=" << write.dstSet
                                 << " binding=" << write.dstBinding
                                 << " twin=" << (rowInfo.twin ? 1 : 0)
-                                << " texId=" << ii.imageView << std::endl;
+                                << " texId=" << ii.imageView
+                                << " name='" << texture->GetTextureDesc().name << "'"
+                                << " usage=" << static_cast<u32>(texture->GetTextureDesc().usage)
+                                << std::endl;
                         }
                         continue;
                     }
