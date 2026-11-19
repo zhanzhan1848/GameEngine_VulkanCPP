@@ -381,6 +381,9 @@ jobs:
           # R33：因果对分组（PRIMAL_SHADOW_RENDER_OFF 跳过阴影 GPU 渲染，
           # 判 UAV 写全灭是否由阴影 GPU 路径插入引起）
           $env:PRIMAL_F350_SHADOW_RENDER_OFF_DIAG = '1'
+          # R36b：时序判别组（BLACK_STAGE_FRAME=50——SPGI/blit 在 frame 50
+          # 是否有内容：中途死亡 vs 从未工作）
+          $env:PRIMAL_F350_FRAME50_DUMP_DIAG = '1'
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350
           exit 0
 
