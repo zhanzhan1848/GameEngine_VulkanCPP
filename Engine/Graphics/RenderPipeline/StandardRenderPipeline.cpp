@@ -6236,6 +6236,28 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                         << "[D3D12_BLACK_STAGE] rg_uav_probe not copied yet" << std::endl;
                 }
             }
+            // R38：blit 转世探针——独立命令缓冲内重跑 ExecuteShadowDepthBlit
+            //（管线/set/描述符/barrier 全走正常路径；lightVP 不参与 blit，
+            // 单位矩阵占位）。shadow_map_reborn 非零 → 管线/描述符/输入全活，
+            // 帧期 RG-cmd dispatch 未生效（RG 提交路径问题）；恒零 →
+            // D32→R32 采样链断（SRV/视图格式方向，R24 同族）。
+            {
+                CommandBufferHandle rbch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                if (RHICommandBuffer* rc = GetCommandBuffer(rbch)) {
+                    if (rc->Begin()) {
+                        math::m4x4 identity{};
+                        for (u32 i = 0; i < 4; ++i) math::elem(identity, i, i) = 1.0f;
+                        gpuDrawStage.ExecuteShadowDepthBlit(rc, identity, 0, prevSlot);
+                        if (!(rc->End() && rc->Submit() && rc->WaitForCompletion())) {
+                            PRIMAL_LOG_STREAM(Error, "Render")
+                                << "[D3D12_BLACK_STAGE] shadow_map_reborn resubmit failed" << std::endl;
+                        }
+                    }
+                }
+                device_->DestroyCommandBuffer(rbch);
+                R23BlackStageDumpTexture(device_, "shadow_map_reborn",
+                                         gpuDrawStage.GetShadowMap(0, prevSlot));
+            }
             PRIMAL_LOG_STREAM(Error, "Render") << "[D3D12_BLACK_STAGE] end" << std::endl;
         }
     }
