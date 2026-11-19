@@ -6218,6 +6218,24 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             // R35：最小 UAV 写探针（自建资源自建 dispatch，与业务 pass 零
             // 耦合）——非零=引擎 UAV 写活（死写为 pass 级）；零=引擎级失效。
             R34UavWriteProbe(device_);
+            // R37：RG 命令缓冲内探针读回（blit cmd 内 dispatch+copy，
+            // frame ~2 落盘、此时读出）——与 R35 独立 cmd 探针对照：
+            //   rg 活+独立活 → 业务死因在各管线自身绑定/输入
+            //   rg 零+独立活 → RG 命令缓冲路径的 compute 状态问题
+            {
+                float rv[16] = {};
+                if (gpuDrawStage.ReadRGUavProbe(rv, 16)) {
+                    double rgSum = 0.0;
+                    for (u32 i = 0; i < 16; ++i) rgSum += rv[i];
+                    PRIMAL_LOG_STREAM(Error, "Render")
+                        << "[D3D12_BLACK_STAGE] rg_uav_probe first4=("
+                        << rv[0] << "," << rv[1] << "," << rv[2] << "," << rv[3]
+                        << ") mean16=" << (rgSum / 16.0) << std::endl;
+                } else {
+                    PRIMAL_LOG_STREAM(Error, "Render")
+                        << "[D3D12_BLACK_STAGE] rg_uav_probe not copied yet" << std::endl;
+                }
+            }
             PRIMAL_LOG_STREAM(Error, "Render") << "[D3D12_BLACK_STAGE] end" << std::endl;
         }
     }

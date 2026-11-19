@@ -349,6 +349,10 @@ public:
         return shadow_frames_[buffer_index % 3].shadow_moments[cascade_index % ShadowFrameResources::kShadowCascades];
     }
 
+    // R37：RG 命令缓冲内 UAV 探针读回（blit cmd 内 dispatch+copy 的结果；
+    // 未拷贝/不可映射时返回 false）。黑帧 dump 面调用。
+    bool ReadRGUavProbe(float* outFloats, u32 count) const;
+
     // GBuffer texture accessors for downstream passes (SSGI, DDGI, etc.)
     /// TAA sub-pixel jitter gate. Only enable when a TAA resolve pass actually
     /// runs in the frame graph — jitter without temporal resolve is visible
@@ -647,6 +651,10 @@ private:
     rhi::DescriptorSetLayoutHandle shadow_blit_set_layout_{ rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT };
     u32 shadow_max_clusters_{ 100000 };
     bool shadow_initialized_{ false };
+    // R37：RG 命令缓冲内 UAV 探针（blit cmd 内 dispatch+copy 的 READBACK；
+    // dump 面经 ReadRGUavProbe 读出）
+    rhi::ResourceHandle rgProbeReadback_{ rhi::handles::INVALID_RESOURCE };
+    bool rgProbeCopied_{ false };
 
     // GBuffer depth blit resources (reuses shadow_blit_pipeline_/layout/set_layout)
     rhi::DescriptorSetHandle gbuffer_depth_blit_descriptor_set_{ rhi::handles::INVALID_DESCRIPTOR_SET };

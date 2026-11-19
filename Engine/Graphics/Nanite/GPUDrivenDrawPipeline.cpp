@@ -4428,6 +4428,20 @@ bool GPUDrivenDrawPipeline::ExecuteShadowMomentsRaster(rhi::RHICommandBuffer* cm
     return true;
 }
 
+// R37：RG 命令缓冲内 UAV 探针读回（frame+1 的 dump 面调用——READBACK
+// 在 blit cmd 内 CopyTextureToBuffer 落盘，此时帧 fence 早已完成）。
+bool GPUDrivenDrawPipeline::ReadRGUavProbe(float* outFloats, u32 count) const {
+    if (!rgProbeCopied_ || rgProbeReadback_ == rhi::handles::INVALID_RESOURCE || !device_)
+        return false;
+    if (const float* p = static_cast<const float*>(
+            device_->MapBuffer(rgProbeReadback_, 0, u64(count) * sizeof(float)))) {
+        for (u32 i = 0; i < count; ++i) outFloats[i] = p[i];
+        device_->UnmapBuffer(rgProbeReadback_);
+        return true;
+    }
+    return false;
+}
+
 bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_buffer,
                                                      u32 cascade_index,
                                                      u32 buffer_index) {
@@ -4530,6 +4544,132 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
         }
     }
     cmd_buffer->Dispatch(groups, groups, 1);
+
+    // R37：RG 命令缓冲内 UAV 写探针（一次性，PRIMAL_D3D12_BLACK_STAGE_DUMP
+    // 门控）。R35b 已证独立命令缓冲内探针 imageStore 精确落地（双组），
+    // 而业务管线（blit/SPGI/voxelization）在同引擎上"录制有效→写零"且
+    // frame 50 起从未活——最后一个未检验差异 = **dispatch 所在命令缓冲**。
+    // 本探针用与 R35b 相同的最小资源（自建 64×64 RGBA16F + 单 binding
+    // StorageImage），但 dispatch 录入 **本 blit 的 RG 命令缓冲**，同 cmd
+    // CopyTextureToBuffer 到 READBACK——frame+1 的 dump 面读出：
+    //   非零 → RG cmd 内 UAV 写活（业务死因在各管线自身绑定/输入）
+    //   零   → RG 提交路径的 compute/描述符状态问题（收敛方向明确）
+    {
+        static const bool s_rgProbeEnabled = [] {
+            const char* v = std::getenv("PRIMAL_D3D12_BLACK_STAGE_DUMP");
+            return v && v[0] == '1' && v[1] == '\0';
+        }();
+        static bool s_rgProbeDone = false;
+        if (s_rgProbeEnabled && !s_rgProbeDone) {
+            s_rgProbeDone = true;
+            struct RgProbeRes {
+                rhi::ResourceHandle tex = rhi::handles::INVALID_RESOURCE;
+                rhi::ResourceHandle readback = rhi::handles::INVALID_RESOURCE;
+                rhi::ResourceHandle set = rhi::handles::INVALID_RESOURCE;
+                rhi::PipelineHandle pipe = rhi::handles::INVALID_PIPELINE;
+                rhi::PipelineLayoutHandle layout = rhi::handles::INVALID_PIPELINE_LAYOUT;
+                rhi::DescriptorSetLayoutHandle setLayout = rhi::handles::INVALID_DESCRIPTOR_SET_LAYOUT;
+                bool ready = false;
+                bool copied = false;
+            };
+            static RgProbeRes rg;
+            if (!rg.ready) {
+                rhi::TextureDesc td{};
+                td.size = {64, 64, 1};
+                td.format = rhi::DataFormat::RGBA16_Float;
+                td.type = rhi::TextureType::Texture2D;
+                td.usage = rhi::TextureUsage::UnorderedAccess |
+                           rhi::TextureUsage::CopySource | rhi::TextureUsage::CopyDest;
+                td.memoryUsage = rhi::GPUMemoryUsage::Static;
+                td.name = "R37_RG_UAV_PROBE";
+                rg.tex = device_->CreateTexture(td);
+                rhi::BufferDesc rb{};
+                rb.size = 64ull * 64ull * 8ull;
+                rb.bindFlags = static_cast<u32>(rhi::BufferUsageFlags::TransferDst);
+                rb.memoryUsage = rhi::GPUMemoryUsage::Readback;
+                rg.readback = device_->CreateBuffer(rb);
+                rhi::DescriptorSetLayoutBinding pb{};
+                pb.binding = 0;
+                pb.descriptorCount = 1;
+                pb.descriptorType = rhi::DescriptorType::StorageImage;
+                pb.stageFlags = rhi::ShaderStage::Compute;
+                rhi::DescriptorSetLayoutDesc pld{1, &pb};
+                rg.setLayout = device_->CreateDescriptorSetLayout(pld);
+                rhi::PipelineLayoutDesc ppld{1, &rg.setLayout};
+                rg.layout = device_->CreatePipelineLayout(ppld);
+                rg.set = device_->CreateDescriptorSet({rg.setLayout});
+                const std::string probePath = utils::ShaderRegistry::ResolveShaderPath(
+                    rhi::RHIPlatform::D3D12,
+                    "Engine/Graphics/Vulkan/shaders/Debug/UavProbe.comp.spv");
+                std::ifstream pf(probePath, std::ios::binary | std::ios::ate);
+                if (pf.is_open()) {
+                    const std::streamsize psz = pf.tellg();
+                    pf.seekg(0, std::ios::beg);
+                    std::vector<u8> pcode(static_cast<size_t>(psz));
+                    if (pf.read(reinterpret_cast<char*>(pcode.data()), psz)) {
+                        auto psh = device_->CreateShader(pcode.data(), pcode.size(),
+                                                          rhi::ShaderStage::Compute, "main");
+                        rhi::ComputePipelineDesc ppd{};
+                        ppd.layout = rg.layout;
+                        ppd.computeShader = psh;
+                        ppd.threadGroupSize = {8, 8, 1};
+                        rg.pipe = device_->CreateComputePipeline(ppd);
+                        device_->DestroyShader(psh);
+                    }
+                }
+                rg.ready = (rg.tex != rhi::handles::INVALID_RESOURCE &&
+                            rg.readback != rhi::handles::INVALID_RESOURCE &&
+                            rg.set != rhi::handles::INVALID_RESOURCE &&
+                            rg.pipe != rhi::handles::INVALID_PIPELINE);
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[D3D12_UAV_PROBE_RG] resources ready=" << rg.ready
+                    << " tex=" << rg.tex << " readback=" << rg.readback
+                    << " pipe=" << rg.pipe << std::endl;
+            }
+            if (rg.ready) {
+                rhi::DescriptorImageInfo pImg{rhi::handles::INVALID_SAMPLER, rg.tex,
+                                              rhi::ResourceState::UnorderedAccess};
+                rhi::WriteDescriptorSet pw{};
+                pw.dstSet = rg.set;
+                pw.dstBinding = 0;
+                pw.descriptorCount = 1;
+                pw.descriptorType = rhi::DescriptorType::StorageImage;
+                pw.imageInfo = &pImg;
+                device_->UpdateDescriptorSets(1, &pw);
+
+                rhi::ResourceBarrier toUav{};
+                toUav.resource = rg.tex;
+                toUav.beforeState = rhi::ResourceState::Unknown;
+                toUav.afterState = rhi::ResourceState::UnorderedAccess;
+                toUav.subresource = 0xFFFFFFFF;
+                toUav.queueFamily = 0xFFFFFFFF;
+                cmd_buffer->InsertBarrier(&toUav, 1);
+                cmd_buffer->BindComputePipeline(rg.pipe);
+                rhi::DescriptorSetHandle rgSet = rg.set;
+                cmd_buffer->BindDescriptorSets(rhi::PipelineBindPoint::Compute,
+                                               rg.layout, 0, 1, &rgSet, 0, nullptr);
+                cmd_buffer->Dispatch(8, 8, 1);
+                // UA→CopySource（供本 cmd 内 CopyTextureToBuffer 读取）
+                rhi::ResourceBarrier toCopy{};
+                toCopy.resource = rg.tex;
+                toCopy.beforeState = rhi::ResourceState::UnorderedAccess;
+                toCopy.afterState = rhi::ResourceState::CopySource;
+                toCopy.subresource = 0xFFFFFFFF;
+                toCopy.queueFamily = 0xFFFFFFFF;
+                cmd_buffer->InsertBarrier(&toCopy, 1);
+                rhi::BufferTextureCopyRegion pr{};
+                pr.imageSubresource = {0, 0, 1};
+                pr.imageExtent = {64, 64, 1};
+                cmd_buffer->CopyTextureToBuffer(rg.tex, rg.readback, &pr, 1);
+                rg.copied = true;
+                rgProbeReadback_ = rg.readback;
+                rgProbeCopied_ = true;
+                PRIMAL_LOG_STREAM(Error, "Render")
+                    << "[D3D12_UAV_PROBE_RG] dispatch+copy recorded (readback "
+                       "read at dump time)" << std::endl;
+            }
+        }
+    }
 
     return true;
 }
