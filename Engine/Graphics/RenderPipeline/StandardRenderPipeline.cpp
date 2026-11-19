@@ -5865,7 +5865,8 @@ void R34UavWriteProbe(rhi::RHIDeviceBase* device) {
     auto descSet = device->CreateDescriptorSet({setLayout});
 
     const std::string relPath =
-        utils::ShaderRegistry::ResolveShaderPath(RHIPlatform::D3D12, "Debug/UavProbe.comp.spv");
+        utils::ShaderRegistry::ResolveShaderPath(
+            RHIPlatform::D3D12, "Engine/Graphics/Vulkan/shaders/Debug/UavProbe.comp.spv");
     std::ifstream file(relPath, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
         PRIMAL_LOG_STREAM(Error, "Render")
