@@ -459,6 +459,7 @@ build-wt/
 test-output/
 .zcode/
 .codex/
+.superagent/
 autoresearch/
 build-wasm/
 projects_test/
@@ -567,3 +568,39 @@ scripts/gi_ownership_baseline.sh
 /scripts/generate_environment_scratch_f.py
 /scripts/private_meshlet_card_cull_audit.py
 /scripts/verify_environment_leaf_field.py
+
+# Optional native Dawn checkout, pinned by scripts/setup_dawn_native.sh.
+/third_party/dawn/
+
+# Local tooling and generated audit outputs (2026-11-20 cleanup).
+/.mcp.json
+/jobs.json
+/package.json
+/package-lock.json
+/remaining-cardgen-reads.txt
+/ssao_output.bmp
+/Engine/Graphics/RHI/Core/Core
+
+# Keep only the small deterministic regression fixture in Git.
+/Testing/RenderingBaselines/*
+!/Testing/RenderingBaselines/dawn_shadow_fit_20261119/
+
+# Rebuildable SPIR-V outputs from this audit; existing tracked baseline bytes remain in HEAD.
+/EngineTest/assets/shaders/BlurPass.spv
+/EngineTest/assets/shaders/ToneMapping.spv
+/EngineTest/assets/shaders/P4cComputeBytesLarge.comp.spv
+/EngineTest/assets/shaders/P4cFormatGradient.vert.spv
+/EngineTest/assets/shaders/P4cLayered.vert.spv
+/EngineTest/assets/shaders/P4cSampleTexture.vert.spv
+/EngineTest/assets/shaders/P4cSecondaryDraw.vert.spv
+/EngineTest/assets/shaders/RVTCapture.frag.spv
+/EngineTest/assets/shaders/RVTCapture.vert.spv
+/EngineTest/assets/shaders/RVTCompress.comp.spv
+/EngineTest/assets/shaders/RVTFinalize.comp.spv
+/EngineTest/assets/shaders/VTProto_Sample.comp.spv
+/EngineTest/assets/shaders/VTProto_UpdatePageTable.comp.spv
+/EngineTest/assets/shaders/VTSys_LayerSample.comp.spv
+/EngineTest/assets/shaders/VTSys_TestSample.comp.spv
+/EngineTest/assets/shaders/VTSys_UpdatePageTable.comp.spv
+/EngineTest/assets/shaders/VTTest_TexelFetch.comp.spv
+/EngineTest/assets/shaders/VTTest_Write.comp.spv
