@@ -66,6 +66,7 @@
 #include <iostream>
 #include <cstring>
 #include <fstream>
+#include <filesystem>
 #include <vector>
 #include <cmath>
 #include <cstdio>
@@ -75,6 +76,7 @@
 #include <limits>
 #include <mutex>
 #include <chrono>
+#include <ctime>
 #include <thread>
 #include <atomic>
 #include <stdexcept>
@@ -2673,6 +2675,230 @@ void TestVulkanSponzaRenderGraph::Run() {
     } else if (!std::getenv("SPGI_CAM_LOCK")) {
         camera_.Update(dt);
     }
+
+    // Interactive camera recorder for validation trajectories (test shell only).
+    // Env:
+    //   CAM_RECORD=1 / PRIMAL_CAM_RECORD=1  — enable
+    //   CAM_RECORD_PATH=<dir>               — output directory (default ~/Desktop/cam_record_<ts>/)
+    //   CAM_RECORD_INTERVAL_SEC=<float>     — sample period; 0 = every frame (default)
+    // Keys (edge): M = mark waypoint (also always written into the continuous path).
+    // Outputs under the record dir:
+    //   cam_path.csv          frame,t_sec,x,y,z,pitch_deg,yaw_deg,mark
+    //   cam_path_spgi.txt     one SPGI_CAM=x,y,z,pitch,yaw per sample (+ comment with t/frame)
+    //   waypoints.csv         marked poses only (same columns + name)
+    //   waypoints_spgi.json   JSON array of marked {name,t,spgi_cam,position,pitch_deg,yaw_deg}
+    // Close the window to finalize (destructor flushes/closes files).
+    {
+        static const bool camRecordEnabled = [] {
+            auto on = [](const char* e) {
+                if (!e || !e[0] || std::strcmp(e, "0") == 0) return false;
+                std::string s(e);
+                for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return s != "false" && s != "off" && s != "no";
+            };
+            return on(std::getenv("CAM_RECORD")) || on(std::getenv("PRIMAL_CAM_RECORD"));
+        }();
+        if (camRecordEnabled && cameraInitialized_) {
+            struct CamRecorder {
+                std::filesystem::path dir;
+                std::ofstream csv;
+                std::ofstream spgi;
+                std::ofstream wpCsv;
+                std::ofstream wpJson;
+                std::chrono::steady_clock::time_point t0{};
+                double lastSampleT{-1.0};
+                double lastPoseLogT{-1.0};
+                float intervalSec{0.0f};
+                u32 sampleCount{0};
+                u32 markCount{0};
+                bool ok{false};
+                bool wpJsonOpen{false};
+
+                CamRecorder() {
+                    const char* home = std::getenv("HOME");
+                    const std::filesystem::path desktop =
+                        home ? std::filesystem::path(home) / "Desktop"
+                             : std::filesystem::path(".");
+                    std::string stamp;
+                    {
+                        const auto now = std::chrono::system_clock::now();
+                        const std::time_t tt = std::chrono::system_clock::to_time_t(now);
+                        std::tm tmLocal{};
+#if defined(_WIN32)
+                        localtime_s(&tmLocal, &tt);
+#else
+                        localtime_r(&tt, &tmLocal);
+#endif
+                        char buf[32];
+                        std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tmLocal);
+                        stamp = buf;
+                    }
+                    if (const char* p = std::getenv("CAM_RECORD_PATH"); p && p[0]) {
+                        dir = p;
+                    } else {
+                        dir = desktop / ("cam_record_" + stamp);
+                    }
+                    std::error_code ec;
+                    std::filesystem::create_directories(dir, ec);
+                    if (ec) {
+                        std::cerr << "[CAM_RECORD] create_directories failed: " << dir
+                                  << " err=" << ec.message() << std::endl;
+                        return;
+                    }
+                    if (const char* iv = std::getenv("CAM_RECORD_INTERVAL_SEC"); iv && iv[0]) {
+                        const float v = std::strtof(iv, nullptr);
+                        if (v > 0.0f) intervalSec = v;
+                    }
+                    csv.open(dir / "cam_path.csv", std::ios::out | std::ios::trunc);
+                    spgi.open(dir / "cam_path_spgi.txt", std::ios::out | std::ios::trunc);
+                    wpCsv.open(dir / "waypoints.csv", std::ios::out | std::ios::trunc);
+                    wpJson.open(dir / "waypoints_spgi.json", std::ios::out | std::ios::trunc);
+                    if (!csv || !spgi || !wpCsv || !wpJson) {
+                        std::cerr << "[CAM_RECORD] failed to open output files under " << dir << std::endl;
+                        return;
+                    }
+                    csv << "frame,t_sec,x,y,z,pitch_deg,yaw_deg,mark\n";
+                    wpCsv << "name,frame,t_sec,x,y,z,pitch_deg,yaw_deg,spgi_cam\n";
+                    spgi << "# CAM_RECORD path — each data line is SPGI_CAM=x,y,z,pitch,yaw (degrees)\n";
+                    spgi << "# Convert marks via waypoints_spgi.json; continuous samples via cam_path.csv\n";
+                    wpJson << "[\n";
+                    wpJsonOpen = true;
+                    csv.flush();
+                    spgi.flush();
+                    wpCsv.flush();
+                    wpJson.flush();
+                    t0 = std::chrono::steady_clock::now();
+                    ok = true;
+                    std::cerr << "[CAM_RECORD] ON dir=" << dir
+                              << " interval_sec=" << intervalSec
+                              << " (0=every frame). Fly WASD/arrows/RMB; press M to mark; close window to stop.\n";
+                    std::cerr.flush();
+                }
+
+                ~CamRecorder() {
+                    if (!ok) return;
+                    if (wpJsonOpen) {
+                        if (markCount == 0) {
+                            wpJson << "]\n";
+                        } else {
+                            wpJson << "\n]\n";
+                        }
+                        wpJsonOpen = false;
+                    }
+                    csv.flush();
+                    spgi.flush();
+                    wpCsv.flush();
+                    wpJson.flush();
+                    std::cerr << "[CAM_RECORD] closed samples=" << sampleCount
+                              << " marks=" << markCount << " dir=" << dir << std::endl;
+                }
+
+                void Sample(u64 frame, const primal::math::v3& pos, const primal::math::v3& rot,
+                            bool mark, const char* markName) {
+                    if (!ok) return;
+                    const double t = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - t0).count();
+                    const bool due = (lastSampleT < 0.0) ||
+                                     (intervalSec <= 0.0f) ||
+                                     ((t - lastSampleT) + 1e-9 >= static_cast<double>(intervalSec)) ||
+                                     mark;
+                    if (!due) {
+                        // Still emit a sparse pose HUD so the pilot can read xyz/angles.
+                        if (lastPoseLogT < 0.0 || (t - lastPoseLogT) >= 0.5) {
+                            std::cerr << std::fixed << std::setprecision(3)
+                                      << "[CAM_POSE] t=" << t
+                                      << " pos=(" << pos.x << "," << pos.y << "," << pos.z << ")"
+                                      << " pitch=" << rot.x << " yaw=" << rot.y
+                                      << "  SPGI_CAM=" << std::setprecision(3)
+                                      << pos.x << "," << pos.y << "," << pos.z << ","
+                                      << rot.x << "," << rot.y << std::endl;
+                            lastPoseLogT = t;
+                        }
+                        return;
+                    }
+                    lastSampleT = t;
+                    const int markFlag = mark ? 1 : 0;
+                    csv << frame << ',' << std::fixed << std::setprecision(6) << t << ','
+                        << std::setprecision(4) << pos.x << ',' << pos.y << ',' << pos.z << ','
+                        << rot.x << ',' << rot.y << ',' << markFlag << '\n';
+                    spgi << "# t=" << std::setprecision(3) << t << " frame=" << frame;
+                    if (mark) spgi << " MARK";
+                    spgi << '\n';
+                    spgi << "SPGI_CAM=" << std::setprecision(4)
+                         << pos.x << ',' << pos.y << ',' << pos.z << ','
+                         << rot.x << ',' << rot.y << '\n';
+                    ++sampleCount;
+                    // Pose HUD ~2 Hz (or every sample when throttled / on mark).
+                    if (intervalSec >= 0.25f || lastPoseLogT < 0.0 || (t - lastPoseLogT) >= 0.5 || mark) {
+                        std::cerr << std::fixed << std::setprecision(3)
+                                  << "[CAM_POSE] t=" << t
+                                  << " pos=(" << pos.x << "," << pos.y << "," << pos.z << ")"
+                                  << " pitch=" << rot.x << " yaw=" << rot.y
+                                  << "  SPGI_CAM=" << pos.x << "," << pos.y << "," << pos.z << ","
+                                  << rot.x << "," << rot.y;
+                        if (mark) {
+                            std::cerr << "  [MARK";
+                            if (markName && markName[0]) std::cerr << ' ' << markName;
+                            std::cerr << "]";
+                        }
+                        std::cerr << std::endl;
+                        lastPoseLogT = t;
+                    }
+                    if ((sampleCount % 30u) == 0u) {
+                        csv.flush();
+                        spgi.flush();
+                    }
+                }
+
+                void Mark(u64 frame, const primal::math::v3& pos, const primal::math::v3& rot) {
+                    if (!ok) return;
+                    const double t = std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - t0).count();
+                    ++markCount;
+                    const std::string name = "mark_" + std::to_string(markCount);
+                    // Rewrite waypoints.csv line cleanly here (Sample's mark branch is unused).
+                    wpCsv << name << ',' << frame << ',' << std::fixed << std::setprecision(6) << t << ','
+                          << std::setprecision(4) << pos.x << ',' << pos.y << ',' << pos.z << ','
+                          << rot.x << ',' << rot.y << ",\""
+                          << pos.x << ',' << pos.y << ',' << pos.z << ','
+                          << rot.x << ',' << rot.y << "\"\n";
+                    if (markCount > 1) wpJson << ",\n";
+                    wpJson << "  {\n"
+                           << "    \"name\": \"" << name << "\",\n"
+                           << "    \"t\": " << std::setprecision(6) << t << ",\n"
+                           << "    \"spgi_cam\": \"" << std::setprecision(4)
+                           << pos.x << "," << pos.y << "," << pos.z << ","
+                           << rot.x << "," << rot.y << "\",\n"
+                           << "    \"position\": [" << pos.x << ", " << pos.y << ", " << pos.z << "],\n"
+                           << "    \"pitch_deg\": " << rot.x << ",\n"
+                           << "    \"yaw_deg\": " << rot.y << "\n"
+                           << "  }";
+                    wpCsv.flush();
+                    wpJson.flush();
+                    Sample(frame, pos, rot, true, name.c_str());
+                }
+            };
+
+            static CamRecorder recorder;
+            bool marked = false;
+            {
+                using namespace primal::input;
+                input_value mkey;
+                get(input_source::keyboard, input_code::key_m, mkey);
+                if (mkey.current.x > 0.0f && mkey.previous.x == 0.0f) {
+                    marked = true;
+                }
+            }
+            const auto pos = camera_.GetPosition();
+            const auto rot = camera_.GetRotation();
+            if (marked) {
+                recorder.Mark(frameCount_, pos, rot);
+            } else {
+                recorder.Sample(frameCount_, pos, rot, false, nullptr);
+            }
+        }
+    }
+
     if (!activeScene_) activeScene_=&scene_;
     bool switchedSceneThisFrame=false;
     const char* farSwitchFrame=std::getenv("DDGI_FAR_SCENE_SWITCH_FRAME");
