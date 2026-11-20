@@ -4789,3 +4789,15 @@ get_directory_property(PRIMAL_UNIT_TEST_TARGETS BUILDSYSTEM_TARGETS)
 foreach(_primal_ut ${PRIMAL_UNIT_TEST_TARGETS})
     primal_stage_d3d12_agility(${_primal_ut})
 endforeach()
+# Regression for the former same-name primal::graphics::InstanceData ODR
+# collision (96-byte forward payload vs 192-byte scene snapshot payload).
+add_executable(TestInstanceDataODR
+    Graphics/TestInstanceDataODR.cpp
+    Graphics/InstanceDataODRForwardFirst.cpp
+    Graphics/InstanceDataODRSnapshotFirst.cpp
+)
+target_include_directories(TestInstanceDataODR PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine)
+add_test(NAME UnitInstanceDataODR COMMAND TestInstanceDataODR)
+set_target_properties(TestInstanceDataODR PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
