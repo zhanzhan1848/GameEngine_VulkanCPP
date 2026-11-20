@@ -292,6 +292,18 @@ namespace primal::graphics::rhi
             return false;
         }
 
+        // WebGPU supports direct queue writes to the destination. In WASM,
+        // synchronous polling cannot complete an asynchronous staging map
+        // without returning control to the browser event loop.
+        if (device_->GetPlatform() == RHIPlatform::Dawn)
+        {
+            if (device_->UpdateBufferData(out_buffer, data, size, 0)) return true;
+            PRIMAL_LOG_STREAM(Error, "RHI") << "Failed to upload GPU buffer: " << name << std::endl;
+            device_->DestroyBuffer(out_buffer);
+            out_buffer = handles::INVALID_RESOURCE;
+            return false;
+        }
+
         // Staging Buffer
         BufferDesc stagingDesc{};
         stagingDesc.size = size;

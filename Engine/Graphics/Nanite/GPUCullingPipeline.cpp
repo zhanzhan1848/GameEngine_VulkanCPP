@@ -234,9 +234,18 @@ bool GPUCullingPipeline::CreatePipelines() {
     cullingBindings[11].readonly = true; // meshlets
     cullingBindings[12].readonly = true; // cluster_map
 
+    // The Dawn WGSL never reads the diagnostic buffer at binding 10. Omitting
+    // that binding leaves all culling inputs intact while fitting adapters
+    // with ten storage buffers per shader stage.
+    rhi::DescriptorSetLayoutBinding dawnBindings[12];
+    u32 dawnCount = 0;
+    if (device_->GetPlatform() == rhi::RHIPlatform::Dawn) {
+        for (const auto& binding : cullingBindings)
+            if (binding.binding != 10) dawnBindings[dawnCount++] = binding;
+    }
     rhi::DescriptorSetLayoutDesc cullingLayoutDesc{
-        .bindingCount = 13,  // T4.6.5 part 35.2: bumped from 12 to 13 (added cluster_map)
-        .bindings = cullingBindings
+        .bindingCount = dawnCount ? dawnCount : 13u,
+        .bindings = dawnCount ? dawnBindings : cullingBindings
     };
 
     culling_descriptor_layout_ = device_->CreateDescriptorSetLayout(cullingLayoutDesc);
@@ -1799,7 +1808,8 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
         writes[writeCount].bufferInfo = &bufferInfos[writeCount];
         writeCount++;
 
-        // Binding 10: Culling debug buffer (for debugging culling issues) - triple buffered
+        // Binding 10 is not part of the Dawn layout: its WGSL does not use it.
+        if (device_->GetPlatform() != rhi::RHIPlatform::Dawn) {
         bufferInfos[writeCount].buffer = culling_debug_buffers_[i];
         bufferInfos[writeCount].offset = 0;
         bufferInfos[writeCount].range = sizeof(primal::graphics::nanite::CullingDebugData) * MAX_DEBUG_ENTRIES;
@@ -1809,6 +1819,7 @@ bool GPUCullingPipeline::CreateDescriptorSets(const RenderSceneSnapshot& snapsho
         writes[writeCount].descriptorType = rhi::DescriptorType::StorageBuffer;
         writes[writeCount].bufferInfo = &bufferInfos[writeCount];
         writeCount++;
+        }
 
         // Binding 11: Global meshlet buffer (for Normal Cone backface culling) - CRITICAL: Always bind
         auto global_meshlet_buffer = gpuDrawPipeline_->GetGlobalMeshletBuffer();

@@ -1969,7 +1969,7 @@ void LumenDDGIPass::CreatePipelines() {
             DescriptorSetDesc dsDesc{depth_set_layout_};
             depth_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
-        {
+        if (sdf_trace_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
             DescriptorSetDesc dsDesc{sdf_trace_set_layout_};
             sdf_trace_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
@@ -1983,7 +1983,7 @@ void LumenDDGIPass::CreatePipelines() {
             DescriptorSetDesc dsDesc{first_native_normal_sdf_trace_set_layout_};
             first_native_normal_sdf_trace_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
-        {
+        if (finalize_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
             DescriptorSetDesc dsDesc{finalize_set_layout_};
             finalize_ds_[i] = device_->CreateDescriptorSet(dsDesc);
         }
@@ -3758,8 +3758,16 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
                 // Patch ProbeUpdateCount in the volume constant buffer
                 {
-                    auto* mapped = static_cast<DDGIVolumeData*>(device_->MapBuffer(volume_cb_[frameIdx]));
-                    if (mapped) {
+                    if (device_->GetPlatform() == RHIPlatform::Dawn) {
+                        // Dawn's mapped GPU buffers use a fresh zero-filled CPU
+                        // staging allocation on each MapBuffer call. Mapping the
+                        // whole UBO just to patch this field erases all the other
+                        // volume parameters on Unmap. Upload only the four bytes.
+                        if (!device_->UpdateBufferData(volume_cb_[frameIdx], &updateCount,
+                                                       sizeof(updateCount), offsetof(DDGIVolumeData, ProbeUpdateCount)))
+                            return;
+                        volume_data_.ProbeUpdateCount = updateCount;
+                    } else if (auto* mapped = static_cast<DDGIVolumeData*>(device_->MapBuffer(volume_cb_[frameIdx]))) {
                         // C3.5 slice 3 (deterministic stabilization): during the
                         // atlas warm-up window the probe field stays frozen at
                         // its deterministic init — updating probes against the

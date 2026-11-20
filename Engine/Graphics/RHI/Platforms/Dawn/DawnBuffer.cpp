@@ -6,6 +6,9 @@
 #include "DawnDevice.h"
 #include <cstring>
 #include <cstdlib>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include <iostream>
 
 namespace primal::graphics::rhi {
@@ -204,6 +207,14 @@ void* DawnBuffer::mapImpl(u64 offset, u64 size) {
         wgpuBufferMapAsync(wgpuBuffer_, mapMode, alignedOffset, alignedSize, callbackInfo);
 
         WGPUInstance instance = device_.GetInstance();
+#ifdef __EMSCRIPTEN__
+        // Browser mapAsync resolves on the JS event loop. Keep callback state
+        // alive until it settles, including on device loss.
+        while (!cbData.done) {
+            wgpuInstanceProcessEvents(instance);
+            if (!cbData.done) emscripten_sleep(1);
+        }
+#else
         constexpr int maxPollIterations = 100000;
         int pollCount = 0;
         while (!cbData.done && pollCount < maxPollIterations) {
@@ -211,6 +222,7 @@ void* DawnBuffer::mapImpl(u64 offset, u64 size) {
             ++pollCount;
         }
 
+#endif
         if (!cbData.done || !cbData.success) {
             return nullptr;
         }

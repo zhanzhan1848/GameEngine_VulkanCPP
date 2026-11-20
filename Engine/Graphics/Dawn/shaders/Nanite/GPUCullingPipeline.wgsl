@@ -24,7 +24,7 @@
 //   7: array<u32, read_write>             — indirect_commands (5 u32s)
 //   8: texture_2d<f32>                    — hzb_texture
 //   9: atomic<u32>, read_write            — cluster_visibility_counter
-//  10: array<u32, read_write>             — debug_buffer (unused — debug stripped)
+//  10: unused (debug instrumentation is not present in the Dawn shader)
 //  11: array<MeshletData, read>           — global meshlets
 //
 // Debug output is stripped: CullingConfig.enable_debug_output defaults to
@@ -134,7 +134,6 @@ struct ClusterVisibility {
 @group(0) @binding(7) var<storage, read_write> indirect_commands: array<u32>;
 @group(0) @binding(8) var hzb_texture: texture_2d<f32>;
 @group(0) @binding(9) var<storage, read_write> cluster_visibility_counter: atomic<u32>;
-@group(0) @binding(10) var<storage, read_write> debug_buffer: array<u32>;
 @group(0) @binding(11) var<storage, read> meshlets: array<MeshletData>;
 @group(0) @binding(12) var<storage, read> cluster_map: array<ClusterMapEntry>;
 

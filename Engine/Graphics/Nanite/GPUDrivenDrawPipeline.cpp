@@ -3605,6 +3605,9 @@ bool GPUDrivenDrawPipeline::InitializeShadowResources(u32 num_instances, u32 max
         depthBindings[5].descriptorType = rhi::DescriptorType::StorageBuffer; // meshlet_vertex_indices
         depthBindings[6].descriptorType = rhi::DescriptorType::StorageBuffer; // meshlet_triangle_indices
         depthBindings[7].descriptorType = rhi::DescriptorType::StorageBuffer; // vertex_positions
+        // The Dawn shadow vertex shader reads these buffers without writing.
+        if (device_->GetPlatform() == rhi::RHIPlatform::Dawn)
+            for (int i = 1; i < 8; ++i) depthBindings[i].readonly = true;
 
         rhi::DescriptorSetLayoutDesc depthLayoutDesc{ .bindingCount = 8, .bindings = depthBindings };
         shadow_depth_set_layout_ = device_->CreateDescriptorSetLayout(depthLayoutDesc);
