@@ -2270,7 +2270,8 @@ inline std::string LoadWGSL(const char* shaderName) {
         {"SSGITrace",             kShader_SSGITrace},
         {"SSRPass",               kShader_SSRPass},
         {"TestTriangle",          kShader_TestTriangle},
-        {"ToneMapping",           kShader_ToneMapping},
+        // ToneMapping is loaded from MEMFS: the embedded legacy copy lacks
+        // the passthrough entry and the current exposure bindings.
         {"Velocity",              kShader_Velocity},
     };
 

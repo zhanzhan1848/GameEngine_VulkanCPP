@@ -152,7 +152,7 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
     // Lumen/ subdir lookup works.
     // R13: D3D12 与 Vulkan 同名（镜像按 Vulkan 相对路径布局）。
     const bool binaryNames = (platform == RHIPlatform::Vulkan || platform == RHIPlatform::D3D12);
-    const char* traceName    = binaryNames ? "SSRTrace"     : "SSRPass";
+    const char* traceName    = (binaryNames || platform == RHIPlatform::Dawn) ? "SSRTrace" : "SSRPass";
     const char* temporalName = binaryNames ? "SSRTemporal"  : "SSRTemporal";
     const char* upsampleName = binaryNames ? "SSRComposite" : "SSRComposite";
 
@@ -192,6 +192,7 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
         bindings[4] = {4, DescriptorType::StorageImage,      1, ShaderStage::Compute};
         bindings[5] = {5, DescriptorType::UniformBuffer,     1, ShaderStage::Compute};
         bindings[5].minBindingSize = 192;
+        bindings[1].unfilterableFloat = true; // HZB is R32Float in WebGPU.
 
         DescriptorSetLayoutDesc dslDesc;
         dslDesc.bindingCount = 6;

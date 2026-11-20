@@ -257,8 +257,11 @@ static void EnsurePipeline(RHIDeviceBase& device) {
     };
 
     ShaderHandle vs = stageShader(ShaderStage::Vertex, "tonemap_vs");
-    ShaderHandle fs = stageShader(ShaderStage::Pixel,
-        MetalEyeAdaptationEnabled(platform) ? "tonemap_fs_adapt" : "tonemap_fs");
+    const char* fragmentEntry = MetalEyeAdaptationEnabled(platform) ? "tonemap_fs_adapt" : "tonemap_fs";
+#ifdef __EMSCRIPTEN__
+    if (std::getenv("PRIMAL_DAWN_FORWARD_SHOWCASE")) fragmentEntry = "tonemap_fs_forward_showcase";
+#endif
+    ShaderHandle fs = stageShader(ShaderStage::Pixel, fragmentEntry);
     if (vs == handles::INVALID_SHADER || fs == handles::INVALID_SHADER) {
         // R9-WIN：阶段被拒（上层已打过 [VulkanShader] reject / cso 缺失日志）时
         // 明示后果——本 pass 是帧输出必需管线，Execute 期将 fail-fast 退出，
@@ -582,7 +585,7 @@ static void EnsureOutputTextures(RHIDeviceBase& device, u32 width, u32 height) {
     s_OutTexHeight = height;
 }
 
-const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHandle inputHDR, RGResourceHandle bloomTexture, RGResourceHandle aoTexture, RGResourceHandle ssgiTexture, RGResourceHandle velocityTexture, u32 frameIndex) {
+const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHandle inputHDR, RGResourceHandle bloomTexture, RGResourceHandle aoTexture, RGResourceHandle ssgiTexture, RGResourceHandle velocityTexture, u32 frameIndex, float additiveGainOverride) {
     u32 fi = frameIndex % MAX_FRAMES;
     s_ToneMapSetIdx[fi] = 0;
 
@@ -643,7 +646,7 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
 
             EnsurePipeline(builder.GetGraph().GetDevice());
         },
-        [inputHDR, bloomTexture, aoTexture, ssgiTexture, velocityTexture, fi, frameIndex](const ToneMappingPassData& data, RenderGraphContext& context) {
+        [inputHDR, bloomTexture, aoTexture, ssgiTexture, velocityTexture, fi, frameIndex, additiveGainOverride](const ToneMappingPassData& data, RenderGraphContext& context) {
             if (s_ToneMapPipeline == handles::INVALID_PIPELINE) {
                 // R9-WIN fail-fast（2026-11-12 Windows Vulkan 实证）：管线 INVALID 时
                 // 本 pass 跳过绘制后，ToneMapping_Output 成为从未被写入的瞬态、
@@ -911,6 +914,11 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
                 imageInfos[5].imageView = velocityViewHandle;
                 imageInfos[5].sampler = s_ToneMapSampler;
                 imageInfos[6].imageView = s_AdaptState[s_AdaptPing];  // P3.1 本帧新适应态
+                // Dawn has no eye-adaptation pass here, but its explicit
+                // bind-group layout still requires a valid texture at slot 7.
+                if (device.GetPlatform() == RHIPlatform::Dawn &&
+                    imageInfos[6].imageView == handles::INVALID_RESOURCE)
+                    imageInfos[6].imageView = s_DummyTextureView;
                 imageInfos[6].sampler = s_ToneMapSampler;
 
                 // P3.1: 8 bindings — 0..5 纹理/采样器 + 6 ToneParams UBO + 7 适应态
@@ -942,12 +950,12 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
                     * std::pow(2.0f, ToneExposureEV());
                 s_LastUboExposure = exposure;   // sun-audit P3: [ToneAdapt] 采样用
                 const ToneParamsUBO toneParams{ exposure,
-                                                s_AdaptEnabled ? 1.0f : 0.0f,
+                                                (s_AdaptEnabled && device.GetPlatform() != RHIPlatform::Dawn) ? 1.0f : 0.0f,
                                                 s_AdaptKey,
                                                 s_GradeContrast,
                                                 s_GradeSat,
                                                 s_GradeVignette,
-                                                s_BloomIntensity,
+                                                additiveGainOverride >= 0.0f ? additiveGainOverride : s_BloomIntensity,
                                                 0u };
                 device.UpdateBufferData(s_ToneParamsBuf[fi], &toneParams, sizeof(toneParams), 0);
 

@@ -183,6 +183,13 @@ Engine_Test::~Engine_Test() {
 }
 
 bool Engine_Test::initialize() {
+#ifdef __EMSCRIPTEN__
+    const int requested = EM_ASM_INT({
+        const value = new URLSearchParams(location.search).get('mode');
+        return value !== null && /^(10|[0-9])$/.test(value) ? Number(value) : -1;
+    });
+    if (requested >= 0) renderMode_ = static_cast<DawnRenderMode>(requested);
+#endif
     std::cout << "[TestDawnFR] Init..." << std::endl;
 
     // Initialize JobSystem early — GPUMaterialRegistry::BuildAsync schedules on it.
@@ -357,6 +364,7 @@ bool Engine_Test::initialize() {
 
 #ifdef __EMSCRIPTEN__
     g_engineTest = this;
+    forwardRenderer_.SetDawnRenderMode(static_cast<u32>(renderMode_));
     // Create HUD dynamically (independent of shell.html)
     EM_ASM({
         if (!document.getElementById('modeHud')) {
@@ -754,6 +762,22 @@ bool Engine_Test::LoadSponzaScene() {
 
     std::cerr << "[TestDawnFR] Material instances created: " << texLoaded << " loaded, " << texFailed << " failed" << std::endl;
 
+static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR", "MeshletSSGISSRDDGI", "MeshletDynamicDDGI"};
+static const char* kModeDesc[] = {
+    "Directional light only",
+    "Directional + Shadow",
+    "Directional + Shadow + IBL",
+    "Directional + Shadow + IBL + Punctual",
+    "Full + Screen-Space Reflections",
+    "G-Buffer + Deferred Lighting",
+    "Deferred lighting preview (DDGI integration pending)",
+    "Unlit meshlet albedo (V cycles debug views)",
+    "GPU-Driven Meshlet + Indirect Draw + IBL",
+    "GPU-Driven Meshlet + SSGI + SSR",
+    "Meshlet + SSGI + SSR + static DDGI",
+    "GPU-Driven Meshlet + SSGI + SSR + Canonical Dynamic DDGI"
+};
+
     return true;
 }
 
@@ -765,26 +789,6 @@ void Engine_Test::RenderFrame() {
     // mode on load (Tab handler also emits this, but only fires on key press).
     if (!initialModeBroadcast_) {
         initialModeBroadcast_ = true;
-        static constexpr const char* kModeNames[] = {
-            "NoEffects", "ShadowOnly", "ShadowAndIBL", "Full",
-            "DeferredPBR", "DeferredDDGI", "GBufferDDGI",
-            "MeshletNoIBL", "Meshlet", "MeshletSSGISSR",
-            "MeshletDDGI", "MeshletDynamicDDGI"
-        };
-        static constexpr const char* kModeDesc[] = {
-            "Forward PBR (no shadows, no IBL)",
-            "Forward PBR + Shadow Map",
-            "Forward PBR + Shadow + IBL",
-            "Forward PBR + Shadow + IBL + SSR",
-            "G-Buffer + Deferred Lighting",
-            "G-Buffer + Deferred Lighting + DDGI",
-            "G-Buffer + DDGI Global Illumination",
-            "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
-            "GPU-Driven Meshlet + Indirect Draw + IBL",
-            "GPU-Driven Meshlet + SSGI + SSR",
-            "GPU-Driven Meshlet + SSGI + SSR + DDGI",
-            "GPU-Driven Meshlet + SSGI + SSR + Canonical Dynamic DDGI"
-        };
         EM_ASM_({
             if (window.setRenderMode) {
                 window.setRenderMode($0, UTF8ToString($1), UTF8ToString($2));
@@ -804,16 +808,6 @@ void Engine_Test::RenderFrame() {
 
     UpdateCamera(dt);
 
-    u32 imageIndex = 0;
-    if (!swapchain_->AcquireNextImage(&imageIndex)) {
-        device_->EndFrame();
-        frameIndex_++;
-        return;
-    }
-
-    rhi::ResourceHandle backBuffer = swapchain_->GetBackBuffer(imageIndex);
-    if (backBuffer == rhi::handles::INVALID_RESOURCE) return;
-
     u32 fi = frameIndex_ % kFrameCount;
     forwardRenderer_.SetTime(dt, totalFrames_ / 60.0f, frameIndex_);
 
@@ -821,6 +815,18 @@ void Engine_Test::RenderFrame() {
     // Full render path: Shadow → Forward(HDR) → Post-processing → Present
     // ============================================================
 
+    const bool meshletMode = (renderMode_ == DawnRenderMode::MeshletNoIBL ||
+                              renderMode_ == DawnRenderMode::Meshlet ||
+                              renderMode_ == DawnRenderMode::MeshletSSGISSR ||
+                              renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
+                              renderMode_ == DawnRenderMode::MeshletDynamicDDGI);
+    if (meshletMode && !InitializeMeshletPipeline()) {
+        renderMode_ = DawnRenderMode::NoEffects;
+        forwardRenderer_.SetDawnRenderMode(static_cast<u32>(renderMode_));
+        initialModeBroadcast_ = false;
+        device_->EndFrame();
+        return;
+    }
     // 1. Setup render graph FIRST so SSAO/Bloom/ToneMapping resources are created
     //    before any command buffers. Dawn can corrupt heap if resources are created
     //    between two command buffer recordings.
@@ -851,11 +857,6 @@ void Engine_Test::RenderFrame() {
     // RenderMeshletFrame). This flag gates the meshlet depth import (rebinds
     // depthRG from prepassDepthTexture_ to
     // GPUDrivenDrawPipeline::GetFinalDepthTexture()) below.
-    const bool meshletMode = (renderMode_ == DawnRenderMode::MeshletNoIBL ||
-                              renderMode_ == DawnRenderMode::Meshlet ||
-                              renderMode_ == DawnRenderMode::MeshletSSGISSR ||
-                              renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
-                              renderMode_ == DawnRenderMode::MeshletDynamicDDGI);
     // The TAA-bypass diagnostic is a SEPARATE concern: Mode 7/8 keep the bypass,
     // Mode 9 runs TAA (its SSGI/SSR depend on the resolved HDR).
     const bool meshletBypassTAA = (renderMode_ == DawnRenderMode::MeshletNoIBL ||
@@ -910,6 +911,7 @@ void Engine_Test::RenderFrame() {
             renderMode_ == DawnRenderMode::FullPlusSSR ||
             renderMode_ == DawnRenderMode::Deferred ||
             ((renderMode_ == DawnRenderMode::MeshletSSGISSR ||
+        auto ssrHandle = rendergraph::kInvalidRGResourceHandle;
               renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
               renderMode_ == DawnRenderMode::MeshletDynamicDDGI) &&
              (ssgissrSubmode_ == SSGISSRSubmode::SSROnly || ssgissrSubmode_ == SSGISSRSubmode::Both));
@@ -922,14 +924,17 @@ void Engine_Test::RenderFrame() {
             // starting point StandardRenderPipeline uses for settings_.ssr).
             rhi::TextureDesc ormDescForRG;
             ormDescForRG.size = {width_, height_, 1};
-            ormDescForRG.format = rhi::DataFormat::RGBA8_UNorm;
+            ormDescForRG.format = meshletMode ? rhi::DataFormat::BGRA8_UNorm : rhi::DataFormat::RGBA8_UNorm;
             ormDescForRG.type = rhi::TextureType::Texture2D;
             ormDescForRG.usage = rhi::TextureUsage::RenderTarget | rhi::TextureUsage::ShaderResource;
-            auto ormRG = renderGraph_->ImportTexture("GBufferORM_SSR", gbufferTextures_[3], ormDescForRG);
+            auto orm = meshletMode ? primal::graphics::nanite::GPUDrivenDrawPipeline::Get().GetGBufferORM() : gbufferTextures_[3];
+            auto ormRG = renderGraph_->ImportTexture("GBufferORM_SSR", orm, ormDescForRG);
             const auto& ssrOut = PostProcess::AddSSRPass(*renderGraph_, taaHDR, depthRG, hzbHandle,
                                                           velMrtRG, ormRG, width_, height_, frameIndex_,
                                                           view_.GetProjectionMatrix(), invProj, SSRConfig{});
-            taaHDR = ssrOut.outputColor;
+            // SSRPass now returns reflection only. Preserve the TAA scene and
+            // add the reflection once in the tone-map pass below.
+            ssrHandle = ssrOut.outputColor;
         }
 
         // SSGI (Lumen Dawn variant): half-res HZB ray march gathering prev-frame color.
@@ -957,22 +962,17 @@ void Engine_Test::RenderFrame() {
         auto ssaoAOHandle = ssaoOut.ssaoOutput;
 
         // Bloom disabled — BlurPass WGSL/C++ struct mismatch + heap corruption causes validation errors
-        auto bloomHandle = rendergraph::kInvalidRGResourceHandle;
+        auto bloomHandle = ssrHandle;
 
         const auto& tonemapOut = PostProcess::AddToneMappingPass(*renderGraph_, taaHDR, bloomHandle,
-            ssaoAOHandle, ssgiHandle, velMrtRG, fi);
+            ssaoAOHandle, ssgiHandle, velMrtRG, fi, ssrActive ? 1.0f : -1.0f);
         tonemapOutput = tonemapOut.output;
     }
 
-    // Present: blit tonemapped output → backbuffer
-    rhi::TextureDesc bbDesc;
-    bbDesc.size = {width_, height_, 1};
-    bbDesc.format = rhi::DataFormat::BGRA8_UNorm;
-    bbDesc.type = rhi::TextureType::Texture2D;
-    bbDesc.usage = rhi::TextureUsage::RenderTarget;
-    auto bbRG = renderGraph_->ImportTexture("BackBuffer", backBuffer, bbDesc);
-
-    struct PresentData { rendergraph::RGResourceHandle input; rendergraph::RGResourceHandle output; };
+    // Acquire the canvas inside the final pass. Asyncify may yield during scene
+    // setup, at which point a previously acquired WebGPU surface texture expires.
+    bool acquired = false;
+    struct PresentData { rendergraph::RGResourceHandle input; };
 
     // Blit pipeline (static, created once during first setup)
     static rhi::PipelineHandle s_presentPipeline = rhi::handles::INVALID_PIPELINE;
@@ -988,9 +988,7 @@ void Engine_Test::RenderFrame() {
     renderGraph_->AddPass<PresentData>("PresentPass", rendergraph::RGPassType::Graphics, rendergraph::RGPassCategory::Present,
         [&](PresentData& data, rendergraph::RenderGraphBuilder& builder) {
             data.input = tonemapOutput;
-            data.output = bbRG;
             builder.Read(data.input, rhi::ResourceState::ShaderResource);
-            builder.Write(data.output, rhi::ResourceState::RenderTarget);
             builder.SideEffect();
 
             // Create Blit pipeline during setup (not during execute)
@@ -1053,13 +1051,12 @@ void Engine_Test::RenderFrame() {
                     }
             }
         },
-        [this](const PresentData& data, rendergraph::RenderGraphContext& context) {
+        [this, &acquired](const PresentData& data, rendergraph::RenderGraphContext& context) {
             if (s_presentPipeline == rhi::handles::INVALID_PIPELINE) return;
 
             auto& dev = context.graph->GetDevice();
             auto* inputRes = context.graph->GetResource(data.input);
-            auto* outputRes = context.graph->GetResource(data.output);
-            if (!inputRes || !outputRes) return;
+            if (!inputRes) return;
 
             rhi::ResourceHandle inputHandle = inputRes->GetPhysicalHandle();
 
@@ -1083,7 +1080,10 @@ void Engine_Test::RenderFrame() {
 
             rhi::RenderPassDesc passDesc;
             passDesc.colorAttachments.resize(1);
-            passDesc.colorAttachments[0].texture = outputRes->GetPhysicalHandle();
+            u32 imageIndex = 0;
+            acquired = swapchain_->AcquireNextImage(&imageIndex);
+            if (!acquired) return;
+            passDesc.colorAttachments[0].texture = swapchain_->GetBackBuffer(imageIndex);
             passDesc.colorAttachments[0].loadOp = rhi::LoadAction::Clear;
             passDesc.colorAttachments[0].storeOp = rhi::StoreAction::Store;
 
@@ -1190,6 +1190,8 @@ void Engine_Test::RenderFrame() {
                 velRegion.srcOffsets[1] = {(s32)width_, (s32)height_, 1};
                 velRegion.dstSubresource = {0, 0, 1};
                 velRegion.dstOffsets[0] = {0, 0, 0};
+                if (renderMode_ == DawnRenderMode::FullPlusSSR)
+                    forwardRenderer_.RenderDawnGBuffer(cmd, view_, gbufferTextures_, prepassDepthTexture_, materials_, fi, width_, height_);
                 velRegion.dstOffsets[1] = {(s32)width_, (s32)height_, 1};
                 cmd->BlitTexture(gbufferTextures_[4], velocityTexture_, &velRegion, 1, rhi::FilterMode::Nearest);
             } else {
@@ -1206,7 +1208,7 @@ void Engine_Test::RenderFrame() {
         device_->Submit(submitInfo);
     }
 
-    swapchain_->Present(rhi::handles::INVALID_SYNC);
+    if (acquired) swapchain_->Present(rhi::handles::INVALID_SYNC);
     device_->EndFrame();
     frameIndex_++;
     totalFrames_++;
@@ -1425,21 +1427,6 @@ void Engine_Test::UpdateCamera(float dt) {
     // Tab (keyCode 48) to cycle render mode — edge detected.
     // V (keyCode 9) cycles meshlet debug visualization (mode 7/8 only).
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR", "MeshletSSGISSRDDGI", "MeshletDynamicDDGI"};
-        static const char* kModeDesc[] = {
-            "Directional light only",
-            "Directional + Shadow",
-            "Directional + Shadow + IBL",
-            "Directional + Shadow + IBL + Punctual",
-            "Full + Screen-Space Reflections",
-            "G-Buffer + Deferred Lighting",
-            "G-Buffer + DDGI Global Illumination",
-            "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
-            "GPU-Driven Meshlet + Indirect Draw + IBL",
-            "GPU-Driven Meshlet + SSGI + SSR",
-            "GPU-Driven Meshlet + SSGI + SSR + DDGI",
-            "GPU-Driven Meshlet + SSGI + SSR + Canonical Dynamic DDGI"
-        };
         static_assert(std::size(kModeNames) == static_cast<u32>(DawnRenderMode::Count),
                       "kModeNames must cover all DawnRenderMode entries");
         static_assert(std::size(kModeDesc) == static_cast<u32>(DawnRenderMode::Count),
@@ -1585,23 +1572,17 @@ void Engine_Test::UpdateCamera(float dt) {
     // Tab (keyCode 9) to cycle render mode — edge detected.
     // V (keyCode 86) cycles meshlet debug visualization (mode 7/8 only).
     {
-        static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR", "MeshletSSGISSRDDGI", "MeshletDynamicDDGI"};
-        static const char* kModeDesc[] = {
-            "Directional light only",
-            "Directional + Shadow",
-            "Directional + Shadow + IBL",
-            "Directional + Shadow + IBL + Punctual",
-            "Full + Screen-Space Reflections",
-            "G-Buffer + Deferred Lighting",
-            "G-Buffer + DDGI Global Illumination",
-            "Meshlet pipeline — IBL OFF (A/B vs Mode 8)",
-            "GPU-Driven Meshlet + Indirect Draw + IBL",
-            "GPU-Driven Meshlet + SSGI + SSR",
-            "GPU-Driven Meshlet + SSGI + SSR + DDGI",
-            "GPU-Driven Meshlet + SSGI + SSR + Canonical Dynamic DDGI"
-        };
         static_assert(std::size(kModeNames) == static_cast<u32>(DawnRenderMode::Count),
                       "kModeNames must cover all DawnRenderMode entries");
+        if (tabPressed && !prevTabState_ && renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI) {
+            prevTabState_ = true;
+            EM_ASM({
+                var url = new URL(location.href);
+                url.searchParams.set('mode', '11');
+                location.replace(url.href);
+            });
+            return;
+        }
         static_assert(std::size(kModeDesc) == static_cast<u32>(DawnRenderMode::Count),
                       "kModeDesc must cover all DawnRenderMode entries");
         bool tabPressed = EmscriptenGetKeyState(9);
@@ -3345,14 +3326,6 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
         }
     }
 
-    if (!meshletInitialized_) {
-        if (!InitializeMeshletPipeline()) {
-            std::cerr << "[Meshlet] Init failed, falling back to NoEffects" << std::endl;
-            renderMode_ = DawnRenderMode::NoEffects;
-            return;
-        }
-    }
-
     auto& gpuDrawPipeline = primal::graphics::nanite::GPUDrivenDrawPipeline::Get();
     auto& cullingPipeline = primal::graphics::nanite::GPUCullingPipeline::Get();
     const u32 fi = frameIndex_ % kFrameCount;
@@ -3491,6 +3464,14 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
         camData.proj_matrix       = view_.GetProjectionMatrix();
         camData.prev_view_matrix  = camData.view_matrix;
         camData.prev_proj_matrix  = camData.proj_matrix;
+        const auto& sdf = primal::graphics::nanite::GlobalSDF::Get();
+        const bool giReady = renderMode_ == DawnRenderMode::MeshletDynamicDDGI &&
+            sdf.IsInitialized() && sdf.IsVoxelizationReady() &&
+            meshletSceneSnapshot_.GetInstanceCount() > 0 &&
+            gpuDrawPipeline.GetGlobalVertexBuffer() != rhi::handles::INVALID_RESOURCE;
+        camData.gi_content_ready = giReady;
+        camData.gi_frame_index = dynamicGiFrame_;
+        if (giReady) ++dynamicGiFrame_;
         camData.light_direction   = rhi::math::Normalize(currentSunDir_);  // sun→scene direction (same convention as scene_'s dirLight.direction); WGSL negates internally
         camData.light_color       = primal::math::v3{2.5f, 2.4f, 2.1f};
         camData.frame_index       = frameIndex_;
@@ -3896,7 +3877,6 @@ void Engine_Test::applicationWillFinishLaunching(NS::Notification* notification)
     pApp->setActivationPolicy(NS::ActivationPolicy::ActivationPolicyRegular);
 }
 
-bool SetReferenceSunDirection(float yaw, float pitch);
 bool Engine_Test::applicationShouldTerminateAfterLastWindowClosed(NS::Application*) {
     shuttingDown_ = true;
 
@@ -3919,7 +3899,7 @@ bool Engine_Test::applicationShouldTerminateAfterLastWindowClosed(NS::Applicatio
 // Both functions are no-ops on native (guarded by __EMSCRIPTEN__).
 // ============================================================
 #ifdef __EMSCRIPTEN__
-    if (SetReferenceSunDirection(yaw, pitch)) return;
+bool SetReferenceSunDirection(float yaw, float pitch);
 extern "C" {
 
 // Index maps to DawnDebugParams field order (see DawnDebugParams.h).
@@ -3939,6 +3919,7 @@ EMSCRIPTEN_KEEPALIVE void setDebugParam(int idx, float val) {
     }
 }
 
+    if (SetReferenceSunDirection(yaw, pitch)) return;
 // yaw/pitch → direction vector. Panel takes over sun control: auto-rotate
 // is forced off and the JS-side state mirror is updated.
 EMSCRIPTEN_KEEPALIVE void setSunDirection(float yaw, float pitch) {

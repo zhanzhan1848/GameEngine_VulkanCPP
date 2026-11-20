@@ -43,6 +43,6 @@ rhi::ResourceHandle GetToneMappingOutputTexture(u32 frameIndex);
  * @details Applies tone mapping (ACES, Reinhard, etc.) and gamma correction. 
  *          Can optionally composite Bloom and other effects.
  */
-const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHandle inputHDR, RGResourceHandle bloomTexture = {}, RGResourceHandle aoTexture = {}, RGResourceHandle ssgiTexture = {}, RGResourceHandle velocityTexture = {}, u32 frameIndex = 0);
+const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHandle inputHDR, RGResourceHandle bloomTexture = {}, RGResourceHandle aoTexture = {}, RGResourceHandle ssgiTexture = {}, RGResourceHandle velocityTexture = {}, u32 frameIndex = 0, float additiveGainOverride = -1.0f);
 
 } // namespace primal::graphics::PostProcess

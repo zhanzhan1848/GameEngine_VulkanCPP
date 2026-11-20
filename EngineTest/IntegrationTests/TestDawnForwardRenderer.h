@@ -108,8 +108,15 @@ private:
     primal::graphics::RenderView view_;
 
     // Camera — outside Sponza, looking toward origin (same as macOS verified view)
+#ifdef __EMSCRIPTEN__
+    // Start in the Sponza atrium looking along its long axis, so the web
+    // demo opens on the scene instead of immediately facing a side wall.
+    primal::math::v3 cameraPos_{0.0f, 5.0f, 0.0f};
+    float cameraYaw_{1.57079633f};
+#else
     primal::math::v3 cameraPos_{0.0f, 5.0f, -10.0f};
     float cameraYaw_{3.14159265f};
+#endif
     float cameraPitch_{-0.291f};
     float cameraSpeed_{5.0f};
 
@@ -233,6 +240,8 @@ private:
     u32 width_{1280};
     u32 height_{720};
     u32 totalFrames_{0};
+    // Advances only while the dynamic GI scene inputs are available.
+    u32 dynamicGiFrame_{0};
     static constexpr u32 kFrameCount = 3;
 
 #ifdef __APPLE__

@@ -30,8 +30,9 @@ struct TraceResult {
 @group(0) @binding(0) var depthTex: texture_depth_2d;
 @group(0) @binding(1) var hzbTex: texture_2d<f32>;
 @group(0) @binding(2) var colorTex: texture_2d<f32>;        // TAA'd HDR
-@group(0) @binding(3) var ssrOutput: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(4) var<uniform> params: SSRTraceParams;
+@group(0) @binding(3) var ormTex: texture_2d<f32>;
+@group(0) @binding(4) var ssrOutput: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var<uniform> params: SSRTraceParams;
 
 fn ndcDepthToLinear(ndcDepth: f32) -> f32 {
     return (2.0 * params.nearPlane * params.farPlane) /
@@ -220,6 +221,10 @@ fn ssr_trace(@builtin(global_invocation_id) gid: vec3u) {
     let rayOffset = max(0.05, 0.05 / max(NdotV, 0.3));
     let rayOrigin = viewPos + viewNormal * rayOffset;
 
+    if (textureLoad(ormTex, fullPos, 0).g > 0.98) {
+        textureStore(ssrOutput, halfPos, vec4f(0.0));
+        return;
+    }
     // sourceUV lets traceRayHZB skip self-hit pixels.
     let traceResult = traceRayHZB(rayOrigin, reflDir, pixelUV);
 

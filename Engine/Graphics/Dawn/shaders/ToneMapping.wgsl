@@ -165,3 +165,15 @@ fn tonemap_fs(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 
     return vec4<f32>(result, 1.0);
 }
+
+// The forward showcase produces lower-range lighting and separate screen-space
+// buffers. Its meshlet shader already applies the panel's exposure.
+@fragment
+fn tonemap_fs_forward_showcase(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+    let scene = textureSample(sceneTexture, texSampler, uv).rgb;
+    let ao = textureSample(aoTexture, texSampler, uv).r;
+    let indirect = textureSample(ssgiTexture, texSampler, uv).rgb;
+    let reflection = textureSample(bloomTexture, texSampler, uv).rgb;
+    let color = max(scene * ao + indirect * 0.4 + reflection, vec3<f32>(0.0));
+    return vec4<f32>(pow(ACESFilm(color), vec3<f32>(1.0 / 2.2)), 1.0);
+}
