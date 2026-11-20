@@ -4,7 +4,11 @@ window.DAWN_ASSETS = [
     "url": "https://pub-e0a46516544c4038bea407d5fe82f92a.r2.dev/sha256/b0c1f2d5e583508aab922c6e4c2c38cf2a564f952709f45827ac10d4c4757390/Sponza.model",
     "fsPath": "/assets/Sponza.model",
     "sha256": "b0c1f2d5e583508aab922c6e4c2c38cf2a564f952709f45827ac10d4c4757390",
-    "size": 7491644
+    "size": 7491644,
+    "gzip": {
+      "url": "https://pub-e0a46516544c4038bea407d5fe82f92a.r2.dev/sha256/cbb07d1e582556e3f7fac8938d7d9555aa185729e64191121ebd5b1fc18dec4f/Sponza.model.gz",
+      "size": 3101186
+    }
   },
   {
     "url": "https://pub-e0a46516544c4038bea407d5fe82f92a.r2.dev/sha256/49627ecb64a77e12567c8c3853cb63248a14013fd7553ebffb904f8fd428ffec/sunset.hdr",
@@ -468,12 +472,20 @@ window.DAWN_GI_INPUTS = [
     "url": "https://pub-e0a46516544c4038bea407d5fe82f92a.r2.dev/sha256/974efb3a95d7773519691ee937c493fcb306dd717066e42431c691ea7af66d5e/SponzaTangentFrames.model",
     "fsPath": "/assets/SponzaTangentFrames.model",
     "sha256": "974efb3a95d7773519691ee937c493fcb306dd717066e42431c691ea7af66d5e",
-    "size": 189764292
+    "size": 189764292,
+    "gzip": {
+      "url": "https://pub-e0a46516544c4038bea407d5fe82f92a.r2.dev/sha256/b647690997f40be0c919278eba69f673370079a25eb3b6eb51fe28347e9c6b6b/SponzaTangentFrames.model.gz",
+      "size": 18460236
+    }
   },
   {
     "url": "https://pub-e0a46516544c4038bea407d5fe82f92a.r2.dev/sha256/0f00339ae8fc472a0f5b003bc060ab1f7a1b64e2c7d5b5e3d6b93146214ec581/Sponza_global_sdf.v3.cache",
     "fsPath": "/assets/Sponza_global_sdf.v3.cache",
     "sha256": "0f00339ae8fc472a0f5b003bc060ab1f7a1b64e2c7d5b5e3d6b93146214ec581",
-    "size": 113246264
+    "size": 113246264,
+    "gzip": {
+      "url": "https://pub-e0a46516544c4038bea407d5fe82f92a.r2.dev/sha256/180de01dd4f4163c0805ed178865cbf2f8cdd35b73004f633626bc036f69a123/Sponza_global_sdf.v3.cache.gz",
+      "size": 17488892
+    }
   }
 ];

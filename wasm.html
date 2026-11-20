@@ -458,6 +458,12 @@
       };
 
       window.hideLoading = function() {
+        if (new URLSearchParams(location.search).get('mode') !== '11') {
+          for (let i = 0; i < 7; i++) {
+            const slider = document.getElementById('param_' + i);
+            if (slider) window._setDebugParam(i, Number(slider.value));
+          }
+        }
         loadingOverlay.classList.add('hidden');
         statusLeft.textContent = 'Running';
         // Notify parent launcher (if any) that this iframe's demo is ready.
@@ -592,9 +598,11 @@
           : window.DAWN_ASSETS;
         DawnAssetLoader.stageAssets(items, {
           modelPath: referenceGI ? '/assets/SponzaTangentFrames.model' : '/assets/Sponza.model',
-          fs: FS, fetch: window.fetch.bind(window), crypto: window.crypto,
-          progress: function(done, total) {
-            setProgress(Math.round(10 + 80 * done / total), 'Loading scene ' + done + '/' + total);
+          fs: FS, fetch: window.fetch.bind(window), crypto: window.crypto, cacheStorage: window.caches,
+          progress: function(done, total, ready, bytes) {
+            const mb = value => (value / 1000000).toFixed(1);
+            setProgress(Math.round(10 + 80 * ready / bytes),
+              'Preparing scene ' + mb(ready) + ' / ' + mb(bytes) + ' MB (' + done + '/' + total + ')');
           }
         }).then(function() {
           if (referenceGI) {
@@ -633,7 +641,10 @@
         },
         printErr: function(text) {
           console.error('[WASM]', text);
-          window.setStatus(text);
+        },
+        onAbort: function(reason) {
+          window.setStatus('Engine stopped: ' + reason);
+          setProgress(0, 'Engine stopped: ' + reason);
         },
         canvas: canvas,
         setStatus: function(text) {
