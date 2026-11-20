@@ -567,6 +567,17 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
             << " DSV=" << (wantDsv ? fmtName(dxgiFull) : std::string("none"))
             << " SRV=" << fmtName(DepthSrvFormat(texDesc_.format)) << std::endl;
     }
+    // R39（黑帧线）：每个纹理创建回显 GPU VA——同堆内两资源 VA 区间相交
+    // 即分配器别名/重叠实锤（R37 rg 探针读出 velocity 类数据的
+    // memory-overlap 假说判别面）。VA=0 仅 wrap/view 特例。诊断专用。
+    PRIMAL_LOG_STREAM(Info, "RHI")
+        << "[D3D12_VA] name='" << texDesc_.name << "' "
+        << GetNativeDesc().Width << "x" << GetNativeDesc().Height
+        << " array=" << static_cast<unsigned>(GetNativeDesc().DepthOrArraySize)
+        << " mips=" << GetNativeDesc().MipLevels
+        << " fmt=" << static_cast<unsigned>(texDesc_.format)
+        << " va=" << (resource_ ? resource_->GetGPUVirtualAddress() : 0ull)
+        << std::endl;
     return true;
 }
 

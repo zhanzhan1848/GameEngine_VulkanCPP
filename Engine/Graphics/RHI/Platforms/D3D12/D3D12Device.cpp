@@ -1611,19 +1611,18 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
         const bool sameSlotStale = oldOwnerSlot == currentFrameIndex_;
         const bool fromLimbo = sameSlotStale
             && heaps.CbvSrvUavLimboMatches(oldOwnerSlot, oldOwnerEpoch);
-        if (sameSlotStale && !fromLimbo && !warnedStaleBeyondLimbo_) {
-            warnedStaleBeyondLimbo_ = true;
-            // R34：点名 set——该告警区此后描述符为垃圾（"交由写入路径重建"，
-            // 只对逐帧全量重写的 set 成立）。若某 set 仅 init 期物化一次、
-            // 之后不再 UpdateDescriptorSets，其 region 的垃圾描述符永驻 =
-            // 对应 GPU 写恒零（SPGI/DDGI/blit 输出归零的候选机制）。
+        if (sameSlotStale && !fromLimbo) {
+            // R39：去 warned-once——全量打点每次 beyond-limbo 迁移（含 set
+            // base/main_count，R34 已加）。"region left for write-path
+            // rebuild" 的假设（逐帧 set 全量重写）若对某 set 不成立，其
+            // 垃圾描述符永驻 = 死写候选；多发生频次/多 set 归属是判别面。
             PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
                 << "[D3D12Device] set migration beyond limbo snapshot (slot "
                 << oldOwnerSlot << " epoch " << oldOwnerEpoch
                 << " base=" << set->BaseSlot()
                 << " main_count=" << set->MainCount()
                 << "): content not recoverable, skipping copy (region left "
-                   "for write-path rebuild; warned once)" << std::endl;
+                   "for write-path rebuild)" << std::endl;
         }
         if (!sameSlotStale || fromLimbo) {
             native->CopyDescriptorsSimple(
