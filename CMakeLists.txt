@@ -549,7 +549,8 @@ else()
             DISABLE_PARTICLE_FX=1
             PRIMAL_PLUS
         )
-        target_compile_options(TestDawnWASM PRIVATE "--use-port=emdawnwebgpu")
+        target_compile_options(TestDawnWASM PRIVATE "--use-port=emdawnwebgpu"
+            "-include" "${CMAKE_SOURCE_DIR}/Engine/Common/WasmStdIncludeShim.h")
         target_link_libraries(TestDawnWASM PRIVATE Engine)
         target_link_options(TestDawnWASM PRIVATE
             "--use-port=emdawnwebgpu"
@@ -646,7 +647,8 @@ else()
             DISABLE_PARTICLE_FX=1
             PRIMAL_PLUS
         )
-        target_compile_options(TestKenneyTilePreviewWASM PRIVATE "--use-port=emdawnwebgpu")
+        target_compile_options(TestKenneyTilePreviewWASM PRIVATE "--use-port=emdawnwebgpu"
+            "-include" "${CMAKE_SOURCE_DIR}/Engine/Common/WasmStdIncludeShim.h")
         target_link_libraries(TestKenneyTilePreviewWASM PRIVATE Engine)
         target_link_options(TestKenneyTilePreviewWASM PRIVATE
             "--use-port=emdawnwebgpu"

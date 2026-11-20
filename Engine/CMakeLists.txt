@@ -934,6 +934,13 @@ if(EMSCRIPTEN)
     # 会随链接接口传递给 TestDawnWASM 等消费目标；compile 侧仅本库 TU 直含 zlib.h。
     target_compile_options(${PROJECT_NAME} PRIVATE "-sUSE_ZLIB=1")
     target_link_options(${PROJECT_NAME} PRIVATE "-sUSE_ZLIB=1")
+    # 新 libc++（emcc 7.x）大量收敛传递包含：全库数十个 TU 直接使用 std::vector/
+    # std::string 而无显式 include（CommonHeaders.h 本就刻意不收 vector），native
+    # 平台靠 libstdc++/旧 libc++ 传递包含存活。此处按 TU 级强制包含恢复旧可见性
+    # （垫片头按绝对路径注入——裸 "-include string" 会被 emcc 驱动误当输入文件），
+    # 避免数十文件的手工 include 大 diff；新代码仍应显式 include。
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        "-include" "${CMAKE_CURRENT_SOURCE_DIR}/Common/WasmStdIncludeShim.h")
 elseif(UNIX AND NOT APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         X11

@@ -11,6 +11,9 @@
 #include <sstream>
 #include <cstring>
 #include <set>
+#include <vector>
+#include <string>   // 新 libc++（emcc 7）不再传递给出 vector/string
+
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::lumen {
