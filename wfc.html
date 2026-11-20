@@ -953,9 +953,8 @@
       }
 
       var Module = {
-        preRun: [function() {
-          stageAllAssets();
-        }],
+        // Kenney meshes and textures are embedded; WFC does not use Sponza.
+        preRun: [],
         postRun: [function() {
           // Loading overlay hidden by C++ after GPU texture upload.
           // setWfcHud is wired via EXPORTED_FUNCTIONS in CMakeLists.txt —
