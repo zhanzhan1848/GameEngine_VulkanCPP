@@ -17,9 +17,14 @@ set(COMMON_HEADERS
 )
 
 # 辅助函数：配置测试目标
+if(PRIMAL_ISOLATED_OUTPUTS AND APPLE)
+    set(PRIMAL_INTEGRATION_OUTPUT_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+else()
+    set(PRIMAL_INTEGRATION_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/")
+endif()
 function(setup_test_target target_name)
     set_target_properties(${target_name} PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/"
+        RUNTIME_OUTPUT_DIRECTORY "${PRIMAL_INTEGRATION_OUTPUT_DIR}"
     )
     # R9: Agility runtime DLL staging per exe (no-op outside Windows+D3D12
     # trees; defined in Engine/CMakeLists.txt which configures first).
@@ -123,13 +128,19 @@ enable_testing()
 # stale-test port: one-time (per build) copy of shaders/assets into the shared
 # Darwin/Debug output directory used by every integration test target.
 set(ITEST_ASSETS_STAMP ${CMAKE_BINARY_DIR}/IntegrationTestsAssetsCopy.stamp)
+if(PRIMAL_ISOLATED_OUTPUTS AND APPLE)
+    # Source assets are inputs (several GiB); only shaders need a private copy.
+    set(PRIMAL_TEST_ASSET_COMMAND create_symlink)
+else()
+    set(PRIMAL_TEST_ASSET_COMMAND copy_directory)
+endif()
 add_custom_command(OUTPUT ${ITEST_ASSETS_STAMP}
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         ${CMAKE_CURRENT_SOURCE_DIR}/../shaders
-        ${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/shaders
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${PRIMAL_INTEGRATION_OUTPUT_DIR}/shaders
+    COMMAND ${CMAKE_COMMAND} -E ${PRIMAL_TEST_ASSET_COMMAND}
         ${CMAKE_CURRENT_SOURCE_DIR}/../assets
-        ${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/assets
+        ${PRIMAL_INTEGRATION_OUTPUT_DIR}/assets
     COMMAND ${CMAKE_COMMAND} -E touch ${ITEST_ASSETS_STAMP}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../shaders ${CMAKE_CURRENT_SOURCE_DIR}/../assets
     COMMENT "Copying EngineTest shaders/assets to output directory"

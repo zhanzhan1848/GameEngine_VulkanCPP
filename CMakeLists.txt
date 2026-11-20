@@ -48,8 +48,14 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "Choose build type: Debug Release" FORCE)
 endif()
 
-# 设置输出目录
-if(EMSCRIPTEN)
+# Explicit macOS backend worktrees must not overwrite another tree's engine
+# archive or executable. Existing editor/CLI paths retain their defaults.
+option(PRIMAL_ISOLATED_OUTPUTS "Keep macOS build products and generated config inside the build tree" OFF)
+if(PRIMAL_ISOLATED_OUTPUTS AND APPLE)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/artifacts/$<CONFIG>)
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/artifacts/$<CONFIG>)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/artifacts/$<CONFIG>)
+elseif(EMSCRIPTEN)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/WASM)
     set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/WASM)
     set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/WASM)
@@ -71,11 +77,20 @@ set(ENGINE_ASSETS_DIR ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/Assets)
 set(ENGINE_SHADERS_DIR ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/Shaders)
 set(ENGINE_RESOURCES_DIR ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/Resources)
 
-# 生成配置头文件
-configure_file(
-    ${CMAKE_SOURCE_DIR}/Engine/Common/EngineConfig.h.in
-    ${CMAKE_SOURCE_DIR}/Engine/Common/EngineConfig.h
-)
+# Isolated configurations must not rewrite the shared source-tree header.
+if(PRIMAL_ISOLATED_OUTPUTS AND APPLE)
+    set(PRIMAL_CONFIG_INCLUDE_DIR ${CMAKE_BINARY_DIR}/generated/$<CONFIG>)
+    file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
+    # Expand configuration-dependent paths for Makefiles and Xcode alike.
+    configure_file(${CMAKE_SOURCE_DIR}/Engine/Common/EngineConfig.h.in
+                   ${CMAKE_BINARY_DIR}/generated/EngineConfig.configured.h)
+    file(GENERATE OUTPUT ${PRIMAL_CONFIG_INCLUDE_DIR}/EngineConfig.h
+         INPUT ${CMAKE_BINARY_DIR}/generated/EngineConfig.configured.h)
+    include_directories(BEFORE ${PRIMAL_CONFIG_INCLUDE_DIR})
+else()
+    configure_file(${CMAKE_SOURCE_DIR}/Engine/Common/EngineConfig.h.in
+                   ${CMAKE_SOURCE_DIR}/Engine/Common/EngineConfig.h)
+endif()
 
 # 导入CMake工具模块
 # include(CMake/Default.cmake)
@@ -239,24 +254,40 @@ elseif(APPLE AND NOT EMSCRIPTEN)
             link_directories("${FBX_SDK_ROOT}/lib/release")
         endif()
         
-        # 复制FBX SDK动态库到输出目录
-        if(EXISTS "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib")
-            file(COPY "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib" 
-                 DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
-        elseif(EXISTS "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib")
-            file(COPY "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib" 
-                 DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
-        elseif(EXISTS "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib")
-            file(COPY "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib" 
-                 DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
-        elseif(EXISTS "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib")
-            file(COPY "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib" 
-                 DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
-        elseif(EXISTS "${FBX_SDK_ROOT}/lib/libfbxsdk.dylib")
-            file(COPY "${FBX_SDK_ROOT}/lib/libfbxsdk.dylib" 
-                 DESTINATION ${CMAKE_LIBRARY_OUTPUT_DIRECTORY})
+        # file(COPY) runs at configure time and cannot expand $<CONFIG>.
+        set(PRIMAL_FBX_DESTINATIONS "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+        if(PRIMAL_ISOLATED_OUTPUTS AND APPLE)
+            set(PRIMAL_FBX_DESTINATIONS)
+            if(CMAKE_CONFIGURATION_TYPES)
+                set(PRIMAL_FBX_CONFIGS ${CMAKE_CONFIGURATION_TYPES})
+            else()
+                set(PRIMAL_FBX_CONFIGS ${CMAKE_BUILD_TYPE})
+            endif()
+            foreach(PRIMAL_FBX_CONFIG IN LISTS PRIMAL_FBX_CONFIGS)
+                string(REPLACE "$<CONFIG>" "${PRIMAL_FBX_CONFIG}" PRIMAL_FBX_DESTINATION "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}")
+                list(APPEND PRIMAL_FBX_DESTINATIONS "${PRIMAL_FBX_DESTINATION}")
+            endforeach()
         endif()
-        
+        foreach(PRIMAL_FBX_DESTINATION IN LISTS PRIMAL_FBX_DESTINATIONS)
+            # 复制FBX SDK动态库到输出目录
+            if(EXISTS "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib")
+                file(COPY "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib"
+                     DESTINATION ${PRIMAL_FBX_DESTINATION})
+            elseif(EXISTS "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib")
+                file(COPY "${FBX_SDK_ROOT}/lib/debug/libfbxsdk.dylib"
+                     DESTINATION ${PRIMAL_FBX_DESTINATION})
+            elseif(EXISTS "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib")
+                file(COPY "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib"
+                     DESTINATION ${PRIMAL_FBX_DESTINATION})
+            elseif(EXISTS "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib")
+                file(COPY "${FBX_SDK_ROOT}/lib/release/libfbxsdk.dylib"
+                     DESTINATION ${PRIMAL_FBX_DESTINATION})
+            elseif(EXISTS "${FBX_SDK_ROOT}/lib/libfbxsdk.dylib")
+                file(COPY "${FBX_SDK_ROOT}/lib/libfbxsdk.dylib"
+                     DESTINATION ${PRIMAL_FBX_DESTINATION})
+            endif()
+        endforeach()
+
         # 添加FBX SDK编译定义
         add_definitions(-DENABLE_FBX_SDK=1)
         
@@ -452,6 +483,12 @@ if(NOT CMAKE_BUILD_TYPE MATCHES "^(Debug|Release|ReleaseASAN|ReleaseUBSAN|Releas
 endif()
 add_subdirectory(third_party/JoltPhysics/Build)
 set(CMAKE_BUILD_TYPE "${JOLT_ORIG_BUILD_TYPE}")
+if(PRIMAL_ISOLATED_OUTPUTS AND APPLE AND NOT CMAKE_CONFIGURATION_TYPES)
+    # Jolt normalizes RelWithDebInfo to Debug internally. Use the caller's
+    # literal artifact path so producer and consumer resolve the same archive.
+    set_target_properties(Jolt PROPERTIES ARCHIVE_OUTPUT_DIRECTORY
+        "${CMAKE_BINARY_DIR}/artifacts/${JOLT_ORIG_BUILD_TYPE}")
+endif()
 if(NOT JOLT_ORIG_BUILD_TYPE MATCHES "^(Debug|Release|ReleaseASAN|ReleaseUBSAN|ReleaseTSAN|ReleaseCoverage|Distribution)$")
     # Jolt 的 INTERFACE 条件定义按"消费者"的 config 求值：非标准 config（如 DebugEditor）
     # 永远不命中 gen-expr，收不到这些宏 → 与 libJolt.a 条件编译不一致（布局错位）。

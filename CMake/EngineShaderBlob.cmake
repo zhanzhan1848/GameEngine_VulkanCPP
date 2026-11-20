@@ -53,6 +53,8 @@ add_custom_target(BuildEngineShaderBlob
     COMMENT "Engine shaders packed legacy blob"
 )
 
+# Backend-isolated builds never deploy into the shared editor output.
+if(NOT PRIMAL_ISOLATED_OUTPUTS)
 # Make the editor copy the blob into its working directory at build time
 # so the engine can find it. This runs as part of the editor's PostBuild.
 add_custom_command(
@@ -78,3 +80,5 @@ add_custom_command(
     COMMENT "Copying BlitToDrawable metallib to editor output"
     VERBATIM
 )
+
+endif()

@@ -356,8 +356,13 @@ if(APPLE)
         ${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/lib/libopenvdb.dylib
         TBB::tbb
     )
+    if(PRIMAL_ISOLATED_OUTPUTS AND APPLE)
+        set(PRIMAL_PFX_OUTPUT_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+    else()
+        set(PRIMAL_PFX_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/")
+    endif()
     set_target_properties(pfx_converter PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/"
+        RUNTIME_OUTPUT_DIRECTORY "${PRIMAL_PFX_OUTPUT_DIR}"
         BUILD_RPATH "${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/lib"
         INSTALL_RPATH "${CMAKE_SOURCE_DIR}/third_party/Alembic/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/TBB/Mac/lib;${CMAKE_SOURCE_DIR}/third_party/OpenVDB/Mac/lib"
     )
