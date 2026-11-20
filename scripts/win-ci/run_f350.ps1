@@ -63,9 +63,12 @@ if ($env:PRIMAL_F350_SHADOW_RENDER_OFF_DIAG -eq '1') {
 # R36b 时序判别组（PRIMAL_F350_FRAME50_DUMP_DIAG=1）：BLACK_STAGE_FRAME=50
 # ——SPGI/blit/GlobalSDF 在 frame 50 是否有内容。frame50 活而 frame350 零 =
 # 中途死亡（与遥测/事件对齐）；两帧皆零 = 从未工作（init/首次 dispatch 面）。
+# R36b→R39b 时序判别组（PRIMAL_F350_FRAME50_DUMP_DIAG=1）：BLACK_STAGE_FRAME=4
+# ——voxelization/SPGI/blit 首次 dispatch 后立即读（frame 4）：
+# frame4 即零 = 首写失败（init/首 dispatch 面收敛）；frame4 活而 350 零 = 中途覆写。
 if ($env:PRIMAL_F350_FRAME50_DUMP_DIAG -eq '1') {
-    $diagGroups += @{ name = 'd3d12-gion-frame50'; api = 'd3d12'; gi = 1;
-                      ppm = 'art2_win_d3d12_frame50_f350.ppm'; diag = 3 }
+    $diagGroups += @{ name = 'd3d12-gion-frame4'; api = 'd3d12'; gi = 1;
+                      ppm = 'art2_win_d3d12_frame4_f350.ppm'; diag = 3 }
 }
 
 # Asset gates (same files the r11 launchers hard-require before running).
@@ -141,7 +144,7 @@ foreach ($g in ($groups + $diagGroups)) {
     # diag=3 BLACK_STAGE_FRAME=50；canonical 组确保无残留）
     if ($g.diag -eq 1) { $env:TAA_OFF = '1' }
     elseif ($g.diag -eq 2) { $env:PRIMAL_SHADOW_RENDER_OFF = '1' }
-    elseif ($g.diag -eq 3) { $env:PRIMAL_D3D12_BLACK_STAGE_FRAME = '50' }
+    elseif ($g.diag -eq 3) { $env:PRIMAL_D3D12_BLACK_STAGE_FRAME = '4' }
     else {
         Remove-Item Env:TAA_OFF -ErrorAction SilentlyContinue
         Remove-Item Env:PRIMAL_SHADOW_RENDER_OFF -ErrorAction SilentlyContinue
