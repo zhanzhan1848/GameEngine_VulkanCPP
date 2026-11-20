@@ -4,6 +4,7 @@
 #include "LightmapAtlasPacker.h"
 
 #include <algorithm>
+#include <cstdlib>  // R39b：std::abs(int)——Emscripten libc++ 无传递包含（桌面链侥幸），run 44660586799 wasm 首炸
 
 namespace primal::graphics::baking {
 
