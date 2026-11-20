@@ -5929,8 +5929,16 @@ void R34UavWriteProbe(rhi::RHIDeviceBase* device) {
         return;
     }
 
-    DescData params{0, DescriptorType::StorageImage, tex};
-    UpdateDesc(device, descSet, &params, 1);
+    // R40：双绑定——b0 探针输出（StorageImage），b1 = gbuffer albedo 源
+    //（SampledImage）——shader 输出 = 常数 + 采样值×0.5：
+    //   输出 > 常数 → SRV 读活（读路径正常，死写在别处）
+    //   输出 = 纯常数 → SRV 读零（描述符/状态错位实锤）
+    //   输出 = 零 → UAV 写死（不应出现——R35b 已证独立 cmd 写活）
+    DescData params[2]{
+        {0, DescriptorType::StorageImage, tex},
+        {1, DescriptorType::SampledImage, srcTex},
+    };
+    UpdateDesc(device, descSet, params, 2);
 
     // —— dispatch（独立命令缓冲，与 dump 读回同一提交纪律） ——
     bool dispatched = false;
@@ -6241,7 +6249,10 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             }
             // R35：最小 UAV 写探针（自建资源自建 dispatch，与业务 pass 零
             // 耦合）——非零=引擎 UAV 写活（死写为 pass 级）；零=引擎级失效。
-            R34UavWriteProbe(device_);
+            // 探针/各资源的 GPU VA 由 R39 的 [D3D12_VA] 创建期回显面覆盖
+            //（D3D12Texture.cpp，WIN32 侧）。R40：传入 gbuffer albedo 作
+            // SRV 读判别源（输出 = 常数 + 采样×0.5）。
+            R34UavWriteProbe(device_, gpuDrawStage.GetGBufferAlbedo());
             // R37：RG 命令缓冲内探针读回（blit cmd 内 dispatch+copy，
             // frame ~2 落盘、此时读出）——与 R35 独立 cmd 探针对照：
             //   rg 活+独立活 → 业务死因在各管线自身绑定/输入

@@ -5,10 +5,18 @@
 // 单 binding（StorageImage）单 dispatch，imageStore 常数色——读回非零 =
 // 引擎 UAV 写路径活（死写为 pass 级问题）；读回零 = 引擎级 UAV 写失效
 // （描述符物化/根签名/状态机方向收敛）。仅诊断注册，业务无感。
+// R40（2026-11-20）：SRV 读判别——binding 1 加 SampledImage（gbuffer
+// albedo，由宿主更新绑定），输出 = 常数 + 采样值：输出含 albedo 内容 =
+// SRV 读路径活（死写在描述符/状态外）；输出 = 纯常数或零 = SRV 读死
+//（描述符物化错位实锤）。
 #version 450
+#extension GL_EXT_samplerless_texture_functions : require
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0, rgba16f) writeonly uniform image2D u_probe;
+layout(set = 0, binding = 1) uniform texture2D u_probe_src;
 
 void main() {
-    imageStore(u_probe, ivec2(gl_GlobalInvocationID.xy), vec4(1.0, 0.75, 0.5, 1.0));
+    vec4 sampled = texelFetch(u_probe_src, ivec2(gl_GlobalInvocationID.xy), 0);
+    imageStore(u_probe, ivec2(gl_GlobalInvocationID.xy),
+               vec4(1.0, 0.75, 0.5, 1.0) + sampled * 0.5);
 }
