@@ -4,7 +4,7 @@
 //   RT0: WorldPos (xyz) + unused (w)             RGBA16F
 //   RT1: Normal (xyz)*0.5+0.5 + linearDepth (w)   RGBA16F
 //   RT2: Albedo (rgb) + metallic (a)              RGBA8_sRGB
-//   RT3: ORM (r=ao, g=roughness, b=0, a=0)        RGBA8
+//   RT3: ORM (r=ao, g=roughness, b=metallic, a=0)        RGBA8
 //   RT4: Velocity (rg) + 0,0                      RG16F
 //
 // 3b-2: albedo/ORM are constant defaults (no material textures yet).
@@ -132,8 +132,8 @@ fn gbuffer_fs(input: VSOutput) -> FSOutput {
     // B=metallic (matches ForwardPBR:244 unpacking).
     output.rt2 = vec4<f32>(albedoTex, ormTex.b);
 
-    // RT3: occlusion (r), roughness (g). B/A unused (reserved for emissive).
-    output.rt3 = vec4<f32>(ormTex.r, ormTex.g, 0.0, 0.0);
+    // SSR consumes occlusion, roughness and metallic in the shared ORM layout.
+    output.rt3 = vec4<f32>(ormTex.rgb, 0.0);
 
     // Velocity in NDC: (cur - prev) * 0.5. curClip/prevClip interpolation is
     // perspective-correct, so dividing in fragment gives accurate NDC. Matches

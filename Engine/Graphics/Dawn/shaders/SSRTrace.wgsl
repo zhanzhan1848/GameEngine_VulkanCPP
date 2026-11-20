@@ -35,8 +35,16 @@ struct TraceResult {
 @group(0) @binding(5) var<uniform> params: SSRTraceParams;
 
 fn ndcDepthToLinear(ndcDepth: f32) -> f32 {
-    return (2.0 * params.nearPlane * params.farPlane) /
-           (params.farPlane + params.nearPlane - ndcDepth * (params.farPlane - params.nearPlane));
+    // WebGPU stores clip.z / clip.w in [0, 1]. Apply the same inverse
+    // projection used by reconstructViewPos so hits and rays share units.
+    let view = params.invProj[2] * ndcDepth + params.invProj[3];
+    return -view.z / view.w;
+}
+
+fn sceneDepthAtUV(uv: vec2f) -> f32 {
+    let size = vec2i(textureDimensions(depthTex));
+    let pixel = clamp(vec2i(uv * vec2f(size)), vec2i(0), size - 1);
+    return ndcDepthToLinear(textureLoad(depthTex, pixel, 0));
 }
 
 fn reconstructViewPos(uv: vec2f, ndcDepth: f32) -> vec3f {
@@ -159,12 +167,26 @@ fn traceRayHZB(rayOriginView: vec3f, rayDirView: vec3f, sourceUV: vec2f) -> Trac
 
         if (rayDepthLinear > sceneDepthLinear) {
             if (mip == 0u) {
-                if (rayDepthLinear <= sceneDepthLinear + params.thickness) {
-                    result.hit = true;
-                    result.hitUV = sampleUV;
-                    result.hitDist = t;
-                    break;
+                // Locate the first full-resolution depth crossing inside this
+                // step instead of returning its far endpoint as the reflected UV.
+                var lo = t - stepSize;
+                var hi = t;
+                for (var i = 0u; i < 5u; i++) {
+                    let mid = (lo + hi) * 0.5;
+                    let pos = rayOriginView + mid * rayDirView;
+                    let uv = viewToScreen(pos).xy;
+                    let surface = sceneDepthAtUV(uv);
+                    if (pos.z < surface) { lo = mid; } else { hi = mid; }
                 }
+                let hit = rayOriginView + hi * rayDirView;
+                let hitUV = viewToScreen(hit).xy;
+                let delta = hit.z - sceneDepthAtUV(hitUV);
+                if (delta >= 0.0 && delta <= params.thickness) {
+                    result.hit = true;
+                    result.hitUV = hitUV;
+                    result.hitDist = hi;
+                }
+                break;
             } else {
                 t -= stepSize;
                 mip = mip - 1u;
@@ -176,8 +198,7 @@ fn traceRayHZB(rayOriginView: vec3f, rayDirView: vec3f, sourceUV: vec2f) -> Trac
     return result;
 }
 
-@compute @workgroup_size(8, 8, 1)
-fn ssr_trace(@builtin(global_invocation_id) gid: vec3u) {
+fn traceReflection(gid: vec3u, weightMaterial: bool) {
     let halfDims = vec2u(params.halfScreenSize.xy);
     if (gid.x >= halfDims.x || gid.y >= halfDims.y) { return; }
 
@@ -200,6 +221,10 @@ fn ssr_trace(@builtin(global_invocation_id) gid: vec3u) {
         return;
     }
 
+    if (textureLoad(ormTex, fullPos, 0).g > 0.98) {
+        textureStore(ssrOutput, halfPos, vec4f(0.0));
+        return;
+    }
     let pixelUV = (vec2f(fullPos) + 0.5) / params.screenSize.xy;
     let viewPos = reconstructViewPos(pixelUV, depth);
     let viewNormal = reconstructViewNormal(fullPos, pixelUV, depth);
@@ -221,10 +246,6 @@ fn ssr_trace(@builtin(global_invocation_id) gid: vec3u) {
     let rayOffset = max(0.05, 0.05 / max(NdotV, 0.3));
     let rayOrigin = viewPos + viewNormal * rayOffset;
 
-    if (textureLoad(ormTex, fullPos, 0).g > 0.98) {
-        textureStore(ssrOutput, halfPos, vec4f(0.0));
-        return;
-    }
     // sourceUV lets traceRayHZB skip self-hit pixels.
     let traceResult = traceRayHZB(rayOrigin, reflDir, pixelUV);
 
@@ -259,8 +280,26 @@ fn ssr_trace(@builtin(global_invocation_id) gid: vec3u) {
         let grazingFade = smoothstep(0.2, 0.5, NdotV);
 
         let strength = distFade * edgeFade * grazingFade;
-        textureStore(ssrOutput, halfPos, vec4f(hitColor.rgb * strength, strength));
+        var fresnel = 1.0;
+        if (weightMaterial) {
+            // The showcase adds SSR directly to the lit scene. Weight the
+            // incoming radiance once, keeping the hit confidence independent.
+            let metallic = textureLoad(ormTex, fullPos, 0).b;
+            let f0 = mix(0.04, 1.0, metallic);
+            fresnel = f0 + (1.0 - f0) * pow(1.0 - clamp(NdotV, 0.0, 1.0), 5.0);
+        }
+        textureStore(ssrOutput, halfPos, vec4f(hitColor.rgb * strength * fresnel, strength));
     } else {
         textureStore(ssrOutput, halfPos, vec4f(0.0));
     }
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn ssr_trace(@builtin(global_invocation_id) gid: vec3u) {
+    traceReflection(gid, false);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn ssr_trace_showcase(@builtin(global_invocation_id) gid: vec3u) {
+    traceReflection(gid, true);
 }

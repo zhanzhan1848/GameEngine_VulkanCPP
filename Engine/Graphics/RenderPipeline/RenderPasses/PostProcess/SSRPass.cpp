@@ -9,6 +9,7 @@
 #include <sstream>
 #include <iostream>
 #include <cmath>
+#include <cstdlib>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::PostProcess {
@@ -156,7 +157,11 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
     const char* temporalName = binaryNames ? "SSRTemporal"  : "SSRTemporal";
     const char* upsampleName = binaryNames ? "SSRComposite" : "SSRComposite";
 
-    ShaderHandle traceCS    = loadShader(traceName,    "ssr_trace");
+    const char* traceEntry = "ssr_trace";
+#ifdef __EMSCRIPTEN__
+    if (std::getenv("PRIMAL_DAWN_FORWARD_SHOWCASE")) traceEntry = "ssr_trace_showcase";
+#endif
+    ShaderHandle traceCS    = loadShader(traceName, traceEntry);
     ShaderHandle temporalCS = loadShader(temporalName, "ssr_temporal");
     ShaderHandle upsampleCS = loadShader(upsampleName, "ssr_composite");
 
@@ -187,12 +192,12 @@ static bool EnsurePipelines(RHIDeviceBase& device) {
         DescriptorSetLayoutBinding bindings[6]{};
         bindings[0] = {0, DescriptorType::SampledDepthImage, 1, ShaderStage::Compute};
         bindings[1] = {1, DescriptorType::SampledImage,      1, ShaderStage::Compute};
+        bindings[1].unfilterableFloat = true; // HZB is R32Float in WebGPU.
         bindings[2] = {2, DescriptorType::SampledImage,      1, ShaderStage::Compute};
         bindings[3] = {3, DescriptorType::SampledImage,      1, ShaderStage::Compute};  // ORM
         bindings[4] = {4, DescriptorType::StorageImage,      1, ShaderStage::Compute};
         bindings[5] = {5, DescriptorType::UniformBuffer,     1, ShaderStage::Compute};
         bindings[5].minBindingSize = 192;
-        bindings[1].unfilterableFloat = true; // HZB is R32Float in WebGPU.
 
         DescriptorSetLayoutDesc dslDesc;
         dslDesc.bindingCount = 6;

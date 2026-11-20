@@ -1415,6 +1415,13 @@ void ForwardRenderer::RenderDawnShadowPass(rhi::RHICommandBuffer* cmdBuffer,
     cmdBuffer->InsertBarrier(&b, 1);
 }
 
+// Meshlet scenes can supply a cluster entity as meshId. Raster passes must
+// draw the RenderMesh registered for the geometry that owns this material.
+static RenderMesh* GetDawnRasterMesh(const RenderProxy& proxy) {
+    return RenderMesh::GetByEntityId(proxy.contentMeshId != id::invalid_id
+        ? proxy.contentMeshId : proxy.meshId);
+}
+
 void ForwardRenderer::RenderDawnDepthPrepass(rhi::RHICommandBuffer* cmdBuffer,
                                              const RenderView& view,
                                              rhi::ResourceHandle depthTexture,
@@ -1468,7 +1475,7 @@ void ForwardRenderer::RenderDawnDepthPrepass(rhi::RHICommandBuffer* cmdBuffer,
         cmdBuffer->BindDescriptorSets(rhi::PipelineBindPoint::Graphics, dawnPrepassPipelineLayout_,
                                       0, 1, &dawnPrepassPerObjectSet_[fi], 1, &dynamicOffset);
 
-        RenderMesh* mesh = RenderMesh::GetByEntityId(proxy->meshId);
+        RenderMesh* mesh = GetDawnRasterMesh(*proxy);
         if (mesh && mesh->IsValid()) {
             mesh->Draw(cmdBuffer);
         }
@@ -1697,7 +1704,7 @@ void ForwardRenderer::RenderDawnGBuffer(rhi::RHICommandBuffer* cmdBuffer,
                                                   1, 1, &matSet, 0, nullptr);
                 }
 
-                RenderMesh* mesh = RenderMesh::GetByEntityId(proxy->meshId);
+                RenderMesh* mesh = GetDawnRasterMesh(*proxy);
                 if (mesh && mesh->IsValid()) {
                     mesh->Draw(cmdBuffer);
                 }

@@ -703,12 +703,9 @@ bool Engine_Test::LoadSponzaScene() {
 
         // Create RenderProxy
         RenderProxy proxy;
-        // NOTE: proxy.meshId doubles as the cluster::component lookup key.
-        // cluster::create stores the cluster keyed by entity_id (see
-        // Cluster.cpp:70-71 — `component c{ entity.get_id() }`). So we set
-        // proxy.meshId = entity_id of the entity that owns the cluster.
-        // The forward path uses meshInfo.mesh directly (not proxy.meshId), so
-        // this is safe.
+        // RenderMesh is registered under the imported geometry ID. The meshlet
+        // snapshot separately uses meshId to look up the ECS cluster below.
+        proxy.contentMeshId = meshInfo.meshEntityId;
         proxy.materialId = meshInfo.meshEntityId; // Use entity ID as material key
         proxy.entityId = meshInfo.meshEntityId;
 
@@ -762,6 +759,9 @@ bool Engine_Test::LoadSponzaScene() {
 
     std::cerr << "[TestDawnFR] Material instances created: " << texLoaded << " loaded, " << texFailed << " failed" << std::endl;
 
+    return true;
+}
+
 static const char* kModeNames[] = {"NoEffects", "ShadowOnly", "ShadowAndIBL", "ShadowAndIBLAndPuncLight", "ShadowAndIBLAndPuncLightAndSSR", "Deferred", "LumenDDGI", "MeshletNoIBL", "Meshlet", "MeshletSSGISSR", "MeshletSSGISSRDDGI", "MeshletDynamicDDGI"};
 static const char* kModeDesc[] = {
     "Directional light only",
@@ -777,9 +777,6 @@ static const char* kModeDesc[] = {
     "Meshlet + SSGI + SSR + static DDGI",
     "GPU-Driven Meshlet + SSGI + SSR + Canonical Dynamic DDGI"
 };
-
-    return true;
-}
 
 void Engine_Test::RenderFrame() {
     if (!device_ || !swapchain_ || shuttingDown_) return;
@@ -815,6 +812,9 @@ void Engine_Test::RenderFrame() {
     // Full render path: Shadow → Forward(HDR) → Post-processing → Present
     // ============================================================
 
+    // 1. Setup render graph FIRST so SSAO/Bloom/ToneMapping resources are created
+    //    before any command buffers. Dawn can corrupt heap if resources are created
+    //    between two command buffer recordings.
     const bool meshletMode = (renderMode_ == DawnRenderMode::MeshletNoIBL ||
                               renderMode_ == DawnRenderMode::Meshlet ||
                               renderMode_ == DawnRenderMode::MeshletSSGISSR ||
@@ -827,9 +827,6 @@ void Engine_Test::RenderFrame() {
         device_->EndFrame();
         return;
     }
-    // 1. Setup render graph FIRST so SSAO/Bloom/ToneMapping resources are created
-    //    before any command buffers. Dawn can corrupt heap if resources are created
-    //    between two command buffer recordings.
     renderGraph_->Clear();
 
     auto hdrRG = renderGraph_->ImportTexture("HDR", hdrTexture_, hdrDesc_);
@@ -911,10 +908,10 @@ void Engine_Test::RenderFrame() {
             renderMode_ == DawnRenderMode::FullPlusSSR ||
             renderMode_ == DawnRenderMode::Deferred ||
             ((renderMode_ == DawnRenderMode::MeshletSSGISSR ||
-        auto ssrHandle = rendergraph::kInvalidRGResourceHandle;
               renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI ||
               renderMode_ == DawnRenderMode::MeshletDynamicDDGI) &&
              (ssgissrSubmode_ == SSGISSRSubmode::SSROnly || ssgissrSubmode_ == SSGISSRSubmode::Both));
+        auto ssrHandle = rendergraph::kInvalidRGResourceHandle;
         if (ssrActive) {
             // Pass frameIndex_ (true counter) — same reason as SSGI: SSR's
             // temporal jitter hashes by params.frameIndex and would otherwise
@@ -1190,11 +1187,11 @@ void Engine_Test::RenderFrame() {
                 velRegion.srcOffsets[1] = {(s32)width_, (s32)height_, 1};
                 velRegion.dstSubresource = {0, 0, 1};
                 velRegion.dstOffsets[0] = {0, 0, 0};
-                if (renderMode_ == DawnRenderMode::FullPlusSSR)
-                    forwardRenderer_.RenderDawnGBuffer(cmd, view_, gbufferTextures_, prepassDepthTexture_, materials_, fi, width_, height_);
                 velRegion.dstOffsets[1] = {(s32)width_, (s32)height_, 1};
                 cmd->BlitTexture(gbufferTextures_[4], velocityTexture_, &velRegion, 1, rhi::FilterMode::Nearest);
             } else {
+                if (renderMode_ == DawnRenderMode::FullPlusSSR)
+                    forwardRenderer_.RenderDawnGBuffer(cmd, view_, gbufferTextures_, prepassDepthTexture_, materials_, fi, width_, height_);
                 forwardRenderer_.Render(cmd, scene_, view_, hdrTexture_, velocityTexture_, depthTexture_, materials_, fi, width_, height_);
             }
 
@@ -1574,6 +1571,9 @@ void Engine_Test::UpdateCamera(float dt) {
     {
         static_assert(std::size(kModeNames) == static_cast<u32>(DawnRenderMode::Count),
                       "kModeNames must cover all DawnRenderMode entries");
+        static_assert(std::size(kModeDesc) == static_cast<u32>(DawnRenderMode::Count),
+                      "kModeDesc must cover all DawnRenderMode entries");
+        bool tabPressed = EmscriptenGetKeyState(9);
         if (tabPressed && !prevTabState_ && renderMode_ == DawnRenderMode::MeshletSSGISSRDDGI) {
             prevTabState_ = true;
             EM_ASM({
@@ -1583,9 +1583,6 @@ void Engine_Test::UpdateCamera(float dt) {
             });
             return;
         }
-        static_assert(std::size(kModeDesc) == static_cast<u32>(DawnRenderMode::Count),
-                      "kModeDesc must cover all DawnRenderMode entries");
-        bool tabPressed = EmscriptenGetKeyState(9);
         if (tabPressed && !prevTabState_) {
             renderMode_ = static_cast<DawnRenderMode>((static_cast<u8>(renderMode_) + 1) % static_cast<u8>(DawnRenderMode::Count));
             forwardRenderer_.SetDawnRenderMode(static_cast<u32>(renderMode_));
@@ -3464,6 +3461,9 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
         camData.proj_matrix       = view_.GetProjectionMatrix();
         camData.prev_view_matrix  = camData.view_matrix;
         camData.prev_proj_matrix  = camData.proj_matrix;
+        camData.light_direction   = rhi::math::Normalize(currentSunDir_);  // sun→scene direction (same convention as scene_'s dirLight.direction); WGSL negates internally
+        camData.light_color       = primal::math::v3{2.5f, 2.4f, 2.1f};
+        camData.frame_index       = frameIndex_;
         const auto& sdf = primal::graphics::nanite::GlobalSDF::Get();
         const bool giReady = renderMode_ == DawnRenderMode::MeshletDynamicDDGI &&
             sdf.IsInitialized() && sdf.IsVoxelizationReady() &&
@@ -3472,9 +3472,6 @@ void Engine_Test::RenderMeshletFrame(primal::graphics::rhi::RHICommandBuffer* cm
         camData.gi_content_ready = giReady;
         camData.gi_frame_index = dynamicGiFrame_;
         if (giReady) ++dynamicGiFrame_;
-        camData.light_direction   = rhi::math::Normalize(currentSunDir_);  // sun→scene direction (same convention as scene_'s dirLight.direction); WGSL negates internally
-        camData.light_color       = primal::math::v3{2.5f, 2.4f, 2.1f};
-        camData.frame_index       = frameIndex_;
         camData.delta_time        = 1.0f / 60.0f;
 
         // 4. Register DDGI TraceRays → UpdateIrradiance → UpdateDepth
@@ -3919,10 +3916,10 @@ EMSCRIPTEN_KEEPALIVE void setDebugParam(int idx, float val) {
     }
 }
 
-    if (SetReferenceSunDirection(yaw, pitch)) return;
 // yaw/pitch → direction vector. Panel takes over sun control: auto-rotate
 // is forced off and the JS-side state mirror is updated.
 EMSCRIPTEN_KEEPALIVE void setSunDirection(float yaw, float pitch) {
+    if (SetReferenceSunDirection(yaw, pitch)) return;
     if (!g_engineTest) return;
     g_engineTest->SetSunDirection(yaw, pitch);
     g_engineTest->SetSunAutoRotate(false);
