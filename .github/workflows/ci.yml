@@ -811,7 +811,12 @@ jobs:
             cp build_wasm/wasm_manifest.js deploy/
           fi
           mkdir -p deploy/assets/models/Sponza
-          cp EngineTest/assets/Sponza.model deploy/assets/
+          # EngineTest/assets/* 被 .gitignore 刻意排除（重资产不进 git），CI checkout
+          # 里没有 Sponza.model——与上方 png 同样按 best-effort 处理，勿让部署步骤
+          # 因资产缺席而红。注意：TestDawnForwardRenderer 缺该模型会启动失败
+          # （LoadSponzaScene 无回退），gh-pages demo 的完整资产供给（LFS/发布
+          # 管道）是独立事项，不在本 job 的门禁范围内。
+          cp EngineTest/assets/Sponza.model deploy/assets/ 2>/dev/null || true
           cp EngineTest/assets/models/Sponza/*.png deploy/assets/models/Sponza/ 2>/dev/null || true
           echo "=== Deploy contents ==="
           du -sh deploy/
