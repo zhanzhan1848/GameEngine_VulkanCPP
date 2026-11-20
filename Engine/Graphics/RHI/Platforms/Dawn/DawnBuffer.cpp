@@ -215,7 +215,11 @@ void* DawnBuffer::mapImpl(u64 offset, u64 size) {
             return nullptr;
         }
 
-        return wgpuBufferGetMappedRange(wgpuBuffer_, alignedOffset, alignedSize);
+        // MapRead requires the const WebGPU accessor. RHI's common void*
+        // return type does not make readback mappings writable.
+        return needsMapRead_
+            ? const_cast<void*>(wgpuBufferGetConstMappedRange(wgpuBuffer_, alignedOffset, alignedSize))
+            : wgpuBufferGetMappedRange(wgpuBuffer_, alignedOffset, alignedSize);
     }
 
     // GPU buffer (Vertex/Index/Uniform/Storage) — use CPU staging.

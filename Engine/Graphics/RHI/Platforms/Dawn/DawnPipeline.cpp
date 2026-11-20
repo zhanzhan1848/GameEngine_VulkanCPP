@@ -30,8 +30,9 @@ bool DawnPipeline::InitializeGraphics(const GraphicsPipelineDesc& desc) {
 
     // Get fragment shader module (optional for depth-only passes)
     DawnShader* fragmentShader = nullptr;
-    bool hasFragmentShader = (desc.pixelShader != handles::INVALID_SHADER &&
-                              desc.pixelShader != static_cast<ShaderHandle>(0));
+    // RHIAllocator can allocate/reuse slot zero. Only INVALID_SHADER denotes
+    // a depth-only pipeline; treating zero as absent silently drops frag_depth.
+    const bool hasFragmentShader = desc.pixelShader != handles::INVALID_SHADER;
     if (hasFragmentShader) {
         fragmentShader = device_.GetShader(desc.pixelShader);
         if (!fragmentShader || !fragmentShader->GetModule()) {
@@ -140,7 +141,9 @@ bool DawnPipeline::InitializeGraphics(const GraphicsPipelineDesc& desc) {
             blend.alpha.dstFactor = WGPUBlendFactor_Zero;
         }
 
-        target.blend = &blend;
+        // A present blend descriptor enables blending in WebGPU, even for
+        // ONE/ZERO. Non-blendable targets such as R32Float require nullptr.
+        target.blend = desc.enableBlend ? &blend : nullptr;
         target.writeMask = WGPUColorWriteMask_All;
     }
 

@@ -4814,3 +4814,11 @@ add_test(NAME UnitInstanceDataODR COMMAND TestInstanceDataODR)
 set_target_properties(TestInstanceDataODR PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
 )
+
+# Native Dawn host selection is CPU-only; no GPU or Engine linkage required.
+add_executable(UnitDawnProbeSchedule Graphics/TestDawnProbeSchedule.cpp)
+target_include_directories(UnitDawnProbeSchedule PRIVATE ${CMAKE_SOURCE_DIR})
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(UnitDawnProbeSchedule PRIVATE -fno-fast-math)
+endif()
+add_test(NAME UnitDawnProbeSchedule COMMAND UnitDawnProbeSchedule)

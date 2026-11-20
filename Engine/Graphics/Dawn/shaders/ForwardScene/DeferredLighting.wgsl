@@ -217,8 +217,8 @@ fn fragmentLighting_v3(in: VSOut) -> LightingOut {
     let diffuse_ibl = kD_ibl * albedo * irradiance;
 
     let R = reflect(-V, N);
-    let MAX_REFLECTION_LOD = 4.0;
-    let prefilteredColor = textureSampleLevel(prefilterMap, defaultSampler, R, roughness * MAX_REFLECTION_LOD).rgb;
+    let MAX_REFLECTION_LOD = f32(textureNumLevels(prefilterMap) - 1u);
+    let prefilteredColor = textureSampleLevel(prefilterMap, defaultSampler, R, clamp(roughness, 0.0, 1.0) * MAX_REFLECTION_LOD).rgb;
     let brdf = textureSampleLevel(brdfLUT, brdfSampler, vec2<f32>(max(dot(N, V), 0.0), roughness), 0.0).rg;
     let specular_ibl = prefilteredColor * (F_ibl * brdf.x + brdf.y);
 

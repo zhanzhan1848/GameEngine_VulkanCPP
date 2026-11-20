@@ -382,7 +382,7 @@ fn deferred_lighting_meshlet_cs(@builtin(global_invocation_id) gid: vec3<u32>) {
             let irradiance = textureSampleLevel(irradianceMap, iblSampler, N, 0.0).rgb;
             let diffuseIBL = irradiance * albedoIndirect;
             let R = reflect(-V, N);
-            let prefilteredColor = textureSampleLevel(prefilterMap, iblSampler, R, roughness * 4.0).rgb;
+            let prefilteredColor = textureSampleLevel(prefilterMap, iblSampler, R, clamp(roughness, 0.0, 1.0) * f32(textureNumLevels(prefilterMap) - 1u)).rgb;
             let brdf = textureSampleLevel(brdfLUT, iblSampler, vec2<f32>(NdotV, roughness), 0.0);
             let specularIBL = prefilteredColor * (kS_ibl * brdf.r + brdf.g);
             // Live-tunable from the WASM debug panel (default 0.2).

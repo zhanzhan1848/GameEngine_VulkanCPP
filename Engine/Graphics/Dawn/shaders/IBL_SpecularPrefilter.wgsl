@@ -32,6 +32,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     N = normalize(N);
 
+    let roughness = clamp(params.roughness, 0.0, 1.0);
     let R = N;
     let V = R;
 
@@ -41,10 +42,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     for (var i = 0u; i < SAMPLE_COUNT; i++) {
         let xi = hammersley(i, SAMPLE_COUNT);
-        let h = importanceSampleGGX(xi, N, params.roughness);
+        let h = importanceSampleGGX(xi, N, roughness);
 
         // Rotate H from tangent space to world space
-        let up = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0), abs(N.z) < 0.999);
+        // select(falseValue, trueValue, condition): avoid a parallel axis.
+        let up = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(N.z) < 0.999);
         let tangentX = normalize(cross(up, N));
         let tangentY = cross(N, tangentX);
         let hWorld = normalize(tangentX * h.x + tangentY * h.y + N * h.z);
@@ -53,14 +55,14 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let NdotL = max(dot(N, L), 0.0);
 
         if (NdotL > 0.0) {
-            let d = distributionGGX(N, hWorld, params.roughness);
+            let d = distributionGGX(N, hWorld, roughness);
             let NdotH = max(dot(N, hWorld), 0.0);
             let HdotV = max(dot(hWorld, V), 0.0);
             let pdf = d * NdotH / (4.0 * HdotV + 0.0001);
 
             let saTexel = 4.0 * PI / (6.0 * params.srcResolution * params.srcResolution);
             let saSample = 1.0 / (f32(SAMPLE_COUNT) * pdf + 0.0001);
-            let mipLevel = select(0.0, 0.5 * log2(saSample / saTexel), params.roughness > 0.0);
+            let mipLevel = select(0.0, 0.5 * log2(saSample / saTexel), roughness > 0.0);
 
             prefilteredColor += textureSampleLevel(envMap, smp, L, mipLevel).rgb * NdotL;
             totalWeight += NdotL;

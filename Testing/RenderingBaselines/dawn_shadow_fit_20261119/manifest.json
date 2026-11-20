@@ -1,0 +1,17 @@
+{
+  "date": "2026-11-19",
+  "scope": "CPU cascade fit of 393 actual Sponza bounds; expected 64 floats captured from frozen Vulkan native350 slot2. Not a complete shadow visual gate.",
+  "input": "Dawn actual model loading bounds; packed center XYZ and radius, little-endian f32",
+  "reference": "Frozen DDGI_FIRST_SHADOW_MAP_DUMP exact same-frame matrices",
+  "frozen_manifest_sha256": "39923e4050df8c3c505bda4551c7ab5a6d702dc37276ee5b2f694a8d7c8f9a16",
+  "files": {
+    "bounds.f32": {
+      "bytes": 6288,
+      "sha256": "147a8c6c6dd178af9b2de99cbdf9b136468c10022be80dbb01d81052d1d66a75"
+    },
+    "matrices.f32": {
+      "bytes": 256,
+      "sha256": "a10951a59ef837a611471d68259b7264e1faf0be2785f64a688d9b2b64bfd3e5"
+    }
+  }
+}

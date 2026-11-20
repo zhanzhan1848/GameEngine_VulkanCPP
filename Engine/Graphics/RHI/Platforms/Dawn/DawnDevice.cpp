@@ -1120,7 +1120,9 @@ bool DawnDevice::submitImpl(const QueueSubmitInfo& info) {
     });
 
     // Submit to the device queue — no wait here; sync happens at Present/EndFrame
-    wgpuQueueSubmit(wgpuQueue_, 1, &wgpuCmdBuf);
+    // Use the command-buffer submission path so its state becomes Submitted;
+    // otherwise a subsequent WaitForCompletion rejects valid device submits.
+    if (!cmdBuf->Submit(0)) return false;
 
     // Note: do NOT release wgpuCmdBuf here. The DawnCommandBuffer owns it
     // and will release it in destroyImpl/resetImpl.

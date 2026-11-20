@@ -174,6 +174,14 @@ fn unpack_normal(packed: u32, color_t_sign: u32) -> vec3<f32> {
     return vec3<f32>(f.x, f.y, z * nSign);
 }
 
+// Qualified generated unit tangents can quantize just outside the XY disk.
+// Preserve their in-plane direction instead of inventing an unrelated +Z axis.
+fn unpack_tangent(packed: u32, color_t_sign: u32) -> vec3<f32> {
+    let f = vec2<f32>(f32(packed >> 16u), f32(packed & 65535u)) * (2.0 / 65535.0) - vec2<f32>(1.0);
+    if (dot(f, f) > 1.0) { return normalize(vec3<f32>(f, 0.0)); }
+    return unpack_normal(packed, color_t_sign >> 1u);
+}
+
 // Vertex shader output. Interpolated across the triangle.
 struct VSOutput {
     @builtin(position) position: vec4<f32>,
@@ -275,11 +283,11 @@ fn gpu_driven_vertex_shader(
     let element = load_vertex_element(vert_idx);
 
     let normal = unpack_normal(element.normal, element.color_t_sign);
-    let tangent = unpack_normal(element.tangent, element.color_t_sign);
+    let tangent = unpack_tangent(element.tangent, element.color_t_sign);
 
     // Tangent sign stored in high byte of color_t_sign (0xFF = negative).
     let tangent_sign = select(1.0, -1.0,
-        (element.color_t_sign & 0xFF000000u) != 0u);
+        (element.color_t_sign & 0x01000000u) != 0u);
 
     // Flip V to match WebGPU texture coordinate convention (same as Metal port).
     let uv = vec2<f32>(element.uv.x, 1.0 - element.uv.y);
@@ -358,6 +366,9 @@ struct FSOutput {
 @fragment
 fn gpu_driven_fragment_shader(in: VSOutput, @builtin(front_facing) is_front: bool) -> FSOutput {
     var out: FSOutput;
+    // Evaluate derivatives before the material sentinel can return: Tint
+    // requires derivative operations in uniform control flow.
+    let geomN = normalize(cross(dpdy(in.world_pos), dpdx(in.world_pos)));
 
     // Error sentinel: bright magenta. Visible against any valid scene color
     // so we can spot missing material data immediately.
@@ -382,10 +393,10 @@ fn gpu_driven_fragment_shader(in: VSOutput, @builtin(front_facing) is_front: boo
     // swapping to cross(dpdy, dpdx) makes geomN face the camera so N aligns
     // with the VISIBLE side.
     var N = normalize(in.normal);
-    let geomN = normalize(cross(dpdy(in.world_pos), dpdx(in.world_pos)));
     if (dot(N, geomN) < 0.0) { N = -N; }
     let T = normalize(in.tangent);
-    let B = normalize(cross(N, T));
+    let frame_sign = select(-1.0, 1.0, dot(cross(normalize(in.normal), T), in.bitangent) >= 0.0);
+    let B = normalize(cross(N, T)) * frame_sign;
 
     let mat = load_material(in.material_id);
     let scaled_uv = fract(in.uv * mat.uv_scale);

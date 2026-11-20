@@ -6,9 +6,16 @@
 #include "DawnDevice.h"
 #include "DawnTexture.h"
 #include "DawnPipeline.h"
+#include "DawnTextureCopyLayout.h"
 #include <iostream>
 #include <cstring>
 #include <chrono>
+#include <memory>
+#include <thread>
+#include <atomic>
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 namespace primal::graphics::rhi {
 
@@ -200,28 +207,41 @@ bool DawnCommandBuffer::submitImpl(u32 waitFlags) {
 }
 
 bool DawnCommandBuffer::waitForCompletionImpl() {
-    // Process events on the WGPU instance until all submitted work is done
     WGPUInstance wgpuInstance = device_.GetInstance();
     if (!wgpuInstance) return false;
-
+    // Processing events is not a completion fence. Wait for the queue's
+    // callback covering the work submitted before this request.
+    struct Completion { std::atomic<bool> done{false}; bool success = false; };
+    auto completion = std::make_shared<Completion>();
+    WGPUQueueWorkDoneCallbackInfo callback{};
+    callback.mode = WGPUCallbackMode_AllowProcessEvents;
+    // The callback owns a reference even if the caller times out. Never pass
+    // stack storage that can be reclaimed before a late callback arrives.
+    callback.userdata1 = new std::shared_ptr<Completion>(completion);
+    callback.callback = [](WGPUQueueWorkDoneStatus status, WGPUStringView, void* data, void*) {
+        std::unique_ptr<std::shared_ptr<Completion>> owner(static_cast<std::shared_ptr<Completion>*>(data));
+        (*owner)->success = status == WGPUQueueWorkDoneStatus_Success;
+        (*owner)->done = true;
+    };
+    wgpuQueueOnSubmittedWorkDone(device_.GetQueue(), callback);
     auto startTime = std::chrono::steady_clock::now();
     const auto timeout = std::chrono::seconds(5);
-
-    while (true) {
+    while (!completion->done) {
         wgpuInstanceProcessEvents(wgpuInstance);
-
-        auto elapsed = std::chrono::steady_clock::now() - startTime;
-        if (elapsed > timeout) {
+        if (completion->done) break;
+        if (std::chrono::steady_clock::now() - startTime > timeout) {
             PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] WaitForCompletion timed out" << std::endl;
             return false;
         }
-
-        // In WebGPU, wgpuInstanceProcessEvents processes all pending work.
-        // After submission, a single call should suffice for synchronous completion.
-        break;
+#ifdef __EMSCRIPTEN__
+        emscripten_sleep(0);
+#else
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
     }
-
-    return true;
+    if (!completion->success)
+        PRIMAL_LOG_STREAM(Error, "RHI") << "[DawnCommandBuffer] GPU queue completion failed" << std::endl;
+    return completion->success;
 }
 
 // === Render Pass ===
@@ -812,28 +832,18 @@ void DawnCommandBuffer::CopyBufferToTexture(ResourceHandle srcBuffer,
     for (u32 i = 0; i < regionCount; ++i) {
         const auto& r = regions[i];
 
-        WGPUTexelCopyBufferInfo srcCopy{};
-        srcCopy.layout.offset = r.bufferOffset;
-        srcCopy.layout.bytesPerRow = r.bufferRowLength;
-        srcCopy.layout.rowsPerImage = r.bufferImageHeight;
-        srcCopy.buffer = wgpuSrc;
-
-        WGPUTexelCopyTextureInfo dstCopy{};
-        dstCopy.texture = wgpuDst;
-        dstCopy.mipLevel = r.imageSubresource.mipLevel;
-        dstCopy.origin = WGPUOrigin3D{
-            static_cast<u32>(r.imageOffset.x),
-            static_cast<u32>(r.imageOffset.y),
-            static_cast<u32>(r.imageOffset.z)
-        };
-        dstCopy.aspect = WGPUTextureAspect_All;
-
-        WGPUExtent3D copySize{};
-        copySize.width = r.imageExtent.width;
-        copySize.height = r.imageExtent.height;
-        copySize.depthOrArrayLayers = r.imageExtent.depth;
-
-        wgpuCommandEncoderCopyBufferToTexture(wgpuEncoder_, &srcCopy, &dstCopy, &copySize);
+        if (!ForEachDawnTextureCopy(dstTex->GetTextureDesc(), r,
+            [&](const WGPUTexelCopyBufferLayout& layout, WGPUOrigin3D origin, WGPUExtent3D size) {
+                WGPUTexelCopyBufferInfo srcCopy{};
+                srcCopy.layout = layout;
+                srcCopy.buffer = wgpuSrc;
+                WGPUTexelCopyTextureInfo dstCopy{};
+                dstCopy.texture = wgpuDst;
+                dstCopy.mipLevel = r.imageSubresource.mipLevel;
+                dstCopy.origin = origin;
+                dstCopy.aspect = WGPUTextureAspect_All;
+                wgpuCommandEncoderCopyBufferToTexture(wgpuEncoder_, &srcCopy, &dstCopy, &size);
+            })) return;
     }
 
     UpdateStats(CommandType::CopyBufferToTexture);
@@ -863,28 +873,18 @@ void DawnCommandBuffer::CopyTextureToBuffer(ResourceHandle srcTexture,
     for (u32 i = 0; i < regionCount; ++i) {
         const auto& r = regions[i];
 
-        WGPUTexelCopyTextureInfo srcCopy{};
-        srcCopy.texture = wgpuSrc;
-        srcCopy.mipLevel = r.imageSubresource.mipLevel;
-        srcCopy.origin = WGPUOrigin3D{
-            static_cast<u32>(r.imageOffset.x),
-            static_cast<u32>(r.imageOffset.y),
-            static_cast<u32>(r.imageOffset.z)
-        };
-        srcCopy.aspect = WGPUTextureAspect_All;
-
-        WGPUTexelCopyBufferInfo dstCopy{};
-        dstCopy.layout.offset = r.bufferOffset;
-        dstCopy.layout.bytesPerRow = r.bufferRowLength;
-        dstCopy.layout.rowsPerImage = r.bufferImageHeight;
-        dstCopy.buffer = wgpuDst;
-
-        WGPUExtent3D copySize{};
-        copySize.width = r.imageExtent.width;
-        copySize.height = r.imageExtent.height;
-        copySize.depthOrArrayLayers = r.imageExtent.depth;
-
-        wgpuCommandEncoderCopyTextureToBuffer(wgpuEncoder_, &srcCopy, &dstCopy, &copySize);
+        if (!ForEachDawnTextureCopy(srcTex->GetTextureDesc(), r,
+            [&](const WGPUTexelCopyBufferLayout& layout, WGPUOrigin3D origin, WGPUExtent3D size) {
+                WGPUTexelCopyTextureInfo srcCopy{};
+                srcCopy.texture = wgpuSrc;
+                srcCopy.mipLevel = r.imageSubresource.mipLevel;
+                srcCopy.origin = origin;
+                srcCopy.aspect = WGPUTextureAspect_All;
+                WGPUTexelCopyBufferInfo dstCopy{};
+                dstCopy.layout = layout;
+                dstCopy.buffer = wgpuDst;
+                wgpuCommandEncoderCopyTextureToBuffer(wgpuEncoder_, &srcCopy, &dstCopy, &size);
+            })) return;
     }
 
     UpdateStats(CommandType::CopyTextureToBuffer);

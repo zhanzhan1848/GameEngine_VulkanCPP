@@ -945,6 +945,28 @@ if(APPLE)
     # 12. TestDawnRenderer (WebGPU)
     if(ENABLE_WEBGPU AND EXISTS ${CMAKE_SOURCE_DIR}/third_party/dawn)
         set(DAWN_ROOT_DIR ${CMAKE_SOURCE_DIR}/third_party/dawn)
+        # Small, self-contained regressions retained after experiment cleanup.
+        # Keep CPU fitting independent of the caller's contraction policy.
+        set_source_files_properties("DawnSponzaShadowFit.cpp" PROPERTIES
+            COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
+        add_executable(TestDawnShadowFit "TestDawnShadowFit.cpp" "DawnSponzaShadowFit.cpp")
+        setup_test_target(TestDawnShadowFit)
+        target_compile_options(TestDawnShadowFit PRIVATE -fno-fast-math)
+        add_dependencies(IntegrationTests TestDawnShadowFit)
+        set_tests_properties(Engine_Integration_Tests_TestDawnShadowFit PROPERTIES
+            LABELS "CPU;Dawn;NativeRegression" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+        foreach(native_test TestDawnShadows TestDawnMaterialTextures TestDawnReadback)
+            add_executable(${native_test} "${native_test}.cpp")
+            setup_test_target(${native_test})
+            target_compile_definitions(${native_test} PRIVATE ENABLE_WEBGPU=1)
+            target_compile_options(${native_test} PRIVATE -fno-fast-math)
+            target_link_libraries(${native_test} PRIVATE webgpu_dawn)
+            add_dependencies(IntegrationTests ${native_test})
+            set_tests_properties(Engine_Integration_Tests_${native_test} PROPERTIES
+                LABELS "GPU;Dawn;NativeRegression" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+                RUN_SERIAL TRUE TIMEOUT 90)
+        endforeach()
         add_executable(TestDawnRenderer
             "TestDawnMain.cpp"
             "TestDawnRenderer.cpp"
@@ -983,11 +1005,14 @@ if(APPLE)
         add_executable(TestDawnSponza
             "Main.cpp"
             "TestDawnSponza.cpp"
+            "DawnSponzaShadowFit.cpp"
             "MacKeyboard.mm"
             ${COMMON_HEADERS}
         )
         setup_test_target(TestDawnSponza)
         target_compile_definitions(TestDawnSponza PRIVATE "TEST_DAWN_SPONZA=1" "ENABLE_WEBGPU=1")
+        # Geometry readback oracle must preserve NaN checks and IEEE comparisons.
+        target_compile_options(TestDawnSponza PRIVATE -fno-fast-math)
         target_include_directories(TestDawnSponza PUBLIC
             "${CMAKE_CURRENT_SOURCE_DIR}/../../Engine/Graphics/RHI/Platforms/Dawn"
             "${DAWN_ROOT_DIR}/include"
