@@ -1,4 +1,5 @@
 #pragma once
+#include "DawnSponzaHalf.h"
 #include "DawnSponzaSurfaceLighting.h"
 #include "Engine/Graphics/Lumen/SurfaceCache/CardTileOwners.h"
 
@@ -92,8 +93,8 @@ public:
     bool Save(const char* prefix){
         if(readback_==handles::INVALID_RESOURCE)return false;const auto* data=static_cast<const u8*>(device_->MapBuffer(readback_,0,bytes_));if(!data)return false;
         const u64 textureBytes=u64(tileCount_)*24+u64(params_.counts[0])*params_.counts[0]*16;u64 invalid=0,validTiles=0;float maximum=0;
-        for(u64 at=0;at<textureBytes;at+=2){_Float16 v;std::memcpy(&v,data+at,2);if(!std::isfinite(float(v)))++invalid;}
-        for(u32 t=0;t<tileCount_;++t){_Float16 v[4];std::memcpy(v,data+u64(tileCount_)*8+t*8,8);if(v[3]>0)++validTiles;for(u32 c=0;c<3;++c)maximum=std::max(maximum,float(v[c]));}
+        for(u64 at=0;at<textureBytes;at+=2){HalfStorage v;std::memcpy(&v,data+at,2);if(!std::isfinite(float(v)))++invalid;}
+        for(u32 t=0;t<tileCount_;++t){HalfStorage v[4];std::memcpy(v,data+u64(tileCount_)*8+t*8,8);if(v[3]>0)++validTiles;for(u32 c=0;c<3;++c)maximum=std::max(maximum,float(v[c]));}
         std::ofstream raw(std::string(prefix)+".bin",std::ios::binary);raw.write(reinterpret_cast<const char*>(data),bytes_);raw.close();device_->UnmapBuffer(readback_);device_->DestroyBuffer(readback_);readback_=handles::INVALID_RESOURCE;
         if(lightReadback_!=handles::INVALID_RESOURCE){
             if(lightCaptureFrame_!=recorded_)return false;const u64 bytes=u64(params_.counts[0])*params_.counts[0]*8;

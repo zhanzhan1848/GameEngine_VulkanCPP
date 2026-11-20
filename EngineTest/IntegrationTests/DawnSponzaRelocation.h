@@ -1,4 +1,5 @@
 #pragma once
+#include "DawnSponzaHalf.h"
 #include "Engine/Graphics/RHI/Platforms/Dawn/DawnDevice.h"
 #include "Engine/Common/CoreLogStream.h"
 #include <algorithm>
@@ -110,7 +111,7 @@ public:
         const u32 n=p.counts[0];int base[3];float f[3];
         for(u32 a=0;a<3;++a){const float local=point[a]-p.origin[a];if(local<0||local>=p.extent[a])return 1e10f;
             const float q=local/p.extent[a]*float(n)-.5f;base[a]=int(std::floor(q));f[a]=q-float(base[a]);}
-        auto at=[&](int x,int y,int z){u16 bits=data[(u64(std::clamp(z,0,int(n)-1))*n+std::clamp(y,0,int(n)-1))*n+std::clamp(x,0,int(n)-1)];_Float16 value;std::memcpy(&value,&bits,2);return float(value);};
+        auto at=[&](int x,int y,int z){u16 bits=data[(u64(std::clamp(z,0,int(n)-1))*n+std::clamp(y,0,int(n)-1))*n+std::clamp(x,0,int(n)-1)];HalfStorage value;std::memcpy(&value,&bits,2);return float(value);};
         auto mix=[](float a,float b,float t){return a*(1.f-t)+b*t;};
         const float z0=mix(mix(at(base[0],base[1],base[2]),at(base[0]+1,base[1],base[2]),f[0]),mix(at(base[0],base[1]+1,base[2]),at(base[0]+1,base[1]+1,base[2]),f[0]),f[1]);
         const float z1=mix(mix(at(base[0],base[1],base[2]+1),at(base[0]+1,base[1],base[2]+1),f[0]),mix(at(base[0],base[1]+1,base[2]+1),at(base[0]+1,base[1]+1,base[2]+1),f[0]),f[1]);return mix(z0,z1,f[2]);

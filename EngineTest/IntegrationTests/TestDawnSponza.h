@@ -42,17 +42,20 @@ namespace primal::graphics { using f64 = double; }
 #include "Engine/Platform/Platform.h"
 #include <unordered_map>
 
-class Engine_Test : public Test
+class DawnSponzaRenderer : public Test
 #ifdef __APPLE__
     , public NS::ApplicationDelegate
 #endif
 {
 public:
-    Engine_Test();
-    ~Engine_Test() override;
+    DawnSponzaRenderer();
+    ~DawnSponzaRenderer() override;
     bool initialize() override;
     void run() override;
     void shutdown() override;
+#ifdef __EMSCRIPTEN__
+    void SetSunDirection(float yaw, float pitch);
+#endif
 
 #ifdef __APPLE__
     void applicationDidFinishLaunching(NS::Notification* notification) override;
@@ -61,8 +64,10 @@ public:
 #endif
 
 private:
+#ifdef __APPLE__
     void SetupRenderLoop();
     static void DisplayLinkCallback(CFRunLoopTimerRef timer, void* info);
+#endif
 
     bool LoadScene();
     bool CreatePipelines();
@@ -80,6 +85,10 @@ private:
     primal::graphics::rhi::RHISwapChain* swapchain_{nullptr};
     primal::platform::window window_;
     bool shuttingDown_{false};
+    primal::math::v3 sunDirection_{.5f, -.7f, .3f};
+#ifdef __EMSCRIPTEN__
+    bool rotateSun_{false}, lastLightKey_{false};
+#endif
 
     // Shaders & Pipeline
     primal::graphics::rhi::ShaderHandle vs_{primal::graphics::rhi::handles::INVALID_SHADER};
@@ -182,9 +191,15 @@ private:
     u32 width_{1280};
     u32 height_{720};
 
+#ifdef __APPLE__
     CFRunLoopTimerRef displayLink_{nullptr};
     CFRunLoopRef runLoop_{nullptr};
+#endif
     time_it timer_;
 };
+
+#ifndef __EMSCRIPTEN__
+using Engine_Test = DawnSponzaRenderer;
+#endif
 
 #endif // ENABLE_WEBGPU

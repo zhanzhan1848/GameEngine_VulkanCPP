@@ -1,4 +1,7 @@
 #pragma once
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include "Engine/Graphics/RHI/Platforms/Dawn/DawnDevice.h"
 #include "Engine/Graphics/Utils/ShaderRegistry.h"
 #include "Engine/Common/CoreDiag.h"
@@ -112,7 +115,11 @@ inline bool GenerateAlbedoMips(graphics::rhi::DawnDevice& device,
             primal::diag::Emit(primal::diag::kLevelError, "DawnAlbedoMips", "Completion timeout; resource ownership unknown");
             std::_Exit(7);
         }
+#ifdef __EMSCRIPTEN__
+        emscripten_sleep(1);
+#else
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
     }
     if (!completion.ok || !validation.ok)
         primal::diag::Emit(primal::diag::kLevelError, "DawnAlbedoMips", "Mip generation or validation failed");

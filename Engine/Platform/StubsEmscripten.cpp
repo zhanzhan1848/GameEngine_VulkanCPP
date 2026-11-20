@@ -13,6 +13,7 @@
 #include "Engine/Graphics/RHI/Platforms/Dawn/DawnDevice.h"
 #include "Engine/Graphics/Nanite/NaniteResourceManager.h"
 #include "Engine/Utilities/IOStream.h"
+#include "Engine/Graphics/Utilities/GeometryFirstHit.h"
 
 #include <unordered_map>
 #include <memory>
@@ -124,23 +125,29 @@ id::id_type get_rhi_mesh_id(id::id_type geometry_id) {
     return geometry_id;
 }
 
-// R40：StandardRenderPipeline 的 SC 卡烘焙/BLAS 访问面。WASM 侧无烘焙数据、
-// 无 ray_geometry 资产：has_* 返回 false 让 content-ready 门禁按实例跳过，
-// get_* 返回空/false，调用方走各自的"无数据"分支（SC 候选默认关的口径）。
+// The browser owns the decoded mesh in this table. Build the same BLAS
+// as native once per mesh, without a disk cache in MEMFS.
 std::shared_ptr<const graphics::ray_geometry::MeshBLAS> get_rhi_mesh_blas(id::id_type id) {
-    (void)id;
-    return nullptr;
+    std::lock_guard lock(asset_mutex());
+    auto it = asset_table().find(id);
+    if (it == asset_table().end()) return {};
+    auto& asset = it->second;
+    if (!asset.triangle_blas)
+        asset.triangle_blas = graphics::ray_geometry::BuildMeshBLAS(asset);
+    return asset.triangle_blas;
 }
 
 bool get_rhi_mesh_card_bake(id::id_type id, graphics::rhi::RHICardBakeData& out) {
-    (void)id;
-    (void)out;
-    return false;
+    std::lock_guard lock(asset_mutex());
+    auto it = asset_table().find(id);
+    out = it == asset_table().end() ? graphics::rhi::RHICardBakeData{} : it->second.card_bake;
+    return !out.cards.empty();
 }
 
 bool has_rhi_mesh_card_bake(id::id_type id) {
-    (void)id;
-    return false;
+    std::lock_guard lock(asset_mutex());
+    auto it = asset_table().find(id);
+    return it != asset_table().end() && !it->second.card_bake.cards.empty();
 }
 
 // 签名必须与 ContentToEngine.h 的声明逐参一致（第 4 参 preferred_device 带默认

@@ -23,6 +23,13 @@
 #include <CoreGraphics/CoreGraphics.h>
 #endif
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+extern "C" bool EmscriptenGetKeyState(int);
+extern "C" bool EmscriptenGetMouseButton(int);
+extern "C" void EmscriptenGetMouseDelta(float*, float*);
+#endif
+
 using namespace primal;
 using namespace primal::graphics::rhi;
 using namespace primal::graphics::rhi::handles;
@@ -40,8 +47,8 @@ static void CaptureRequire(bool ok, const char* message) {
 // Construction / Destruction
 // ============================================================
 
-Engine_Test::Engine_Test() = default;
-Engine_Test::~Engine_Test() = default;
+DawnSponzaRenderer::DawnSponzaRenderer() = default;
+DawnSponzaRenderer::~DawnSponzaRenderer() = default;
 
 // ============================================================
 // Shader loading
@@ -65,12 +72,12 @@ static std::string LoadShaderSource(const std::string& path) {
 // Texture helpers
 // ============================================================
 
-ResourceHandle Engine_Test::CreateTextureFromData(int w, int h, const unsigned char* data,
+ResourceHandle DawnSponzaRenderer::CreateTextureFromData(int w, int h, const unsigned char* data,
     DataFormat format) {
     return primal::tests::dawn_sponza::CreateTexture(*device_, w, h, data, format);
 }
 
-ResourceHandle Engine_Test::LoadTextureFromFile(const std::string& path, DataFormat format) {
+ResourceHandle DawnSponzaRenderer::LoadTextureFromFile(const std::string& path, DataFormat format) {
     // Check cache first — include format in key so same path can have sRGB and linear versions
     std::string cacheKey = path + (format == DataFormat::RGBA8_sRGB ? "|srgb" : "|lin");
     auto it = textureCache_.find(cacheKey);
@@ -185,7 +192,7 @@ static std::string DeriveMetallicPath(const std::string& diffusePath) {
 // CreatePipeline
 // ============================================================
 
-bool Engine_Test::CreatePipelines() {
+bool DawnSponzaRenderer::CreatePipelines() {
     std::string shaderSource = LoadShaderSource("EngineTest/shaders/DawnWGSL/ForwardPBR.wgsl");
     if (shaderSource.empty()) {
         std::cerr << "[DawnSponza] Failed to load ForwardPBR.wgsl" << std::endl;
@@ -339,7 +346,7 @@ bool Engine_Test::CreatePipelines() {
 // CreateResources
 // ============================================================
 
-bool Engine_Test::CreateResources() {
+bool DawnSponzaRenderer::CreateResources() {
     TextureDesc hdrDesc{};
     hdrDesc.size = {width_, height_, 1}; hdrDesc.type = TextureType::Texture2D;
     hdrDesc.format = DataFormat::RGBA16_Float;
@@ -450,8 +457,8 @@ bool Engine_Test::CreateResources() {
 // LoadScene
 // ============================================================
 
-bool Engine_Test::LoadScene() {
-    std::string baseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
+bool DawnSponzaRenderer::LoadScene() {
+    std::string baseDir = "EngineTest/assets/";
 
     const char* requestedModel = std::getenv("PRIMAL_TEST_MODEL");
     std::string modelPath = baseDir + (requestedModel ? requestedModel : "Sponza_process_rebuild.model");
@@ -694,7 +701,15 @@ bool Engine_Test::LoadScene() {
 // Camera update
 // ============================================================
 
-void Engine_Test::UpdateCamera(float dt) {
+#ifdef __EMSCRIPTEN__
+void DawnSponzaRenderer::SetSunDirection(float yaw, float pitch) {
+    sunDirection_ = {std::cos(pitch)*std::sin(yaw), std::sin(pitch), std::cos(pitch)*std::cos(yaw)};
+    CaptureRequire(surfaceLighting_.SetSunDirection(sunDirection_), "surface light update failed");
+    rotateSun_ = false;
+}
+#endif
+
+void DawnSponzaRenderer::UpdateCamera(float dt) {
     float speed = cameraSpeed_ * dt;
 
 #ifdef __APPLE__
@@ -721,6 +736,33 @@ void Engine_Test::UpdateCamera(float dt) {
     // Q/E for up/down: Q=12, E=14
     if (keyPressed(12)) cameraPos_.y -= speed;
     if (keyPressed(14)) cameraPos_.y += speed;
+#elif defined(__EMSCRIPTEN__)
+    const bool lightKey = EmscriptenGetKeyState(76);
+    if (lightKey && !lastLightKey_) rotateSun_ = !rotateSun_;
+    lastLightKey_ = lightKey;
+    if (rotateSun_) {
+        const float angle = std::atan2(sunDirection_.x, sunDirection_.z) + .4f * dt;
+        const float horizontal = std::hypot(sunDirection_.x, sunDirection_.z);
+        sunDirection_.x = horizontal * std::sin(angle);
+        sunDirection_.z = horizontal * std::cos(angle);
+        CaptureRequire(surfaceLighting_.SetSunDirection(sunDirection_), "surface light update failed");
+    }
+    EM_ASM({ window.setSunDirection?.($0, $1, $2); window.setSunAutoRotate?.($3); },
+           sunDirection_.x, sunDirection_.y, sunDirection_.z, int(rotateSun_));
+    float dx, dy;
+    EmscriptenGetMouseDelta(&dx, &dy);
+    cameraYaw_ += 2.f * dt * (EmscriptenGetKeyState(37) - EmscriptenGetKeyState(39));
+    cameraPitch_ += 2.f * dt * (EmscriptenGetKeyState(38) - EmscriptenGetKeyState(40));
+    if (EmscriptenGetMouseButton(0)) {
+        cameraYaw_ -= dx * .002f;
+        cameraPitch_ -= dy * .002f;
+    }
+    cameraPitch_ = std::clamp(cameraPitch_, -1.55f, 1.55f);
+    const float forward = speed * (EmscriptenGetKeyState(87) - EmscriptenGetKeyState(83));
+    const float left = speed * (EmscriptenGetKeyState(65) - EmscriptenGetKeyState(68));
+    cameraPos_.x += sinf(cameraYaw_) * forward + cosf(cameraYaw_) * left;
+    cameraPos_.z += cosf(cameraYaw_) * forward - sinf(cameraYaw_) * left;
+    cameraPos_.y += speed * (EmscriptenGetKeyState(69) - EmscriptenGetKeyState(81));
 #endif
 }
 
@@ -728,7 +770,7 @@ void Engine_Test::UpdateCamera(float dt) {
 // Initialize
 // ============================================================
 
-bool Engine_Test::initialize() {
+bool DawnSponzaRenderer::initialize() {
     // Fixed reference profile keeps the frozen 160x90 probe lattice at native
     // Vulkan internal image resolution. FinalBlit still outputs 1280x720.
     if(const char* reference=std::getenv("PRIMAL_DAWN_REFERENCE_RESOLUTION");reference&&std::strcmp(reference,"1")==0){width_=2560;height_=1440;probeSpacing_=16;}
@@ -917,7 +959,7 @@ bool Engine_Test::initialize() {
 // Run – one frame
 // ============================================================
 
-void Engine_Test::run() {
+void DawnSponzaRenderer::run() {
     if (!device_ || !swapchain_ || shuttingDown_) return;
 
     timer_.begin();
@@ -967,7 +1009,7 @@ void Engine_Test::run() {
             rhimath::v4 color;
         };
         LightDataCPU ld{};
-        ld.direction = rhimath::v4{0.5f, -0.7f, 0.3f, 3.0f};
+        ld.direction = rhimath::v4{sunDirection_.x, sunDirection_.y, sunDirection_.z, 3.f};
         ld.color = rhimath::v4{1.0f, 1.0f, 1.0f, 0.0f};
         void* mapped = device_->MapBuffer(lightBuffers_[frameIdx], 0, sizeof(LightDataCPU));
         if (mapped) {
@@ -977,6 +1019,12 @@ void Engine_Test::run() {
     }
 
     device_->BeginFrame();
+
+    // A browser canvas texture expires when a pending map yields to the
+    // event loop. Resolve N-2 history before acquiring this frame's image.
+    primal::tests::dawn_sponza::ProbeSchedule::DepthHistory depthHistory;
+    if (probeUpdateEnabled_)
+        CaptureRequire(probeDepthHistory_.Consume(frameIndex_, depthHistory), "N-2 probe depth readback failed");
 
     u32 imageIndex = 0;
     if (!swapchain_->AcquireNextImage(&imageIndex)) {
@@ -1009,8 +1057,6 @@ void Engine_Test::run() {
     primal::tests::dawn_sponza::ProbeSchedule::Plan probePlan;
     if(probeUpdateEnabled_){
         probeGovernor_.RecordFrame();
-        primal::tests::dawn_sponza::ProbeSchedule::DepthHistory depthHistory;
-        CaptureRequire(probeDepthHistory_.Consume(frameIndex_,depthHistory),"N-2 probe depth readback failed");
         const u32 budget=graphics::GIAdaptiveGovernor::ScaleBudget(probeCapacity_,probeGovernor_.Scale());
         CaptureRequire(probeSchedule_.Prepare(frameIndex_,frameIndex_,frameIndex_,budget,graphics::lumen::GIWarmupFrames(),
             {cameraPos_.x,cameraPos_.y,cameraPos_.z},depthHistory,probePlan,std::getenv("DDGI_AGE_CAP")!=nullptr),"probe schedule preparation failed");
@@ -1065,7 +1111,7 @@ void Engine_Test::run() {
     primal::tests::dawn_sponza::ShadowParameters shadowParams{};
     shadowParams.inverseViewProjection = rhimath::Inverse(viewProj);
     // Match the frozen pipeline normalization before the shadow module fit.
-    const auto shadowLightDirection = rhimath::Normalize(rhimath::v3{0.5f,-0.7f,0.3f});
+    const auto shadowLightDirection = rhimath::Normalize(sunDirection_);
     shadowParams.lightDirection = {shadowLightDirection.x,shadowLightDirection.y,shadowLightDirection.z,0};
     shadowParams.width=width_; shadowParams.height=height_; shadowParams.depthTexelSize={1.f/width_,1.f/height_};
     shadowParams.sunTanHalfAngle=std::tan(0.5357f*0.5f*rhimath::constants::DEG_TO_RAD);
@@ -1149,7 +1195,7 @@ void Engine_Test::run() {
     const bool deferredCapture=screenProbePlacementEnabled_&&deferredPrefix&&(frameIndex_==0||frameIndex_+1==u32(captureFrame?std::atoi(captureFrame):350));
     if(screenProbePlacementEnabled_){
         primal::tests::dawn_sponza::DeferredLighting::Params p{};p.camera[0]=cameraPos_.x;p.camera[1]=cameraPos_.y;p.camera[2]=cameraPos_.z;
-        p.lightDirection[0]=.5f;p.lightDirection[1]=-.7f;p.lightDirection[2]=.3f;p.lightDirection[3]=3;
+        p.lightDirection[0]=sunDirection_.x;p.lightDirection[1]=sunDirection_.y;p.lightDirection[2]=sunDirection_.z;p.lightDirection[3]=3;
         p.lightColor[0]=p.lightColor[1]=p.lightColor[2]=1;
         CaptureRequire(deferredLighting_.Record(*dawnCmd,frameIndex_,p,raster),"deferred direct encoding failed");
         if(deferredCapture)CaptureRequire(deferredLighting_.Capture(*dawnCmd),"deferred direct capture failed");
@@ -1381,16 +1427,18 @@ void Engine_Test::run() {
 // Shutdown
 // ============================================================
 
-void Engine_Test::shutdown() {
+void DawnSponzaRenderer::shutdown() {
     if (shuttingDown_) return;
     shuttingDown_ = true;
     std::cout << "[DawnSponza] Shutting down..." << std::endl;
 
+#ifdef __APPLE__
     if (displayLink_) {
         CFRunLoopRemoveTimer(runLoop_, displayLink_, kCFRunLoopCommonModes);
         CFRelease(displayLink_);
         displayLink_ = nullptr;
     }
+#endif
 
     for (auto& mat : meshMaterials_) {
         if (mat.materialSet != INVALID_DESCRIPTOR_SET && device_) device_->DestroyDescriptorSet(mat.materialSet);
@@ -1482,7 +1530,7 @@ void Engine_Test::shutdown() {
 
 #ifdef __APPLE__
 
-void Engine_Test::applicationDidFinishLaunching(NS::Notification* notification) {
+void DawnSponzaRenderer::applicationDidFinishLaunching(NS::Notification* notification) {
     NS::Application* pApp = reinterpret_cast<NS::Application*>(notification->object());
     pApp->activateIgnoringOtherApps(true);
 
@@ -1495,18 +1543,18 @@ void Engine_Test::applicationDidFinishLaunching(NS::Notification* notification) 
     SetupRenderLoop();
 }
 
-void Engine_Test::applicationWillFinishLaunching(NS::Notification* notification) {
+void DawnSponzaRenderer::applicationWillFinishLaunching(NS::Notification* notification) {
     NS::Application* pApp = reinterpret_cast<NS::Application*>(notification->object());
     pApp->setActivationPolicy(NS::ActivationPolicy::ActivationPolicyRegular);
 }
 
-bool Engine_Test::applicationShouldTerminateAfterLastWindowClosed(
+bool DawnSponzaRenderer::applicationShouldTerminateAfterLastWindowClosed(
     [[maybe_unused]] NS::Application* pSender) {
     shutdown();
     return true;
 }
 
-void Engine_Test::SetupRenderLoop() {
+void DawnSponzaRenderer::SetupRenderLoop() {
     runLoop_ = CFRunLoopGetMain();
     CFRunLoopTimerContext context = {0, this, nullptr, nullptr, nullptr};
     displayLink_ = CFRunLoopTimerCreate(
@@ -1521,8 +1569,8 @@ void Engine_Test::SetupRenderLoop() {
     std::cerr << "[DawnSponza] 60 FPS render loop started" << std::endl;
 }
 
-void Engine_Test::DisplayLinkCallback(CFRunLoopTimerRef, void* info) {
-    auto* test = static_cast<Engine_Test*>(info);
+void DawnSponzaRenderer::DisplayLinkCallback(CFRunLoopTimerRef, void* info) {
+    auto* test = static_cast<DawnSponzaRenderer*>(info);
     test->run();
 }
 

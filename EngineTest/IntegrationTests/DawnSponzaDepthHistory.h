@@ -1,4 +1,7 @@
 #pragma once
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 #include "DawnSponzaProbeUpdate.h"
 #include "DawnSponzaProbeSchedule.h"
 #include "Engine/Graphics/RHI/Platforms/Dawn/DawnBuffer.h"
@@ -59,7 +62,11 @@ public:
         while(!slot.map->done.load(std::memory_order_acquire)){
             wgpuInstanceProcessEvents(device_->GetInstance());
             if(std::chrono::steady_clock::now()-start>std::chrono::seconds(10))return false;
-            if(!slot.map->done.load(std::memory_order_acquire))std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#ifdef __EMSCRIPTEN__
+            if (!slot.map->done.load(std::memory_order_acquire)) emscripten_sleep(1);
+#else
+            if (!slot.map->done.load(std::memory_order_acquire)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+#endif
         }
         if(!slot.map->success)return false;
         auto* buffer=device_->GetBuffer(slot.buffer);if(!buffer)return false;

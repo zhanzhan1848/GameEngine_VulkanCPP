@@ -528,6 +528,8 @@ else()
         # Particles/*.cpp. The test target still gets the compile definition
         # for safety in case any other translation unit reads it directly.
         add_executable(TestDawnWASM
+            EngineTest/IntegrationTests/TestDawnSponza.cpp
+            EngineTest/IntegrationTests/DawnSponzaShadowFit.cpp
             EngineTest/IntegrationTests/TestDawnMain.cpp
             EngineTest/IntegrationTests/TestDawnForwardRenderer.cpp
             EngineTest/IntegrationTests/EmscriptenInput.cpp
@@ -561,6 +563,7 @@ else()
             -sENVIRONMENT=web
             -sEXIT_RUNTIME=0
             -sASYNCIFY
+            -sASYNCIFY_STACK_SIZE=262144
             -sASSERTIONS=1
             --shell-file ${CMAKE_SOURCE_DIR}/wasm/shell.html
             -g
@@ -573,20 +576,28 @@ else()
         set(SHADERS_ROOT "${CMAKE_SOURCE_DIR}/Engine/Graphics/Dawn/shaders")
         if(EXISTS "${SHADERS_ROOT}")
             string(APPEND EMBED_FLAGS " --embed-file ${SHADERS_ROOT}@/Engine/Graphics/Dawn/shaders")
+            # Re-link when a packaged WGSL shader changes, including newly
+            # added entries; otherwise incremental builds retain stale code.
+            file(GLOB_RECURSE DAWN_WASM_SHADERS CONFIGURE_DEPENDS "${SHADERS_ROOT}/*.wgsl")
+            set_property(TARGET TestDawnWASM APPEND PROPERTY LINK_DEPENDS ${DAWN_WASM_SHADERS})
         endif()
-        # Embed Sponza.model (~7 MB) so it's in MEMFS before main() runs.
-        # This avoids the async preRun timing issue where XHR fetch completes
-        # after main() has already tried to open the file.
-        set(SPONZA_MODEL "${CMAKE_SOURCE_DIR}/EngineTest/assets/Sponza.model")
-        if(EXISTS "${SPONZA_MODEL}")
-            string(APPEND EMBED_FLAGS " --embed-file ${SPONZA_MODEL}@/assets/Sponza.model")
-        endif()
-        # Embed DDGI static probe cache (~1.6 MB). Without this, WASM falls
-        # back to StaticProbeBaker CPU ray trace at Mode 10/11 init — single-
-        # threaded WASM makes that 30+ seconds, which looks like a tab hang.
-        set(DDGI_CACHE "${CMAKE_SOURCE_DIR}/mode10_ddgi_cache.spch")
-        if(EXISTS "${DDGI_CACHE}")
-            string(APPEND EMBED_FLAGS " --embed-file ${DDGI_CACHE}@/mode10_ddgi_cache.spch")
+        set_property(SOURCE EngineTest/IntegrationTests/TestDawnSponza.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-fast-math)
+        set_property(SOURCE EngineTest/IntegrationTests/DawnSponzaShadowFit.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-fast-math -ffp-contract=off)
+        file(GLOB DAWN_SPONZA_SHADERS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/EngineTest/shaders/DawnWGSL/*.wgsl")
+        set_property(TARGET TestDawnWASM APPEND PROPERTY LINK_DEPENDS ${DAWN_SPONZA_SHADERS})
+        string(APPEND EMBED_FLAGS " --embed-file ${CMAKE_SOURCE_DIR}/EngineTest/shaders/DawnWGSL@/EngineTest/shaders/DawnWGSL")
+        # Local standalone builds may embed their existing scene. The deployment
+        # page sets this option and stages pinned R2 assets before main instead.
+        option(PRIMAL_DAWN_REMOTE_ASSETS "Load Dawn scene assets at runtime" OFF)
+        if(NOT PRIMAL_DAWN_REMOTE_ASSETS)
+            set(SPONZA_MODEL "${CMAKE_SOURCE_DIR}/EngineTest/assets/Sponza.model")
+            if(EXISTS "${SPONZA_MODEL}")
+                string(APPEND EMBED_FLAGS " --embed-file ${SPONZA_MODEL}@/assets/Sponza.model")
+            endif()
+            set(DDGI_CACHE "${CMAKE_SOURCE_DIR}/mode10_ddgi_cache.spch")
+            if(EXISTS "${DDGI_CACHE}")
+                string(APPEND EMBED_FLAGS " --embed-file ${DDGI_CACHE}@/mode10_ddgi_cache.spch")
+            endif()
         endif()
         # Export ccall/cwrap (used by shell.html to call setDebugParam/setSunDirection)
         # and export the two extern "C" functions themselves (EMSCRIPTEN_KEEPALIVE).

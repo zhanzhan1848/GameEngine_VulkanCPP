@@ -604,3 +604,9 @@ scripts/gi_ownership_baseline.sh
 /EngineTest/assets/shaders/VTSys_UpdatePageTable.comp.spv
 /EngineTest/assets/shaders/VTTest_TexelFetch.comp.spv
 /EngineTest/assets/shaders/VTTest_Write.comp.spv
+
+# Local Emscripten outputs (WASM/ and wasm/ share a directory on macOS).
+/wasm/TestDawnWASM.js
+/wasm/TestDawnWASM.wasm
+/wasm/libEngine.a
+/wasm/liblua_static.a

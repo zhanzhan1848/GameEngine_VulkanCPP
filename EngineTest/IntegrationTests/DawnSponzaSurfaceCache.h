@@ -1,4 +1,5 @@
 #pragma once
+#include "DawnSponzaHalf.h"
 #include "DawnSponzaGeometry.h"
 #include "Engine/Graphics/Lumen/SurfaceCache/CardGenerator.h"
 #include "Engine/Graphics/Lumen/SurfaceCache/OwnerCardRanges.h"
@@ -117,7 +118,7 @@ public:
             nonempty+=count>0;perCard.push_back(count);}
         for(u64 i=0;i<pixels;++i){if(data[i*4+3]==0)continue;++valid;if(!covered[i]||data[i*4+3]<128)++invalid;
             float depth;std::memcpy(&depth,data+pixels*8+i*4,4);if(!std::isfinite(depth)||depth<.0499f)++invalid;
-            _Float16 oct[2];std::memcpy(oct,data+pixels*4+i*4,4);for(auto v:oct)if(!std::isfinite(float(v))||v<0||v>1)++invalid;}
+            HalfStorage oct[2];std::memcpy(oct,data+pixels*4+i*4,4);for(auto v:oct)if(!std::isfinite(float(v))||v<0||v>1)++invalid;}
         std::ofstream raw(std::string(prefix)+"-atlas.bin",std::ios::binary);raw.write(reinterpret_cast<const char*>(data),bytes);raw.close();
         std::ofstream meta(std::string(prefix)+"-atlas.json");meta << "{\"atlas_size\":2048,\"cards\":" << cards_.size() << ",\"encoded_cards\":" << captured_ << ",\"encoded_draws\":" << encodedDraws_ << ",\"record_frames\":" << recordFrames_ << ",\"capture_cursor\":" << captureCursor_ << ",\"capture_seeded\":" << (captureSeeded_?"true":"false") << ",\"nonempty_cards\":" << nonempty << ",\"valid_texels\":" << valid << ",\"invalid_texels\":" << invalid << ",\"completion_checked\":true,\"radiance_connected\":false,\"card_valid_texels\":[";
         for(size_t i=0;i<perCard.size();++i){if(i)meta << ',';meta << perCard[i];}meta << "]}\n";meta.close();

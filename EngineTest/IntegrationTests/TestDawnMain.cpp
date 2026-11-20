@@ -9,8 +9,17 @@
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#include "TestDawnSponza.h"
+#include <cstdlib>
 
 extern "C" void EmscriptenInitInput();
+
+static DawnSponzaRenderer* referenceRenderer = nullptr;
+bool SetReferenceSunDirection(float yaw, float pitch) {
+    if (!referenceRenderer) return false;
+    referenceRenderer->SetSunDirection(yaw, pitch);
+    return true;
+}
 
 static Engine_Test* g_test = nullptr;
 
@@ -21,7 +30,25 @@ void main_loop() {
 int main([[maybe_unused]] int argc, [[maybe_unused]] char* argv[]) {
     std::cout << "=== Dawn WebGPU WASM ===" << std::endl;
 
-    Engine_Test test;
+    if (EM_ASM_INT({ return new URLSearchParams(location.search).get("mode") === "11"; })) {
+        static DawnSponzaRenderer renderer;
+        setenv("PRIMAL_DAWN_SCREEN_PROBES_STAGE1", "1", 1);
+        setenv("PRIMAL_DAWN_REFERENCE_RESOLUTION", "1", 1);
+        setenv("PRIMAL_TEST_MODEL", "SponzaTangentFrames.model", 1);
+        if (!renderer.initialize()) {
+            std::cerr << "Failed to initialize Mode 11" << std::endl;
+            return 1;
+        }
+        referenceRenderer = &renderer;
+        EmscriptenInitInput();
+        EM_ASM({
+            window.setRenderMode?.(11, "Dynamic GI", "Sponza");
+            window.hideLoading?.();
+        });
+        emscripten_set_main_loop([] { renderer.run(); }, 0, true);
+    }
+    setenv("PRIMAL_DAWN_FORWARD_SHOWCASE", "1", 1);
+    static Engine_Test test;
     g_test = &test;
     if (!test.initialize()) {
         std::cerr << "Failed to initialize" << std::endl;

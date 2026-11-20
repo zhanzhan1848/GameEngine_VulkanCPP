@@ -1,4 +1,5 @@
 #pragma once
+#include "DawnSponzaHalf.h"
 #include "DawnSponzaSurfaceCache.h"
 #include "DawnSponzaShadows.h"
 #include "Engine/Graphics/Lumen/DDGISlotMap.h"
@@ -48,7 +49,8 @@ public:
         auto buffer=[&](u64 bytes,const void* data,BufferType type,GPUMemoryUsage memory=GPUMemoryUsage::Static){BufferDesc d{};d.size=bytes;d.type=type;d.memoryUsage=memory;
             auto h=device.CreateBuffer(d);buffers_.push_back(h);if(h!=handles::INVALID_RESOURCE){if(data&&!device.UpdateBufferData(h,data,bytes))return handles::INVALID_RESOURCE;}return h;};
         const auto dispatchBuffer=buffer(dispatch.size()*32,dispatch.data(),BufferType::Raw);
-        visibility_=buffer(u64(size_)*size_*4,nullptr,BufferType::Raw);const auto lights=buffer(sizeof(in.light),&in.light,BufferType::Raw);
+        visibility_=buffer(u64(size_)*size_*4,nullptr,BufferType::Raw);sunLight_ = in.light;
+        const auto lights = sunBuffer_ = buffer(sizeof(in.light), &in.light, BufferType::Raw);
         const float zeros[36]{};const auto dummy=buffer(sizeof(zeros),zeros,BufferType::Raw);
         if(dispatchBuffer==handles::INVALID_RESOURCE||visibility_==handles::INVALID_RESOURCE||lights==handles::INVALID_RESOURCE||dummy==handles::INVALID_RESOURCE)return false;
         auto texture=[&](){TextureDesc d{};d.type=TextureType::Texture2D;d.size={size_,size_,1};d.format=DataFormat::RGBA16_Float;
@@ -93,6 +95,17 @@ public:
         }
         ready_=true;PRIMAL_LOG_STREAM(Info,"DawnSurfaceLighting") << "cards=" << cards_ << " texels=" << texels_ << " atlas=" << size_ << " full_refresh=1 probe_feedback=0 radiosity_solo=" << in.radiositySolo << " tile_radiosity=0";return true;
     }
+    bool SetSunDirection(const primal::math::v3& direction) {
+        if (!ready_) return false;
+        const auto toward = graphics::rhi::math::Normalize(direction);
+        shadow_.toward[0] = -toward.x;
+        shadow_.toward[1] = -toward.y;
+        shadow_.toward[2] = -toward.z;
+        sunLight_.direction[0] = direction.x;
+        sunLight_.direction[1] = direction.y;
+        sunLight_.direction[2] = direction.z;
+        return device_->UpdateBufferData(sunBuffer_, &sunLight_, sizeof(sunLight_));
+    }
     bool Record(DawnCommandBuffer& cmd,u32 frame,const primal::math::m4x4* matrices,ResourceHandle indirect=handles::INVALID_RESOURCE,bool indirectEnabled=false){
         if(!ready_||frame!=nextFrame_||(indirectEnabled&&indirect==handles::INVALID_RESOURCE))return false;const u32 slot=graphics::lumen::DDGISlotsForFrame(frame).writeIndex;
         if(matrices)std::copy_n(matrices,4,shadow_.matrices);
@@ -121,7 +134,7 @@ public:
         if(readback_==handles::INVALID_RESOURCE)return false;const u64 pixels=u64(size_)*size_,bytes=pixels*20;
         const auto* data=static_cast<const u8*>(device_->MapBuffer(readback_,0,bytes));if(!data)return false;
         u64 valid=0,lit=0,shadowed=0,invalid=0;float maximum=0;
-        for(u64 p=0;p<pixels;++p){_Float16 a[4],b[4];float v;std::memcpy(a,data+p*8,8);std::memcpy(b,data+pixels*8+p*8,8);std::memcpy(&v,data+pixels*16+p*4,4);
+        for(u64 p=0;p<pixels;++p){HalfStorage a[4],b[4];float v;std::memcpy(a,data+p*8,8);std::memcpy(b,data+pixels*8+p*8,8);std::memcpy(&v,data+pixels*16+p*4,4);
             if(a[3]!=b[3]||(a[3]!=0&&a[3]!=1))++invalid;if(a[3]==1){++valid;lit+=a[0]>0||a[1]>0||a[2]>0;shadowed+=v<1;}
             if(!std::isfinite(v)||v<0||v>1)++invalid;
             for(u32 c=0;c<3;++c){const float x=a[c],y=b[c];maximum=std::max(maximum,x);if(!std::isfinite(x)||!std::isfinite(y)||x<0||x>64||y<0||y>x+.0625f)++invalid;}}
@@ -142,6 +155,8 @@ public:
         pipelineLayout_=handles::INVALID_PIPELINE_LAYOUT;layout_=handles::INVALID_DESCRIPTOR_SET_LAYOUT;
     }
 private:
+    Light sunLight_{};
+    ResourceHandle sunBuffer_ = handles::INVALID_RESOURCE;
     DawnDevice* device_=nullptr;bool ready_=false;u32 size_=0,texels_=0,cards_=0,nextFrame_=0,recorded_=0;ShadowUniform shadow_{};LightUniform light_{};
     std::vector<ResourceHandle> buffers_,textures_;ResourceHandle visibility_=handles::INVALID_RESOURCE,zero_=handles::INVALID_RESOURCE,zeroAux_=handles::INVALID_RESOURCE,readback_=handles::INVALID_RESOURCE;
     std::array<ResourceHandle,3> lighting_{},nodirect_{};std::array<ResourceHandle,4> shadowBuffers_{},lightBuffers_{};

@@ -3896,6 +3896,7 @@ void Engine_Test::applicationWillFinishLaunching(NS::Notification* notification)
     pApp->setActivationPolicy(NS::ActivationPolicy::ActivationPolicyRegular);
 }
 
+bool SetReferenceSunDirection(float yaw, float pitch);
 bool Engine_Test::applicationShouldTerminateAfterLastWindowClosed(NS::Application*) {
     shuttingDown_ = true;
 
@@ -3918,6 +3919,7 @@ bool Engine_Test::applicationShouldTerminateAfterLastWindowClosed(NS::Applicatio
 // Both functions are no-ops on native (guarded by __EMSCRIPTEN__).
 // ============================================================
 #ifdef __EMSCRIPTEN__
+    if (SetReferenceSunDirection(yaw, pitch)) return;
 extern "C" {
 
 // Index maps to DawnDebugParams field order (see DawnDebugParams.h).

@@ -1,4 +1,5 @@
 #pragma once
+#include "DawnSponzaHalf.h"
 #include "DawnSponzaScreenProbeHistory.h"
 namespace primal::tests::dawn_sponza {
 // Full-resolution reconstruction of canonical radiance SH. Both outputs are
@@ -50,7 +51,7 @@ public:
     bool Save(const std::string& prefix){
         if(readback_==handles::INVALID_RESOURCE)return false;const auto* raw=static_cast<const char*>(device_->MapBuffer(readback_,0,u64(pitch_)*height_*2));if(!raw)return false;
         std::ofstream out(prefix+".bin",std::ios::binary);u32 invalid=0,valid[2]{};float peak=0;
-        for(u32 image=0;image<2;++image)for(u32 y=0;y<height_;++y){const auto* row=raw+u64(pitch_)*(height_*image+y);out.write(row,width_*8);const auto* values=reinterpret_cast<const _Float16*>(row);for(u32 x=0;x<width_;++x){valid[image]+=float(values[x*4+3])>0;for(u32 c=0;c<4;++c){const float v=values[x*4+c];invalid+=!std::isfinite(v);peak=std::max(peak,std::abs(v));}}}
+        for(u32 image=0;image<2;++image)for(u32 y=0;y<height_;++y){const auto* row=raw+u64(pitch_)*(height_*image+y);out.write(row,width_*8);const auto* values=reinterpret_cast<const HalfStorage*>(row);for(u32 x=0;x<width_;++x){valid[image]+=float(values[x*4+3])>0;for(u32 c=0;c<4;++c){const float v=values[x*4+c];invalid+=!std::isfinite(v);peak=std::max(peak,std::abs(v));}}}
         out.close();device_->UnmapBuffer(readback_);device_->DestroyBuffer(readback_);readback_=handles::INVALID_RESOURCE;
         std::ofstream params(prefix+"-params.bin",std::ios::binary);params.write(reinterpret_cast<const char*>(&lastParams_),sizeof(lastParams_));params.write(reinterpret_cast<const char*>(&lastDenoise_),sizeof(lastDenoise_));params.close();
         std::ofstream meta(prefix+".json");meta<<"{\"frame\":"<<lastSource_.frame<<",\"width\":"<<width_<<",\"height\":"<<height_<<",\"probes\":"<<lastSource_.probes<<",\"valid_gather\":"<<valid[0]<<",\"valid_denoise\":"<<valid[1]<<",\"invalid\":"<<invalid<<",\"peak\":"<<peak<<",\"layout\":\"gather RGBA16F; denoise RGBA16F; tight rows\",\"completion_checked_by_caller\":true}\n";meta.close();return out.good()&&params.good()&&meta.good()&&!invalid;

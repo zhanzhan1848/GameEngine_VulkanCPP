@@ -1,4 +1,5 @@
 #pragma once
+#include "DawnSponzaHalf.h"
 #include "DawnSponzaProbeUpdate.h"
 namespace primal::tests::dawn_sponza {
 // Native mode-7 consumer. All input buffers are borrowed and frame-qualified;
@@ -83,7 +84,7 @@ public:
     bool Save(const std::string& prefix){
         if(readback_==handles::INVALID_RESOURCE)return false;const u32 w=inputs_.targetWidth,h=inputs_.targetHeight;const auto* raw=static_cast<const u8*>(device_->MapBuffer(readback_,0,u64(pitch_)*h*2));if(!raw)return false;
         std::ofstream out(prefix+".bin",std::ios::binary);u32 invalid=0,valid=0;float peak=0;
-        for(u32 image=0;image<2;++image)for(u32 y=0;y<h;++y){const auto* row=raw+u64(pitch_)*(h*image+y);out.write(reinterpret_cast<const char*>(row),w*8);const auto* values=reinterpret_cast<const _Float16*>(row);for(u32 x=0;x<w;++x){valid+=image==0&&float(values[x*4+3])>0;for(u32 c=0;c<4;++c){float value=values[x*4+c];if(!std::isfinite(value))++invalid;peak=std::max(peak,std::abs(value));}}}
+        for(u32 image=0;image<2;++image)for(u32 y=0;y<h;++y){const auto* row=raw+u64(pitch_)*(h*image+y);out.write(reinterpret_cast<const char*>(row),w*8);const auto* values=reinterpret_cast<const HalfStorage*>(row);for(u32 x=0;x<w;++x){valid+=image==0&&float(values[x*4+3])>0;for(u32 c=0;c<4;++c){float value=values[x*4+c];if(!std::isfinite(value))++invalid;peak=std::max(peak,std::abs(value));}}}
         out.close();device_->UnmapBuffer(readback_);device_->DestroyBuffer(readback_);readback_=handles::INVALID_RESOURCE;
         // Preserve the exact host record uploaded for this captured dispatch.
         std::ofstream params(prefix+".params.bin",std::ios::binary);params.write(reinterpret_cast<const char*>(&lastParams_),sizeof(lastParams_));params.close();

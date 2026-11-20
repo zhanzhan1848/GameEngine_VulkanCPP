@@ -1,4 +1,5 @@
 #pragma once
+#include "DawnSponzaHalf.h"
 #include "DawnSponzaGeometry.h"
 #include "DawnSponzaTAA.h"
 #include "DawnSponzaGBufferFormats.h"
@@ -49,7 +50,7 @@ public:
  bool Save(const std::string& prefix){
   if(readback_==handles::INVALID_RESOURCE)return false;const auto* bytes=static_cast<const char*>(device_->MapBuffer(readback_,0,offset_[5]+u64(pitch_[5])*heights_[5]));if(!bytes)return false;
   std::ofstream f(prefix+".bin",std::ios::binary);f.write(reinterpret_cast<const char*>(&capturedParams_),sizeof(Params));u32 invalid=0;
-  for(u32 i=0;i<6;++i)for(u32 y=0;y<heights_[i];++y){const auto* row=bytes+offset_[i]+u64(pitch_[i])*y;f.write(row,widths_[i]*bpp_[i]);if(i>=4){const auto* values=reinterpret_cast<const _Float16*>(row);for(u32 x=0;x<widths_[i]*4;++x)invalid+=!std::isfinite(float(values[x]));}}f.close();device_->UnmapBuffer(readback_);device_->DestroyBuffer(readback_);readback_=handles::INVALID_RESOURCE;
+  for(u32 i=0;i<6;++i)for(u32 y=0;y<heights_[i];++y){const auto* row=bytes+offset_[i]+u64(pitch_[i])*y;f.write(row,widths_[i]*bpp_[i]);if(i>=4){const auto* values=reinterpret_cast<const HalfStorage*>(row);for(u32 x=0;x<widths_[i]*4;++x)invalid+=!std::isfinite(float(values[x]));}}f.close();device_->UnmapBuffer(readback_);device_->DestroyBuffer(readback_);readback_=handles::INVALID_RESOURCE;
   std::ofstream meta(prefix+".json");meta<<"{\"frame\":"<<captured_<<",\"source_digest\":"<<in_.scene.digest<<",\"invalid\":"<<invalid<<",\"normal_format\":\""<<CaptureFormatName(formats_[1])<<"\",\"orm_format\":\""<<CaptureFormatName(formats_[2])<<"\",\"layout\":\"Params208;source D32,normal/orm as formats;previous trace,current trace,resolve RGBA16F tight rows\"}\n";meta.close();return f.good()&&meta.good()&&!invalid;
  }
  void Shutdown(){if(!device_)return;for(auto& s:slots_){for(auto h:s.sets)if(h!=handles::INVALID_DESCRIPTOR_SET)device_->DestroyDescriptorSet(h);for(auto h:s.output)if(h!=handles::INVALID_RESOURCE)device_->DestroyTexture(h);if(s.params!=handles::INVALID_RESOURCE)device_->DestroyBuffer(s.params);s=Slot{};}for(u32 i=0;i<2;++i){if(pipelines_[i]!=handles::INVALID_PIPELINE)device_->DestroyPipeline(pipelines_[i]);if(shaders_[i]!=handles::INVALID_SHADER)device_->DestroyShader(shaders_[i]);}if(pipelineLayout_!=handles::INVALID_PIPELINE_LAYOUT)device_->DestroyPipelineLayout(pipelineLayout_);if(layout_!=handles::INVALID_DESCRIPTOR_SET_LAYOUT)device_->DestroyDescriptorSetLayout(layout_);if(readback_!=handles::INVALID_RESOURCE)device_->DestroyBuffer(readback_);device_=nullptr;ready_=false;nextFrame_=0;layout_=handles::INVALID_DESCRIPTOR_SET_LAYOUT;pipelineLayout_=handles::INVALID_PIPELINE_LAYOUT;shaders_.fill(handles::INVALID_SHADER);pipelines_.fill(handles::INVALID_PIPELINE);readback_=handles::INVALID_RESOURCE;}

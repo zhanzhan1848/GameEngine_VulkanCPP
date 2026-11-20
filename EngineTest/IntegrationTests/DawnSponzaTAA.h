@@ -1,4 +1,5 @@
 #pragma once
+#include "DawnSponzaHalf.h"
 #include "DawnSponzaPostProcess.h"
 #include "Engine/Graphics/RHI/Platforms/Dawn/DawnTexture.h"
 #include "Engine/Graphics/RHI/Core/RHIMath.h"
@@ -53,7 +54,7 @@ public:
     bool Save(const std::string& prefix){
         if(readback_==handles::INVALID_RESOURCE)return false;const u64 bytes=offset_[4]+u64(pitch_[4])*height_;auto* raw=static_cast<const char*>(device_->MapBuffer(readback_,0,bytes));if(!raw)return false;
         std::ofstream f(prefix+".bin",std::ios::binary);f.write(reinterpret_cast<const char*>(&capturedParams_),sizeof(Params));u32 invalid=0;
-        for(u32 i=0;i<5;++i)for(u32 y=0;y<height_;++y){const auto* row=raw+offset_[i]+u64(y)*pitch_[i];f.write(row,width_*(i<3?8:4));if(i==2){const auto* values=reinterpret_cast<const _Float16*>(row);for(u32 x=0;x<width_*4;++x)invalid+=!std::isfinite(float(values[x]));}}
+        for(u32 i=0;i<5;++i)for(u32 y=0;y<height_;++y){const auto* row=raw+offset_[i]+u64(y)*pitch_[i];f.write(row,width_*(i<3?8:4));if(i==2){const auto* values=reinterpret_cast<const HalfStorage*>(row);for(u32 x=0;x<width_*4;++x)invalid+=!std::isfinite(float(values[x]));}}
         f.close();device_->UnmapBuffer(readback_);device_->DestroyBuffer(readback_);readback_=handles::INVALID_RESOURCE;
         std::ofstream meta(prefix+".json");meta<<"{\"frame\":"<<captured_<<",\"width\":"<<width_<<",\"height\":"<<height_<<",\"reset\":"<<capturedParams_.reset<<",\"depth_valid\":"<<capturedParams_.depthValid<<",\"jitter\":["<<capturedRaster_.jitter.x<<","<<capturedRaster_.jitter.y<<"],\"invalid\":"<<invalid<<",\"layout\":\"Params160; current,history,output RGBA16F; current,previous depth float32; tight rows\",\"completion_checked_by_caller\":true}\n";meta.close();return f.good()&&meta.good()&&!invalid;
     }
