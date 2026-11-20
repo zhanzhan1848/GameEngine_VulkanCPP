@@ -99,9 +99,10 @@
           catch { /* An evicted or full cache must not block rendering. */ }
         }
       }
+      const fs = await options.fs;
       var dir = item.fsPath.slice(0, item.fsPath.lastIndexOf('/'));
-      if (dir && !options.fs.analyzePath(dir).exists) options.fs.mkdirTree(dir);
-      options.fs.writeFile(item.fsPath, data);
+      if (dir && !fs.analyzePath(dir).exists) fs.mkdirTree(dir);
+      fs.writeFile(item.fsPath, data);
       readyBytes += source.size;
       options.progress(++finished, items.length, readyBytes, totalBytes);
     }

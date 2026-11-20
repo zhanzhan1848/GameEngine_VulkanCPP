@@ -369,7 +369,7 @@
   </div>
 
   <script src="package_loader.js"></script>
-  <script src="dawn_asset_loader.js"></script>
+  <script src="dawn_asset_loader.js?v=2"></script>
   <script>
     // web-cloud-delivery S1：项目包入口——?package=<url> 时 fetch+解析 v2 运行时包
     //（与 PrimalPlayer 同一行式契约），侧栏展示场景/实体/资产/序列摘要与诊断；
@@ -589,22 +589,31 @@
       }
       requestAnimationFrame(updateFps);
 
-      // Stage the pinned model, textures and HDR before entering main().
-      function stageAllAssets() {
-        addRunDependency('dawn-assets');
-        var referenceGI = new URLSearchParams(location.search).get('mode') === '11';
+      const referenceGI = new URLSearchParams(location.search).get('mode') === '11';
+      let mountFileSystem;
+      const fileSystemReady = new Promise(resolve => { mountFileSystem = resolve; });
+      let sceneReady;
+
+      function prepareScene() {
         var items = referenceGI
           ? window.DAWN_ASSETS.filter(item => item.fsPath !== '/assets/Sponza.model').concat(window.DAWN_GI_INPUTS)
           : window.DAWN_ASSETS;
-        DawnAssetLoader.stageAssets(items, {
+        return DawnAssetLoader.stageAssets(items, {
           modelPath: referenceGI ? '/assets/SponzaTangentFrames.model' : '/assets/Sponza.model',
-          fs: FS, fetch: window.fetch.bind(window), crypto: window.crypto, cacheStorage: window.caches,
+          fs: fileSystemReady, fetch: window.fetch.bind(window), crypto: window.crypto, cacheStorage: window.caches,
           progress: function(done, total, ready, bytes) {
             const mb = value => (value / 1000000).toFixed(1);
             setProgress(Math.round(10 + 80 * ready / bytes),
               'Preparing scene ' + mb(ready) + ' / ' + mb(bytes) + ' MB (' + done + '/' + total + ')');
           }
-        }).then(function() {
+        });
+      }
+
+      function stageAllAssets() {
+        addRunDependency('dawn-assets');
+        mountFileSystem(FS);
+        sceneReady.then(function(error) {
+          if (error) throw error;
           if (referenceGI) {
             FS.mkdirTree('/EngineTest');
             FS.symlink('/assets', '/EngineTest/assets');
@@ -672,13 +681,13 @@
       var manifestScript = document.createElement('script');
       manifestScript.src = 'dawn_assets_manifest.js';
       manifestScript.onload = function() {
-        // Once manifest is loaded, kick off the Emscripten module
+        // Fetch both origins concurrently. Each asset worker waits for MEMFS
+        // only after its first object is ready for mounting.
+        sceneReady = prepareScene().then(() => null, error => error);
         setProgress(10, 'Loading engine... / 加载引擎...');
         var script = document.createElement('script');
         script.src = 'TestDawnWASM.js';
-        script.onload = function() {
-          setProgress(15, 'Engine loaded. / 引擎已加载');
-        };
+
         script.onerror = function() {
           setProgress(0, 'Failed to load TestDawnWASM.js / 加载失败');
           statusLeft.textContent = 'Error: Failed to load WASM module';
