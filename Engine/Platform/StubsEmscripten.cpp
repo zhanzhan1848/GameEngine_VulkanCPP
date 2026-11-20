@@ -124,11 +124,33 @@ id::id_type get_rhi_mesh_id(id::id_type geometry_id) {
     return geometry_id;
 }
 
-id::id_type create_resource(const void* data, asset_type::type type, GraphicsAPI api) {
+// R40：StandardRenderPipeline 的 SC 卡烘焙/BLAS 访问面。WASM 侧无烘焙数据、
+// 无 ray_geometry 资产：has_* 返回 false 让 content-ready 门禁按实例跳过，
+// get_* 返回空/false，调用方走各自的"无数据"分支（SC 候选默认关的口径）。
+std::shared_ptr<const graphics::ray_geometry::MeshBLAS> get_rhi_mesh_blas(id::id_type id) {
+    (void)id;
+    return nullptr;
+}
+
+bool get_rhi_mesh_card_bake(id::id_type id, graphics::rhi::RHICardBakeData& out) {
+    (void)id;
+    (void)out;
+    return false;
+}
+
+bool has_rhi_mesh_card_bake(id::id_type id) {
+    (void)id;
+    return false;
+}
+
+// 签名必须与 ContentToEngine.h 的声明逐参一致（第 4 参 preferred_device 带默认
+// 值，但定义少参即成另一个重载——链接期 undefined symbol 的真凶，R40 修正）。
+id::id_type create_resource(const void* data, asset_type::type type, GraphicsAPI api,
+                            graphics::rhi::RHIDeviceBase* preferred_device) {
     if (!data) return id::invalid_id;
     if (type != asset_type::texture) return id::invalid_id;
 
-    auto* device = first_device();
+    auto* device = preferred_device ? preferred_device : first_device();
     if (!device) {
         PRIMAL_LOG_STREAM(Error, "Engine") << "[StubsEmscripten] create_resource: no device registered" << std::endl;
         return id::invalid_id;
@@ -189,6 +211,28 @@ id::id_type create_resource(const void* data, asset_type::type type, GraphicsAPI
         texture_table()[new_id] = handle;
     }
     return new_id;
+}
+
+// R40：MaterialDataBuilder（Nanite 材质纹理路径）与 SceneDataAdapter 的清理路径
+// 都会走到 destroy_resource；WASM 侧同样用 side-table 反查后经设备释放纹理。
+void destroy_resource(id::id_type id, asset_type::type type, GraphicsAPI api) {
+    if (!id::is_valid(id)) return;
+    if (type == asset_type::texture) {
+        graphics::rhi::ResourceHandle handle{graphics::rhi::handles::INVALID_RESOURCE};
+        {
+            std::lock_guard<std::mutex> lock(asset_mutex());
+            auto it = texture_table().find(id);
+            if (it == texture_table().end()) return;
+            handle = it->second;
+            texture_table().erase(it);
+        }
+        if (handle != graphics::rhi::handles::INVALID_RESOURCE) {
+            if (auto* device = first_device()) device->DestroyTexture(handle);
+        }
+    }
+    // mesh 类资源由 asset_table/gpu_mesh_table 承载（register_mesh_asset 路径），
+    // 其释放走各自的 release/registry 接口；此处与原生 ContentToEngine.cpp 一致地
+    // 只处理 texture 类型，其余类型静默忽略。
 }
 
 void shutdown() {

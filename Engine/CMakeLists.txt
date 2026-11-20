@@ -422,8 +422,11 @@ endif()
 # Nanite IS compiled for WASM — its Metal includes are guarded by
 # #ifdef __APPLE__ and ENABLE_WEBGPU paths are implemented.
 # StubsEmscripten.cpp provides the ContentToEngine symbols Nanite references.
+# Simulation is excluded together with the root-level Jolt skip (WASM 下
+# Jolt 目标不存在，Simulation/*.cpp 是唯一允许含 Jolt 头的源集)。
 if(EMSCRIPTEN)
     list(FILTER COMMON_SOURCES EXCLUDE REGEX "Content/ContentToEngine\\.cpp")
+    list(FILTER COMMON_SOURCES EXCLUDE REGEX "Simulation/.*\\.cpp")
 endif()
 
 # 合并所有源文件
@@ -528,8 +531,14 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 )
 
 # 粒子系统禁用定义
+# DISABLE_PARTICLE_FX 是 Engine/ParticleFX/* 全体源文件的编译守卫宏名
+# （Particles/ 目录用 DISABLE_PARTICLE_SYSTEM），两个宏必须同时给出，
+# 否则 WASM 下 ParticleFX 仍编活动体而对空的 Particles 头报成员缺失。
 if(DISABLE_PARTICLE_SYSTEM)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE DISABLE_PARTICLE_SYSTEM=1)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        DISABLE_PARTICLE_SYSTEM=1
+        DISABLE_PARTICLE_FX=1
+    )
 endif()
 
 # 编译选项
@@ -918,7 +927,14 @@ if(TARGET Jolt)
 endif()
 
 # 添加平台相关库
-if(UNIX AND NOT APPLE)
+# 注意：EMSCRIPTEN 下 UNIX=1 且 APPLE=0，必须排在 UNIX 分支前才能命中。
+if(EMSCRIPTEN)
+    # WASM：无系统 zlib，走 Emscripten ports（-sUSE_ZLIB=1 同时给出 zlib.h 的
+    # include 路径并在链接期拉入 port 库）。Engine 是 STATIC 目标，link_options
+    # 会随链接接口传递给 TestDawnWASM 等消费目标；compile 侧仅本库 TU 直含 zlib.h。
+    target_compile_options(${PROJECT_NAME} PRIVATE "-sUSE_ZLIB=1")
+    target_link_options(${PROJECT_NAME} PRIVATE "-sUSE_ZLIB=1")
+elseif(UNIX AND NOT APPLE)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         X11
         dl

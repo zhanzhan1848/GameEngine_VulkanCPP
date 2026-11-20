@@ -395,8 +395,11 @@ struct LuaEventPayload {
     int table_ref;         // LUA_REGISTRYINDEX ref to event table
     int _pad;              // explicit alignment (avoid compiler-dependent padding)
 };
-static_assert(sizeof(LuaEventPayload) == 16,
-              "LuaEventPayload must stay 16 bytes — engine payload_size contract");
+// 契约按布局表达而非字面量 16：LP64 下 8+4+4=16，wasm32 下 4+4+4=12。
+// 全部消费点（下方 emit/校验两处）都以 sizeof 相对比较，结构对引擎
+// 不透明、不过序列化 ABI，两平台各自自洽即可。
+static_assert(sizeof(LuaEventPayload) == sizeof(void*) + 8,
+              "LuaEventPayload layout drifted — 1 pointer + 2 int contract");
 
 // === Phase 2b.6: post(fn) global ===
 // Capture struct for posted Lua callbacks. Heap-allocated; owned by the

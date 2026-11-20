@@ -477,6 +477,13 @@ set(JPH_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 # 仓库自定义 build type（如 build-wt 的 DebugEditor）不命中其 $<CONFIG:...> gen-expr 时，
 # libJolt.a 与消费方头文件内联代码会条件编译不一致 → 类布局错位 → 堆损坏。
 # 在 Jolt 子目录范围内归一化为 Debug（PUBLIC 宏会传播给 Engine 保持两边一致）。
+# EMSCRIPTEN/WASM 整块跳过：该 pin 的 Core.h 平台链把 __linux__ 判在 __EMSCRIPTEN__
+# 之前，而 emcc 默认定义 __linux__ → WASM 被识别成 Linux → CPU 链 #error
+# Unsupported CPU architecture（上游修法是 EMSCRIPTEN 提前，属子模块内部改动无法
+# 经主仓推送）。WASM demo 是渲染测试，物理整体不参与：Simulation 源同步在
+# Engine/CMakeLists.txt 里按 EMSCRIPTEN 排除，仓库不变量"Jolt 头只出现在
+# Simulation/ 内部"保证其余引擎代码自洽。
+if(NOT EMSCRIPTEN)
 set(JOLT_ORIG_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
 if(NOT CMAKE_BUILD_TYPE MATCHES "^(Debug|Release|ReleaseASAN|ReleaseUBSAN|ReleaseTSAN|ReleaseCoverage|Distribution)$")
     set(CMAKE_BUILD_TYPE Debug)
@@ -498,6 +505,7 @@ if(NOT JOLT_ORIG_BUILD_TYPE MATCHES "^(Debug|Release|ReleaseASAN|ReleaseUBSAN|Re
 endif()
 # libEngine.a 会被链入 PrimalEngine.dylib（共享库），Jolt 静态目标必须 PIC
 set_target_properties(Jolt PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # Emscripten: Particles/*.cpp pulls in Metal headers and breaks the WASM build.
 # Set the option BEFORE add_subdirectory(Engine) so the source-file filter runs.
@@ -536,6 +544,9 @@ else()
             ENABLE_WEBGPU=1
             TEST_DAWN_FORWARD_RENDERER=1
             DISABLE_PARTICLE_SYSTEM=1
+            # 与 Engine 库保持成对：ParticleFX/* 守卫用 FX 宏、Particles/ 与
+            # ForwardSceneRenderer.h 的 PFX 成员混用两宏，缺一即成员/类体失配。
+            DISABLE_PARTICLE_FX=1
             PRIMAL_PLUS
         )
         target_compile_options(TestDawnWASM PRIVATE "--use-port=emdawnwebgpu")
@@ -631,6 +642,8 @@ else()
         target_compile_definitions(TestKenneyTilePreviewWASM PRIVATE
             ENABLE_WEBGPU=1
             DISABLE_PARTICLE_SYSTEM=1
+            # 与 Engine 库保持成对（见 TestDawnWASM 处注释）。
+            DISABLE_PARTICLE_FX=1
             PRIMAL_PLUS
         )
         target_compile_options(TestKenneyTilePreviewWASM PRIVATE "--use-port=emdawnwebgpu")

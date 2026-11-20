@@ -10,6 +10,8 @@
 #pragma once
 
 #include "CommonHeaders.h"
+#include <string>
+
 #include "../../../Platform/PlatformTypes.h"
 
 namespace primal::graphics::rhi {
