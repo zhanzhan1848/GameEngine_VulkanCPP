@@ -51,10 +51,13 @@ GeometryHandle geometry::handle() const {
 }
 
 // Proxy implementations that delegate to geometry namespace
-const std::vector<math::v3>& geometry::tessellate(f32 tolerance) const {
-    static const std::vector<math::v3> empty;
+utl::vector<math::v3> geometry::tessellate(f32 tolerance) const {
     GeometryHandle h = handle();
-    return h.is_valid() ? primal::geometry::tessellate(h, tolerance) : empty;
+    if (!h.is_valid()) return {};
+    // R39：底层缓存为 std::vector（Geometry/Geometry.cpp，WASM 链不含该
+    // TU）——代理层按值转拷为 utl::vector 返回。
+    const std::vector<math::v3>& pts = primal::geometry::tessellate(h, tolerance);
+    return utl::vector<math::v3>(pts.begin(), pts.end());
 }
 
 aabb geometry::bounding_box() const {
