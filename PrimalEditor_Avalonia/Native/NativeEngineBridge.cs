@@ -32,6 +32,8 @@ public static class NativeEngineBridge
         // mis-parse the parameters — surfaces as garbage output that takes
         // an afternoon to diagnose. Better to crash here.
         AIAssetPipelineSettings.AssertSize();
+        // 同一契约覆盖实体稳定键注册表镜像（2026-11-05 lightmap 稳定键计划）。
+        EntityIdentityC.AssertSize();
     }
 
     /// <summary>
@@ -266,6 +268,77 @@ public static class NativeEngineBridge
 
     [DllImport("PrimalEngine", EntryPoint = "PipelineClearLightmap", CallingConvention = CallingConvention.Cdecl)]
     public static extern void PipelineClearLightmap();
+
+    // ---- 实体稳定键注册表（2026-11-05 lightmap 稳定键计划）----
+    // lightmap bake 的 per-instance 键烧的是易失 runtime id（mesh_<h>_e<id>），
+    // 产物跨会话失配。编辑器把 runtime native entity id → 实体 GUID 稳定键的
+    // 映射批量推给引擎，bake/渲染两侧按键解析。契约冻结于 EngineDLL
+    // EntityIdentityC（LayoutKind.Sequential：u32 + char[64] = 68B，
+    // AssertSize 在下方锁死）。stable_key = "e" + guid.ToString("N")（33 字符）。
+    [StructLayout(LayoutKind.Sequential)]
+    public struct EntityIdentityC
+    {
+        public uint NativeEntityId;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
+        public string StableKey;
+
+        /// <summary>
+        /// Asserts <see cref="System.Runtime.InteropServices.Marshal.SizeOf{T}"/>
+        /// matches the C++ EntityIdentityC (u32 + char[64] = 68 bytes).
+        /// A mismatch means the C# mirror drifted from the C++ POD and the
+        /// registry push would silently mis-parse — fail fast, same contract
+        /// as <see cref="AIAssetPipelineSettings.AssertSize"/>.
+        /// </summary>
+        public const int ExpectedSizeBytes = 68;
+
+        public static void AssertSize()
+        {
+            int actual = Marshal.SizeOf<EntityIdentityC>();
+            if (actual != ExpectedSizeBytes)
+            {
+                throw new InvalidOperationException(
+                    $"EntityIdentityC ABI size mismatch: C# is {actual} bytes, " +
+                    $"C++ POD is {ExpectedSizeBytes} bytes (u32 native_entity_id + char[64] stable_key). " +
+                    "Field order, types or packing drifted — do NOT push identities until fixed.");
+            }
+        }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineSetEntityIdentities", CallingConvention = CallingConvention.Cdecl)]
+    private static extern uint _PipelineSetEntityIdentities(EntityIdentityC[] identities, uint count);
+
+    /// <summary>
+    /// Push a full-snapshot identity registry (runtime native entity id →
+    /// stable key) to the engine; engine side upserts by native id, so a
+    /// full push is naturally idempotent. Returns false when the engine
+    /// rejects the batch (or the export is missing — logged, never thrown;
+    /// bake then keeps its legacy runtime-id keys).
+    /// </summary>
+    public static bool PipelineSetEntityIdentities(EntityIdentityC[]? identities)
+    {
+        if (!_isLoaded) return false;
+        try
+        {
+            var batch = identities ?? Array.Empty<EntityIdentityC>();
+            return _PipelineSetEntityIdentities(batch, (uint)batch.Length) != 0;
+        }
+        catch (Exception ex) { Logger.Error("PipelineSetEntityIdentities failed", ex); return false; }
+    }
+
+    [DllImport("PrimalEngine", EntryPoint = "PipelineClearEntityIdentities", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void _PipelineClearEntityIdentities();
+
+    /// <summary>
+    /// Drop the engine-side identity registry (scene close / pre-resync).
+    /// Failures are logged, never thrown — same degradation contract as
+    /// <see cref="PipelineSetEntityIdentities(EntityIdentityC[])"/>.
+    /// </summary>
+    public static void PipelineClearEntityIdentities()
+    {
+        if (!_isLoaded) return;
+        try { _PipelineClearEntityIdentities(); }
+        catch (Exception ex) { Logger.Error("PipelineClearEntityIdentities failed", ex); }
+    }
 
     [DllImport("PrimalEngine", EntryPoint = "CreateRenderSurface", CallingConvention = CallingConvention.Cdecl)]
     private static extern uint _CreateRenderSurface(IntPtr host, int width, int height);

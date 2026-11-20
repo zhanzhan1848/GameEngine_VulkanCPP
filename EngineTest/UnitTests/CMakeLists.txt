@@ -123,6 +123,19 @@ if(MSVC)
     message(STATUS "C1001 mitigation (lightmap): TestLightmapBaking.cpp='${PRIMAL_LMAP_ICE_OD_FLAGS}'")
 endif()
 
+# EntityIdentityRegistry（2026-11-05 lightmap 稳定键轮）：upsert/未命中回退/
+# 键解析回退/整批校验拒绝 + 线程安全冒烟（自包含，零 GPU/Engine-lib 依赖；
+# registry cpp 直接编入，沿 TestLightmapBaking 注册惯例）。
+add_executable(TestEntityIdentityRegistry
+    Graphics/TestEntityIdentityRegistry.cpp
+    ${CMAKE_SOURCE_DIR}/Engine/Graphics/EntityIdentityRegistry.cpp
+)
+target_include_directories(TestEntityIdentityRegistry PRIVATE ${CMAKE_SOURCE_DIR})
+add_test(NAME TestEntityIdentityRegistry COMMAND TestEntityIdentityRegistry)
+set_target_properties(TestEntityIdentityRegistry PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests
+)
+
 # M1-a MLX 后端对拍门禁：shim 缺失 SKIP，库存在而对拍失败 FAIL。
 # 依赖 Tools/NeuralMLXShim 的构建产物（dylib + mlx.metallib），见
 # scripts/build_neural_mlx_metallib.sh 与 Docs/2026-09-15-neural-mlx-backend-plan.md。

@@ -16,6 +16,7 @@ set(SOURCE_FILES
     "AssetAPI.cpp"
     "RenderPipelineAPI.cpp"
     "LightmapAPI.cpp"
+    "EntityIdentityAPI.cpp"
     "PCGAPI.cpp"
     "GeometryAPI.cpp"
     "MaterialAPI.cpp"
@@ -57,6 +58,7 @@ set(HEADER_FILES
     "FrameAPI.h"
     "PipelineLightDesc.h"
     "AssetAPI.h"
+    "EntityIdentityAPI.h"
 )
 
 # 添加共享库目标

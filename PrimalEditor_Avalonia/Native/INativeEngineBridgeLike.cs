@@ -151,6 +151,26 @@ public interface INativeEngineBridgeLike
 
     /// <summary>scripting S1：销毁脚本实例（幂等；invalid 容忍）。</summary>
     void ScriptDestroyForEntity(ulong scriptHandle) { }
+
+    // ---- 实体稳定键注册表（2026-11-05 lightmap 稳定键计划）；默认实现保持测试桥兼容 ----
+
+    /// <summary>
+    /// 解析实体在渲染管线侧的 mesh 实体 id（PipelineRegisterMeshEntity 返回
+    /// 值——lightmap bake 的 per-instance 键 e&lt;id&gt; 用的就是它，而非 source
+    /// ECS id）。返回 null = 该实体没有已注册的管线 mesh（非 mesh 实体，
+    /// 稳定键快照跳过）。默认 null。
+    /// </summary>
+    uint? TryGetRenderMeshEntityId(uint entityId) => null;
+
+    /// <summary>
+    /// 推送实体稳定键注册表全量快照（runtime native entity id → "e"+guid N
+    /// 格式稳定键）。引擎侧按 native id upsert，全量推送天然幂等。返回
+    /// false = 引擎拒绝（推送方记日志，不中断同步）。默认 true（no-op）。
+    /// </summary>
+    bool SetEntityIdentities(NativeEngineBridge.EntityIdentityC[] identities) => true;
+
+    /// <summary>清空引擎侧稳定键注册表（场景关闭/重同步前）。默认 no-op。</summary>
+    void ClearEntityIdentities() { }
 }
 
 public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
@@ -407,4 +427,17 @@ public sealed class NativeEngineBridgeAdapter : INativeEngineBridgeLike
         if (contentId == NativeEngineBridge.InvalidContentId) return;
         NativeEngineBridge.ProceduralMeshDestroy(contentId);
     }
+
+    // ---- 实体稳定键注册表（2026-11-05 lightmap 稳定键计划） ----
+    // _pipelineMeshEntities 记录 source ECS id → PipelineRegisterMeshEntity
+    // 返回的 mesh 实体 id；bake 键 e<id> 用的正是后者，故在此解析（唯一
+    // 同时知道两张映射的层）。u64 → u32 收窄同 ApplyMaterialGraph：引擎侧
+    // id::id_type 为 u32，导出时才扩成 u64（invalid 不会入表）。
+    public uint? TryGetRenderMeshEntityId(uint entityId) =>
+        _pipelineMeshEntities.TryGetValue(entityId, out var meshEntityId) ? (uint)meshEntityId : null;
+
+    public bool SetEntityIdentities(NativeEngineBridge.EntityIdentityC[] identities) =>
+        NativeEngineBridge.PipelineSetEntityIdentities(identities);
+
+    public void ClearEntityIdentities() => NativeEngineBridge.PipelineClearEntityIdentities();
 }
