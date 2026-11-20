@@ -42,6 +42,28 @@ static float scShadowSample(texture3d<float, access::sample> tex, float3 pos,
     return tex.read(uint3(t)).r;
 }
 
+// Match frozen SurfaceCacheShadow.comp: choose the finest containing
+// cascade, and scale the receiver bias/threshold by its actual voxel size.
+static float scShadowSampleBest(float3 pos, constant SCShadowParams& sp,
+    texture3d<float, access::sample> sdf0, texture3d<float, access::sample> sdf1,
+    texture3d<float, access::sample> sdf2) {
+    uint cc=uint(sp.sdf_resolutions_count.w);
+    if(cc>0u && scShadowInside(pos,sp.sdf_origins[0].xyz,sp.sdf_extents[0].xyz))
+        return scShadowSample(sdf0,pos,sp.sdf_origins[0].xyz,sp.sdf_extents[0].xyz,uint(sp.sdf_resolutions_count.x));
+    if(cc>1u && scShadowInside(pos,sp.sdf_origins[1].xyz,sp.sdf_extents[1].xyz))
+        return scShadowSample(sdf1,pos,sp.sdf_origins[1].xyz,sp.sdf_extents[1].xyz,uint(sp.sdf_resolutions_count.y));
+    if(cc>2u && scShadowInside(pos,sp.sdf_origins[2].xyz,sp.sdf_extents[2].xyz))
+        return scShadowSample(sdf2,pos,sp.sdf_origins[2].xyz,sp.sdf_extents[2].xyz,uint(sp.sdf_resolutions_count.z));
+    return 1.0e10f;
+}
+static float scShadowVoxelAt(float3 pos, constant SCShadowParams& sp) {
+    uint cc=uint(sp.sdf_resolutions_count.w);
+    for(uint c=0u;c<cc && c<3u;++c)
+        if(scShadowInside(pos,sp.sdf_origins[c].xyz,sp.sdf_extents[c].xyz))
+            return max(sp.sdf_extents[c].x/max(sp.sdf_resolutions_count[c],1.0f),0.01f);
+    return cc>0u?max(sp.sdf_extents[0].x/max(sp.sdf_resolutions_count.x,1.0f),0.01f):1.0f;
+}
+
 // G2: PCSS 4-tap PCF（与 GLSL scPcf4 同式；access::read 用 read() 采样）
 static float scPcf4Depth(texture2d<float, access::read> depthMap,
                          float2 uv, float ndcZ) {
@@ -153,41 +175,24 @@ kernel void surfaceCacheShadow(
         }
     }
 
-    uint cc = uint(sp.sdf_resolutions_count.w);
-    float voxel = cc > 0u
-        ? max(sp.sdf_extents[0].x / max(sp.sdf_resolutions_count.x, 1.0f), 0.01f)
-        : 1.0f;
+    float voxel = scShadowVoxelAt(world,sp);
     float3 origin = world + normal * (voxel * sp.shadow_params.y);
-
+    float originDistance = scShadowSampleBest(origin,sp,sdf0,sdf1,sdf2);
     float3 L = sp.light_direction.xyz;
     float maxDist = sp.shadow_params.x;
     float t = voxel;
-    float hitThreshold = voxel * 0.5f;
+    // An unsigned SDF close to an unrelated surface is not itself a blocker.
+    // The frozen reference requires the march to get closer than half the
+    // origin distance, bounded by half the receiver's cascade voxel.
+    float hitThreshold = min(voxel*0.5f,max(originDistance*0.5f,0.0f));
     float shadow = 1.0f;
-
-    // C1 修复：保守球追踪。原 d×1.2 过冲在 2-3 体素距离上一跳可越过
-    // 0.3-0.5m 的墙（体素 ≈0.19m），建筑内部卡片因此吃到假阳光——室内
-    // 平填充的主要能量入口（SC_PROBE_FEED_OFF 实验定位）。步数 16→24
-    // 覆盖 50m maxDist 的远距起步。
-    for (int step = 0; step < 24; ++step) {
-        float3 pos = origin + L * t;
-        float d = 1.0e10f;
-        if (cc > 0u && scShadowInside(pos, sp.sdf_origins[0].xyz, sp.sdf_extents[0].xyz))
-            d = scShadowSample(sdf0, pos, sp.sdf_origins[0].xyz, sp.sdf_extents[0].xyz,
-                               uint(sp.sdf_resolutions_count.x));
-        else if (cc > 1u && scShadowInside(pos, sp.sdf_origins[1].xyz, sp.sdf_extents[1].xyz))
-            d = scShadowSample(sdf1, pos, sp.sdf_origins[1].xyz, sp.sdf_extents[1].xyz,
-                               uint(sp.sdf_resolutions_count.y));
-        else if (cc > 2u && scShadowInside(pos, sp.sdf_origins[2].xyz, sp.sdf_extents[2].xyz))
-            d = scShadowSample(sdf2, pos, sp.sdf_origins[2].xyz, sp.sdf_extents[2].xyz,
-                               uint(sp.sdf_resolutions_count.z));
-
-        if (d > 1.0e9f) break;   // left all cascades → unoccluded
-        if (d < hitThreshold) { shadow = 0.0f; break; }
-        float advance = max(d, voxel * 0.25f);
+    for (int step = 0; step < 16; ++step) {
+        float d = scShadowSampleBest(origin+L*t,sp,sdf0,sdf1,sdf2);
+        if (d > 1.0e9f) break;
+        if (d < hitThreshold) { shadow=0.0f; break; }
+        float advance = d>hitThreshold*4.0f?d*1.2f:max(d,voxel*0.25f);
         t += advance;
         if (t >= maxDist) break;
     }
-
     visibility[vis_index] = shadow;
 }

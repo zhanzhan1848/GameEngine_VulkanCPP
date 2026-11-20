@@ -59,6 +59,15 @@ static bool LegacySurfacePolicy() {
     return legacy;
 }
 
+// Native Metal parity path; the frozen Vulkan/D3D12 policy remains unchanged.
+static bool MetalQualifiedSurface(RHIPlatform platform) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("PRIMAL_METAL_SC_QUALIFIED");
+        return value && std::strcmp(value, "1") == 0;
+    }();
+    return platform == RHIPlatform::Metal && enabled;
+}
+
 bool SurfaceCachePass::HasOfflineSDFSource() const {
     return sc_offline_sdf_texture_ != handles::INVALID_RESOURCE &&
         sc_offline_sdf_resolution_ > 0 &&
@@ -256,6 +265,7 @@ static std::vector<u8> LoadShaderBytecode(rhi::RHIDeviceBase* device, const char
     }
     std::set<std::string> included;
     std::string resolved = ResolveIncludes(source, SC_SHADER_DIR, included);
+    if (MetalQualifiedSurface(platform)) resolved = "#define PRIMAL_METAL_SC_QUALIFIED 1\n" + resolved;
     // C 系列归因旋钮（编译期诊断变体，默认关闭）：SC 侧注入路径逐条断电。
     if (std::getenv("PRIMAL_SC_NO_EMISSIVE")) {
         resolved = "#define PRIMAL_SC_NO_EMISSIVE 1\n" + resolved;
@@ -289,16 +299,17 @@ void SurfaceCachePass::ResetSurfaceAtlas(RHICommandBuffer* cmd, u32 slot) {
         barriers[i].subresource = 0xffffffffu;
     }
     cmd->InsertBarrier(barriers, 4);
+    const bool metal = device_->GetPlatform() == RHIPlatform::Metal;
     const DescriptorData params[] = {
         {0, DescriptorType::StorageImage, albedo_atlas_},
         {1, DescriptorType::StorageImage, normal_atlas_},
         {2, DescriptorType::StorageImage, depth_atlas_},
         {3, DescriptorType::StorageImage, emissive_atlas_},
-        {4, DescriptorType::UniformBuffer, atlas_reset_cb_},
-        {5, DescriptorType::StorageBuffer, GetCardDispatchBuffer(slot)},
+        {metal ? 1u : 4u, DescriptorType::UniformBuffer, atlas_reset_cb_},
+        {metal ? 2u : 5u, DescriptorType::StorageBuffer, GetCardDispatchBuffer(slot)},
         {6, DescriptorType::StorageBuffer, triangle_atlas_buffer_},
     };
-    UpdateDescriptorSet(device_, atlas_init_set_[slot], params, 7);
+    UpdateDescriptorSet(device_, atlas_init_set_[slot], params, metal ? 6u : 7u);
     cmd->BindComputePipeline(atlas_init_pipeline_);
     cmd->BindDescriptorSets(PipelineBindPoint::Compute, atlas_init_layout_, 0, 1,
                            &atlas_init_set_[slot], 0, nullptr);
@@ -566,8 +577,8 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
     const char* ownerEnv = std::getenv("PRIMAL_SC_CAPTURE_OWNER");
     const bool ownerIsolation = !(ownerEnv && std::strcmp(ownerEnv, "0") == 0);
     if (!card_view_enabled_ && (ownerIsolation ||
-        ((device_->GetPlatform() == RHIPlatform::Vulkan ||
-          device_->GetPlatform() == RHIPlatform::D3D12) && !LegacySurfacePolicy()))) {
+        (((device_->GetPlatform() == RHIPlatform::Vulkan ||
+          device_->GetPlatform() == RHIPlatform::D3D12) && !LegacySurfacePolicy()) || MetalQualifiedSurface(device_->GetPlatform())))) {
         card_view_enabled_ = true;
         PRIMAL_LOG_STREAM(Warn, "Render") << "[SurfaceCache] owner isolation requires card-view capture; overriding SC_CARDVIEW=0" << std::endl;
     }
@@ -739,9 +750,9 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
 
     // Create triple-buffered constant buffers
     CreateConstantBuffers();
-    if ((device_->GetPlatform() == RHIPlatform::Vulkan ||
+    if (((device_->GetPlatform() == RHIPlatform::Vulkan ||
          device_->GetPlatform() == RHIPlatform::D3D12) &&
-        !LegacySurfacePolicy() && atlas_reset_cb_ == handles::INVALID_RESOURCE) {
+        !LegacySurfacePolicy() || MetalQualifiedSurface(device_->GetPlatform())) && atlas_reset_cb_ == handles::INVALID_RESOURCE) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[SurfaceCache] surface reset CB unavailable" << std::endl;
         return false;
     }
@@ -751,8 +762,8 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
 
     // Create pipelines and triple-buffered descriptor sets
     CreatePipelines();
-    if ((device_->GetPlatform() == RHIPlatform::Vulkan ||
-         device_->GetPlatform() == RHIPlatform::D3D12) && !LegacySurfacePolicy()) {
+    if (((device_->GetPlatform() == RHIPlatform::Vulkan ||
+         device_->GetPlatform() == RHIPlatform::D3D12) && !LegacySurfacePolicy() || MetalQualifiedSurface(device_->GetPlatform()))) {
         bool resetReady = atlas_init_pipeline_ != handles::INVALID_PIPELINE &&
             atlas_init_layout_ != handles::INVALID_PIPELINE_LAYOUT;
         for (const auto set : atlas_init_set_) resetReady &= set != handles::INVALID_DESCRIPTOR_SET;
@@ -1066,7 +1077,7 @@ void SurfaceCachePass::CreateConstantBuffers() {
     CreateCBs(global_cb_, 512);    // GlobalShaderData (padded)
     CreateCBs(params_cb_, 512);    // SurfaceCacheParams (padded)
     if (device_->GetPlatform() == RHIPlatform::Vulkan ||
-        device_->GetPlatform() == RHIPlatform::D3D12) {
+        device_->GetPlatform() == RHIPlatform::D3D12 || MetalQualifiedSurface(device_->GetPlatform())) {
         BufferDesc reset{};
         reset.size = 512;
         reset.type = BufferType::Constant;
@@ -1956,7 +1967,8 @@ void SurfaceCachePass::CreatePipelines() {
     ShaderHandle atlasInitShader = handles::INVALID_SHADER;
     {
         atlasInitShader = CompileComputeShader("SurfaceCacheAtlasInit",
-            isVk ? "surface_cache_atlas_init" : "surfaceCacheAtlasInit");
+            isVk ? "surface_cache_atlas_init" :
+                MetalQualifiedSurface(device_->GetPlatform()) ? "surfaceCacheAtlasReset" : "surfaceCacheAtlasInit");
     }
     // Vulkan-only: GBuffer-gather capture (real rendered surfaces → card atlas)
     ShaderHandle captureGatherShader = handles::INVALID_SHADER;
@@ -2455,8 +2467,8 @@ void SurfaceCachePass::AddCardCapturePasses(
     const u32 total = card_generator_.GetCardCount();
     if (total == 0) return;
 
-    const bool qualified = (device_->GetPlatform() == RHIPlatform::Vulkan ||
-                            device_->GetPlatform() == RHIPlatform::D3D12) && !LegacySurfacePolicy();
+    const bool qualified = ((device_->GetPlatform() == RHIPlatform::Vulkan ||
+                            device_->GetPlatform() == RHIPlatform::D3D12) && !LegacySurfacePolicy() || MetalQualifiedSurface(device_->GetPlatform()));
     RGResourceHandle materialDependency{};
     if (qualified) {
         materialDependency = graph.ImportResource("SC_SurfaceValidity", albedo_atlas_);
@@ -2794,8 +2806,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
 
     output.lighting_atlas = lightingHandle;
     output.lighting_nodirect_atlas = nodirectHandle;
-    const bool qualifiedSurface = (device_->GetPlatform() == RHIPlatform::Vulkan ||
-                                   device_->GetPlatform() == RHIPlatform::D3D12) && !LegacySurfacePolicy();
+    const bool qualifiedSurface = ((device_->GetPlatform() == RHIPlatform::Vulkan ||
+                                   device_->GetPlatform() == RHIPlatform::D3D12) && !LegacySurfacePolicy() || MetalQualifiedSurface(device_->GetPlatform()));
     const auto materialDependency = qualifiedSurface
         ? graph.ImportResource("SC_SurfaceValidity", albedo_atlas_) : RGResourceHandle{};
 
@@ -2837,8 +2849,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             if (!cmd) return;
 
             const u32 frameIdx = DDGISlotsForFrame(current_frame_index).writeIndex;
-            if ((device_->GetPlatform() == RHIPlatform::Vulkan ||
-                 device_->GetPlatform() == RHIPlatform::D3D12) && !LegacySurfacePolicy())
+            if (((device_->GetPlatform() == RHIPlatform::Vulkan ||
+                 device_->GetPlatform() == RHIPlatform::D3D12) && !LegacySurfacePolicy() || MetalQualifiedSurface(device_->GetPlatform())))
                 ResetSurfaceAtlas(cmd, frameIdx);
 
             // Guard: pipeline must be valid
@@ -3260,6 +3272,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             //     alpha=1 albedo to process even before Capture covers texels.
             // ================================================================
             if (atlas_init_pipeline_ != handles::INVALID_PIPELINE &&
+                !MetalQualifiedSurface(device_->GetPlatform()) &&
                 ((device_->GetPlatform() != RHIPlatform::Vulkan &&
                   device_->GetPlatform() != RHIPlatform::D3D12) ||
                  LegacySurfacePolicy()) &&
@@ -4159,10 +4172,14 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                             {shIsVk ? 6u : 1u, DescriptorType::StorageBuffer, GetCardDispatchBuffer(frameIdx)},
                             {shIsVk ? 7u : 2u, DescriptorType::StorageBuffer, card_generator_.GetCardDataBuffer()},
                             {shIsVk ? 8u : 3u, DescriptorType::StorageBuffer, shadow_visibility_buffer_},
-                            {shIsVk ? 9u : 4u,  DescriptorType::SampledImage, depthTex[0]},
-                            {shIsVk ? 10u : 5u, DescriptorType::SampledImage, depthTex[1]},
-                            {shIsVk ? 11u : 6u, DescriptorType::SampledImage, depthTex[2]},
-                            {shIsVk ? 12u : 7u, DescriptorType::SampledImage, depthTex[3]},
+                            {shIsVk ? 9u : (device_->GetPlatform() == RHIPlatform::Metal ? 5u : 4u),
+                             DescriptorType::SampledImage, depthTex[0]},
+                            {shIsVk ? 10u : (device_->GetPlatform() == RHIPlatform::Metal ? 6u : 5u),
+                             DescriptorType::SampledImage, depthTex[1]},
+                            {shIsVk ? 11u : (device_->GetPlatform() == RHIPlatform::Metal ? 7u : 6u),
+                             DescriptorType::SampledImage, depthTex[2]},
+                            {shIsVk ? 12u : (device_->GetPlatform() == RHIPlatform::Metal ? 8u : 7u),
+                             DescriptorType::SampledImage, depthTex[3]},
                         };
                         UpdateDescriptorSet(device_, shadow_set_[frameIdx], shadowParams, 13);
 

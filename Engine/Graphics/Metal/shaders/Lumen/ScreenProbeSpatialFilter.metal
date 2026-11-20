@@ -10,21 +10,44 @@
  *   Writes to outputSH (current frame history slot)
  *   Gather subsequently reads from outputSH
  *
- * Per-thread reads: 5 positions + 5×4 SH = 25 (within Apple Silicon ~32 limit)
+ * Measured mode additionally validates normal agreement and scene visibility.
  *
  * Dispatch: (totalProbes + 63) / 64, 1, 1
  * ThreadGroupSize: (64, 1, 1)
  */
 
 #include <metal_stdlib>
+#include "GeometryFirstHit.metal"
 using namespace metal;
 
 struct SpatialConstants {
     uint  totalProbes;
     uint  gridW;
     float sigma;       // bilateral spatial sigma (world-space)
-    float pad;
+    uint flags;       // bit0 measured, bit1 current geometry ready
+    uint4 geometryCounts;
 };
+
+static_assert(sizeof(SpatialConstants)==32, "Metal spatial constants ABI");
+
+static bool measuredSpatialConnection(uint center, uint neighbor, float3 p, float3 q,
+    constant SpatialConstants& params, device const float4* normals,
+    device const GeometryNode* top, device const GeometryNode* bottom,
+    device const GeometryTriangle* triangles, device const GeometryInstance* instances) {
+    if ((params.flags & 2u)==0u) return false;
+    float3 n=normals[center].xyz, m=normals[neighbor].xyz;
+    if (!all(isfinite(n)) || !all(isfinite(m)) || dot(n,n)<0.25f || dot(m,m)<0.25f) return false;
+    n=normalize(n); m=normalize(m);
+    if (dot(n,m)<0.5f) return false;
+    const float3 a=p+n*0.01f, b=q+m*0.01f, delta=b-a;
+    const float dist=length(delta);
+    if (!isfinite(dist) || dist<=0.002f) return false;
+    GeometryHit hit;
+    // Raw segment result: a nonzero near distance is intentional here. Only
+    // proven miss permits interpolation; hits and incomplete queries reject.
+    return geometryFirstHit(a,delta/dist,0.001f,dist-0.001f,
+        top,bottom,triangles,instances,params.geometryCounts,hit)==0;
+}
 
 kernel void screen_probe_spatial_filter(
     // Input SH coefficients (4 float4 per probe, interleaved)
@@ -39,9 +62,15 @@ kernel void screen_probe_spatial_filter(
     // Constants
     constant SpatialConstants& params [[buffer(3)]],
 
+    device const float4* probeNormals [[buffer(4)]],
+    device const GeometryNode* geometryTop [[buffer(5)]],
+    device const GeometryNode* geometryBottom [[buffer(6)]],
+    device const GeometryTriangle* geometryTriangles [[buffer(7)]],
+    device const GeometryInstance* geometryInstances [[buffer(8)]],
     uint global_id [[thread_position_in_grid]])
 {
     if (global_id >= params.totalProbes) return;
+    const bool measured=(params.flags & 1u)!=0u;
 
     uint gx = global_id % params.gridW;
     uint gy = global_id / params.gridW;
@@ -50,7 +79,7 @@ kernel void screen_probe_spatial_filter(
     float4 centerPosData = probePos[global_id];
 
     // If center probe is inactive, output zeros
-    if (centerPosData.w <= 0.0f) {
+    if (centerPosData.w <= 0.0f || (measured && !all(isfinite(centerPosData)))) {
         uint base = global_id * 4;
         outputSH[base + 0] = float4(0.0f);
         outputSH[base + 1] = float4(0.0f);
@@ -66,8 +95,10 @@ kernel void screen_probe_spatial_filter(
         centerSH[b] = inputSH[centerBase + b].rgb;
     }
 
+    bool finiteCenter=true;
+    if (measured) for (uint b=0;b<4;++b) finiteCenter &= all(isfinite(inputSH[centerBase+b]));
     // Check if center SH is valid
-    if (inputSH[centerBase + 0].w <= 0.0f) {
+    if (inputSH[centerBase + 0].w <= 0.0f || !finiteCenter) {
         // Invalid center: output zeros
         outputSH[centerBase + 0] = float4(0.0f);
         outputSH[centerBase + 1] = float4(0.0f);
@@ -106,11 +137,18 @@ kernel void screen_probe_spatial_filter(
 
         // Check neighbor active
         float4 neighborPosData = probePos[nidx];
-        if (neighborPosData.w <= 0.0f) continue;
+        if (neighborPosData.w <= 0.0f || (measured && !all(isfinite(neighborPosData)))) continue;
 
         // Check neighbor SH valid
         uint neighborBase = nidx * 4;
         if (inputSH[neighborBase + 0].w <= 0.0f) continue;
+
+        if (measured) {
+            bool finiteNeighbor=true;
+            for (uint b=0;b<4;++b) finiteNeighbor &= all(isfinite(inputSH[neighborBase+b]));
+            if (!finiteNeighbor || !measuredSpatialConnection(global_id,nidx,centerPos,neighborPosData.xyz,
+                params,probeNormals,geometryTop,geometryBottom,geometryTriangles,geometryInstances)) continue;
+        }
 
         // Bilateral weight based on world-space distance
         float dist2 = distance_squared(centerPos, neighborPosData.xyz);

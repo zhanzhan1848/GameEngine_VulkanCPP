@@ -110,7 +110,7 @@ float3 gatherProbeIrradiance(float3 wpos, float3 N, thread bool& inVolume,
             if (tw <= 0.0f) continue;
             int3 pc = int3(mix(float3(b0), float3(b1), float3(float(x), float(y), float(z))));
             uint pidx = uint(pc.x) + uint(counts.x) * (uint(pc.y) + uint(counts.y) * uint(pc.z));
-            pixOpen += ddgi_opensky_buffer[pidx] * tw;
+            pixOpen += ddgi_opensky_buffer[pidx*2u] * tw;
             pixOpenW += tw;
         }
         if (pixOpenW > 0.0f) pixOpen /= pixOpenW;
@@ -159,10 +159,11 @@ float3 gatherProbeIrradiance(float3 wpos, float3 N, thread bool& inVolume,
         // Phase 3.2 孪生: 天空分类衰减——探针露天度 × 像素封闭度。
         float classify = 1.0f;
         if (params.radiosity_gate.w != 0u) {
-            float pOpen = ddgi_opensky_buffer[pidx];
-            float skyness = smoothstep(0.35f, 0.65f, pOpen);
+            float pOpen = ddgi_opensky_buffer[pidx*2u];
+            float skyness = smoothstep(0.15f, 0.45f, pOpen);
             float enclosed = 1.0f - smoothstep(0.05f, 0.25f, pixOpen);
             classify = 1.0f - skyness * enclosed * 0.85f;
+            if(params.opensky_v2!=0u)classify=mix(1.0f,classify,ddgi_opensky_buffer[pidx*2u+1u]);
         }
 
         accVis += irr * tw * nwSoft * vw * insidePenalty * classify;
@@ -206,6 +207,7 @@ kernel void surfaceCacheLightEval(
     // (surface-point reconstruction for the probe gather).
     texture2d<float, access::read>  prev_lighting_atlas [[texture(4)]],
     texture2d<float, access::read>  depth_atlas         [[texture(5)]],
+    texture2d<float, access::write> nodirect_out [[texture(7)]],
 
     constant FlattenedLightingParams& params         [[buffer(1)]],
     constant SurfaceCacheCard*        cards          [[buffer(2)]],
@@ -249,7 +251,18 @@ kernel void surfaceCacheLightEval(
 
     // Read material data
     float4 albedo = albedo_atlas.read(atlas_uv);
+#if defined(PRIMAL_METAL_SC_QUALIFIED)
+    const float surfaceDepth = depth_atlas.read(atlas_uv).r;
+    const uint validity = uint(round(clamp(albedo.a, 0.0f, 1.0f) * 255.0f));
+    if ((validity & 128u) == 0u || !isfinite(surfaceDepth) || surfaceDepth < 0.0f ||
+        !all(isfinite(albedo))) {
+        lighting_out.write(float4(0), atlas_uv);
+        nodirect_out.write(float4(0), atlas_uv);
+        return;
+    }
+#else
     if (albedo.a < 0.01) return;
+#endif
 
     // CardCapture packs bit7 validity, transmission UNorm4 in bits3..6 and
     // thickness UNorm3 in bits0..2 of the RGBA8 alpha byte.
@@ -370,6 +383,7 @@ kernel void surfaceCacheLightEval(
         if (tileSample.a > 0.0f) tileRadiance = tileSample.rgb;
     }
 
+#if !defined(PRIMAL_METAL_SC_QUALIFIED)
     // C3.5 slice 5+6: texel-side ambient floor with sky-openness modulation
     // (occlusion-aware; enclosed crevices keep a 0.25 floor) — Vulkan twin:
     // scSkyOpenness in SurfaceCacheLightEval.comp.
@@ -397,6 +411,7 @@ kernel void surfaceCacheLightEval(
     if (params.radiosity_solo == 0u) {
         E_indirect = max(E_indirect, float3(0.52f, 0.46f, 0.37f) * mix(0.25f, 1.0f, skyOpen));
     }
+#endif
     // WRC 计划 Stream B2: radiosity_solo=1 时 tile radiosity 是全部 texel
     //（含 volume 外）的唯一常备间接来源——legacy prev_light 自反馈双轨停用
     //（Vulkan 孪生同步）。
@@ -413,4 +428,8 @@ kernel void surfaceCacheLightEval(
     // prev_lighting_atlas here creates three independent temporal states because
     // the atlas is triple-buffered, observed as an A/B/C brightness cycle.
     lighting_out.write(float4(result, 1.0), atlas_uv);
+    // Publish the same-frame diagnostic copy with direct Lambert radiance removed.
+    const float3 noDirect = clamp(result - direct_light * albedo.rgb * SC_INV_PI,
+        float3(0), float3(64));
+    nodirect_out.write(float4(noDirect, 1), atlas_uv);
 }

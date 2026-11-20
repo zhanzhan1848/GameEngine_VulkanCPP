@@ -35,57 +35,69 @@ float3 ACESFilm(float3 x) {
     return saturate((x*(a*x+b))/(x*(c*x+d)+e));
 }
 
-// Metal 曝光标定系数（2026-09-05）。上游 GI/直射能量对齐完成前的整体
-// 标定：同机位实测 Metal LDR 均值 131/255（贴白率 27.5%）vs Vulkan
-// 40/255（0.7%）——用户判定 Metal 过曝、Vulkan 偏暗，取中点迭代。
-// 上游 parity bisect 落地后本系数应回归 1.0。
-// P0.3 (2026-09-15): 收编为 exposure_ev 单旋钮——标定值移入 ToneParams
-// UBO（C++ 每帧上传 base × 2^EV，EV0 时与旧常数逐位同值，画面零变化）。
+// Match the existing 32-byte CPU ToneParamsUBO. The opt-in adaptive entry
+// binds the native R32 state; legacy entries do not reference that texture.
 struct ToneParams {
-    float exposure;   // 0
-    uint  _pad0;      // 4
-    uint  _pad1;      // 8
-    uint  _pad2;      // 12
+    float exposure;
+    float autoAdapt;
+    float key;
+    float contrast;
+    float saturation;
+    float vignette;
+    float bloomIntensity;
+    uint _pad1;
 };
+static_assert(sizeof(ToneParams) == 32, "Tone parameters CPU/MSL ABI");
+static_assert(__builtin_offsetof(ToneParams, bloomIntensity) == 24, "Bloom gain ABI");
 
-// Fragment Shader
-// 注意（2026-09-11 B10.5）：两平台 ACES 路径的曝光语义有意分叉——Metal 的
-// 上游是 LDR（fusion 已做过 exposure+ACES+gamma），继续用 0.26 基值；
-// Vulkan/Dawn 的上游是线性 HDR，曝光在 WGSL tonemap_fs 的 0.10 基值。
-// 不要把两边"对齐"——上游单位制不同。
+// HDR Fusion output requires ACES exactly once. The Metal Sponza reference
+// launcher explicitly selects this entry while legacy LDR users retain the
+// passthrough entry below. Exposure EV remains the CPU's unmodified value.
+float4 apply_tone(float3 color, float3 bloom, float2 uv,
+                  constant ToneParams& params, float exposure) {
+    if (!all(isfinite(color))) color = float3(0.0f);
+    color = (color + bloom * params.bloomIntensity) * exposure;
+    color = pow(ACESFilm(color), float3(1.0f / 2.2f));
+
+    // Same display-domain grading as the frozen reference tone shader.
+    if (params.contrast != 1.0f)
+        color = clamp((color - 0.5f) * params.contrast + 0.5f, 0.0f, 1.0f);
+    if (params.saturation != 1.0f) {
+        float luminance = dot(color, float3(0.2126f, 0.7152f, 0.0722f));
+        color = mix(float3(luminance), color, params.saturation);
+    }
+    if (params.vignette > 0.0f) {
+        float distanceFromCenter = distance(uv, float2(0.5f));
+        color *= 1.0f - params.vignette * smoothstep(0.35f, 0.85f, distanceFromCenter);
+    }
+    return float4(color, 1.0f);
+}
+
 fragment float4 tonemap_fs(VertexOut in [[stage_in]],
                            texture2d<float> sceneTexture [[texture(0)]],
                            texture2d<float> bloomTexture [[texture(1)]],
-                           constant ToneParams& params [[buffer(6)]]) // Optional
-{
+                           constant ToneParams& params [[buffer(6)]]) {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
-
-    float3 color = sceneTexture.sample(s, in.uv).rgb;
-
-    // Add Bloom if available (simple addition)
-    // Check if texture is bound by checking dimensions or assuming it is valid if passed
-    // Metal doesn't allow checking for null texture easily in shader without flags
-    // Assuming bloomTexture is bound (can be black 1x1 if disabled)
-    float3 bloom = bloomTexture.sample(s, in.uv).rgb;
-    color += bloom;
-
-    // 曝光标定（P0.3: EV0 时 params.exposure 与旧 CAL_EXPOSURE 逐位同值）
-    color *= params.exposure;
-
-    // Tone Mapping
-    color = ACESFilm(color);
-
-    // Gamma Correction
-    color = pow(color, float3(1.0/2.2));
-
-    return float4(color, 1.0);
+    return apply_tone(sceneTexture.sample(s,in.uv).rgb,bloomTexture.sample(s,in.uv).rgb,
+                      in.uv,params,params.exposure);
 }
 
-// Passthrough variant: bloom composite only, NO ACES/gamma.
-// Metal 的上游（DeferredLighting.metal fragmentLighting / FusionComposite）
-// 已经做过 exposure+ACES+gamma（LDR 输出）；全链再过一次 tonemap 是双重
-// 转换，暗部被抬到近白（2026-09-02 同机位截图实证）。Vulkan 上游输出线性
-// HDR，仍走 tonemap_fs。
+fragment float4 tonemap_fs_adapt(VertexOut in [[stage_in]],
+                                 texture2d<float> sceneTexture [[texture(0)]],
+                                 texture2d<float> bloomTexture [[texture(1)]],
+                                 constant ToneParams& params [[buffer(6)]],
+                                 texture2d<float, access::read> adaptState [[texture(7)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    float exposure = params.exposure;
+    if (params.autoAdapt > .5f) {
+        const float average = exp2(adaptState.read(uint2(0)).r);
+        if (average > 1e-6f && average < 1e30f) exposure *= params.key/average;
+    }
+    return apply_tone(sceneTexture.sample(s,in.uv).rgb,bloomTexture.sample(s,in.uv).rgb,
+                      in.uv,params,exposure);
+}
+
+// Preserve the legacy LDR/bloom contract; this is not an HDR display transform.
 fragment float4 tonemap_fs_passthrough(VertexOut in [[stage_in]],
                                        texture2d<float> sceneTexture [[texture(0)]],
                                        texture2d<float> bloomTexture [[texture(1)]],
@@ -94,9 +106,5 @@ fragment float4 tonemap_fs_passthrough(VertexOut in [[stage_in]],
     constexpr sampler s(filter::linear, address::clamp_to_edge);
     float3 color = sceneTexture.sample(s, in.uv).rgb;
     float3 bloom = bloomTexture.sample(s, in.uv).rgb;
-    // 曝光标定（P0.3: EV0 时 params.exposure 与旧 CAL_EXPOSURE 逐位同值）——
-    // passthrough 直出下线性值 ≥1.0 全部贴白，Metal GI 场均值 ~1.0 曾致
-    // 27.5% 贴白率。
-    color = (color + bloom) * params.exposure;
-    return float4(color, 1.0);
+    return float4((color + bloom) * params.exposure, 1.0f);
 }

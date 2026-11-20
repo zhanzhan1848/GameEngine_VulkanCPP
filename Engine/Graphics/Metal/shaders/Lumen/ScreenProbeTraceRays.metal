@@ -48,7 +48,18 @@ struct ScreenProbeGlobalData {
     // F1 (M7): x = far_cache_start_distance — SDF rays stop there and query
     // the DDGI radiance cache at the stop point (0 disables).
     float4   cache_params;
+    // CPU tail: diagnostics are consumed by finalize; keep all following
+    // offsets explicit so future readers cannot silently truncate the ABI.
+    float4   diag_params;
+    float4   hint_params;
+    float4   sky_params;
+    float4   wrc_fb[2];
+    float4   repr_params;
+    float4   tier_params;
+    float4   tier_counts;
 };
+static_assert(sizeof(ScreenProbeGlobalData) == 544, "Screen probe CPU/MSL ABI");
+static_assert(__builtin_offsetof(ScreenProbeGlobalData, diag_params) == 416, "SPGI diagnostics ABI");
 
 // ============================================================================
 // Constants
@@ -527,6 +538,15 @@ kernel void screen_probe_trace_hzb(
     uint mip = 1u;
     float thickness = 0.3f;
 
+    // Match frozen Vulkan: grazing paths and camera-plane crossings defer
+    // to the world trace instead of borrowing a near-field screen sample.
+    const float4 clip0=global.view_projection*float4(origin,1.0f);
+    const float4 clip1=global.view_projection*float4(origin+rayDir*maxDist,1.0f);
+    if(clip0.w<=0.0f || clip1.w<=0.0f)return;
+    const float2 uv0=clip0.xy/clip0.w*0.5f+0.5f;
+    const float2 uv1=clip1.xy/clip1.w*0.5f+0.5f;
+    if(distance(uv0,uv1)>1.5f)return;
+
     for (uint step = 0u; step < MAX_HZB_STEPS; ++step) {
         float mipScale = float(1u << mip);
         t += baseStep * mipScale;
@@ -539,8 +559,11 @@ kernel void screen_probe_trace_hzb(
         float2 uv = float2(ndc.x * 0.5f + 0.5f, 1.0f - (ndc.y * 0.5f + 0.5f));
         if (uv.x < 0.0f || uv.x > 1.0f || uv.y < 0.0f || uv.y > 1.0f) break;
 
-        constexpr sampler s(coord::normalized, filter::nearest, address::clamp_to_edge);
-        float sceneNDC = hzb_texture.sample(s, uv, level(float(mip))).r;
+        // Explicit texel coordinates preserve Vulkan texelFetch boundaries;
+        // normalized sampler precision can select a neighboring HZB cell.
+        const uint2 mipSize(hzb_texture.get_width(mip),hzb_texture.get_height(mip));
+        const uint2 mipCoord=min(uint2(uv*float2(mipSize)),mipSize-1);
+        float sceneNDC = hzb_texture.read(mipCoord,mip).r;
         // Linearize both (Vulkan [0,1] NDC convention, matches the HZB chain).
         float sceneLin = near * far / (far - sceneNDC * (far - near));
         float rayLin   = near * far / (far - ndc.z * (far - near));
@@ -641,7 +664,10 @@ kernel void screen_probe_trace_sdf(
         rayDir = orientAroundNormal(rayDir, probeNormal);
     }
 
-    float3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * 2.0f;
+    // The SDF distance is relative to this origin; Finalize uses the same
+    // candidate bias. HZB keeps its independent two-voxel origin.
+    const bool measured = global.tier_counts.w > 0.5f;
+    float3 origin = probePos + probeNormal * global.sdf_voxel_sizes[0].x * (measured ? 0.25f : 2.0f);
     // F1: cap the march at far_cache_start (0 disables).
     float cacheStart = global.cache_params.x;
     float maxDist = (cacheStart > 0.0f)
@@ -665,7 +691,7 @@ kernel void screen_probe_trace_sdf(
         // Relaxed advancement: overstep when far, conservative when close
         float advance;
         if (d > hitThreshold * 4.0f) {
-            advance = d * 1.2f;
+            advance = d * (measured ? global.hint_params.z : 1.2f);
         } else {
             advance = max(d, minStep);
         }
@@ -675,7 +701,7 @@ kernel void screen_probe_trace_sdf(
         remainingDist -= advance;
     }
 
-    if (hitDistance > 0.0f) {
+    if (measured ? hitDistance >= 0.0f : hitDistance > 0.0f) {
         // T4.3 二批: per-mesh detail refinement of the coarse GlobalSDF hit
         // (distance only — screen probes carry their own GBuffer normals).
         float3 detailN;
@@ -683,7 +709,30 @@ kernel void screen_probe_trace_sdf(
                             origin, rayDir, hitDistance, detailN)) {
             // refined hitDistance already in out-param
         }
-        hit_buffer[global_id] = float4(hitDistance, 0.0f, 0.0f, 2.0f);
+        float packedHint = 0.0f;
+        if (measured) {
+            const float3 hitPos = origin + rayDir * hitDistance;
+            const float h = max(global.sdf_voxel_sizes[0].x, 0.0001f);
+            float3 gradient;
+            float3 smoothGradient;
+            for (uint axis=0;axis<3;++axis) {
+                float3 offset=float3(0.0f);offset[axis]=h;
+                gradient[axis]=screenProbeSampleBestSDF(hitPos+offset,sdf0,sdf1,sdf2,global)
+                    -screenProbeSampleBestSDF(hitPos-offset,sdf0,sdf1,sdf2,global);
+                // The frozen optional smooth hint samples cascade zero only.
+                if (global.hint_params.x>0.5f)
+                    smoothGradient[axis]=sampleSDFCascade(sdf0,hitPos+offset,global.sdf_origins[0].xyz,global.sdf_extents[0].xyz)
+                        -sampleSDFCascade(sdf0,hitPos-offset,global.sdf_origins[0].xyz,global.sdf_extents[0].xyz);
+            }
+            float3 normalHint=normalize(gradient+float3(0.000001f));
+            if (global.hint_params.x>0.5f)
+                normalHint=normalize(mix(normalHint,normalize(smoothGradient+float3(0.000001f)),0.75f));
+            // GLSL packSnorm2x16 layout, carried as bits rather than a float.
+            const short2 encoded=short2(round(clamp(octEncode(normalHint)*2.0f-1.0f,float2(-1.0f),float2(1.0f))*32767.0f));
+            const ushort2 bits=as_type<ushort2>(encoded);
+            packedHint=as_type<float>(uint(bits.x)|(uint(bits.y)<<16u));
+        }
+        hit_buffer[global_id] = float4(hitDistance, packedHint, 0.0f, 2.0f);
     } else if (cacheStart > 0.0f) {
         // F1 far-cache: x = travelled distance (stop point = origin + dir * x).
         hit_buffer[global_id] = float4(length(pos - origin), 0.0f, 0.0f, 3.0f);
@@ -703,6 +752,104 @@ kernel void screen_probe_trace_sdf(
 // to this kernel — within the Apple Silicon read budget, monitored via
 // PRIMAL_GI_CASCADE=0 A/B.
 // ============================================================================
+// Native counterpart of the frozen reference's world-grid lookup with SDF
+// depth-history weighting. tier_counts.w selects the measured producer contract;
+// unknown depth is excluded and attenuation survives normalization.
+static bool spgiWorldRadiance(float3 receiver, float3 receiverNormal, float3 direction,
+                             constant ScreenProbeGlobalData& global,
+                             device const float4* sh, device const float* depthHistory,
+                             device const float4* effectiveOrigins, thread float3& radiance) {
+    if (global.ddgi_fb[1].w <= 0.5f) return false;
+    const int3 counts = int3(global.ddgi_fb[1].xyz);
+    if (any(counts <= int3(0))) return false;
+    const float spacing = max(global.ddgi_fb[0].w, 0.01f);
+    const float3 origin = global.ddgi_fb[0].xyz;
+    const float3 gp = (receiver - origin) / spacing;
+    if (!all(isfinite(gp)) || any(gp < float3(0.0f)) || any(gp > float3(counts - 1))) return false;
+    const int3 low = clamp(int3(floor(gp)), int3(0), counts - 1);
+    const int3 high = min(low + 1, counts - 1);
+    const float3 fraction = clamp(fract(gp), float3(0.0f), float3(1.0f));
+    const float dx = direction.x, dy = direction.y, dz = direction.z;
+    const float basis[9] = {0.282095f, -0.488603f * dy, 0.488603f * dz,
+        -0.488603f * dx, 1.092548f * dy * dx, -1.092548f * dy * dz,
+        0.315392f * (3.0f * dz * dz - 1.0f), -1.092548f * dx * dz,
+        0.546274f * (dx * dx - dy * dy)};
+    float3 sum = float3(0.0f);
+    float weightSum = 0.0f;
+    float unoccludedWeightSum = 0.0f;
+    const bool measured = global.tier_counts.w > 0.5f;
+    const bool useVisibility = measured || global.hint_params.w > 0.5f;
+    for (uint corner = 0; corner < 8; ++corner) {
+        const bool3 upper = bool3(corner & 1u, corner & 2u, corner & 4u);
+        const float3 weights = select(1.0f - fraction, fraction, upper);
+        const float trilinear = weights.x * weights.y * weights.z;
+        if (trilinear <= 0.0f) continue;
+        const int3 cell = select(low, high, upper);
+        const float3 delta = origin + float3(cell) * spacing - receiver;
+        const float lengthToProbe = length(delta);
+        // A receiver exactly on a probe has no preferred direction.
+        const float3 toProbe = lengthToProbe > 0.000001f ? delta / lengthToProbe : float3(0.0f);
+        float weight = trilinear * (0.25f + 0.75f * clamp(dot(toProbe, direction) * 0.5f + 0.5f, 0.0f, 1.0f));
+        unoccludedWeightSum += weight;
+        const uint index = uint(cell.x + counts.x * (cell.y + counts.y * cell.z));
+        if (useVisibility) {
+            // The second plane stores variance. Measured mode has no variance
+            // floor or minimum visibility; unclassified support contributes zero.
+            const float4 relocated = effectiveOrigins[index];
+            const bool measuredOrigin = relocated.w > 0.25f && all(isfinite(relocated));
+            const float3 anchor = (measured ? measuredOrigin : relocated.w > 0.0f)
+                ? relocated.xyz : origin + float3(cell) * spacing;
+            const float3 probeToReceiver = receiver - anchor;
+            const float distanceToProbe = length(probeToReceiver);
+            const float3 sampleDirection = measured && !(distanceToProbe > 0.0001f)
+                ? receiverNormal : probeToReceiver / max(distanceToProbe, 0.0001f);
+            float2 oct = sampleDirection.xy / max(dot(abs(sampleDirection), float3(1.0f)), 0.0001f);
+            if (sampleDirection.z < 0.0f)
+                oct = (1.0f - abs(oct.yx)) * select(float2(-1.0f), float2(1.0f), oct >= float2(0.0f));
+            const uint2 texel = uint2(clamp((oct * 0.5f + 0.5f) * 8.0f, float2(0.0f), float2(7.0f)));
+            const uint depthIndex = index * 128u + texel.y * 8u + texel.x;
+            const float mean = depthHistory[depthIndex];
+            const float storedVariance = depthHistory[depthIndex + 64u];
+            const float variance = measured ? storedVariance : max(storedVariance, 0.0001f);
+            const float beyond = max(distanceToProbe - mean, 0.0f);
+            float visibility;
+            if (measured) {
+                const bool known = measuredOrigin && isfinite(distanceToProbe) &&
+                    isfinite(mean) && mean >= 0.0f && isfinite(variance) && variance >= 0.0f;
+                visibility = known ? (beyond == 0.0f ? 1.0f : variance / (variance + beyond * beyond)) : 0.0f;
+            } else {
+                visibility = clamp(2.0f * variance / (variance + beyond * beyond), 0.2f, 1.0f);
+            }
+            visibility *= relocated.w > 0.75f ? 1.0f : (relocated.w > 0.0f ? 0.5f : 0.0f);
+            // Reject corrupt support before it can poison the weighted sum.
+            if (!all(isfinite(relocated)) || !isfinite(mean) || !isfinite(storedVariance)) visibility = 0.0f;
+            weight *= visibility;
+        }
+        float3 value = float3(0.0f);
+        for (uint coefficient = 0; coefficient < 9; ++coefficient)
+            value += sh[index * 9u + coefficient].rgb * basis[coefficient];
+        if (measured && !all(isfinite(value))) continue;
+        sum += max(value, float3(0.0f)) * weight;
+        weightSum += weight;
+    }
+    if (!(weightSum > 0.0f) && (measured || !useVisibility)) return false;
+    radiance = sum / max(weightSum, 0.0001f);
+    // Mode 1 selects visible neighbours. Mode 2 additionally preserves the
+    // attenuation that normalization would otherwise erase.
+    if (measured || global.hint_params.w > 1.5f)
+        radiance *= clamp(weightSum / max(unoccludedWeightSum, 0.0001f), 0.0f, 1.0f);
+    if (!all(isfinite(radiance))) radiance = float3(0.0f);
+    radiance = min(radiance, float3(64.0f));
+    return true;
+}
+
+static float3 spgiSkyRadiance(float3 direction, constant ScreenProbeGlobalData& global) {
+    const float up = clamp(direction.y, 0.0f, 1.0f);
+    // Frozen ShaderLib/SkyAtmosphere.glsl EvaluateSkyBase, without sun halo.
+    return mix(float3(4.40f, 4.20f, 3.80f), float3(5.50f, 5.76f, 6.00f), pow(up, 0.45f))
+        * global.sky_params.xyz;
+}
+
 kernel void screen_probe_trace_finalize(
     texture2d<float, access::sample>  prevFrameColor        [[texture(0)]],
     texture2d<float, access::sample>  surface_cache_lighting [[texture(1)]],
@@ -711,6 +858,7 @@ kernel void screen_probe_trace_finalize(
     texture3d<float, access::read>    radianceCascadeL1y     [[texture(4)]],  // T3.5 SH-L1
     texture3d<float, access::read>    radianceCascadeL1z     [[texture(5)]],  // T3.5 SH-L1
     texture2d<float, access::read>    surface_cache_depth    [[texture(6)]],
+    texture2d<float, access::read>    surface_cache_albedo   [[texture(7)]],
 
     device const float4*              probePositions  [[buffer(0)]],
     device const float4*              probeNormals    [[buffer(1)]],
@@ -723,6 +871,8 @@ kernel void screen_probe_trace_finalize(
     device const uint*                sc_grid_cards   [[buffer(8)]],
     device const float4*              ddgiIrradiance  [[buffer(9)]],
     device const float4*              importanceSH    [[buffer(10)]],  // F2
+    device const float*               ddgiDepth       [[buffer(11)]],
+    device const float4*              ddgiOrigins     [[buffer(12)]],
 
     uint global_id [[thread_position_in_grid]])
 {
@@ -761,9 +911,12 @@ kernel void screen_probe_trace_finalize(
         rayDir = spgiJitterRotation(probeIdx, global.camera_position.w) * rayDir;
         rayDir = orientAroundNormal(rayDir, probeNormal);
     }
-    float3 origin = posData.xyz + probeNormal * global.sdf_voxel_sizes[0].x * 2.0f;
+    float3 origin = posData.xyz + probeNormal * global.sdf_voxel_sizes[0].x
+        * (global.tier_counts.w > 0.5f ? 0.25f : 2.0f);
 
     float4 hit = hit_buffer[global_id];
+    const bool measured = global.tier_counts.w > 0.5f;
+    if (measured && hit.w == 3.0f) hit = float4(-1.0f,0.0f,0.0f,0.0f);
     float3 radiance = float3(0.0f);
     float cosTheta = 0.0f;
     bool useWorldFallback = false;
@@ -773,11 +926,27 @@ kernel void screen_probe_trace_finalize(
         constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
         radiance = prevFrameColor.sample(s, hit.yz).rgb;
         if (any(isnan(radiance)) || any(isinf(radiance))) radiance = float3(0.0f);
+        // Same HDR-hit firefly knee as frozen ScreenProbeTraceFinalize.comp.
+        // Below the CPU-provided knee energy passes unchanged; diagnostic 2
+        // keeps the raw HZB sample for source-isolation comparisons.
+        if (global.diag_params.x < 1.5f || global.diag_params.x > 2.5f) {
+            float hitLum = dot(radiance, float3(0.2126f, 0.7152f, 0.0722f));
+            radiance *= 1.0f / (1.0f + max(hitLum - global.tier_counts.y, 0.0f) * 2.0f);
+        }
         cosTheta = max(dot(probeNormal, rayDir), 0.0f);
     } else if (hit.w == 2.0f) {
         // SDF far-field hit — SC card grid (T1.3) near / prev color projection.
         float3 hitPos = origin + rayDir * hit.x;
         bool usedSurfaceCache = false;
+        float3 hintForQuery=float3(0.0f);
+        if (measured && global.diag_params.y>=0.0f) {
+            const uint packed=as_type<uint>(hit.y);
+            const short2 encoded=as_type<short2>(ushort2(ushort(packed&65535u),ushort(packed>>16u)));
+            const float2 octS=max(float2(encoded)/32767.0f,float2(-1.0f));
+            const float3 decoded=octDecode(clamp(octS*0.5f+0.5f,float2(0.0f),float2(1.0f)));
+            if (dot(decoded,decoded)>0.25f)
+                hintForQuery=decoded*(0.5f/max(global.diag_params.y,0.001f));
+        }
 
         // A card projection only proves UV coverage, not surface identity.
         // Validate against captured geometry and choose the closest matching
@@ -801,10 +970,12 @@ kernel void screen_probe_trace_finalize(
                 for (uint gi = begin; gi < end; ++gi) {
                     uint ci = sc_grid_cards[gi];
                     float3 candidate; float key;
-                    if (scQueryCardCandidate(cards[ci], hitPos, -rayDir,
-                                             max(0.15f, global.sdf_voxel_sizes[0].x * 1.25f),
-                                             surface_cache_depth, surface_cache_lighting,
-                                             float3(0.0f), candidate, key)) {
+                    uint reject;
+                    if (scQueryScreenProbeCandidate(cards[ci], hitPos, rayDir,
+                            max(0.15f, global.sdf_voxel_sizes[0].x * 1.25f),
+                            global.tier_counts.z > 0.5f,
+                            surface_cache_depth, surface_cache_lighting, surface_cache_albedo,
+                            hintForQuery, candidate, key, reject)) {
                         if (key < bestKey) {
                             bestKey = key;
                             radiance = candidate;
@@ -820,6 +991,12 @@ kernel void screen_probe_trace_finalize(
             // Use the existing world-probe estimate until a validated screen
             // hit (HZB) or a surface-cache card supplies this ray.
             useWorldFallback = true;
+        }
+        // SC and HZB share the same sampled-radiance policy. The existing
+        // CPU diagnostic flag explicitly restores unbounded SC samples.
+        if (global.diag_params.w < 0.5f) {
+            float hitLum = dot(radiance, float3(0.2126f, 0.7152f, 0.0722f));
+            radiance *= 1.0f / (1.0f + max(hitLum - global.tier_counts.y, 0.0f) * 2.0f);
         }
         if (any(isnan(radiance)) || any(isinf(radiance))) radiance = float3(0.0f);
         cosTheta = max(dot(probeNormal, rayDir), 0.0f);
@@ -927,37 +1104,26 @@ kernel void screen_probe_trace_finalize(
             // DDGI unavailable / stop point outside the volume → sky gradient.
             float skyWeight = max(dot(probeNormal, rayDir), 0.0f);
             if (skyWeight > 0.0f) {
-                float skyY = rayDir.y * 0.5f + 0.5f;
-                radiance = mix(float3(0.15f, 0.18f, 0.25f), float3(0.4f, 0.5f, 0.65f), skyY);
+                radiance = spgiSkyRadiance(rayDir, global);
                 cosTheta = skyWeight;
             }
         }
     }
     if (useWorldFallback || (hit.w != 1.0f && hit.w != 2.0f && hit.w != 3.0f)) {
-        // Miss → DDGI probe fallback (T2.2) → sky gradient.
-        if (global.ddgi_fb[1].w > 0.5f) {
-            float3 org = global.ddgi_fb[0].xyz;
-            float spacing = max(global.ddgi_fb[0].w, 0.01f);
-            int3 counts = int3(global.ddgi_fb[1].xyz);
-            int3 gc = int3(floor((posData.xyz - org) / spacing));
-            gc = clamp(gc, int3(0), counts - int3(1));
-            uint pidx = uint(gc.x) + uint(counts.x) * (uint(gc.y) + uint(counts.y) * uint(gc.z));
-            // SH3 coefficients @ 16B stride (vec4 view of the DDGI buffer)
-            float3 sh0 = ddgiIrradiance[pidx * 9u + 0u].xyz;
-            float3 sh1 = ddgiIrradiance[pidx * 9u + 1u].xyz;
-            float3 sh2 = ddgiIrradiance[pidx * 9u + 2u].xyz;
-            float3 sh3 = ddgiIrradiance[pidx * 9u + 3u].xyz;
-            radiance = max(float3(0.0f),
-                0.282095f * sh0
-                - 0.488603f * sh1 * rayDir.y
-                + 0.488603f * sh2 * rayDir.z
-                - 0.488603f * sh3 * rayDir.x);
+        // Full SH9 interpolation replaces nearest-probe L0+L1 snapping.
+        // Outside the grid is unavailable; do not clamp onto an unrelated edge probe.
+        if (spgiWorldRadiance(posData.xyz, probeNormal, rayDir, global, ddgiIrradiance, ddgiDepth, ddgiOrigins, radiance)) {
             cosTheta = max(dot(probeNormal, rayDir), 0.0f);
         } else {
-            float skyWeight = max(dot(probeNormal, rayDir), 0.0f);
+            if (measured) {
+                // No classified support is unknown, not a measured black sample.
+                // Average excludes w=0; do not revive it through sky or WRC.
+                probeRadiance[global_id] = float4(0.0f);
+                return;
+            }
+            const float skyWeight = max(dot(probeNormal, rayDir), 0.0f);
             if (skyWeight > 0.0f) {
-                float skyY = rayDir.y * 0.5f + 0.5f;
-                radiance = mix(float3(0.15f, 0.18f, 0.25f), float3(0.4f, 0.5f, 0.65f), skyY);
+                radiance = spgiSkyRadiance(rayDir, global);
                 cosTheta = skyWeight;
             }
         }

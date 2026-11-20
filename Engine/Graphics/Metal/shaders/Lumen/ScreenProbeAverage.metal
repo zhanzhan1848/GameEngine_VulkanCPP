@@ -7,13 +7,11 @@
  * functions, and accumulates into threadgroup shared memory via parallel
  * reduction.
  *
- * Confidence = mix(0.35, 1, hitRatio) × radianceConsistency (2026-09-17 P1,
- * audit §6.3: validity decoupled from geometry hits — sky/fallback samples
- * keep the probe alive with a 0.35 reliability floor)
+ * Confidence = mix(skyConfFloor, 1, hitRatio) × radianceConsistency.
+ * The host supplies skyConfFloor (0.25 by default); variance shades reliability
+ * within [0.55, 1], matching the frozen Vulkan confidence contract.
  *   - hitRatio: geometry-hit fraction (0 = all fallback/sky, 1 = all hit)
- *   - radianceConsistency: exp(-variance_of_luminance) — penalizes probes
- *     that see wildly different colors in different directions (likely at
- *     geometric boundaries or seeing through geometry)
+ *   - radianceConsistency: mix(0.55, 1, exp(-4 * variance_of_luminance))
  *
  * Output: 4 float4 per probe (interleaved: [sh0, sh1, sh2, sh3])
  *   sh[0].w = confidence (multi-factor)
@@ -31,7 +29,14 @@ struct AvgConstants {
     uint raysPerProbe;
     float frameSeed;   // F5: same value as camera_position.w (< 0 disables)
     float isMode;      // F2: importance resampling on/off (matches cache_params.y)
+    uint tier3Mode;
+    uint tierRaysMode;
+    uint sh2CheckMode;
+    uint _pad2;
+    float skyConfFloor;
+    float _pad3[3];
 };
+static_assert(sizeof(AvgConstants) == 48, "ScreenProbe Average host uniform ABI");
 
 constant float PI = 3.14159265358979323846f;
 constant float GOLDEN_RATIO = 1.618033988749895f;
@@ -299,14 +304,14 @@ kernel void screen_probe_average(
             float avgLumSq = (activeCount > 0.0f) ? (sharedLumSq[0] / activeCount) : 0.0f;
             float lumVariance = max(avgLumSq - avgLum * avgLum, 0.0f);
 
-            // Radiance consistency: low variance → high consistency
-            // Scale factor: variance of 1.0 → consistency ≈ 0.02
-            float radianceConsistency = exp(-lumVariance * 4.0f);
+            // High-contrast incoming light is still valid probe evidence.
+            // Match frozen Vulkan: variance shades confidence, never erases it.
+            float radianceConsistency = mix(0.55f, 1.0f, exp(-lumVariance * 4.0f));
 
-            // 来源可靠性分级：几何命中线性抬升到 1；纯 fallback 保 0.25 底
+            // 来源可靠性分级：几何命中线性抬升到 1；纯 fallback 使用宿主 skyConfFloor
             // （非零才能通过 Gather 的 sh0w>0 门；完整来源感知分级按审计
             // 顺序属 fallback/confidence 阶段）。
-            float confidence = mix(0.25f, 1.0f, hitRatio) * radianceConsistency;
+            float confidence = mix(constants.skyConfFloor, 1.0f, hitRatio) * radianceConsistency;
 
             probeSHOut[base + 0] = float4(sharedSH[0][0] * sumScale, confidence);
             probeSHOut[base + 1] = float4(sharedSH[1][0] * sumScale, 1.0f);

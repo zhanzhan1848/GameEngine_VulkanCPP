@@ -20,6 +20,7 @@ using namespace metal;
 
 struct RayInfo {
     float distance;
+    float weight;
     uint  texelIdx;
     uint  hit;
 };
@@ -53,30 +54,36 @@ kernel void ddgi_update_depth(
     constexpr uint MAX_RAYS_PER_PROBE = 256u;
     threadgroup RayInfo tg_rays[MAX_RAYS_PER_PROBE];
     uint rayLimit = min(volume.RaysPerProbe, MAX_RAYS_PER_PROBE);
+    const bool measured = volume.RaySampleMode == 7;
 
     for (uint r = tid; r < rayLimit; r += 64u) {
         tg_rays[r].distance = 0.0f;
+        tg_rays[r].weight = 1.0f;
         tg_rays[r].texelIdx = 0u;
         tg_rays[r].hit = 0u;
 
         DDGIRayData ray = ray_buffer[rayOffset + r];
 
-        if (ray.radiance_and_dist.w >= 0.0f) {
+        float distance = ray.radiance_and_dist.w;
+        if (measured && (distance == -2.0f || distance == -3.0f))
+            distance = volume.RayMaxDistance;
+        if (distance >= 0.0f && (!measured || isfinite(distance))) {
             // B8: binning must use the SAME mode-aware sampler as the trace
             // side — a fixed mode-0 direction mis-bins every ray when
             // RaySampleMode != 0 (directions no longer match traced radiance).
             float3 lightDir = volume.LightDirection.xyz;
             float3 toLight = (dot(lightDir, lightDir) > 1e-8f)
                 ? normalize(-lightDir) : float3(0.0f, -1.0f, 0.0f);
-            float3 rayDir = ddgiSampleRayDirection(r, volume.RaysPerProbe,
+            float4 raySample = ddgiSampleRayDirection(r, volume.RaysPerProbe,
                                                    volume.FrameIndex,
                                                    uint(volume.RaySampleMode),
-                                                   toLight).xyz;
-            float2 uv = octahedralEncode(rayDir);
+                                                   toLight);
+            float2 uv = octahedralEncode(raySample.xyz);
             uint2 texel = uint2(clamp(uint(uv.x * float(DDGI_DEPTH_RES)), 0u, DDGI_DEPTH_RES - 1u),
                                 clamp(uint(uv.y * float(DDGI_DEPTH_RES)), 0u, DDGI_DEPTH_RES - 1u));
 
-            tg_rays[r].distance = ray.radiance_and_dist.w;
+            tg_rays[r].distance = distance;
+            tg_rays[r].weight = measured ? 0.25f / raySample.w : 1.0f;
             tg_rays[r].texelIdx = texel.y * DDGI_DEPTH_RES + texel.x;
             tg_rays[r].hit = 1u;
         }
@@ -95,13 +102,30 @@ kernel void ddgi_update_depth(
 
     float sumDist = 0.0f;
     float sumDistSq = 0.0f;
+    float sumWeight = 0.0f;
     uint rayCount = 0u;
 
     for (uint r = 0; r < rayLimit; ++r) {
         if (tg_rays[r].hit && tg_rays[r].texelIdx == texelIdx) {
             float d = tg_rays[r].distance;
-            sumDist += d;
-            sumDistSq += d * d;
+            if (measured) {
+                // Weighted Welford: mean/M2 avoids cancellation for a narrow
+                // depth distribution far from the probe (frozen mode 7).
+                float weight = tg_rays[r].weight;
+                float nextWeight = sumWeight + weight;
+                if (sumWeight == 0.0f) {
+                    sumDist = d;
+                } else {
+                    float delta = d - sumDist;
+                    float nextMean = sumDist + delta * (weight / nextWeight);
+                    sumDistSq += weight * delta * (d - nextMean);
+                    sumDist = nextMean;
+                }
+                sumWeight = nextWeight;
+            } else {
+                sumDist += d;
+                sumDistSq += d * d;
+            }
             rayCount++;
         }
     }
@@ -110,8 +134,23 @@ kernel void ddgi_update_depth(
     uint varIdx  = probeBase + DDGI_DEPTH_TEXELS + texelIdx;
 
     if (rayCount == 0u) {
-        depth_output[meanIdx] = depth_history[meanIdx];
-        depth_output[varIdx]  = depth_history[varIdx];
+        // No current evidence invalidates measured visibility. Old positive
+        // history must not turn unknown geometry into a clear direction.
+        depth_output[meanIdx] = measured ? -1.0f : depth_history[meanIdx];
+        depth_output[varIdx]  = measured ? 0.0f : depth_history[varIdx];
+        return;
+    }
+
+    float rampFrames = 60.0f;
+    float rampT = saturate(float(max(volume.FrameIndex, 1u) - 1u) / rampFrames);
+    float alpha = mix(1.0f, volume.DepthBlurSigma, rampT);
+    if (measured) {
+        float variance = max(sumDistSq / sumWeight, 0.0f);
+        float oldMean = depth_history[meanIdx], oldVariance = depth_history[varIdx];
+        bool historyValid = oldMean >= 0.0f && isfinite(oldMean) &&
+                            oldVariance >= 0.0f && isfinite(oldVariance);
+        depth_output[meanIdx] = historyValid ? mix(oldMean, sumDist, alpha) : sumDist;
+        depth_output[varIdx] = historyValid ? mix(oldVariance, variance, alpha) : variance;
         return;
     }
 
@@ -122,10 +161,6 @@ kernel void ddgi_update_depth(
         variance = max(variance, volume.ProbeSpacing * volume.ProbeSpacing * 0.02f);
     }
     variance = max(variance, 0.001f);
-
-    float rampFrames = 60.0f;
-    float rampT = saturate(float(max(volume.FrameIndex, 1u) - 1u) / rampFrames);
-    float alpha = mix(1.0f, volume.DepthBlurSigma, rampT);
 
     depth_output[meanIdx] = mix(depth_history[meanIdx], mean, alpha);
     depth_output[varIdx]  = mix(depth_history[varIdx],  variance, alpha);

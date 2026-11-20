@@ -6,10 +6,10 @@
  * and SH projection weights, then multiplies by per-card radiance (from
  * DDGICardRadianceAvg) to produce updated probe irradiance SH coefficients.
  *
- * SC-first hierarchy (Lumen-like sparse cache): the surface-cache projection is
- * the PRIMARY feed; the SDF ray trace result (Path A, already in the output
- * buffer) fills in proportionally to how thin the SC coverage is. Coverage =
- * assigned-card count × per-card atlas validity (card_radiance.w).
+ * Card projection bootstraps low-confidence probes and recovers missing trace
+ * energy. In the default coldstart mode, converged nonzero traced probes keep
+ * ownership; the host can also request the legacy or gated blending modes.
+ * Only captured card blocks contribute coverage (card_radiance.w).
  *
  * All 9 SH bands (L0-L2) are projected and written; projection signs match
  * DDGIUpdateIrradiance's basis.
@@ -42,7 +42,9 @@ kernel void ddgi_probe_irradiance_from_cards(
     device const float4* card_radiance           [[buffer(3)]],
     // vec4[9]/probe layout (144B): index float4, take xyz (MSL float3* strides 12B).
     device const float4* irradiance_history      [[buffer(4)]],
-    device float4* irradiance_output             [[buffer(5)]]
+    device float4* irradiance_output             [[buffer(5)]],
+    device const float4* probe_confidence        [[buffer(6)]],
+    constant float4& sc_inject                    [[buffer(7)]]
 ) {
     if (probeIdx >= vol.ProbeCountTotal) return;
 
@@ -54,9 +56,12 @@ kernel void ddgi_probe_irradiance_from_cards(
 
     uint n = min(range.count, 12u);
     float validSum = 0.0f;
+    uint validCount = 0u;
     for (uint i = 0; i < n; ++i) {
         device const ProbeCardContrib& c = contribs[range.start + i];
         float4 cr = card_radiance[c.card_index];
+        if (cr.w <= 0.0f) continue;
+        ++validCount;
         validSum += cr.w;  // per-card atlas coverage (0..1)
         for (uint b = 0; b < 9u; ++b)
             sh[b] += c.sh_weights[b] * cr.xyz;
@@ -103,15 +108,28 @@ kernel void ddgi_probe_irradiance_from_cards(
     // Step 3: match Vulkan's trace-first blend. Card averages are low-frequency
     // and occlusion-unaware, so cap them at 0.45 and leave the SDF trace in
     // control of the sun-patch/shade contrast.
-    float countCoverage = saturate(float(n) / 6.0f);
-    float validCoverage = (n > 0u) ? saturate(validSum / float(n)) : 0.0f;
+    float countCoverage = saturate(float(validCount) / 6.0f);
+    float validCoverage = (validCount > 0u) ? saturate(validSum / float(validCount)) : 0.0f;
     float scLum = dot(scResult[0], float3(0.2126f, 0.7152f, 0.0722f));
-    float pathLum = max(dot(pathA[0], float3(0.2126f, 0.7152f, 0.0722f)), 1e-4f);
+    float rawPathLum = dot(pathA[0], float3(0.2126f, 0.7152f, 0.0722f));
+    float pathLum = max(rawPathLum, 1e-4f);
     float agree = smoothstep(0.0f, 1.0f, scLum / pathLum);
     constexpr float SC_TAKEOVER_MAX = 0.45f;
-    float scWeight = countCoverage * validCoverage * SC_TAKEOVER_MAX * agree;
+    // Frozen Vulkan policy: cards initialize and recover a missing source;
+    // converged traced probes retain ownership in the default coldstart mode.
+    const float SC_SETTLED_FLOOR = 0.15f;
+    float settled = smoothstep(0.5f, 1.0f, probe_confidence[probeIdx].w);
+    float injectBase = countCoverage * validCoverage;
+    float takeover = SC_TAKEOVER_MAX;
+    if (sc_inject.x >= 1.5f) {
+        float recovery = rawPathLum <= 1e-3f ? SC_SETTLED_FLOOR : 0.0f;
+        takeover = mix(SC_TAKEOVER_MAX, recovery, settled);
+    } else if (sc_inject.x >= 0.5f) {
+        takeover = mix(SC_TAKEOVER_MAX, SC_SETTLED_FLOOR, settled);
+    }
+    float scWeight = injectBase * agree * takeover;
 
     for (uint i = 0; i < 9u; ++i) {
-        irradiance_output[base + i] = float4(mix(pathA[i], scResult[i], scWeight), 1.0f);
+        irradiance_output[base + i] = float4(mix(pathA[i], scResult[i], scWeight), irradiance_output[base + i].w);
     }
 }

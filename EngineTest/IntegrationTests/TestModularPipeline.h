@@ -83,6 +83,13 @@ private:
     bool LoadSponzaScene();
     void RegisterSceneCardsWithSurfaceCache();
     bool LoadMaterialTextures();
+    bool CaptureGBuffer(const std::string& prefix);
+    bool CaptureLighting(const std::string& prefix, uint32_t pipelineFrame, uint32_t bufferIndex);
+    bool CaptureDDGI(const std::string& prefix, uint32_t pipelineFrame);
+    bool CaptureScreenProbeRays(const std::string& prefix, uint32_t pipelineFrame);
+    bool CaptureScreenProbeSlices(const std::string& prefix, uint32_t pipelineFrame);
+    bool CaptureScreenProbeHZB(const std::string& prefix, uint32_t pipelineFrame);
+    bool CaptureTAAInputs(const std::string& prefix, uint32_t pipelineFrame);
 
     // Vulkan-reference IBL resources (sunset.hdr -> cubemap -> irradiance /
     // prefilter / BRDF LUT). The generated maps remain alive while the pipeline

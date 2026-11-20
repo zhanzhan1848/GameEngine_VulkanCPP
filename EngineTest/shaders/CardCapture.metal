@@ -207,17 +207,19 @@ fragment CardCapturePSOut card_capture_fragment(
     texture2d_array<float> albedo_textures [[texture(10)]],
     sampler texture_sampler          [[sampler(11)]])
 {
-    // Missing-material sentinel: neutral gray (never magenta — atlas texels
-    // feed probes).
     CardMaterialInfo mat = cardLoadMaterial(mats, IN.material_id);
     float2 scaled_uv = fract(IN.uv);
-
-    float4 albedo_sample = float4(0.5f);
-    int albedo_layers = (int)albedo_textures.get_array_size();
-    if (mat.albedo_texture_idx != 0xFFFFFFFFu && int(mat.albedo_texture_idx) < albedo_layers) {
+    float4 albedo_sample = float4(1.0f);
+    const uint layers = albedo_textures.get_array_size();
+    if (mat.albedo_texture_idx != 0xFFFFFFFFu) {
+        if (mat.albedo_texture_idx >= layers) discard_fragment();
         albedo_sample = albedo_textures.sample(texture_sampler, scaled_uv, mat.albedo_texture_idx);
     }
-    float3 base_color = albedo_sample.rgb * mat.albedo_tint;
+    const float3 base_color = albedo_sample.rgb * mat.albedo_tint;
+    const float axis_depth = dot(IN.world_pos - cb.center.xyz, cb.fwd.xyz);
+    if (!all(isfinite(base_color)) || !all(isfinite(IN.normal)) ||
+        dot(IN.normal, IN.normal) < 1e-8f || !isfinite(axis_depth) || axis_depth < 0.0f)
+        discard_fragment();
 
     float3 N = normalize(IN.normal);
     // Mirroring the card projection must not reverse the physical normal.
@@ -227,6 +229,6 @@ fragment CardCapturePSOut card_capture_fragment(
     OUT.albedo = float4(base_color,
                         float(cardEncodeTransportAlpha(mat.flags)) / 255.0f);
     OUT.normal = float4(cardOctEncode(N), 0.0f, 1.0f);
-    OUT.axis_depth = dot(IN.world_pos - cb.center.xyz, cb.fwd.xyz);
+    OUT.axis_depth = axis_depth;
     return OUT;
 }

@@ -1141,6 +1141,22 @@ if(WIN32 AND ENABLE_VULKAN)
     )
 endif() # WIN32 AND ENABLE_VULKAN gate for TestVulkanSponzaRenderGraph (Windows)
 
+if(APPLE AND NOT ENABLE_VULKAN)
+    foreach(native_test TestMetalDepthHistoryCopy TestMetalTAARaster)
+        add_executable(${native_test} "${native_test}.cpp")
+        setup_test_target(${native_test})
+        set_tests_properties(Engine_Integration_Tests_${native_test} PROPERTIES
+            LABELS "GPU;Metal;NativeRegression" WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+            RUN_SERIAL TRUE TIMEOUT 90)
+    endforeach()
+    add_test(NAME MetalHZBMips
+        COMMAND ${CMAKE_COMMAND} -E env
+            "PRIMAL_NATIVE_TEST_BUILD_DIR=${CMAKE_CURRENT_BINARY_DIR}/native-regression"
+            bash "${CMAKE_SOURCE_DIR}/scripts/tests/run_native_shader_tests.sh")
+    set_tests_properties(MetalHZBMips PROPERTIES LABELS "GPU;Metal;NativeRegression"
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}" RUN_SERIAL TRUE TIMEOUT 90)
+endif()
+
 else()
     message(STATUS "Integration tests skipped: ContentTools disabled (BUILD_CONTENT_TOOLS=OFF)")
     add_custom_target(IntegrationTests)

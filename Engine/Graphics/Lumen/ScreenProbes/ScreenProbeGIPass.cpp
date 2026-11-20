@@ -608,9 +608,14 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
             {8, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // sc_grid_cards (T1.3)
             {9, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // ddgi_irradiance (T2.2)
             {10, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // importanceSH (F2)
+            {11, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // Metal DDGI depth history
+            {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // Metal effective DDGI origins
+            {7, DescriptorType::SampledImage, 1, ShaderStage::Compute, nullptr}, // Metal SC transport alpha
         };
         for (int b = 2; b < 6; ++b) bindings[b].is3D = true;  // radiance cascade (T3.5 + SH-L1)
-        DescriptorSetLayoutDesc layoutDesc{18, bindings};
+        bindings[18].readonly = true;
+        bindings[19].readonly = true;
+        DescriptorSetLayoutDesc layoutDesc{device_->GetPlatform() == RHIPlatform::Metal ? 21u : 18u, bindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -711,8 +716,9 @@ void ScreenProbeGIPass::CreateDescriptorSetLayouts() {
         temporal_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
-    // --- Spatial Filter: 3 SSBO (inputSH, outputSH, positions) + 1 UBO ---
-    if (isVk) {
+    // Metal uses the same spatial resources, with explicit array counts in its CB tail.
+    // Dawn retains its existing four-binding spatial layout.
+    if (isVk || device_->GetPlatform() == RHIPlatform::Metal) {
         DescriptorSetLayoutBinding bindings[] = {
             {0, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // inputSH (readonly)
             {1, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr},  // outputSH (read-write)
@@ -1323,7 +1329,7 @@ void ScreenProbeGIPass::CreateBuffers() {
     // Spatial filter constant buffers (triple-buffered)
     for (int i = 0; i < 3; ++i) {
         BufferDesc desc{};
-        desc.size = 16;  // totalProbes(u32) + gridW(u32) + sigma(f32) + pad(f32)
+        desc.size = device_->GetPlatform() == RHIPlatform::Metal ? 32 : 16; // Metal geometry counts tail
         desc.type = BufferType::Constant;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
@@ -1837,6 +1843,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
     RGResourceHandle scCardDataHandle;
     RGResourceHandle scCardLookupHandle;
     RGResourceHandle scDepthHandle;
+    RGResourceHandle scAlbedoHandle;
     if (surface_cache_available_) {
         // T1.1 (C2): reuse the pipeline-level "SCLightingAtlas" import when
         // provided so the atlas has exactly one RG identity per frame.
@@ -1855,6 +1862,11 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                    : RGResourceHandle{});
         if (surface_cache_depth_atlas_ != handles::INVALID_RESOURCE)
             scDepthHandle = graph.ImportResource("SurfaceCache_Depth_ForProbes", surface_cache_depth_atlas_);
+        // Metal finalize consumes transport alpha; declare its raster-to-compute read.
+        // ImportResource reuses any existing identity for this physical atlas.
+        if (device_->GetPlatform() == RHIPlatform::Metal &&
+            surface_cache_albedo_atlas_ != handles::INVALID_RESOURCE)
+            scAlbedoHandle = graph.ImportResource("SurfaceCache_Albedo_ForProbes", surface_cache_albedo_atlas_);
         scCardDataHandle = graph.ImportResource("SurfaceCache_CardData_ForProbes", surface_cache_card_data_buffer_);
         scCardLookupHandle = graph.ImportResource("SurfaceCache_CardLookup_ForProbes", surface_cache_card_lookup_buffer_);
     }
@@ -1891,7 +1903,8 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
 
     RGResourceHandle ddgiDepthRG, ddgiOriginsRG;
     if ((device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
-         device_->GetPlatform() == rhi::RHIPlatform::D3D12) &&
+         device_->GetPlatform() == rhi::RHIPlatform::D3D12 ||
+         device_->GetPlatform() == rhi::RHIPlatform::Metal) &&
         ddgi_depth_buffer_ != handles::INVALID_RESOURCE &&
         ddgi_relocated_origins_ != handles::INVALID_RESOURCE) {
         ddgiDepthRG = graph.ImportResource("SPGI_DDGI_DepthHistory", ddgi_depth_buffer_);
@@ -1905,7 +1918,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
         // Setup lambda: declare resource dependencies
         // ====================================================================
         [this, gbuffer_depth, gbuffer_normal, prev_frame_color, hzb_texture, giOutputHandle, giFilteredHandle,
-         scLightingHandle, scNodirectHandle, scCardDataHandle, scCardLookupHandle, scDepthHandle, cascadeWriteRG, cascadePrevRG, ddgiDepthRG, ddgiOriginsRG](
+         scLightingHandle, scNodirectHandle, scCardDataHandle, scCardLookupHandle, scDepthHandle, scAlbedoHandle, cascadeWriteRG, cascadePrevRG, ddgiDepthRG, ddgiOriginsRG](
             ScreenProbePassData& data, RenderGraphBuilder& builder) {
             // Read GBuffer inputs
             builder.Read(gbuffer_depth, ResourceState::ShaderResource);
@@ -1930,6 +1943,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 if (scNodirectHandle.IsValid())
                     builder.Read(scNodirectHandle, ResourceState::ShaderResource);
                 if (scDepthHandle.IsValid()) builder.Read(scDepthHandle, ResourceState::ShaderResource);
+                if (scAlbedoHandle.IsValid()) builder.Read(scAlbedoHandle, ResourceState::ShaderResource);
                 builder.Read(scCardDataHandle, ResourceState::ShaderResource);
                 builder.Read(scCardLookupHandle, ResourceState::ShaderResource);
             }
@@ -1988,7 +2002,8 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             }
             // Mode7 spatial visibility is independent of zero-hit owner/material
             // eligibility. Only a current ready BVH epoch can prove an open segment.
-            const bool measuredVisibility = splitIsVk && ddgi_measured_visibility_;
+            const bool splitIsMetal = device_->GetPlatform() == RHIPlatform::Metal;
+            const bool measuredVisibility = (splitIsVk || splitIsMetal) && ddgi_measured_visibility_;
             ResourceHandle spatialGeometry[4]{dummy_buffer_,dummy_buffer_,dummy_buffer_,dummy_buffer_};
             bool spatialGeometryReady = measuredVisibility && first_cache_ &&
                 probe_normals_buffer_[frameIdx] != handles::INVALID_RESOURCE &&
@@ -1996,6 +2011,17 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
             for(u32 i=0;i<4 && spatialGeometryReady;++i) {
                 spatialGeometry[i]=first_cache_->GetGeometryFirstHitBuffer(frameIdx,i);
                 spatialGeometryReady &= spatialGeometry[i]!=handles::INVALID_RESOURCE;
+            }
+            u32 spatialGeometryCounts[4]{};
+            if (splitIsMetal && spatialGeometryReady) {
+                const u64 strides[4]{48,48,48,64};
+                for (u32 i=0;i<4;++i) {
+                    u64 bytes=0;
+                    const bool valid=device_->GetBufferByteSize(spatialGeometry[i],bytes) &&
+                        bytes/strides[i]>0 && bytes/strides[i]<=0xffffffffu;
+                    spatialGeometryReady &= valid;
+                    spatialGeometryCounts[i]=valid?static_cast<u32>(bytes/strides[i]):0u;
+                }
             }
             if(!spatialGeometryReady) for(auto& b:spatialGeometry)b=dummy_buffer_;
             if(!firstReady) for(auto& b:firstGeometry)b=dummy_buffer_;
@@ -2188,12 +2214,38 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     ? requestedStepScale : 1.0f;
                 const char* visibilityEnv = std::getenv("SPGI_DDGI_VISIBILITY");
                 const int visibilityMode = visibilityEnv ? std::atoi(visibilityEnv) : (measuredVisibility ? 2 : 0);
-                const bool visibilityReady = ddgi_depth_buffer_ != handles::INVALID_RESOURCE &&
+                bool visibilityReady = ddgi_depth_buffer_ != handles::INVALID_RESOURCE &&
                     ddgi_relocated_origins_ != handles::INVALID_RESOURCE;
+                // MSL pointers have no array length. Qualify all three bound
+                // allocations before authorizing measured world-grid reads.
+                if (splitIsMetal && measuredVisibility) {
+                    u64 probes=1;
+                    const float counts[3]{gd.ddgi_fb[1].x,gd.ddgi_fb[1].y,gd.ddgi_fb[1].z};
+                    for (float count : counts) {
+                        if (!std::isfinite(count) || count<1.0f || count>65535.0f ||
+                            count!=std::floor(count) || probes>0xffffffffu/static_cast<u64>(count)) {
+                            visibilityReady=false; break;
+                        }
+                        probes*=static_cast<u64>(count);
+                    }
+                    const ResourceHandle buffers[3]{ddgi_depth_buffer_,ddgi_relocated_origins_,ddgi_irradiance_buffer_};
+                    const u64 strides[3]{128*sizeof(float),sizeof(math::v4),9*sizeof(math::v4)};
+                    for (u32 i=0;i<3;++i) {
+                        u64 bytes=0;
+                        visibilityReady &= device_->GetBufferByteSize(buffers[i],bytes) && bytes/strides[i]>=probes;
+                    }
+                }
                 if (measuredVisibility && !visibilityReady) gd.ddgi_fb[1].w = 0.0f;
                 gd.hint_params = {kTrilinearHint, std::getenv("SPGI_RAY_SAMPLES_FLOOR") ? 1.0f : 0.0f, sdfStepScale,
                     visibilityReady && visibilityMode >= 1 && visibilityMode <= 2
                         ? float(visibilityMode) : 0.0f};
+                if (device_->GetPlatform() == RHIPlatform::Metal && camera_data.frame_index < 4u) {
+                    PRIMAL_LOG_STREAM(Info, "SPGI-MetalVisibility") << "mode=" << gd.hint_params.w
+                        << " ready=" << visibilityReady << " depth=" << ddgi_depth_buffer_
+                        << " origins=" << ddgi_relocated_origins_ << " sh=" << ddgi_irradiance_buffer_
+                        << " grid=" << gd.ddgi_fb[1].x << "x" << gd.ddgi_fb[1].y << "x" << gd.ddgi_fb[1].z
+                        << " measured=" << measuredVisibility << std::endl;
+                }
                 // GI 能量根治方案 Phase 1.3（R3）: 天空档位门——与 DDGI
                 // volume 的 SkyColor 同源（GIDebug 单例，缺省 0.4）。
                 // [F1-a 2026-09-20] w = 失败射线低频回退限幅 k
@@ -2698,8 +2750,14 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             {9, DescriptorType::StorageBuffer, ddgiIrr},
                             {10, DescriptorType::StorageBuffer, probe_avg_radiance_[histIdx]},  // F2
                             {6, DescriptorType::SampledImage, scDepthAtlas},
+                            {11, DescriptorType::StorageBuffer, ddgi_depth_buffer_ != handles::INVALID_RESOURCE
+                                ? ddgi_depth_buffer_ : dummy_buffer_},
+                            {12, DescriptorType::StorageBuffer, ddgi_relocated_origins_ != handles::INVALID_RESOURCE
+                                ? ddgi_relocated_origins_ : dummy_buffer_},
+                            {7, DescriptorType::SampledImage, scAlbedoAtlas},
                         };
-                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams, 18);
+                        UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finParams,
+                            device_->GetPlatform() == RHIPlatform::Metal ? 21u : 18u);
                     }
                     EnsureStorageWritable(outputTex);
                     cmd->BindComputePipeline(finalize_pipeline_);
@@ -2949,9 +3007,15 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                               tier3_enabled_ ? grid_width_ * 4u : grid_width_, 2.0f,
                               (measuredVisibility ? 1u : 0u) | (spatialGeometryReady ? 2u : 0u)};
                 static_assert(sizeof(SpatialCB) == 16);
+                struct MetalSpatialCB { SpatialCB base; u32 counts[4]; };
+                const MetalSpatialCB metalScb{scb,{spatialGeometryCounts[0],spatialGeometryCounts[1],
+                    spatialGeometryCounts[2],spatialGeometryCounts[3]}};
+                static_assert(sizeof(MetalSpatialCB)==32);
+                const void* spatialConstants=splitIsMetal?static_cast<const void*>(&metalScb):&scb;
+                const u32 spatialConstantSize=splitIsMetal?sizeof(metalScb):sizeof(scb);
                 bool spatialConstantsReady = false;
                 if (auto* cb = device_->MapBuffer(spatial_cb_[frameIdx])) {
-                    std::memcpy(cb, &scb, sizeof(scb));
+                    std::memcpy(cb, spatialConstants, spatialConstantSize);
                     device_->UnmapBuffer(spatial_cb_[frameIdx]);
                     spatialConstantsReady = true;
                 }
@@ -2978,7 +3042,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     {7, DescriptorType::StorageBuffer, spatialGeometry[2]},
                     {8, DescriptorType::StorageBuffer, spatialGeometry[3]},
                 };
-                UpdateDescriptorSet(device_, spatial_ds_[frameIdx], params, splitIsVk ? 9 : 4);
+                UpdateDescriptorSet(device_, spatial_ds_[frameIdx], params, (splitIsVk || splitIsMetal) ? 9 : 4);
 
                 if (measuredVisibility) {
                     // InsertBarrier is image-only on Vulkan: establish actual
@@ -2991,7 +3055,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 cmd->BindComputePipeline(spatial_pipeline_);
                 const DescriptorSetHandle sets[] = { spatial_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, spatial_layout_, 0, 1, sets, 0, nullptr);
-                if (!splitIsVk) cmd->SetComputeBytes(3, &scb, sizeof(SpatialCB));
+                if (!splitIsVk) cmd->SetComputeBytes(3, spatialConstants, spatialConstantSize);
 
                 cmd->Dispatch((slot_count_ + 63) / 64, 1, 1);
                 filteredSH = spatialOutput;

@@ -20,6 +20,10 @@ using namespace metal;
 #include "DDGIVolumeData.metal"
 #include "SurfaceCacheData.metal"
 #include "SDFTraceCommon.metal"
+#ifdef DDGI_METAL_MEASURED_GEOMETRY
+#include "GeometryFirstHit.metal"
+#include "DDGIMeasuredSurface.metal"
+#endif
 
 // ============================================================================
 // DDGI-specific SDF trace wrapper (adapts DDGIVolumeData → shared trace params)
@@ -52,6 +56,52 @@ static SDFHitResult ddgiTraceSDF(
 // (T8.13 sync) — single source shared with the SH projection side.
 // ============================================================================
 
+// The measured Vulkan reference interpolates eight texels explicitly. Hardware
+// filtering can round the weights differently and change the winning relocation
+// direction. Keep this arithmetic local to measured probe relocation.
+#ifdef DDGI_METAL_MEASURED_GEOMETRY
+static float ddgiRelocationSampleCascade(texture3d<float, access::sample> sdf,
+    float3 position, float3 origin, float3 extent, uint resolution) {
+    float3 uv = (position - origin) / extent;
+    if (any(uv < 0.0f) || any(uv > 1.0f)) return 1e10f;
+    float3 p = uv * float(resolution) - 0.5f;
+    int3 base = int3(floor(p));
+    float3 f = p - float3(base);
+    int3 limit = int3(int(resolution) - 1);
+    uint3 c0 = uint3(clamp(base, int3(0), limit));
+    uint3 c1 = uint3(clamp(base + 1, int3(0), limit));
+    float d000 = sdf.read(uint3(c0.x, c0.y, c0.z)).r;
+    float d100 = sdf.read(uint3(c1.x, c0.y, c0.z)).r;
+    float d010 = sdf.read(uint3(c0.x, c1.y, c0.z)).r;
+    float d110 = sdf.read(uint3(c1.x, c1.y, c0.z)).r;
+    float d001 = sdf.read(uint3(c0.x, c0.y, c1.z)).r;
+    float d101 = sdf.read(uint3(c1.x, c0.y, c1.z)).r;
+    float d011 = sdf.read(uint3(c0.x, c1.y, c1.z)).r;
+    float d111 = sdf.read(uint3(c1.x, c1.y, c1.z)).r;
+    return mix(mix(mix(d000, d100, f.x), mix(d010, d110, f.x), f.y),
+               mix(mix(d001, d101, f.x), mix(d011, d111, f.x), f.y), f.z);
+}
+#endif
+
+static float ddgiSampleRelocationSDF(float3 position, constant DDGIVolumeData& volume,
+    texture3d<float, access::sample> sdf0,
+    texture3d<float, access::sample> sdf1,
+    texture3d<float, access::sample> sdf2) {
+#ifdef DDGI_METAL_MEASURED_GEOMETRY
+    if (volume.SdfCascadeCount > 0u && isInsideCascade(position, volume.SdfOrigins[0].xyz, volume.SdfExtents[0].xyz))
+        return ddgiRelocationSampleCascade(sdf0, position, volume.SdfOrigins[0].xyz, volume.SdfExtents[0].xyz, volume.SdfResolutions[0]);
+    else if (volume.SdfCascadeCount > 1u && isInsideCascade(position, volume.SdfOrigins[1].xyz, volume.SdfExtents[1].xyz))
+        return ddgiRelocationSampleCascade(sdf1, position, volume.SdfOrigins[1].xyz, volume.SdfExtents[1].xyz, volume.SdfResolutions[1]);
+    else if (volume.SdfCascadeCount > 2u && isInsideCascade(position, volume.SdfOrigins[2].xyz, volume.SdfExtents[2].xyz))
+        return ddgiRelocationSampleCascade(sdf2, position, volume.SdfOrigins[2].xyz, volume.SdfExtents[2].xyz, volume.SdfResolutions[2]);
+    return 1e10f;
+#else
+    return sampleBestSDF_elseIf(position, sdf0, sdf1, sdf2,
+        volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
+        volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2], volume.SdfCascadeCount);
+#endif
+}
+
 // ============================================================================
 // Probe relocation (ray-origin only) — port of DDGITraceSDF.comp
 // ddgiRelocateProbeOrigin. Pushes a buried ray origin out along the SDF until
@@ -76,10 +126,7 @@ static float3 ddgiRelocateProbeOrigin(float3 probePos, float spacing,
     // 2026-09-10 十五: raised with the Vulkan twin (see DDGITraceSDF.comp) —
     // 0.45×spacing left thick-masonry probes permanently buried.
     const float maxPush = spacing * 0.95f;
-    float d0 = sampleBestSDF_elseIf(probePos, sdf0, sdf1, sdf2,
-                                    volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
-                                    volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
-                                    volume.SdfCascadeCount);
+    float d0 = ddgiSampleRelocationSDF(probePos, volume, sdf0, sdf1, sdf2);
     if (d0 >= 1e9f) return probePos;  // 原点越界（哨兵）——不重定位，就地 march
     if (d0 > skin) return probePos;
     float3 best = probePos;
@@ -104,10 +151,7 @@ static float3 ddgiRelocateProbeOrigin(float3 probePos, float spacing,
                 p += dirs[k] * stepLen;
                 float3 delta = p - probePos;
                 if (dot(delta, delta) > maxPush * maxPush) break;
-                float d = sampleBestSDF_elseIf(p, sdf0, sdf1, sdf2,
-                                               volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
-                                               volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
-                                               volume.SdfCascadeCount);
+                float d = ddgiSampleRelocationSDF(p, volume, sdf0, sdf1, sdf2);
                 // 2026-09-04 伪影1/GI冻结根因修复：越界哨兵（>=1e9，采样点
                 // 在级联覆盖外）恒大于任何真实 SDF 距离——旧逻辑把"最大距离"
                 // 当作最开阔候选，探针会被重定位到场外 → 所有射线从场外
@@ -138,10 +182,7 @@ static float3 ddgiRelocateProbeOrigin(float3 probePos, float spacing,
                 for (int dz = -1; dz <= 1; ++dz) {
                     if (dx == 0 && dy == 0 && dz == 0) continue;
                     float3 c = probePos + float3(float(dx), float(dy), float(dz)) * spacing;
-                    float d = sampleBestSDF_elseIf(c, sdf0, sdf1, sdf2,
-                                                   volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
-                                                   volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
-                                                   volume.SdfCascadeCount);
+                    float d = ddgiSampleRelocationSDF(c, volume, sdf0, sdf1, sdf2);
                     if (d < 1e9f && d > freeBestD) { freeBestD = d; freeBest = c; }
                 }
             }
@@ -224,6 +265,14 @@ kernel void ddgi_trace_rays(
     // Map sparse update index to real probe index
     uint probeIdx = probeUpdateList[localProbeIdx];
     if (probeIdx >= volume.ProbeCountTotal) return;
+#ifdef DDGI_METAL_MEASURED_GEOMETRY
+    if (volume.RaySampleMode == 7) {
+        // The unified fallback has no geometry bindings. Never label SDF or
+        // analytic fallback radiance as a measured first surface.
+        ray_buffer[probeIdx*volume.RaysPerProbe+localRayIdx].radiance_and_dist=float4(0,0,0,-1);
+        return;
+    }
+#endif
 
     uint3 gc = ddgiProbeGridCoord(probeIdx, ddgiGetProbeCounts(volume));
     float3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
@@ -330,6 +379,12 @@ kernel void ddgi_trace_sdf(
     // 2026-09-17 P0：发布重定位后有效起点（绝对 probeIdx，w=1.0）。
     // finalize（buffer(12)）与 gather 可见性必须消费同一起点。
     device float4* relocated_origins [[buffer(6)]]                     // P0: effective origins
+#ifdef DDGI_METAL_MEASURED_GEOMETRY
+    , device const GeometryNode* geometryTop [[buffer(7)]]
+    , device const GeometryNode* geometryBottom [[buffer(8)]]
+    , device const GeometryTriangle* geometryTriangles [[buffer(9)]]
+    , device const GeometryInstance* geometryInstances [[buffer(10)]]
+#endif
 )
 {
     uint tid = tid2d.y * 8u + tid2d.x;
@@ -343,22 +398,12 @@ kernel void ddgi_trace_sdf(
 
     uint3 gc = ddgiProbeGridCoord(probeIdx, ddgiGetProbeCounts(volume));
     float3 probePos = ddgiProbeWorldPos(gc, volume.ProbeOrigin.xyz, volume.ProbeSpacing);
-    // TEMP diagnosis: record the raw SDF value at the grid origin on ray 0.
-    float d0_dbg = sampleBestSDF_elseIf(probePos, sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
-                                        volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
-                                        volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
-                                        volume.SdfCascadeCount);
     // T8.13 sync: relocate buried ray origins (multi-axis deepest-free-point,
     // same policy as DDGITraceSDF.comp::ddgiRelocateProbeOrigin).
     float originState = 1.0f;
     float3 relocatedPos = ddgiRelocateProbeOrigin(probePos, volume.ProbeSpacing, volume,
                                        sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
                                        originState);
-    // TEMP diagnosis: also record the relocated origin's SDF value on ray 1.
-    float d1_dbg = sampleBestSDF_elseIf(relocatedPos, sdf_cascade_0, sdf_cascade_1, sdf_cascade_2,
-                                        volume.SdfOrigins[0], volume.SdfOrigins[1], volume.SdfOrigins[2],
-                                        volume.SdfExtents[0], volume.SdfExtents[1], volume.SdfExtents[2],
-                                        volume.SdfCascadeCount);
     float3 probePosRel = relocatedPos;
     probePos = probePosRel;
     // P0 坐标契约：发布本 probe 的有效起点与分类（同帧版本唯一事实源，
@@ -374,6 +419,22 @@ kernel void ddgi_trace_sdf(
     float3 rayDir = ddgiSampleRayDirection(rayId, volume.RaysPerProbe,
                                            volume.FrameIndex,
                                            uint(volume.RaySampleMode), toLight).xyz;
+
+#ifdef DDGI_METAL_MEASURED_GEOMETRY
+    if (volume.RaySampleMode == 7) {
+        GeometryRay ray{float4(probePos,0.0f),float4(rayDir,volume.RayMaxDistance)};
+        GeometryHit hit={}; int outcome=-1;
+        if (volume.GeometryCardCounts.z==1u)
+            outcome=geometryFirstHit(probePos,rayDir,0.0f,volume.RayMaxDistance,
+                geometryTop,geometryBottom,geometryTriangles,geometryInstances,volume.GeometryCounts,hit);
+        GeometryNode root={}; if (outcome==0) root=geometryTop[0];
+        geometryClassifyMeasured(ray,outcome,root,hit);
+        uint index=group_id*volume.RaysPerProbe+rayId;
+        hit_distance_buffer[index]=hit.measured.x;
+        hit_normal_buffer[index]=float4(hit.measured.yzw,float(hit.identity.w));
+        continue;
+    }
+#endif
 
     // Relaxed sphere tracing (texture3D reads only)
     float t = 0.0f;
@@ -453,15 +514,6 @@ kernel void ddgi_trace_sdf(
 
     // Indexed by update-slot (group) — finalize re-maps to absolute probe index.
     uint globalRayIdx = group_id * volume.RaysPerProbe + rayId;
-    if (rayId == 0u && group_id < volume.ProbeUpdateCount) {
-        hit_distance_buffer[group_id * volume.RaysPerProbe + 0u] =
-            (d0_dbg >= 1e9f) ? 5555.0f : d0_dbg;               // ray0 = raw origin d
-    } else if (rayId == 1u && group_id < volume.ProbeUpdateCount) {
-        hit_distance_buffer[group_id * volume.RaysPerProbe + 1u] =
-            (d1_dbg >= 1e9f) ? 5555.0f : d1_dbg;               // ray1 = relocated d
-    } else {
-        hit_distance_buffer[globalRayIdx] = hitDistance;
-    }
 
     // T4.3: per-mesh detail refinement + gradient normal. Slot count 0
     // (feature off / no nearby per-mesh SDF) → zero normal, coarse t kept.
@@ -476,6 +528,10 @@ kernel void ddgi_trace_sdf(
             hnValid = 1.0f;
         }
     }
+    // Publish the final distance and normal together. Finalize reconstructs
+    // hitPos from this distance; a coarse t paired with a refined normal
+    // describes two different surfaces. Every lane, including 0/1, is a ray.
+    hit_distance_buffer[globalRayIdx] = hitDistance;
     hit_normal_buffer[globalRayIdx] = float4(hitN, hnValid);
     } // T8.13 P2 stride loop
 }
@@ -718,6 +774,44 @@ kernel void ddgi_trace_finalize(
     float3 rayDir = ddgiSampleRayDirection(rayId, volume.RaysPerProbe,
                                            volume.FrameIndex,
                                            uint(volume.RaySampleMode), toLight).xyz;
+
+#ifdef DDGI_METAL_MEASURED_GEOMETRY
+    if (volume.RaySampleMode == 7) {
+        // First-surface geometry remains valid even when its radiance is unknown.
+        float4 measured=float4(0.0f,0.0f,0.0f,isfinite(hitDistance)?hitDistance:-1.0f);
+        const float4 effective=relocated_origins[probeIdx];
+        const bool originKnown=all(isfinite(effective)) && effective.w>=0.5f;
+        const float4 hn=hit_normal_buffer[globalRayIdx];
+        const bool ownerKnown=all(isfinite(hn)) && hn.w>=2.0f && hn.w<=65537.0f && floor(hn.w)==hn.w &&
+            dot(hn.xyz,hn.xyz)>0.25f && originKnown && volume.GeometryCardCounts.z==1u;
+        if (hitDistance>=0.0f && isfinite(hitDistance) && ownerKnown && volume.GeometryCardCounts.w==1u) {
+            const uint owner=uint(hn.w-2.0f);
+            if (owner<min(volume.SCLookupCount,volume.GeometryCardCounts.x)) {
+                uint begin=card_lookups[owner]._pad[0],end=card_lookups[owner]._pad[1];
+                if (begin<=end && end<=volume.GeometryCardCounts.y) {
+                    float best=1e30f; uint reads=0u;
+                    const float3 hitPos=effective.xyz+rayDir*hitDistance;
+                    for (uint c=begin;c<end && reads<16u;++c) {
+                        if (c>=4096u) continue;
+                        SurfaceCacheCard card=card_data[c];
+                        if (card.mesh_instance_id!=owner) continue;
+                        ++reads; float3 value; float key;
+                        if (ddgiMeasuredOwnerCandidate(card,owner,hitPos,hn.xyz,rayDir,
+                            depth_atlas,lighting_atlas,value,key) && key<best) {
+                            best=key; measured.xyz=value;
+                        }
+                    }
+                }
+            }
+        } else if (hitDistance==-2.0f && originKnown && volume.GeometryCardCounts.z==1u) {
+            float up=clamp(rayDir.y,0.0f,1.0f);
+            float lower=rayDir.y<0.0f ? 1.0f-clamp(volume.SdfOrigins[0].w,0.0f,1.0f):1.0f;
+            measured.xyz=mix(float3(4.40f,4.20f,3.80f),float3(5.50f,5.76f,6.00f),pow(up,0.45f))*volume.SkyColor.xyz*lower;
+        }
+        ray_buffer[probeIdx*volume.RaysPerProbe+rayId].radiance_and_dist=measured;
+        continue; // no legacy prev-screen, analytic, nearby-card or sky fallback
+    }
+#endif
 
     DDGIRayData result;
 #ifdef DDGI_PATH_DEBUG

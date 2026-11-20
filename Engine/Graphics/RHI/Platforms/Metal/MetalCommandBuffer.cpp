@@ -1176,6 +1176,7 @@ void MetalCommandBuffer::Draw(u32 vertexCount, u32 startVertex, u32 instanceCoun
                 (NS::UInteger)instanceCount,
                 (NS::UInteger)startInstance
             );
+        UpdateStats(CommandType::Draw);
     } else {
         PRIMAL_LOG_STREAM(Error, "RHI") << "MetalCommandBuffer::Draw: Not in render pass! Type: " << (int)currentEncoderType_ << std::endl;
     }
@@ -1209,6 +1210,7 @@ void MetalCommandBuffer::DrawIndexed(u32 indexCount, u32 startIndex, u32 baseVer
             (NS::UInteger)baseVertex,
             (NS::UInteger)startInstance
         );
+        UpdateStats(CommandType::DrawIndexed);
     } else {
         if (currentEncoderType_ != EncoderType::Render) {
              PRIMAL_LOG_STREAM(Error, "RHI") << "MetalCommandBuffer::DrawIndexed: Not in render pass! Type: " << (int)currentEncoderType_ << std::endl;
@@ -1245,6 +1247,7 @@ void MetalCommandBuffer::DrawIndirect(ResourceHandle buffer, u64 offset, u32 dra
                     nativeBuffer,
                     offset + i * sizeof(MTL::DrawPrimitivesIndirectArguments)
                 );
+                UpdateStats(CommandType::DrawIndirect);
             }
 
             // DIAGNOSTIC: Verify draw call on first few frames

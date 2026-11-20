@@ -86,6 +86,10 @@ struct DDGIVolumeData {
     // C++ tail (offsets 304/320). Struct grows 304→336B, byte-matched.
     float4   SkyColor;                // 304: xyz = sky color, w = analytic history (legacy0/off1/Lambert2)
     float4   Albedo;                  // 320: xyz = uniform albedo, w unused
+#ifdef DDGI_METAL_MEASURED_GEOMETRY
+    uint4 GeometryCounts;             // 336: bound TLAS/BLAS/triangle/instance capacity
+    uint4 GeometryCardCounts;         // 352: lookup/card capacity, scene ready, owner directory ready
+#endif
 };
 
 // ============================================================================
@@ -161,11 +165,39 @@ static float3 ddgiRayDirection(uint rayIndex, uint rayCount, uint frameIndex)
 //   0 UNIFORM — legacy fixed spiral, bit-identical to ddgiRayDirection.
 //   1 JITTER  — golden-angle rotation per frame.
 //   2 COSINE  — 50% cosine lobe around the light + 50% uniform mixture.
+//   7 OCT_STRATIFIED — hashed 8x8 UV strata, spherical PDF (host still gated
+//       until the measured-geometry producer and consumers are connected).
 // Returns float4(dir, pdf).
 // ============================================================================
+// Mode 7: same integer streams and spherical PDF as the frozen GLSL source.
+// Every 8x8 octahedral cell gets rayCount/64 open-interior UV samples.
+static uint ddgiOctSampleHash(uint x) {
+    x ^= x >> 16u; x *= 0x7feb352du;
+    x ^= x >> 15u; x *= 0x846ca68bu;
+    return x ^ (x >> 16u);
+}
+static float4 ddgiOctStratifiedSample(uint rayIndex, uint rayCount, uint frameIndex) {
+    uint cell = rayIndex / (rayCount / 64u);
+    uint seed = ddgiOctSampleHash(frameIndex ^ 0x9e3779b9u) ^
+                ddgiOctSampleHash(rayIndex ^ 0x85ebca6bu);
+    float2 jitter = (float2(ddgiOctSampleHash(seed ^ 0x68bc21ebu) >> 14u,
+                           ddgiOctSampleHash(seed ^ 0x02e5be93u) >> 14u) + 0.5f) / 262144.0f;
+    float2 oct = (float2(cell % 8u, cell / 8u) + jitter) / 8.0f * 2.0f - 1.0f;
+    float3 q = float3(oct, 1.0f - abs(oct.x) - abs(oct.y));
+    if (q.z < 0.0f)
+        q.xy = (1.0f - abs(q.yx)) * select(float2(-1.0f), float2(1.0f), q.xy >= 0.0f);
+    float qLength = length(q);
+    return float4(q / qLength, qLength * qLength * qLength * 0.25f);
+}
+
 static float4 ddgiSampleRayDirection(uint rayIndex, uint rayCount, uint frameIndex,
                                      uint mode, float3 toLight)
 {
+    if (mode == 7u) {
+        if (rayCount >= 64u && rayCount % 64u == 0u)
+            return ddgiOctStratifiedSample(rayIndex, rayCount, frameIndex);
+        mode = 0u; // Partial grids cannot claim the octahedral PDF.
+    }
     const float INV_PHI = 0.6180339887498948482f;
     const float TWO_PI  = 6.28318530717958647692f;
 

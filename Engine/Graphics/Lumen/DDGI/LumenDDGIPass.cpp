@@ -211,7 +211,12 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
         // 的 mode5 特判与 distance 尾射线 buffer 加宽未镜像）。
         const bool measuredModeAllowed =
             device_->GetPlatform() == RHIPlatform::Vulkan ||
-            device_->GetPlatform() == RHIPlatform::D3D12;
+            device_->GetPlatform() == RHIPlatform::D3D12 ||
+            (device_->GetPlatform() == RHIPlatform::Metal &&
+             std::getenv("PRIMAL_METAL_MEASURED_GEOMETRY") &&
+             std::strcmp(std::getenv("PRIMAL_METAL_MEASURED_GEOMETRY"), "1") == 0 &&
+             std::getenv("DDGI_MEASURED_GEOMETRY") &&
+             std::strcmp(std::getenv("DDGI_MEASURED_GEOMETRY"), "1") == 0);
         if (((m >= 0 && m <= 5) || m == 7) &&
             ((m != 5 && m != 7) || (m == 7 ? measuredModeAllowed
                                           : device_->GetPlatform() == RHIPlatform::Vulkan)) &&
@@ -1541,7 +1546,15 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
             sdfTraceBindings[bi].is3D = true;
             sdfTraceBindings[bi].unfilterableFloat = true;
         }
-        DescriptorSetLayoutDesc layoutDesc{13, sdfTraceBindings};
+        // Metal's measured variant appends four read-only geometry buffers.
+        std::vector<DescriptorSetLayoutBinding> metalBindings(std::begin(sdfTraceBindings), std::end(sdfTraceBindings));
+        if (measured_geometry_requested_) {
+            for (u32 i=0;i<4;++i) {
+                DescriptorSetLayoutBinding binding{7u+i, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr};
+                binding.readonly=true; metalBindings.push_back(binding);
+            }
+        }
+        DescriptorSetLayoutDesc layoutDesc{static_cast<u32>(metalBindings.size()), metalBindings.data()};
         sdf_trace_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
     }
 
@@ -1684,6 +1697,11 @@ void LumenDDGIPass::CreatePipelines() {
             effectiveName=std::getenv("DDGI_PATH_DEBUG") ? "DDGITraceFinalize_measured_geometry_pathdbg" : "DDGITraceFinalize_measured_geometry";
         auto code = LoadShaderBytecode(effectiveName.c_str(), device_);
         if (code.empty()) return handles::INVALID_SHADER;
+        if (device_->GetPlatform() == RHIPlatform::Metal && measured_geometry_requested_ &&
+            std::string(name) == "DDGITraceRays") {
+            const std::string define="#define DDGI_METAL_MEASURED_GEOMETRY 1\n";
+            code.insert(code.begin(), define.begin(), define.end());
+        }
         return device_->CreateShader(code.data(), code.size(), ShaderStage::Compute, entry);
     };
 
@@ -3458,6 +3476,36 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         // optional query-source audit tail.
                         vd.SdfExtents[2].w = query_source_audit_enabled_ ? 1.f : 0.f;
                     }
+                    // The shared 336B ABI is unchanged. Only Metal's measured
+                    // variant reads this 32B tail in its existing 512B allocation.
+                    if (device_->GetPlatform() == RHIPlatform::Metal && measured_geometry_requested_) {
+                        static_assert(sizeof(DDGIVolumeData)==336);
+                        u32 bounds[8]{};
+                        bool ready=measured_geometry_epoch_!=0 && measured_geometry_digest_!=0;
+                        const u64 strides[4]={48,48,48,64};
+                        for (u32 i=0;i<4;++i) {
+                            u64 bytes=0;
+                            const bool valid=device_->GetBufferByteSize(measured_geometry_[i],bytes) &&
+                                bytes/strides[i]>0 && bytes/strides[i]<=0xffffffffu;
+                            ready &= valid; bounds[i]=valid?static_cast<u32>(bytes/strides[i]):0u;
+                        }
+                        u64 lookupBytes=0, cardBytes=0;
+                        device_->GetBufferByteSize(sc_card_lookup_buffer_,lookupBytes);
+                        device_->GetBufferByteSize(sc_card_data_buffer_,cardBytes);
+                        bounds[4]=static_cast<u32>(std::min<u64>(lookupBytes/48,0xffffffffu));
+                        bounds[5]=static_cast<u32>(std::min<u64>(cardBytes/64,0xffffffffu));
+                        bounds[6]=ready?1u:0u;
+                        bounds[7]=ready && measured_owner_directory_ready_ && bounds[4]>0 && bounds[5]>0 ? 1u:0u;
+                        vd.SdfVoxelSizes[2].w=static_cast<float>(bounds[6]);
+                        vd.SdfVoxelSizes[2].z=static_cast<float>(bounds[7]);
+                        std::memcpy(reinterpret_cast<u8*>(mapped)+sizeof(vd),bounds,sizeof(bounds));
+                        static u32 receipts=0;
+                        if (ready && receipts++<3u)
+                            PRIMAL_LOG_STREAM(Info,"MetalDDGIGeometry") << "epoch=" << measured_geometry_epoch_
+                                << " digest=" << measured_geometry_digest_ << " nodes=" << bounds[0] << "/" << bounds[1]
+                                << " triangles=" << bounds[2] << " instances=" << bounds[3]
+                                << " ownerDirectory=" << bounds[7] << " cards=" << bounds[5];
+                    }
                     *mapped = vd;
                     device_->UnmapBuffer(volume_cb_[frameIdx]);
 
@@ -3985,7 +4033,13 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         // 2026-09-17 P0：重定位后有效起点（本 pass 写，finalize/gather 读）
                         {splitIsVk ? 12u : 6u, DescriptorType::StorageBuffer, relocated_origins_},
                     };
-                    if (measured_geometry_requested_) {
+                    if (measured_geometry_requested_ && device_->GetPlatform() == RHIPlatform::Metal) {
+                        cmd->MemoryBarrier(PipelineStage::Host, PipelineStage::ComputeShader,
+                                           AccessFlag::HostWrite, AccessFlag::ShaderRead);
+                        for (u32 i=0;i<4;++i) sdfTraceParams[13+i]={7u+i,DescriptorType::StorageBuffer,
+                            measured_geometry_[i]!=handles::INVALID_RESOURCE ? measured_geometry_[i] : probe_update_list_buffers_[frameIdx]};
+                        UpdateDescriptorSet(device_,sdf_trace_ds_[frameIdx],sdfTraceParams,17);
+                    } else if (measured_geometry_requested_) {
                         cmd->MemoryBarrier(PipelineStage::Host, PipelineStage::ComputeShader,
                                            AccessFlag::HostWrite, AccessFlag::ShaderRead);
                         for (u32 i=0;i<4;++i) sdfTraceParams[13+i]={13+i,DescriptorType::StorageBuffer,

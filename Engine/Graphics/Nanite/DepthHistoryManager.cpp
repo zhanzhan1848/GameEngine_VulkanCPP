@@ -351,6 +351,11 @@ bool DepthHistoryManager::CreateCopyPipeline() {
     rhi::ComputePipelineDesc computeDesc{};
     computeDesc.computeShader = shader;
     computeDesc.layout = depth_copy_layout_;
+    // CopyDepthTexture dispatches ceil(size / 16). Metal uses this descriptor
+    // for threadsPerThreadgroup; leaving the default 1x1 only copies 1/256.
+    // Vulkan/D3D12 obtain the local size from their frozen shader binaries.
+    if (device_->GetPlatform() == rhi::RHIPlatform::Metal)
+        computeDesc.threadGroupSize = {16, 16, 1};
     depth_copy_pipeline_ = device_->CreateComputePipeline(computeDesc);
     if (depth_copy_pipeline_ == rhi::handles::INVALID_PIPELINE) return false;
 

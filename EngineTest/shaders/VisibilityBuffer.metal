@@ -45,10 +45,14 @@ struct InstanceData {
     uint padding;
     uint padding1;
     uint padding2;
-    float3 bounds_center;               // offsets 160-171
-    float bounds_radius;                // offset 172
-    uint bounds_padding[4];             // total 192 bytes
+    float3 bounds_center;               // offsets 160-175 (CPU simd::float3)
+    float bounds_radius;                // offset 176
+    uint bounds_padding[2];             // offsets 180-187
+    uint bounds_padding2;               // offset 188; total 192 bytes
 };
+
+static_assert(sizeof(InstanceData) == 192, "GPU-driven CPU/MSL instance stride");
+static_assert(__builtin_offsetof(InstanceData, bounds_radius) == 176, "Instance bounds ABI");
 
 struct VertexOut {
     float4 position [[position]];

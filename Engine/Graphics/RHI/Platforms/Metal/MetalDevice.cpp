@@ -320,6 +320,14 @@ MetalBuffer* MetalDevice::GetBuffer(ResourceHandle handle) {
     return bufferAllocator_.Get(static_cast<u32>(handle));
 }
 
+bool MetalDevice::GetBufferByteSize(ResourceHandle handle, u64& bytes) {
+    if (handle==handles::INVALID_RESOURCE) { bytes=0; return false; }
+    auto* buffer=GetBuffer(handle);
+    auto* native=buffer ? buffer->GetNativeBuffer() : nullptr;
+    bytes=native ? native->length() : 0;
+    return bytes!=0;
+}
+
 bool MetalDevice::UpdateBufferData(ResourceHandle handle, const void* data, u64 size, u64 offset) {
     MetalBuffer* buffer = GetBuffer(handle);
     if (!buffer || !data || size == 0) return false;

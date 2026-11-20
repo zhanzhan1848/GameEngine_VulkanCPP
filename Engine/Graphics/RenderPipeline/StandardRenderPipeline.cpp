@@ -1029,6 +1029,7 @@ static bool EnvironmentVisibilityTemporal() {
 static bool EnvironmentVisibilityRequested(rhi::RHIDeviceBase* device) {
     const char* value=std::getenv("PRIMAL_IBL_VISIBILITY");
     return device && (device->GetPlatform()==rhi::RHIPlatform::Vulkan ||
+                      device->GetPlatform()==rhi::RHIPlatform::Metal ||
                       device->GetPlatform()==rhi::RHIPlatform::D3D12) &&
         !(value && std::strcmp(value,"0")==0);
 }
@@ -1118,6 +1119,20 @@ EnvironmentVisibilityOutputs StandardRenderPipeline::AddEnvironmentVisibility(
             environment_visibility_module_->SetGeometryScene(complete?std::span<const ray_geometry::InstanceInput>(instances):std::span<const ray_geometry::InstanceInput>{});
             environment_geometry_digest_=digest;
         }
+    }
+    if(device_->GetPlatform()==RHIPlatform::Metal && surface_cache_pass_) {
+        auto* sc=surface_cache_pass_.get();
+        const auto view=sc->GetGeometryWitnessView(slot);
+        inputs.geometry_ready &= view.ready && view.source_digest!=0;
+        for(u32 i=0;i<4;++i)inputs.geometry_ready &= inputs.geometry[i]==view.buffers[i];
+        inputs.geometry_still_current=[this,sc,view,slot] {
+            if(surface_cache_pass_.get()!=sc || !view.ready || !view.source_digest)return false;
+            const auto now=sc->GetGeometryWitnessView(slot);
+            if(!now.ready || now.slot!=view.slot || now.scene_epoch!=view.scene_epoch ||
+                now.slot_epoch!=view.slot_epoch || now.source_digest!=view.source_digest)return false;
+            for(u32 i=0;i<4;++i)if(now.buffers[i]!=view.buffers[i] || now.sizes[i]!=view.sizes[i])return false;
+            return true;
+        };
     }
     // Previous-frame unjittered proj*view for temporal history reprojection.
     // Updated at most once per frame so a second render path in the same frame
@@ -1476,15 +1491,15 @@ void StandardRenderPipeline::SelfLoadPipelineShaders() {
         load("Forward/DeferredLighting", "DeferredLighting.metal", "", "vertexMain",
              ShaderStage::Vertex, blit_vs_);
         deferred_vs_ = blit_vs_;
-        load("Forward/DeferredLighting", "DeferredLighting.metal", "", "fragmentLighting_gpuDriven",
+        load("Forward/DeferredLighting", "DeferredLighting.metal", "", "fragmentLighting_gpuDrivenEnvironment",
              ShaderStage::Pixel, deferred_ps_);
-        load("Forward/Blit", "DeferredLighting.metal", "", "fragmentBlitFXAA",
+        load("Forward/Blit", "DeferredLighting.metal", "", "fragmentBlitLDR",
              ShaderStage::Pixel, blit_ps_);
         load("Lumen/DDGIGIGather.comp", "DDGIGIGather.metal", "Lumen/", "ddgi_gi_gather",
              ShaderStage::Compute, gi_gather_shader_);
         load("Lumen/FusionIndirect", "DeferredLighting.metal", "", "fragmentFusionIndirect",
              ShaderStage::Pixel, fusion_indirect_ps_);
-        load("Lumen/FusionComposite", "DeferredLighting.metal", "", "fragmentFusion",
+        load("Lumen/FusionComposite", "DeferredLighting.metal", "", "fragmentFusionEnvironment",
              ShaderStage::Pixel, fusion_composite_ps_);
         load("Lumen/DDGICardRadianceAvg.comp", "DDGICardRadianceAvg.metal", "Lumen/",
              "ddgi_card_radiance_avg", ShaderStage::Compute, sc_card_radiance_shader_);
@@ -1686,10 +1701,15 @@ void StandardRenderPipeline::InitializeSubsystems() {
         environment_geometry_digest_=0;
         // 平台参数取设备实平台：Vulkan 读 spv、D3D12 读 .cso 镜像（入口均
         // 为 "main"——该 spv 的 OpEntryPoint 就是 main，cso 由包装统一为 main）。
-        auto traceCode=SelfLoadShaderSource("Lumen/EnvironmentVisibility_trace.comp",device_->GetPlatform(),ShaderStage::Compute,"");
-        auto resolveCode=SelfLoadShaderSource("Lumen/EnvironmentVisibility_resolve.comp",device_->GetPlatform(),ShaderStage::Compute,"");
-        ShaderHandle trace=traceCode.empty()?handles::INVALID_SHADER:device_->CreateShader(traceCode.data(),traceCode.size(),ShaderStage::Compute,"main");
-        ShaderHandle resolve=resolveCode.empty()?handles::INVALID_SHADER:device_->CreateShader(resolveCode.data(),resolveCode.size(),ShaderStage::Compute,"main");
+        const bool nativeMetal=device_->GetPlatform()==RHIPlatform::Metal;
+        auto traceCode=SelfLoadShaderSource(nativeMetal?"EnvironmentVisibility.metal":"Lumen/EnvironmentVisibility_trace.comp",device_->GetPlatform(),ShaderStage::Compute,nativeMetal?"Lumen/":"");
+        auto resolveCode=nativeMetal?traceCode:SelfLoadShaderSource("Lumen/EnvironmentVisibility_resolve.comp",device_->GetPlatform(),ShaderStage::Compute,"");
+        if(nativeMetal && !resolveCode.empty()) {
+            const std::string define="#define ENV_VIS_RESOLVE 1\n";
+            resolveCode.insert(resolveCode.begin(),define.begin(),define.end());
+        }
+        ShaderHandle trace=traceCode.empty()?handles::INVALID_SHADER:device_->CreateShader(traceCode.data(),traceCode.size(),ShaderStage::Compute,nativeMetal?"environment_visibility_trace":"main");
+        ShaderHandle resolve=resolveCode.empty()?handles::INVALID_SHADER:device_->CreateShader(resolveCode.data(),resolveCode.size(),ShaderStage::Compute,nativeMetal?"environment_visibility_resolve":"main");
         // 目标网格按逻辑视口派生（logical 未就绪时退回渲染分辨率）。
         const u32 logicalW = logical_width_ ? logical_width_ : render_width_;
         const u32 logicalH = logical_height_ ? logical_height_ : render_height_;
@@ -5044,7 +5064,7 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         PostProcess::TAADepthInputs taaDepth;
         PostProcess::TAADepthInputs* taaDepthPtr = nullptr;
         if (device_->GetPlatform() == RHIPlatform::Vulkan ||
-            device_->GetPlatform() == RHIPlatform::D3D12) {
+            device_->GetPlatform() == RHIPlatform::D3D12 || device_->GetPlatform() == RHIPlatform::Metal) {
             taaDepth.require_raster_jitter = true;
             taaDepth.currDepth = gpuDraw.GetGBufferDepthSampleable();
             taaDepth.current_depth_rg = gbufferDepthRG.IsValid() ? gbufferDepthRG :
@@ -7364,7 +7384,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             PostProcess::TAADepthInputs taaDepthRWCB;
             PostProcess::TAADepthInputs* taaDepthRWCBPtr = nullptr;
             if (device_->GetPlatform() == RHIPlatform::Vulkan ||
-                device_->GetPlatform() == RHIPlatform::D3D12) {
+                device_->GetPlatform() == RHIPlatform::D3D12 || device_->GetPlatform() == RHIPlatform::Metal) {
                 taaDepthRWCB.require_raster_jitter = true;
                 taaDepthRWCB.currDepth = gpuDraw.GetGBufferDepthSampleable();
                 taaDepthRWCB.current_depth_rg = gbufferDepthRG.IsValid() ? gbufferDepthRG :

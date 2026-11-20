@@ -76,6 +76,7 @@ static_assert(sizeof(TAAGlobalsCPU)==160,"TAA shader uniform layout must remain 
 static ResourceHandle s_ParamsBuf[MAX_FRAMES] = {
     handles::INVALID_RESOURCE, handles::INVALID_RESOURCE, handles::INVALID_RESOURCE};
 static void* s_ParamsMapped[MAX_FRAMES] = {};
+static TAADiagnosticView s_DiagnosticView;
 
 static u32 s_LastFrameIndex = ~0u; // For detecting first-ever frame (force invHistoryValid=1)
 
@@ -323,12 +324,14 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
     RGResourceHandle prevDepthRG;
     if (depthActive) {
         const bool vkOrD3d12 = graph.GetDevice().GetPlatform() == RHIPlatform::Vulkan ||
+                               graph.GetDevice().GetPlatform() == RHIPlatform::Metal ||
                                graph.GetDevice().GetPlatform() == RHIPlatform::D3D12;
         currDepthRG = vkOrD3d12 && depth->current_depth_rg.IsValid()
             ? depth->current_depth_rg : graph.ImportResource("TAA_CurrDepth", depth->currDepth);
         if (vkOrD3d12)
             prevDepthRG = graph.ImportResource("TAA_PrevDepth",depth->prevDepth);
     } else if (depth && (graph.GetDevice().GetPlatform() == RHIPlatform::Vulkan ||
+                         graph.GetDevice().GetPlatform() == RHIPlatform::Metal ||
                          graph.GetDevice().GetPlatform() == RHIPlatform::D3D12)) {
         currDepthRG = depth->current_depth_rg;
     }
@@ -415,7 +418,8 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             bool executionHistoryValid = histValid;
             bool executionDepthActive = depthActive;
             const auto previousRaster = s_RasterHistory[histReadIdx];
-            if (vulkan) {
+            const bool rasterHistory=vulkan || device.GetPlatform()==RHIPlatform::Metal;
+            if (rasterHistory) {
                 actualRasterValid = depthInputs.require_raster_jitter && depthInputs.raster_jitter_provider &&
                     depthInputs.raster_jitter_provider(actualJitter) &&
                     std::isfinite(actualJitter.x) && std::isfinite(actualJitter.y);
@@ -453,6 +457,23 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
                 // Do not leave an old stamp valid if execution aborts below.
                 s_RasterHistory[fi] = {};
                 s_HistoryInit[fi] = false;
+            }
+
+            if (device.GetPlatform()==RHIPlatform::Metal) {
+                const char* prefix=std::getenv("SPONZA_TAA_CAPTURE_PREFIX");
+                const char* selected=std::getenv("SPONZA_TAA_CAPTURE_NATIVE_FRAME");
+                if (prefix && selected && frameIndex==u32(std::strtoul(selected,nullptr,10))) {
+                    std::ofstream meta(std::string(prefix)+".json");
+                    meta << "{\"native_frame\":" << frameIndex
+                         << ",\"history_frame\":" << previousRaster.frame
+                         << ",\"previous_depth_frame\":" << depthInputs.previous_depth_frame
+                         << ",\"history_valid\":" << executionHistoryValid
+                         << ",\"depth_active\":" << executionDepthActive
+                         << ",\"raster_valid\":" << actualRasterValid
+                         << ",\"jitter\":[" << actualJitter.x << "," << actualJitter.y
+                         << "],\"previous_jitter\":[" << previousRaster.jitter.x << "," << previousRaster.jitter.y
+                         << "],\"width\":" << width << ",\"height\":" << height << "}\n";
+                }
             }
 
             auto* inRes = context.graph->GetResource(inputHDR);
@@ -533,6 +554,14 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
 
             device.UpdateDescriptorSets(writeCount, writes);
 
+            if (device.GetPlatform()==RHIPlatform::Metal && std::getenv("SPONZA_TAA_CAPTURE_PREFIX")) {
+                const char* selected=std::getenv("SPONZA_TAA_CAPTURE_NATIVE_FRAME");
+                if (selected && frameIndex==u32(std::strtoul(selected,nullptr,10))) {
+                    s_DiagnosticView = {frameIndex,{inHandle,histHandle,velHandle,outHandle,
+                        s_ParamsBuf[fi],currDepthInfo.imageView,prevDepthInfo.imageView}};
+                }
+            }
+
             if (vulkan && lumencompare::enabled && lumencompare::Selected("TAAPass.Inputs")) {
                 lumencompare::Output(&device,cmd,"TAAPass.Inputs","Parameters",s_ParamsBuf[fi],true,ResourceState::ShaderResource);
                 lumencompare::Output(&device,cmd,"TAAPass.Inputs","CurrentHDR",inHandle,false,ResourceState::ShaderResource);
@@ -608,7 +637,7 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
             cmd->InsertBarrier(&histBarrier, 1);
 
             s_HistoryInit[fi] = true;
-            if (vulkan) {
+            if (rasterHistory) {
                 s_RasterHistory[fi] = {frameIndex,actualJitter,depthInputs.currDepth,actualRasterValid};
             }
         }
@@ -617,6 +646,12 @@ const TAAPassData& AddTAAPass(RenderGraph& graph, RGResourceHandle inputHDR,
 
 rhi::ResourceHandle GetTAAOutputTexture(u32 frameIndex) {
     return s_OutputTex[frameIndex % MAX_FRAMES];
+}
+
+bool GetTAADiagnosticView(u32 frameIndex, TAADiagnosticView& view) {
+    if (s_DiagnosticView.frame != frameIndex) return false;
+    view = s_DiagnosticView;
+    return true;
 }
 
 void ResetTAAHistory() {

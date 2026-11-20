@@ -18,11 +18,14 @@ struct InstanceData {
     uint padding;                       // 4 bytes - offset 148
     uint padding1;                      // 4 bytes - offset 152
     uint padding2;                      // 4 bytes - offset 156
-    float3 bounds_center;               // 12 bytes - offsets 160-171
-    float bounds_radius;                // 4 bytes - offset 172
-    uint bounds_padding[2];             // 12 bytes - offsets 176-187
+    float3 bounds_center;               // 16 bytes - offsets 160-175 (CPU simd::float3)
+    float bounds_radius;                // 4 bytes - offset 176
+    uint bounds_padding[2];             // 8 bytes - offsets 180-187
     uint bounds_padding2;               // 4 bytes - offset 188
 };
+
+static_assert(sizeof(InstanceData) == 192, "GPU-driven CPU/MSL instance stride");
+static_assert(__builtin_offsetof(InstanceData, bounds_radius) == 176, "Instance bounds ABI");
 
 // 🔥 NEW: Material data structure (matches CPU-side MaterialData)
 struct ClusterMaterial {
@@ -60,7 +63,11 @@ struct DrawConstants {
     float4x4 prev_proj_matrix;
     uint has_prev_frame;
     uint padding2[3];
+    float2 jitter;
+    float2 prev_jitter;
 };
+static_assert(sizeof(DrawConstants) == 368, "GPU-driven CPU/MSL draw constants stride");
+static_assert(__builtin_offsetof(DrawConstants, jitter) == 352, "Raster jitter ABI");
 
 struct ClusterMap {
     uint globalMeshletIndex;
@@ -69,7 +76,7 @@ struct ClusterMap {
     uint padding;     // Maintain 16-byte alignment
 };
 
-float3 UnpackNormal(uint packed) {
+float3 UnpackNormal(uint packed, uint colorTSign = 0x02000000u) {
     float2 f = float2((packed >> 16) & 0xFFFF, packed & 0xFFFF);
     f = f * (2.0 / 65535.0) - 1.0;
     float d = dot(f, f);
@@ -77,7 +84,20 @@ float3 UnpackNormal(uint packed) {
         return float3(0.0f, 0.0f, 1.0f);
     }
     float z = sqrt(max(0.0f, 1.0f - d));
+    // The frozen decoder keeps the invalid-XY fallback at +Z for either sign.
+    if ((colorTSign & 0x02000000u) == 0u) z = -z;
     return float3(f.x, f.y, z);
+}
+
+// The qualified tangent asset uses bit 2 for T.z, independently of N.z.
+// Quantization may move a unit tangent just outside the XY disk: preserve
+// its in-plane direction, matching the frozen Vulkan tangent-frame shader.
+float3 UnpackTangent(uint packed, uint colorTSign) {
+    float2 xy = float2(packed >> 16u, packed & 65535u) * (2.0f / 65535.0f) - 1.0f;
+    if (dot(xy, xy) > 1.0f) return normalize(float3(xy, 0.0f));
+    float3 tangent = UnpackNormal(packed);
+    if ((colorTSign & 0x04000000u) == 0u) tangent.z = -tangent.z;
+    return tangent;
 }
 
 // Meshlet structure (matches RHIMeshlet)
@@ -190,8 +210,8 @@ vertex VertexOut gpu_driven_vertex_shader(
     VertexElement element = elements[vertIdx];
 
     // Unpack Normal and Tangent
-    float3 normal = UnpackNormal(element.normal);
-    float3 tangent = UnpackNormal(element.tangent);
+    float3 normal = UnpackNormal(element.normal, element.colorTSign);
+    float3 tangent = UnpackTangent(element.tangent, element.colorTSign);
 
     // t_sign byte (high byte of colorTSign):
     //   bit 0 = tangent handedness (1 = negative)
@@ -199,14 +219,6 @@ vertex VertexOut gpu_driven_vertex_shader(
     //   bit 2 = tangent Z-sign (1 = positive Z)
     uint t_sign = (element.colorTSign >> 24) & 0xFF;
     float tangentSign = (t_sign & 0x01) ? -1.0 : 1.0;
-
-    // Recover normal Z-sign (UnpackNormal always returns positive Z)
-    if (!(t_sign & 0x02)) {
-        normal.z = -normal.z;
-    }
-    if (!(t_sign & 0x04)) {
-        tangent.z = -tangent.z;
-    }
 
     // UV coordinates (flip Y axis for Metal texture coordinate system)
     float2 uv = float2(element.uv.x, 1.0 - element.uv.y);
@@ -218,6 +230,7 @@ vertex VertexOut gpu_driven_vertex_shader(
     float4 worldPos = instance.world_matrix * float4(pos, 1.0);
     float4 viewPos = uniforms.view_matrix * worldPos;
     out.position = uniforms.proj_matrix * viewPos;
+    out.position.xy += uniforms.jitter * out.position.w;
 
     // Compute current and previous clip-space positions for velocity
     out.currentPos = out.position;  // Already computed as current frame position
@@ -225,6 +238,7 @@ vertex VertexOut gpu_driven_vertex_shader(
     // Previous frame clip position (for velocity)
     if (uniforms.has_prev_frame) {
         out.previousPos = uniforms.prev_proj_matrix * (uniforms.prev_view_matrix * worldPos);
+        out.previousPos.xy += uniforms.prev_jitter * out.previousPos.w;
     } else {
         out.previousPos = out.currentPos;
     }
@@ -242,7 +256,7 @@ vertex VertexOut gpu_driven_vertex_shader(
 
     // Degenerate check FIRST: if tangent is parallel to normal, rebuild frame
     if (abs(dot(worldTangent, worldNormal)) > 0.999) {
-        float3 up = abs(worldNormal.y) < 0.999 ? float3(0, 1, 0) : float3(1, 0, 0);
+        float3 up = abs(worldNormal.y) < 0.999 ? float3(1, 0, 0) : float3(0, 1, 0);
         worldTangent = normalize(cross(up, worldNormal));
     } else {
         // Gram-Schmidt: ensure tangent is orthogonal to normal (safe now)
@@ -294,20 +308,23 @@ fragment GBufferOutput gpu_driven_fragment_shader(
         as_type<float>(material_words[material_base + 10u]));
     const uint material_flags = material_words[material_base + 11u];
 
-    // Sample textures
-    constexpr sampler linear_sampler(mip_filter::linear, mag_filter::linear, min_filter::linear, address::repeat);
+    // Honor the bound material sampler, including the Sponza anisotropy setting.
 
     // Get texture array size
     uint albedo_array_size = albedo_textures.get_array_size();
 
     // 🔥 NEW: Apply UV scaling for texture repetition
     float2 scaled_uv = in.uv * uv_scale;
+    // Frozen Vulkan samples albedo with explicit derivatives computed before
+    // the material-index branch. Keep the same footprint for mip/anisotropy.
+    const float2 albedo_dx = dfdx(scaled_uv);
+    const float2 albedo_dy = dfdy(scaled_uv);
 
     // Sample albedo texture
     float4 albedo_sample = float4(1.0, 1.0, 1.0, 1.0);
 
     if (albedo_texture_idx != 0xFFFFFFFF && albedo_texture_idx < albedo_array_size) {
-        albedo_sample = albedo_textures.sample(linear_sampler, scaled_uv, albedo_texture_idx);
+        albedo_sample = albedo_textures.sample(texture_sampler, scaled_uv, albedo_texture_idx, gradient2d(albedo_dx, albedo_dy));
     }
 
     // Apply albedo tint
@@ -315,23 +332,21 @@ fragment GBufferOutput gpu_driven_fragment_shader(
 
     out.albedo = float4(baseColor, 1.0);
 
-    // Keep the shading frame tied to the asset normal. Do not face-forward it
-    // with screen-space derivatives: doing so makes a wall's lighting change
-    // when the camera crosses the wall and turns the back side into the lit
-    // side. The repaired ContentTools model supplies the stable normal sign.
+    // Match the frozen two-sided Vulkan receiver orientation. Preserve the
+    // authored UV-frame handedness while orienting N to the visible surface.
     float3 sourceN = normalize(in.normal);
     float3 T = normalize(in.tangent);
-    float3 sourceB = normalize(in.bitangent);
-    float handedness = dot(cross(sourceN, T), sourceB) < 0.0f ? -1.0f : 1.0f;
+    float handedness = dot(cross(sourceN, T), in.bitangent) < 0.0f ? -1.0f : 1.0f;
     float3 N = sourceN;
-    T = normalize(T - dot(T, N) * N);
+    float3 geometricNormal = normalize(cross(dfdy(in.worldPosition), dfdx(in.worldPosition)));
+    if (dot(N, geometricNormal) < 0.0f) N = -N;
     float3 B = normalize(cross(N, T)) * handedness;
 
     // Normal mapping: sample normal texture if available, otherwise use vertex normal
     uint normal_array_size = normal_textures.get_array_size();
 
     if (normal_texture_idx != 0xFFFFFFFF && normal_texture_idx < normal_array_size) {
-        float3 normalSample = normal_textures.sample(linear_sampler, scaled_uv, normal_texture_idx).rgb;
+        float3 normalSample = normal_textures.sample(texture_sampler, scaled_uv, normal_texture_idx, level(0.0f)).rgb;
 
         // Check if normal map has actual data (not flat/black default)
         if (length(normalSample) > 0.1) {
@@ -359,7 +374,7 @@ fragment GBufferOutput gpu_driven_fragment_shader(
 
     uint orm_array_size = orm_textures.get_array_size();
     if (orm_texture_idx != 0xFFFFFFFF && orm_texture_idx < orm_array_size) {
-        float4 orm_sample = orm_textures.sample(linear_sampler, scaled_uv, orm_texture_idx);
+        float4 orm_sample = orm_textures.sample(texture_sampler, scaled_uv, orm_texture_idx, level(0.0f));
         occlusion = orm_sample.r;
         roughness = orm_sample.g;
         metallic = orm_sample.b;
@@ -374,7 +389,8 @@ fragment GBufferOutput gpu_driven_fragment_shader(
     if (uniforms.has_prev_frame) {
         float2 currentNDC = in.currentPos.xy / in.currentPos.w;
         float2 previousNDC = in.previousPos.xy / in.previousPos.w;
-        out.velocity = (currentNDC - previousNDC) * 0.5;
+        // TAA converts NDC motion to UV; preserve the frozen producer's units.
+        out.velocity = currentNDC - previousNDC;
     } else {
         out.velocity = float2(0.0, 0.0);
     }

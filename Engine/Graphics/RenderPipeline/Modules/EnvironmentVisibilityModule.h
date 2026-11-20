@@ -57,13 +57,14 @@ struct EnvironmentVisibilityOutputs {
     // A valid receiver. Valid occluded black stays black.
 };
 
-// Vulkan-only BRDF-lobe geometry visibility. Four VNDF samples at half res,
+// Vulkan/Metal BRDF-lobe geometry visibility. Four VNDF samples at half res,
 // one reflection ray for near mirrors; qualified full-res nearest resolve.
 // This scalar multiplied by prefiltered IBL is a separability approximation,
 // not an exact directional integration of the environment radiance.
 class EnvironmentVisibilityModule {
 public:
     EnvironmentVisibilityModule();
+    rhi::ResourceHandle GetVisibilityTexture(u32 slot,bool half=false) const { return slot<3?(half?half_[slot]:full_[slot]):rhi::handles::INVALID_RESOURCE; }
     bool SetGeometryScene(std::span<const ray_geometry::InstanceInput> instances);
     // Explicit memory-only SAH experiment, scoped to a certified SC epoch.
     bool SetExperimentalGeometryScene(std::span<const ray_geometry::InstanceInput> instances,

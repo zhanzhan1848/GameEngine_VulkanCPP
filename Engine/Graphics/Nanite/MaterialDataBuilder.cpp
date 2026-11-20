@@ -668,6 +668,64 @@ void MaterialDataBuilder::BuildTextureMapping(
     }
 }
 
+// Native Metal albedo chain: reject incompatible layers before allocating,
+// copy mip0 exactly, then generate every layer in the sRGB texture format.
+#ifdef __APPLE__
+namespace {
+bool BuildCheckedMetalAlbedoArray(rhi::RHIDeviceBase* device,rhi::RHICommandBuffer* provided,
+    const std::vector<rhi::ResourceHandle>& sources,rhi::TextureDesc desc,rhi::ResourceHandle& output) {
+    using namespace rhi;
+    if (desc.format!=DataFormat::RGBA8_sRGB || !desc.size.x || !desc.size.y) return false;
+    auto& metal=static_cast<MetalDevice&>(*device);
+    for (auto handle : sources) {
+        auto* texture=metal.GetTexture(handle);
+        auto* native=texture?texture->GetNativeTexture():nullptr;
+        if (!native || native->textureType()!=MTL::TextureType2D ||
+            native->pixelFormat()!=MTL::PixelFormatRGBA8Unorm_sRGB ||
+            native->width()!=desc.size.x || native->height()!=desc.size.y || native->sampleCount()!=1) {
+            PRIMAL_LOG_STREAM(Error,"Render") << "[MaterialDataBuilder] checked Metal albedo source mismatch";
+            return false;
+        }
+    }
+    desc.mipLevels=1;
+    for (u32 n=std::max(desc.size.x,desc.size.y);n>1;n>>=1) ++desc.mipLevels;
+    desc.usage=TextureUsage::ShaderResource|TextureUsage::CopySource|TextureUsage::CopyDest;
+    CommandBufferHandle owned=handles::INVALID_COMMAND_BUFFER;
+    auto* cmd=provided;
+    if (!cmd) {
+        owned=device->CreateCommandBuffer(CommandQueueType::Graphics);
+        cmd=GetCommandBuffer(owned);
+        if (!cmd || !cmd->Begin()) {
+            if (owned!=handles::INVALID_COMMAND_BUFFER) device->DestroyCommandBuffer(owned);
+            return false;
+        }
+    }
+    const auto candidate=device->CreateTexture(desc);
+    if (candidate==handles::INVALID_RESOURCE) {
+        if (owned!=handles::INVALID_COMMAND_BUFFER) device->DestroyCommandBuffer(owned);
+        return false;
+    }
+    for (u32 layer=0;layer<sources.size();++layer) {
+        TextureBlitRegion region{};
+        region.srcSubresource={0,0,1};region.dstSubresource={0,layer,1};
+        region.srcOffsets[1]={s32(desc.size.x),s32(desc.size.y),1};
+        region.dstOffsets[1]=region.srcOffsets[1];
+        cmd->BlitTexture(sources[layer],candidate,&region,1,FilterMode::Nearest);
+    }
+    cmd->GenerateMipmaps(candidate);
+    if (owned!=handles::INVALID_COMMAND_BUFFER) {
+        const bool ok=cmd->End()&&cmd->Submit(0)&&cmd->WaitForCompletion();
+        device->DestroyCommandBuffer(owned);
+        if (!ok) {device->DestroyTexture(candidate);return false;}
+    }
+    output=candidate;
+    PRIMAL_LOG_STREAM(Info,"Render") << "[MaterialDataBuilder] checked Metal albedo array layers=" << desc.arraySize
+        << " mips=" << desc.mipLevels << " format=" << u32(desc.format) << " mip0=exact-copy";
+    return true;
+}
+}
+#endif
+
 // 🎨 NEW: Create texture array using BlitTexture
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
 namespace {
@@ -810,6 +868,12 @@ bool MaterialDataBuilder::CreateTextureArray(
     arrayDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDest;
     arrayDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
 
+#ifdef __APPLE__
+    const char* metalMipPolicy=std::getenv("PRIMAL_METAL_ALBEDO_MIPS");
+    if (device->GetPlatform()==rhi::RHIPlatform::Metal && channel==TextureArrayChannel::Albedo &&
+        metalMipPolicy && std::strcmp(metalMipPolicy,"1")==0)
+        return BuildCheckedMetalAlbedoArray(device,cmdBuffer,sources,arrayDesc,outArray);
+#endif
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
     const char* mipPolicy=std::getenv("PRIMAL_VK_ALBEDO_MIPS");
     if(device->GetPlatform()==rhi::RHIPlatform::Vulkan&&channel==TextureArrayChannel::Albedo&&

@@ -328,7 +328,7 @@ kernel void ddgi_gi_gather(
             for (uint q = 0u; q < 8u; ++q) {
                 if (tw[q] < 0.01f) continue;
                 uint qIdx = pc[q].x + pc[q].y * counts.x + pc[q].z * counts.x * counts.y;
-                pixOpen += flatOpenSky[nearOff + qIdx] * tw[q];
+                pixOpen += flatOpenSky[(nearOff + qIdx)*2u] * tw[q];
                 pixOpenW += tw[q];
             }
             if (pixOpenW > 0.0f) pixOpen /= pixOpenW;
@@ -349,7 +349,7 @@ kernel void ddgi_gi_gather(
             // Phase 3.2: 探针露天度 × 像素封闭度 → 一致度衰减（孪生）。
             float classify = 1.0f;
             if (classifyEnable) {
-                float pOpen = flatOpenSky[nearOff + pIdx];
+                float pOpen = flatOpenSky[(nearOff + pIdx)*2u];
                 float skyness = smoothstep(0.35f, 0.65f, pOpen);
                 float enclosed = 1.0f - smoothstep(0.05f, 0.25f, pixOpen);
                 classify = 1.0f - skyness * enclosed * 0.85f;

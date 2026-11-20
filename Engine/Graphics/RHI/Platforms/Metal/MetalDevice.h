@@ -92,6 +92,7 @@ public:
      * @brief 获取缓冲区对象 (内部使用)
      */
     MetalBuffer* GetBuffer(ResourceHandle handle);
+    bool GetBufferByteSize(ResourceHandle handle, u64& bytes) override;
 
     /**
      * @brief 获取纹理对象 (内部使用)

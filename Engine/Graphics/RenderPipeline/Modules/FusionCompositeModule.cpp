@@ -132,7 +132,8 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
     // Create a linear-clamp sampler for the Fusion passes.
     const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan ||
                       device->GetPlatform() == RHIPlatform::D3D12;
-    if (isVk) {
+    const bool hasEnvironment=isVk || device->GetPlatform()==RHIPlatform::Metal;
+    if (hasEnvironment) {
         SamplerDesc sDesc{};
         sDesc.minFilter = FilterMode::Linear;
         sDesc.magFilter = FilterMode::Linear;
@@ -210,7 +211,7 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         // bindings: 0=scene, 1=indirect, 2=volume_scatter, 3=ssr, 4=orm,
         //           5=albedo, 6=ddgi_specular (T4.3), [7=sampler(Vk)],
         //           8=refl_specular (R4/R5 offscreen specular)
-        const u32 compositeBindingCount = isVk ? 12 : 7;
+        const u32 compositeBindingCount = hasEnvironment ? 12 : 7;
         DescriptorSetLayoutBinding bindings[12];
         bindings[0] = {0, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // scene
         bindings[1] = {1, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // indirect
@@ -219,7 +220,7 @@ bool FusionCompositeModule::Initialize(RHIDeviceBase* device,
         bindings[4] = {4, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // orm
         bindings[5] = {5, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // albedo (T4.3)
         bindings[6] = {6, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr};  // ddgi_specular (T4.3)
-        if (isVk) {
+        if (hasEnvironment) {
             bindings[7] = {7, DescriptorType::Sampler, 1, ShaderStage::Pixel, nullptr};   // sampler
             bindings[8] = {8, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr}; // refl_specular
             bindings[9] = {9, DescriptorType::SampledImage, 1, ShaderStage::Pixel, nullptr}; // environment
@@ -1231,7 +1232,8 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
 
             const bool isVk = device_->GetPlatform() == RHIPlatform::Vulkan ||
                               device_->GetPlatform() == RHIPlatform::D3D12;
-            const u32 paramCount = isVk ? 12 : 7;
+            const bool hasEnvironment=isVk || device_->GetPlatform()==RHIPlatform::Metal;
+            const u32 paramCount = hasEnvironment ? 12 : 7;
             // [R4/R5] 屏幕外 specular 输入（ReflSpecularTrace）；缺席 → black
             //（合成式退化为 v1：SSR + glossy relay）。
             ResourceHandle reflTex = inputs.refl_specular_tex;
@@ -1243,7 +1245,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                 environmentTex = resolve(inputs.environment_specular_rg);
             const bool environmentValid = environmentTex != handles::INVALID_RESOURCE && environmentTex != inputs.black_texture;
             if (!environmentValid) environmentTex = inputs.black_texture;
-            if (isVk) {
+            if (hasEnvironment) {
                 // This display-only switch never changes the direct radiance or GI update inputs.
                 static const float environmentScale = [] {
                     const char* value = std::getenv("PRIMAL_IBL_SPECULAR_SCALE");
@@ -1399,10 +1401,14 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                     if (printStats) {
                         for (auto& t : targets) {
                             if (t.tex == handles::INVALID_RESOURCE) continue;
+                            u32 statW=w,statH=h;
+                            if(device_->GetPlatform()==RHIPlatform::Metal &&
+                               (!device_->GetTextureSize(t.tex,statW,statH) || !statW || !statH))continue;
+                            if(device_->GetPlatform()==RHIPlatform::Metal && (s_asyncMask&64u)){statW=std::min(256u,statW);statH=std::min(256u,statH);}
                             if (t.ring[cbIdx] != handles::INVALID_RESOURCE && tick > 8) {
                                 if (auto* p = static_cast<const u16*>(
-                                        device_->MapBuffer(t.ring[cbIdx], 0, (u64)w * h * 8))) {
-                                    PrintIndirectStripStats(p, w, h, t.tag, tick);
+                                        device_->MapBuffer(t.ring[cbIdx], 0, (u64)statW * statH * 8))) {
+                                    PrintIndirectStripStats(p, statW, statH, t.tag, tick);
                                     device_->UnmapBuffer(t.ring[cbIdx]);
                                 }
                             }
@@ -1437,7 +1443,13 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                         if (!copyThis) continue;
                         if (t.tex == handles::INVALID_RESOURCE) continue;
                         if (!ensureStaging(t.ring[cbIdx])) continue;
-                        cmd->CopyTextureToBuffer(t.tex, t.ring[cbIdx], &rr, 1);
+                        auto copyRegion=rr;
+                        if(device_->GetPlatform()==RHIPlatform::Metal) {
+                            u32 sourceW=0,sourceH=0;
+                            if(!device_->GetTextureSize(t.tex,sourceW,sourceH) || !sourceW || !sourceH)continue;
+                            copyRegion.imageExtent={std::min(rr.imageExtent.width,sourceW),std::min(rr.imageExtent.height,sourceH),1};
+                        }
+                        cmd->CopyTextureToBuffer(t.tex, t.ring[cbIdx], &copyRegion, 1);
                     }
                     // mask 32：仅声明 RG 读边（setup），不执行任何拷贝命令。
                 });

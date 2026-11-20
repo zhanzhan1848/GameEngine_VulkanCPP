@@ -61,18 +61,15 @@ kernel void screen_probe_denoise(
         return;
     }
 
-    // Early out for zero GI — pass through without filtering
-    float centerLum = dot(centerGI.rgb, float3(0.2126f, 0.7152f, 0.0722f));
-    if (centerLum < 0.0001f) {
-        giOutput.write(centerGI, pixel_pos);
-        return;
-    }
-
-    // Light bilateral filter — geometry weights only, no confidence influence
+    // Frozen Vulkan contract: low/zero-radiance receivers participate so
+    // valid nearby probes can fill sparse reconstruction holes within the
+    // same depth/normal neighborhood.
     uint radius = min(params.kernel_radius, 2u);
 
     float3 filteredGI = float3(0.0f);
     float  totalWeight = 0.0f;
+    float filteredConfidence = 0.0f;
+    float centerConfidence = clamp(centerGI.a, 0.0f, 1.0f);
 
     for (int dy = -int(radius); dy <= int(radius); dy++) {
         for (int dx = -int(radius); dx <= int(radius); dx++) {
@@ -101,19 +98,23 @@ kernel void screen_probe_denoise(
             float spatialDist2 = float(dx * dx + dy * dy);
             float w_spatial = exp(-spatialDist2 / (2.0f * params.sigma_spatial * params.sigma_spatial));
 
-            float weight = w_depth * w_normal * w_spatial;
+            float sampleConfidence = clamp(sampleGI.a, 0.0f, 1.0f);
+            float confidenceWeight = mix(max(sampleConfidence, 0.05f), 1.0f, centerConfidence);
+            float weight = w_depth * w_normal * w_spatial * confidenceWeight;
 
             filteredGI += sampleGI.rgb * weight;
+            filteredConfidence += sampleConfidence * weight;
             totalWeight += weight;
         }
     }
 
     if (totalWeight > 1e-6f) {
         filteredGI /= totalWeight;
+        filteredConfidence /= totalWeight;
     } else {
         filteredGI = centerGI.rgb;
+        filteredConfidence = centerConfidence;
     }
 
-    // Pass through confidence from input (for temporal use downstream)
-    giOutput.write(float4(filteredGI, centerGI.a), pixel_pos);
+    giOutput.write(float4(filteredGI, max(centerConfidence, filteredConfidence)), pixel_pos);
 }

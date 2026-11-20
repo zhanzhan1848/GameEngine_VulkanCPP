@@ -21,16 +21,16 @@ struct HZBUniforms {
 };
 
 // ============================================================================
-// Basic HZB Generation - Max Depth Filter
+// Basic HZB Generation - Min Depth Filter
 // ============================================================================
 
 /**
- * @brief Generate HZB mip level using max depth filtering
- * @details Each thread reads a 2x2 pixel block from source mip and writes the maximum depth value
+ * @brief Generate HZB mip level using min depth filtering
+ * @details Each thread reads a 2x2 pixel block from source mip and writes the minimum depth value
  *
  * Input:  Source mip level (mip - 1)
  * Output: Target mip level (mip)
- * Operation: max(depth) for each 2x2 block
+ * Operation: min(depth) for each 2x2 block, matching frozen Vulkan HZBMip
  */
 kernel void copy_depth_to_hzb_mip0(
     depth2d<float> source_depth [[texture(0)]],
@@ -67,17 +67,17 @@ kernel void generate_hzb_mip_level_basic(
     uint source_width = source_depth.get_width();
     uint source_height = source_depth.get_height();
 
-    float max_depth = 0.0;
+    float min_depth = 1.0;
     for (uint dy = 0; dy < 2; ++dy) {
         for (uint dx = 0; dx < 2; ++dx) {
             uint2 sample_pos = source_pos + uint2(dx, dy);
             if (sample_pos.x < source_width && sample_pos.y < source_height) {
                 float depth = source_depth.read(sample_pos).r;
-                max_depth = max(max_depth, depth);
+                min_depth = min(min_depth, depth);
             }
         }
     }
-    target_depth.write(max_depth, target_pos);
+    target_depth.write(min_depth, target_pos);
 }
 
 // ============================================================================

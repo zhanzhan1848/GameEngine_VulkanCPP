@@ -63,3 +63,19 @@ kernel void surfaceCacheAtlasInit(
     depth_atlas.write(float4(-1.0f, 0.0f, 0.0f, 1.0f), atlas_uv);
     emissive_atlas.write(float4(0.0f, 0.0f, 0.0f, 1.0f), atlas_uv);
 }
+
+// Qualified surfaces start invalid over the entire allocation, including gaps
+// and newly reused pages. No card-dispatch upload is needed before capture.
+kernel void surfaceCacheAtlasReset(uint tid [[thread_position_in_grid]],
+    texture2d<float, access::write> albedo [[texture(0)]],
+    texture2d<float, access::write> normal [[texture(1)]],
+    texture2d<float, access::write> depth [[texture(2)]],
+    texture2d<float, access::write> emissive [[texture(3)]]) {
+    const uint width = depth.get_width();
+    if (tid >= width * depth.get_height()) return;
+    const uint2 uv(tid % width, tid / width);
+    albedo.write(float4(0), uv);
+    normal.write(float4(0.5f,0.5f,0,1), uv);
+    depth.write(float4(-1,0,0,1), uv);
+    emissive.write(float4(0), uv);
+}

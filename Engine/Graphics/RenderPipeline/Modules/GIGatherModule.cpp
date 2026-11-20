@@ -57,6 +57,26 @@ static std::string ResolveVariantShaderPath(const char* vulkanSpvPath,
     return utils::ShaderRegistry::ResolveShaderPath(platform, vulkanSpvPath);
 }
 
+// Load the native measured consumer and its local MSL includes. Vulkan assets stay frozen.
+static bool ReadMetalGatherSource(const std::string& path, std::vector<std::string>& seen, std::string& out) {
+    if (std::find(seen.begin(),seen.end(),path)!=seen.end()) return true;
+    std::ifstream file(path); if(!file) return false;
+    seen.push_back(path);
+    std::string line;
+    while(std::getline(file,line)) {
+        const auto first=line.find("#include \"");
+        if(first!=std::string::npos) {
+            const auto begin=first+10, end=line.find('"',begin);
+            if(end==std::string::npos)return false;
+            const std::string name=line.substr(begin,end-begin);
+            std::string include=path.substr(0,path.find_last_of("/\\")+1)+name;
+            if(!std::ifstream(include).good()) include=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Metal/shaders/"+name);
+            if(!ReadMetalGatherSource(include,seen,out))return false;
+        } else out+=line+"\n";
+    }
+    return true;
+}
+
 struct GIGatherCB {
     math::m4x4 inv_view_projection;
     math::v4   probe_origin_spacing;
@@ -112,6 +132,9 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     // env 因子保持（变体 cso 缺失时 CreateShader 失败 → 模块 fail-closed）。
     const bool isVk = device->GetPlatform() == RHIPlatform::Vulkan ||
                       device->GetPlatform() == RHIPlatform::D3D12;
+    const char* metalGeometryEnv=std::getenv("PRIMAL_METAL_GATHER_GEOMETRY");
+    const bool metalGeometry=device->GetPlatform()==RHIPlatform::Metal &&
+        metalGeometryEnv && std::strcmp(metalGeometryEnv,"1")==0;
     const char* glossyAuditEnv = std::getenv("DDGI_GLOSSY_SOURCE_AUDIT");
     const bool glossyAuditRequested = isVk && glossyAuditEnv &&
         glossyAuditEnv[0] == '1' && glossyAuditEnv[1] == '\0';
@@ -158,8 +181,8 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
         PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_QUERY_KERNEL] incompatible geometry, reference, compact or observer configuration" << std::endl;
         return false;
     }
-    geometry_connections_enabled_=replaceVisibility || (isVk && connectionFlag && std::strcmp(connectionFlag,"1")==0);
-    if(geometry_connections_enabled_) {
+    geometry_connections_enabled_=metalGeometry || replaceVisibility || (isVk && connectionFlag && std::strcmp(connectionFlag,"1")==0);
+    if(geometry_connections_enabled_ && isVk) {
         if(glossyAuditRequested) {
             PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_CONNECTIONS] source audit and connection candidate are separate variants";
             return false;
@@ -191,6 +214,18 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
         shader=connection_shader_;
         PRIMAL_LOG_STREAM(Info,"Render") << "[DDGI_CONNECTIONS] mode="
             << (replaceVisibility ? (referenceVisibility ? "geometry-replace-reference" : "geometry-anyhit") : "geometry-gate") << " shader=" << path << std::endl;
+    }
+    if(metalGeometry) {
+        const auto path=utils::ShaderRegistry::ResolveShaderPath("Engine/Graphics/Metal/shaders/Lumen/DDGIGIGatherGeometry.metal");
+        std::vector<std::string> seen;std::string source;
+        if(!ReadMetalGatherSource(path,seen,source)) {
+            PRIMAL_LOG_STREAM(Error,"Render") << "[MetalGatherGeometry] native source unavailable: " << path;
+            return false;
+        }
+        connection_shader_=device->CreateShader(source.data(),source.size(),ShaderStage::Compute,"ddgi_gi_gather_geometry");
+        if(connection_shader_==handles::INVALID_SHADER)return false;
+        shader=connection_shader_;
+        PRIMAL_LOG_STREAM(Info,"Render") << "[MetalGatherGeometry] native measured consumer selected";
     }
     auto failAuditInitialization = [&]() {
         // A diagnostic setup failure must never leave the production pipeline
@@ -305,11 +340,17 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
             {12, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // near relocated origins
             // GI 根治 Phase 3.2: flat openSky（Metal buffer(13)，与 Vulkan flat 20 对等）
             {13, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // flat probe openSky
+            {14, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // native geometry top
+            {15, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // native geometry bottom
+            {16, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // native geometry triangles
+            {17, DescriptorType::StorageBuffer, 1, ShaderStage::Compute, nullptr}, // native geometry instances
+            {18, DescriptorType::UniformBuffer, 1, ShaderStage::Compute, nullptr}, // native policy/counts
         };
         // 修复：18 个条目（含 openSky buffer(13)）但 count 传 17——最后一个
         // 条目从未进布局，Metal ddgi_gi_gather 编码期断言
         // "missing Buffer binding at index 12/13"。
-        set_layout_ = device->CreateDescriptorSetLayout({18, bindings});
+        for(u32 i=18;i<22;++i)bindings[i].readonly=true;
+        set_layout_ = device->CreateDescriptorSetLayout({metalGeometry ? 23u : 18u, bindings});
     }
     layout_ = device->CreatePipelineLayout({1, &set_layout_});
 
@@ -502,7 +543,7 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     const char* fullResGatherEnv = std::getenv("PRIMAL_DDGI_FULL_RES_GATHER");
     const bool fullResGatherOptIn = isVk && fullResGatherEnv &&
         std::strcmp(fullResGatherEnv, "1") == 0;
-    if (device->GetPlatform() == RHIPlatform::Metal || fullResGatherOptIn) {
+    if ((device->GetPlatform() == RHIPlatform::Metal && !metalGeometry) || fullResGatherOptIn) {
         gather_width_ = render_width;
         gather_height_ = render_height;
     } else {
@@ -1669,7 +1710,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     bufWrites[9].descriptorType = DescriptorType::StorageBuffer;
                     bufInfos[9].buffer = (flatActive && flatBuf != handles::INVALID_RESOURCE)
                         ? flatBuf : dummy_buffer_;
-                    bufInfos[9].offset = 256;
+                    bufInfos[9].offset = device_->GetPlatform()==RHIPlatform::Metal &&
+                        !(flatActive && flatBuf!=handles::INVALID_RESOURCE) ? 0u : 256u;
                     bufInfos[9].range = ~0ull;
                     updateDescriptors(10, bufWrites);
                     // Metal fvCB（binding 11，UBO）。
@@ -1716,7 +1758,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     osWrite.bufferInfo = &osInfo;
                     osInfo.buffer = (flatOpenSkyBuf != handles::INVALID_RESOURCE)
                         ? flatOpenSkyBuf : dummy_buffer_;
-                    osInfo.offset = 0;
+                    osInfo.offset = device_->GetPlatform()==RHIPlatform::Metal && flatOpenSkyBuf!=handles::INVALID_RESOURCE ? 256u : 0u;
                     osInfo.range = ~0ull;
                     updateDescriptors(1, &osWrite);
                 }
@@ -1733,9 +1775,33 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 connectionReady=connectionReady && std::isfinite(rasterJitter.x) && std::isfinite(rasterJitter.y);
                 struct ConnectionDispatch {u32 policy[4];float jitter[4];};
                 static_assert(sizeof(ConnectionDispatch)==32);
+                const bool metalConnection=device_->GetPlatform()==RHIPlatform::Metal;
+                struct MetalConnectionDispatch { ConnectionDispatch base; u32 geometry[4]; u32 support[4]; };
+                static_assert(sizeof(MetalConnectionDispatch)==64);
+                MetalConnectionDispatch native{};
+                if(metalConnection) {
+                    const u64 strides[4]{48,48,48,64};
+                    for(u32 i=0;i<4;++i) {
+                        u64 bytes=0;
+                        const bool valid=device_->GetBufferByteSize(inputs.geometry[i],bytes) &&
+                            bytes==inputs.geometry_sizes[i] && bytes%strides[i]==0 && bytes/strides[i]>0 && bytes/strides[i]<=0xffffffffu;
+                        connectionReady &= valid; native.geometry[i]=valid?u32(bytes/strides[i]):0;
+                    }
+                    const ResourceHandle sources[4]{nvolViews[0].relocated_origins,
+                        ddgi->GetDepthBufferBySlot(ddgiReadIdx),flatBuf,flatOpenSkyBuf};
+                    const u64 offsets[4]{0,0,256,256},strides2[4]{16,128*4,9*16,4};
+                    for(u32 i=0;i<4;++i) {
+                        u64 bytes=0;const bool valid=device_->GetBufferByteSize(sources[i],bytes) && bytes>offsets[i] &&
+                            (bytes-offsets[i])/strides2[i]<=0xffffffffu;
+                        connectionReady &= valid;native.support[i]=valid?u32((bytes-offsets[i])/strides2[i]):0;
+                    }
+                    connectionReady &= ddgi->UsesMeasuredVisibility() && flatActive && nvolViews[0].IsValid();
+                }
                 const ConnectionDispatch policy{{connectionReady?1u:0u,inputs.frame_index,bindingIdx,0u},{rasterJitter.x,rasterJitter.y,0.f,0.f}};
+                native.base=policy;
+                const u32 policySize=metalConnection?sizeof(native):sizeof(policy);
                 if(auto* mapped=device_->MapBuffer(connection_cb_[bindingIdx])) {
-                    std::memcpy(mapped,&policy,sizeof(policy));device_->UnmapBuffer(connection_cb_[bindingIdx]);
+                    std::memcpy(mapped,metalConnection?static_cast<const void*>(&native):&policy,policySize);device_->UnmapBuffer(connection_cb_[bindingIdx]);
                     connectionCB=connection_cb_[bindingIdx];
                 } else connectionReady=false;
                 useUpper=connectionReady && !pair_env_requested_ && !payload_env_requested_ && upper_requested_ && upper_allowed_ &&
@@ -1744,13 +1810,19 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 DescriptorBufferInfo infos[5]{};WriteDescriptorSet writes[5]{};
                 for(u32 i=0;i<5;++i) {
                     infos[i].buffer=i==4?connectionCB:(connectionReady?(useUpper && i==1?inputs.geometry_upper:inputs.geometry[i]):dummy_buffer_);
-                    infos[i].offset=0;infos[i].range=i==4?32:(connectionReady?(useUpper && i==1?inputs.geometry_upper_size:inputs.geometry_sizes[i]):64);
-                    writes[i].dstSet=descriptorSet;writes[i].dstBinding=23+i;writes[i].descriptorCount=1;
+                    infos[i].offset=0;infos[i].range=i==4?policySize:(connectionReady?(useUpper && i==1?inputs.geometry_upper_size:inputs.geometry_sizes[i]):64);
+                    writes[i].dstSet=descriptorSet;writes[i].dstBinding=(metalConnection?14u:23u)+i;writes[i].descriptorCount=1;
                     writes[i].descriptorType=i==4?DescriptorType::UniformBuffer:DescriptorType::StorageBuffer;
                     writes[i].bufferInfo=&infos[i];
                     if(i<4)connectionBuffers[i]=infos[i].buffer;
                 }
                 updateDescriptors(5,writes);
+                if(metalConnection && (inputs.frame_index<4 || inputs.frame_index%120==0))
+                    PRIMAL_LOG_STREAM(Info,"Render") << "[MetalGatherGeometry] ready=" << connectionReady
+                        << " frame=" << inputs.frame_index << " epoch=" << inputs.geometry_epoch
+                        << " top=" << native.geometry[0] << " triangles=" << native.geometry[2]
+                        << " origins=" << native.support[0] << " moments=" << native.support[1]
+                        << " sh=" << native.support[2] << " skyFloats=" << native.support[3];
                 if(traversalDispatch) {
                     for(auto& write:writes)write.dstSet=traversal_set_;
                     remember(writes,5);updateDescriptors(5,writes);

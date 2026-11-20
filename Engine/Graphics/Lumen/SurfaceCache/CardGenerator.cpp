@@ -861,7 +861,10 @@ void CardGenerator::UploadToGPU() {
         // SurfaceCacheCardLookup 48B 结构，下游 shader 只读数据内容、无布局
         // 分叉）——向 D3D12 开放，Vulkan 行为不变。
         const bool built=(device_->GetPlatform()==rhi::RHIPlatform::Vulkan ||
-                          device_->GetPlatform()==rhi::RHIPlatform::D3D12) &&
+                          device_->GetPlatform()==rhi::RHIPlatform::D3D12 ||
+                          (device_->GetPlatform()==rhi::RHIPlatform::Metal &&
+                           std::getenv("PRIMAL_METAL_MEASURED_GEOMETRY") &&
+                           std::strcmp(std::getenv("PRIMAL_METAL_MEASURED_GEOMETRY"),"1")==0)) &&
             requested && std::strcmp(requested,"1")==0 &&
             lookups_.size()==meshes_.size() && BuildOwnerCardDirectory(cards_,lookups_,directory);
         const auto* source=built?directory.data():lookups_.data();

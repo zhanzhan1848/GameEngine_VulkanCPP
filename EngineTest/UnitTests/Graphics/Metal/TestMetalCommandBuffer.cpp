@@ -456,6 +456,9 @@ TestResult TestDescriptorArrayBinding() {
     psoDesc.renderTargetCount = 1;
     psoDesc.renderTargetFormats[0] = DataFormat::BGRA8_UNorm;
     psoDesc.topology = PrimitiveTopology::TriangleList;
+    // This test uses a color-only render pass.
+    psoDesc.enableDepthTest = false;
+    psoDesc.enableDepthWrite = false;
     
     PipelineHandle pso = device.CreateGraphicsPipeline(psoDesc);
     if (pso == handles::INVALID_PIPELINE) {
@@ -522,7 +525,7 @@ TestResult TestDescriptorArrayBinding() {
     cmdBuf->BeginRenderPass(passDesc);
     cmdBuf->BindGraphicsPipeline(pso);
     cmdBuf->BindDescriptorSets(PipelineBindPoint::Graphics, pl, 0, 1, &ds, 0, nullptr);
-    cmdBuf->Draw(3, 1, 0, 0);
+    cmdBuf->Draw(3, 0, 1, 0);
     cmdBuf->EndRenderPass();
     cmdBuf->End();
     
@@ -545,9 +548,54 @@ TestResult TestDescriptorArrayBinding() {
     return TestResult::Passed;
 }
 
+
+// Count native encoded draws, including each command in an indirect batch.
+// A real readback guards against accepting a counter-only rendering no-op.
+TestResult TestEncodedDrawStatistics() {
+    DeviceDesc dd{};dd.platform=RHIPlatform::Metal;dd.enableDebug=true;
+    MetalDevice device(dd);TEST_ASSERT(device.Initialize(),"Metal device");
+    const char* source=R"(
+        #include <metal_stdlib>
+        using namespace metal;
+        vertex float4 stats_vertex(uint id [[vertex_id]]) {
+            const float2 p[]{float2(-1,-1),float2(3,-1),float2(-1,3)};
+            return float4(p[id],0,1);
+        }
+        fragment float4 stats_fragment(){return float4(1,0,0,1);}
+    )";
+    auto vs=device.CreateShader(source,strlen(source),ShaderStage::Vertex,"stats_vertex");
+    auto fs=device.CreateShader(source,strlen(source),ShaderStage::Pixel,"stats_fragment");
+    TEST_ASSERT(vs!=handles::INVALID_SHADER&&fs!=handles::INVALID_SHADER,"draw shaders");
+    PipelineLayoutDesc ld{};auto layout=device.CreatePipelineLayout(ld);
+    GraphicsPipelineDesc pd{};pd.layout=layout;pd.vertexShader=vs;pd.pixelShader=fs;pd.renderTargetCount=1;pd.renderTargetFormats[0]=DataFormat::BGRA8_UNorm;pd.enableDepthTest=false;pd.enableDepthWrite=false;pd.cullMode=CullMode::None;
+    auto pipeline=device.CreateGraphicsPipeline(pd);TEST_ASSERT(pipeline!=handles::INVALID_PIPELINE,"draw pipeline");
+    TextureDesc td{};td.type=TextureType::Texture2D;td.size={64,64,1};td.format=DataFormat::BGRA8_UNorm;td.usage=TextureUsage::RenderTarget|TextureUsage::CopySource;
+    auto target=device.CreateTexture(td);
+    BufferDesc bd{};bd.type=BufferType::Index;bd.memoryUsage=GPUMemoryUsage::Dynamic;bd.size=12;auto indices=device.CreateBuffer(bd);const uint32_t indexData[]{0,1,2};
+    TEST_ASSERT(device.UpdateBufferData(indices,indexData,sizeof(indexData)),"index data");
+    bd.type=BufferType::Indirect;bd.size=32;auto indirect=device.CreateBuffer(bd);const uint32_t arguments[]{3,1,0,0,3,1,0,0};
+    TEST_ASSERT(device.UpdateBufferData(indirect,arguments,sizeof(arguments)),"indirect data");
+    bd.type=BufferType::Unknown;bd.memoryUsage=GPUMemoryUsage::Readback;bd.size=64*64*4;auto readback=device.CreateBuffer(bd);
+    auto handle=device.CreateCommandBuffer(CommandQueueType::Graphics);auto* cmd=device.GetCommandBuffer(handle);TEST_ASSERT(cmd&&cmd->Begin(),"begin");
+    TEST_ASSERT(cmd->GetStats().drawCallCount==0,"initial count");
+    RenderPassDesc pass{};pass.colorAttachments.resize(1);pass.colorAttachments[0].texture=target;pass.colorAttachments[0].format=DataFormat::BGRA8_UNorm;pass.colorAttachments[0].loadOp=LoadAction::Clear;pass.colorAttachments[0].storeOp=StoreAction::Store;pass.viewport={{0,0},{64,64},0,1};pass.scissor={{0,0},{64,64}};
+    cmd->BeginRenderPass(pass);cmd->BindGraphicsPipeline(pipeline);
+    cmd->Draw(3,0,1,0);TEST_ASSERT(cmd->GetStats().drawCallCount==1,"direct count");
+    cmd->BindIndexBuffer(indices,DataFormat::R32_UInt,0);cmd->DrawIndexed(3,0,0,1,0);TEST_ASSERT(cmd->GetStats().drawCallCount==2,"indexed count");
+    cmd->DrawIndirect(indirect,0,0);TEST_ASSERT(cmd->GetStats().drawCallCount==2,"empty batch not counted");
+    cmd->DrawIndirect(indirect,0,2);TEST_ASSERT(cmd->GetStats().drawCallCount==4,"indirect batch counts native commands");cmd->EndRenderPass();
+    BufferTextureCopyRegion copy{};copy.bufferRowLength=64;copy.bufferImageHeight=64;copy.imageExtent={64,64,1};cmd->CopyTextureToBuffer(target,readback,&copy,1);
+    TEST_ASSERT(cmd->End()&&cmd->Submit()&&cmd->WaitForCompletion(),"actual completion");
+    const auto* pixels=static_cast<const uint8_t*>(device.MapBuffer(readback,0,64*64*4));TEST_ASSERT(pixels,"readback");
+    const auto at=(32*64+32)*4;const bool red=pixels[at]==0&&pixels[at+1]==0&&pixels[at+2]==255&&pixels[at+3]==255;device.UnmapBuffer(readback);TEST_ASSERT(red,"native draws wrote target");
+    TEST_ASSERT(cmd->Reset()&&cmd->GetStats().drawCallCount==0,"reset clears count");
+    device.DestroyCommandBuffer(handle);device.DestroyBuffer(readback);device.DestroyBuffer(indices);device.DestroyBuffer(indirect);device.DestroyTexture(target);device.DestroyPipeline(pipeline);device.DestroyPipelineLayout(layout);device.DestroyShader(vs);device.DestroyShader(fs);device.Shutdown();return TestResult::Passed;
+}
+
 int main() {
     auto suite = std::make_shared<TestSuite>("MetalCommandBufferTests");
     suite->AddTestCase(TestCase("Creation", TestCommandBufferCreation));
+    suite->AddTestCase(TestCase("EncodedDrawStatistics", TestEncodedDrawStatistics));
     suite->AddTestCase(TestCase("Recording", TestCommandBufferRecording));
     suite->AddTestCase(TestCase("CopyBuffer", TestCommandBufferCopyBuffer));
     suite->AddTestCase(TestCase("RenderPassEncoding", TestRenderPassEncoding));

@@ -88,7 +88,7 @@ struct FlattenedLightingParams {
     uint total_texels;
     uint card_count;
     uint light_count;
-    uint _pad;
+    uint opensky_v2; // same 60-byte offset as FlattenedLightingParams in C++/GLSL
     // T8.13 sync: probe-fed indirect (Lumen hierarchy) — near-volume grid so
     // LightEval can gather incoming irradiance from the DDGI probes. Appended
     // at the end exactly like the C++/GLSL structs; Metal shaders predating
@@ -138,10 +138,10 @@ static float3 cardTexelToWorld(
 
 // Find atlas UV for a world position given a card (card by value — see
 // cardTexelToWorld's address-space note).
-static bool worldToCardUV(
+static bool worldToCardUVMarginPad(
     float3 world_pos,
     SurfaceCacheCard card,
-    thread float2& out_uv)
+    thread float2& out_uv, float margin_uv, float pad_m)
 {
     float3 local = world_pos - card.center.xyz;
     float u, v, depth;
@@ -163,11 +163,24 @@ static bool worldToCardUV(
         v = (local.y / (card.extent.y * 2.0)) + 0.5;
     }
 
-    if (depth < 0.0 || u < 0.0 || u >= 1.0 || v < 0.0 || v >= 1.0) return false;   // C6: u/v==1.0 bleeds into the next card
+    if (depth < 0.0f) return false;
+    const float eu = axis == 0u ? card.extent.y : card.extent.x;
+    const float ev = axis == 2u ? card.extent.y : card.extent.z;
+    const float padU = pad_m > 0.0f && eu > 1e-4f ? pad_m / (eu * 2.0f) : 0.0f;
+    const float padV = pad_m > 0.0f && ev > 1e-4f ? pad_m / (ev * 2.0f) : 0.0f;
+    if (u < -margin_uv-padU || u >= 1.0f+margin_uv+padU ||
+        v < -margin_uv-padV || v >= 1.0f+margin_uv+padV) return false;
+    u = clamp(u, 0.0f, 0.999999f);
+    v = clamp(v, 0.0f, 0.999999f);
 
     out_uv.x = float(card.atlas_offset_x) + u * float(card.resolution);
     out_uv.y = float(card.atlas_offset_y) + v * float(card.resolution);
     return true;
+}
+
+// Geometry-owner qualification stays in the strict, unpadded domain.
+static bool worldToCardUV(float3 world_pos, SurfaceCacheCard card, thread float2& out_uv) {
+    return worldToCardUVMarginPad(world_pos, card, out_uv, 0.0f, 0.0f);
 }
 
 // ============================================================================
@@ -189,50 +202,85 @@ static float3 scCardFaceNormal(SurfaceCacheCard card) {
 // texture params templated: callers hold atlases with different access
 // qualifiers (sample in DDGI, read in resolve/SPGI); .read() works for both.
 template <typename TEXD, typename TEXL>
-// hitNormalHint（G2，2026-09-16，与 GLSL 孪生同步）: 命中点 SDF 梯度，
-// length² > 0.25 时启用朝向身份门；float3(0) = 不启用。
-static bool scQueryCardCandidate(SurfaceCacheCard card,
-                                 float3 hitPos,
-                                 float3 surfaceFacing,
-                                 float tolFloor,
-                                 TEXD depthAtlas,
-                                 TEXL lightingAtlas,
-                                 float3 hitNormalHint,
-                                 thread float3& outRadiance,
-                                 thread float& outKey) {
+static bool scQueryCardCandidateDbg(SurfaceCacheCard card,
+    float3 hitPos, float3 surfaceFacing, float tolFloor, float qpadM,
+    TEXD depthAtlas, TEXL lightingAtlas, float3 hitNormalHint,
+    thread float3& outRadiance, thread float& outKey, thread uint& outReject) {
     outRadiance = float3(0.0f);
     outKey = 1e30f;
-
+    outReject = 0u;
     float2 atlasUV;
-    if (!worldToCardUV(hitPos, card, atlasUV)) return false;
-
-    // n_true = -faceNormal (faces the card plane); see GLSL twin for sign.
-    if (dot(scCardFaceNormal(card), surfaceFacing) >= 0.0f) return false;
-    // G2: 朝向身份门（cos > 0.5 容差，吸收粗 SDF 梯度模糊）
-    if (dot(hitNormalHint, hitNormalHint) > 0.25f &&
-        dot(scCardFaceNormal(card), hitNormalHint) > -0.5f) return false;
-
+    if (!worldToCardUVMarginPad(hitPos, card, atlasUV,
+            1.0f / float(max(card.resolution, 1u)), qpadM)) {
+        outReject = 1u; return false;
+    }
+    const float3 n = scCardFaceNormal(card);
+    if (dot(n, surfaceFacing) >= 0.0f) { outReject = 2u; return false; }
+    // Frozen GLSL uses a soft ordering penalty. SPGI separately chooses
+    // whether reject code 7 is a hard veto (default) or an accepted candidate.
+    float hintPenalty = 0.0f;
+    if (dot(hitNormalHint, hitNormalHint) > 0.25f) {
+        const float d = dot(n, hitNormalHint);
+        if (d > -0.5f) outReject = 7u;
+        hintPenalty = max(d + 1.0f, 0.0f);
+    }
     uint2 texel = uint2(clamp(atlasUV, float2(0.0f),
-                              float2(card.atlas_offset_x + card.resolution - 1u,
-                                     card.atlas_offset_y + card.resolution - 1u)));
-    float depth = depthAtlas.read(texel).r;
-    if (isinf(depth) || isnan(depth) || depth < 0.0f) return false;
-
-    float3 captured = cardTexelToWorld(texel, depth, card);
-    float3 n = scCardFaceNormal(card);
-    float3 delta = captured - hitPos;
-    float along = dot(delta, n);
-    float perp = length(delta - n * along);
-    float footprint = length(card.extent.xyz) / float(max(uint(card.resolution), 1u));
-    float tolAlong = tolFloor + footprint;
-    // Uncertainty ball: the SDF band projects laterally on grazing cards.
-    float tolPerp = max(footprint * 1.5f, tolFloor);
-    if (fabs(along) > tolAlong || perp > tolPerp) return false;
-
-    float3 c = lightingAtlas.read(texel).xyz;
-    if (any(isnan(c)) || any(isinf(c))) return false;
+        float2(card.atlas_offset_x + card.resolution - 1u,
+               card.atlas_offset_y + card.resolution - 1u)));
+    const float depth = depthAtlas.read(texel).r;
+    if (!isfinite(depth) || depth < 0.0f) { outReject = 3u; return false; }
+    const float3 delta = cardTexelToWorld(texel, depth, card) - hitPos;
+    const float along = dot(delta, n);
+    const float perp = length(delta - n * along);
+    const float footprint = length(card.extent.xyz) / float(max(card.resolution, 1u));
+    if (fabs(along) > tolFloor + footprint) { outReject = 4u; return false; }
+    if (perp > max(footprint * 1.5f, tolFloor)) { outReject = 5u; return false; }
+    const float3 c = lightingAtlas.read(texel).xyz;
+    if (!all(isfinite(c))) { outReject = 6u; return false; }
     outRadiance = c;
-    outKey = perp + 0.5f * fabs(along);
+    outKey = perp + 0.5f * fabs(along) +
+        hintPenalty * (perp + fabs(along) + max(tolFloor, 0.05f));
+    return true;
+}
+
+template <typename TEXD, typename TEXL>
+static bool scQueryCardCandidate(SurfaceCacheCard card,
+    float3 hitPos, float3 surfaceFacing, float tolFloor,
+    TEXD depthAtlas, TEXL lightingAtlas, float3 hitNormalHint,
+    thread float3& outRadiance, thread float& outKey) {
+    uint reject;
+    return scQueryCardCandidateDbg(card, hitPos, surfaceFacing, tolFloor, 0.0f,
+        depthAtlas, lightingAtlas, hitNormalHint, outRadiance, outKey, reject);
+}
+
+// Native counterpart of ScreenProbeTraceFinalize's normal (zero-retry-off)
+// candidate policy. Transport alpha is produced by CardCapture.metal.
+template <typename TEXD, typename TEXL, typename TEXA>
+static bool scQueryScreenProbeCandidate(SurfaceCacheCard card,
+    float3 hitPos, float3 rayDir, float tolFloor, bool hintSoft,
+    TEXD depthAtlas, TEXL lightingAtlas, TEXA albedoAtlas, float3 hitNormalHint,
+    thread float3& outRadiance, thread float& outKey, thread uint& outReject) {
+    const float qpadM = min(tolFloor, 0.45f);
+    float3 facing = -rayDir;
+    float transport = 1.0f;
+    bool backface = false;
+    if (dot(scCardFaceNormal(card), facing) >= 0.0f) {
+        float2 uv;
+        if (worldToCardUVMarginPad(hitPos, card, uv,
+                1.0f / float(max(card.resolution, 1u)), qpadM)) {
+            const uint2 texel = uint2(clamp(uv, float2(0.0f),
+                float2(card.atlas_offset_x + card.resolution - 1u,
+                       card.atlas_offset_y + card.resolution - 1u)));
+            const uint bits = uint(round(clamp(albedoAtlas.read(texel).a, 0.0f, 1.0f) * 255.0f));
+            transport = float((bits >> 3u) & 15u) / 15.0f * exp(-2.0f * float(bits & 7u) / 7.0f);
+            backface = (bits & 128u) != 0u && transport > 1.0f / 255.0f;
+        }
+        if (backface) facing = rayDir;
+    }
+    const bool accepted = scQueryCardCandidateDbg(card, hitPos, facing, tolFloor, qpadM,
+        depthAtlas, lightingAtlas, hitNormalHint, outRadiance, outKey, outReject);
+    if (!accepted || (outReject == 7u && !hintSoft)) return false;
+    if (backface) outRadiance *= transport;
     return true;
 }
 

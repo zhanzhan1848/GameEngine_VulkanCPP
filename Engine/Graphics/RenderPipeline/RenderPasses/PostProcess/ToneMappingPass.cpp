@@ -57,6 +57,14 @@ static float EnvFloat(const char* name, float def) {
     const char* e = std::getenv(name);
     return e ? static_cast<float>(std::atof(e)) : def;
 }
+// Native Metal HDR adaptation is opt-in; other API decisions are unchanged.
+static bool MetalEyeAdaptationEnabled(RHIPlatform platform) {
+    static const bool enabled = [] {
+        const char* e = std::getenv("PRIMAL_METAL_EYE_ADAPTATION");
+        return e && e[0] == '1' && e[1] == '\0';
+    }();
+    return platform == RHIPlatform::Metal && enabled;
+}
 // P3.3 旋钮。
 // [2026-09-22 参考观感复验] 显示域 contrast=1.35 会在 ACES+gamma 后
 // 同时截黑暗部和截白高光。锁机位 frame360 A/B 回归 1.0 后，任意通道
@@ -210,7 +218,7 @@ static void EnsurePipeline(RHIDeviceBase& device) {
     if (s_ToneMapPipeline != handles::INVALID_PIPELINE) return;
 
     auto platform = device.GetPlatform();
-    s_UpstreamIsHDR = platform != RHIPlatform::Metal;
+    s_UpstreamIsHDR = platform != RHIPlatform::Metal || MetalEyeAdaptationEnabled(platform);
     // D3D12 多入口单模块拆分：ToneMapping.spv 含 tonemap_vs/tonemap_fs/
     // tonemap_fs_passthrough 三个入口，DXIL 每入口一个 cso（协调约定
     // ToneMapping.<entry>.cso，入口恒 "main"）。Vulkan spv / Metal 源码保持
@@ -249,7 +257,8 @@ static void EnsurePipeline(RHIDeviceBase& device) {
     };
 
     ShaderHandle vs = stageShader(ShaderStage::Vertex, "tonemap_vs");
-    ShaderHandle fs = stageShader(ShaderStage::Pixel, "tonemap_fs");
+    ShaderHandle fs = stageShader(ShaderStage::Pixel,
+        MetalEyeAdaptationEnabled(platform) ? "tonemap_fs_adapt" : "tonemap_fs");
     if (vs == handles::INVALID_SHADER || fs == handles::INVALID_SHADER) {
         // R9-WIN：阶段被拒（上层已打过 [VulkanShader] reject / cso 缺失日志）时
         // 明示后果——本 pass 是帧输出必需管线，Execute 期将 fail-fast 退出，
@@ -458,14 +467,17 @@ static void EnsurePipeline(RHIDeviceBase& device) {
     // shader 的静态引用，必须始终有效；是否采纳适应值由 UBO 的 autoAdapt
     // 门控（PRIMAL_TONE_ADAPT=1）。
     if (device.GetPlatform() == RHIPlatform::Vulkan ||
-        device.GetPlatform() == RHIPlatform::D3D12) {
+        device.GetPlatform() == RHIPlatform::D3D12 ||
+        MetalEyeAdaptationEnabled(device.GetPlatform())) {
         // spv: Lumen/EyeAdaptation.comp.spv（build_spv.sh Volume 同表）。
         // D3D12: Lumen/EyeAdaptation.comp.cso 镜像（入口恒 "main"，后端忽略
         // entry 名——与 spv 的 eye_adaptation 入口等价消费）。
         const bool d3d12Adapt = device.GetPlatform() == RHIPlatform::D3D12;
-        const std::string adaptRel = d3d12Adapt
-            ? "EngineTest/shaders/d3d12/Lumen/EyeAdaptation.comp.cso"
-            : "Engine/Graphics/Vulkan/shaders/Lumen/EyeAdaptation.comp.spv";
+        const std::string adaptRel = MetalEyeAdaptationEnabled(device.GetPlatform())
+            ? "Engine/Graphics/Metal/shaders/EyeAdaptation.metal"
+            : d3d12Adapt
+                ? "EngineTest/shaders/d3d12/Lumen/EyeAdaptation.comp.cso"
+                : "Engine/Graphics/Vulkan/shaders/Lumen/EyeAdaptation.comp.spv";
         const std::string adaptPath = utils::ShaderRegistry::ResolveShaderPath(adaptRel);
         std::ifstream adaptFile(adaptPath, std::ios::binary | std::ios::ate);
         if (adaptFile.is_open()) {
@@ -510,7 +522,21 @@ static void EnsurePipeline(RHIDeviceBase& device) {
                     sd.type = TextureType::Texture2D;
                     sd.usage = TextureUsage::ShaderResource | TextureUsage::UnorderedAccess;
                     sd.name = i == 0 ? "AdaptStateA" : "AdaptStateB";
+                    if (MetalEyeAdaptationEnabled(device.GetPlatform())) {
+                        // One-time CPU initialization must be visible immediately,
+                        // not queued for a later frame's staging Begin. Shared/
+                        // managed R32 retains tracked GPU read/write hazards.
+                        sd.memoryUsage = GPUMemoryUsage::Staging;
+                        sd.usage = sd.usage | TextureUsage::CopySource | TextureUsage::CopyDest;
+                    }
                     s_AdaptState[i] = device.CreateTexture(sd);
+                    if (MetalEyeAdaptationEnabled(device.GetPlatform())) {
+                        const float initialLogLum = 0.0f;
+                        TextureRegionUpdate region{}; region.width = region.height = 1;
+                        if (s_AdaptState[i] == handles::INVALID_RESOURCE ||
+                            !device.UpdateTextureRegion(s_AdaptState[i], &initialLogLum, sizeof(float), region))
+                            primal::diag::FatalPipelineExit("[TONE] Metal adaptation state initialization failed");
+                    }
                 }
                 for (u32 f = 0; f < MAX_FRAMES; ++f) {
                     DescriptorSetDesc asdsDesc{};
@@ -527,6 +553,16 @@ static void EnsurePipeline(RHIDeviceBase& device) {
                 std::cerr << "[TONE] adaptation spv load failed — auto adapt off" << std::endl;
             }
         }
+    }
+    if (MetalEyeAdaptationEnabled(device.GetPlatform())) {
+        bool ready = s_AdaptPipeline != handles::INVALID_PIPELINE &&
+                     s_AdaptDSL != handles::INVALID_DESCRIPTOR_SET_LAYOUT &&
+                     s_AdaptLayout != handles::INVALID_PIPELINE_LAYOUT;
+        for (u32 i = 0; i < MAX_FRAMES; ++i)
+            ready = ready && s_AdaptSets[i] != handles::INVALID_DESCRIPTOR_SET &&
+                    s_AdaptParamsBuf[i] != handles::INVALID_RESOURCE;
+        if (!ready) primal::diag::FatalPipelineExit("[TONE] required native Metal adaptation unavailable");
+        primal::diag::Emit(primal::diag::kLevelInfo, "ToneMapping", "Native Metal adaptation: MSL, 4096 samples, initialized R32 state, HDR consumer");
     }
 }
 
@@ -691,7 +727,8 @@ const ToneMappingPassData& AddToneMappingPass(RenderGraph& graph, RGResourceHand
             // ping 语义：s_AdaptPing = 最近一帧写出的态；tonemap 绑定它。
             if (s_AdaptPipeline != handles::INVALID_PIPELINE &&
                 (device.GetPlatform() == RHIPlatform::Vulkan ||
-                 device.GetPlatform() == RHIPlatform::D3D12) &&
+                 device.GetPlatform() == RHIPlatform::D3D12 ||
+                 MetalEyeAdaptationEnabled(device.GetPlatform())) &&
                 inputView != handles::INVALID_RESOURCE &&
                 s_AdaptSets[fi] != handles::INVALID_DESCRIPTOR_SET) {
                 const u32 prevIdx = s_AdaptPing;

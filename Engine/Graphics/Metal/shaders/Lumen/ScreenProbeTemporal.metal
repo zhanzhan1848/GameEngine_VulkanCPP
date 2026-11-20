@@ -1,16 +1,10 @@
 /**
  * @file ScreenProbeTemporal.metal
- * @brief Screen Probe GI - Change-penalizing temporal accumulation
+ * @brief Screen Probe GI - Reprojected temporal accumulation
  *
- * Core principle: penalize change, don't reward stability.
- *
- * - Base alpha = slow accumulation (0.1)
- * - High gradient (|current - history|) → faster adaptation (trust current)
- * - Low confidence → reset history (clear bad data)
- * - Disocclusion → reset history
- * - History clamping + gradient limiter prevent energy explosion
- *
- * This prevents the system from converging to a wrong stable solution.
+ * Valid position/normal-consistent history uses a fixed EMA. Disocclusion
+ * and very low confidence reset history; mode1 adds neighborhood variance
+ * clamping. The executable formula already matches frozen Vulkan.
  *
  * Dispatch: (totalProbes + 63) / 64, 1, 1
  * ThreadGroupSize: (64, 1, 1)

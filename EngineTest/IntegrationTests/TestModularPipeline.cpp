@@ -1,9 +1,11 @@
 #include "TestModularPipeline.h"
+#include "Engine/Graphics/RenderPipeline/RenderPasses/PostProcess/TAAPass.h"
 #include "SponzaReference.h"
 #include "Graphics/Lumen/GIDebugParams.h"
 #include "Engine/Common/CommonHeaders.h"
 #include "Engine/Common/CoreLogStream.h"
 #include "Engine/Graphics/RHI/Platforms/Metal/MetalDevice.h"
+#include "Engine/Graphics/RHI/Platforms/Metal/MetalTexture.h"
 #include "Engine/Graphics/RHI/Platforms/Metal/MetalMath.h"
 #include "Engine/Graphics/RHI/Core/RHIMath.h"
 #include "Engine/Graphics/Nanite/GPUDrivenDrawPipeline.h"
@@ -126,7 +128,9 @@ namespace {
     }
 
     ResourceHandle CreateTextureFromData(RHIDeviceBase* device, uint32_t width, uint32_t height, const unsigned char* data, bool isSRGB) {
-        DataFormat format = isSRGB ? DataFormat::RGBA8_sRGB : DataFormat::RGBA8_UNorm;
+        // ContentToEngine consumes DXGI wire codes, not RHI DataFormat values.
+        // Writing RHI 40 here silently fell back to UNorm and skipped sRGB decode.
+        const uint32_t format = isSRGB ? 29u : 28u;
         uint32_t row_pitch = width * 4;
         uint32_t slice_pitch = height * row_pitch;
         size_t blob_size = (6 * sizeof(uint32_t)) + (2 * sizeof(uint32_t) + slice_pitch);
@@ -156,33 +160,9 @@ namespace {
         unsigned char* data = stbi_load(path.c_str(), &width, &height, &channels, 4);
         if (!data) return handles::INVALID_RESOURCE;
 
-        constexpr int TARGET_SIZE = 1024;
-        unsigned char* final_data = data;
-        int final_width = width;
-        int final_height = height;
-
-        if (width != TARGET_SIZE || height != TARGET_SIZE) {
-            // Simple bilinear resize
-            float x_ratio = static_cast<float>(width - 1) / TARGET_SIZE;
-            float y_ratio = static_cast<float>(height - 1) / TARGET_SIZE;
-            auto* resized = new unsigned char[TARGET_SIZE * TARGET_SIZE * 4];
-
-            for (int y = 0; y < TARGET_SIZE; ++y) {
-                for (int x = 0; x < TARGET_SIZE; ++x) {
-                    int sx = std::min(static_cast<int>(x * x_ratio), width - 2);
-                    int sy = std::min(static_cast<int>(y * y_ratio), height - 2);
-                    memcpy(&resized[(y * TARGET_SIZE + x) * 4], &data[(sy * width + sx) * 4], 4);
-                }
-            }
-            final_data = resized;
-            final_width = TARGET_SIZE;
-            final_height = TARGET_SIZE;
-            stbi_image_free(data);
-        }
-
-        ResourceHandle handle = CreateTextureFromData(device, final_width, final_height, final_data, isSRGB);
-        if (final_data != data) delete[] final_data;
-        else stbi_image_free(data);
+        // Preserve source pixels and dimensions, matching the frozen reference.
+        ResourceHandle handle = CreateTextureFromData(device, width, height, data, isSRGB);
+        stbi_image_free(data);
         return handle;
     }
 
@@ -201,7 +181,7 @@ namespace {
             std::ifstream f(fullPath.c_str());
             if (f.good()) return fullPath;
         }
-        return baseDir + cleanName;
+        return "";
     }
 
     primal::game_entity::entity create_game_entity(primal::math::v3 position = {}) {
@@ -218,18 +198,14 @@ namespace {
 // ============================================================================
 namespace {
     const shader_file_info kDeferredVS     { "DeferredLighting.metal", "vertexMain",                    ::shader_type::vertex };
-    const shader_file_info kDeferredPS     { "DeferredLighting.metal", "fragmentLighting_gpuDriven",     ::shader_type::pixel  };
+    const shader_file_info kDeferredPS     { "DeferredLighting.metal", "fragmentLighting_gpuDrivenEnvironment",     ::shader_type::pixel  };
     const shader_file_info kBlitVS         { "DeferredLighting.metal", "vertexMain",                    ::shader_type::vertex };
-    // T8.13 sync: FinalBlit samples the FUSION module's already-tone-mapped
-    // LDR output (postToonColor / fusionOut) — the tonemapping fragmentBlit
-    // applied a SECOND ACES+gamma pass on top and pinned the whole frame to
-    // the white shoulder. fragmentBlitFXAA keeps the required no-tonemap copy
-    // semantics while resolving 1x Metal silhouette and floor-edge aliasing.
-    const shader_file_info kBlitPS         { "DeferredLighting.metal", "fragmentBlitFXAA",           ::shader_type::pixel  };
+    // Match Vulkan's final LDR resize after TAA and ToneMapping.
+    const shader_file_info kBlitPS         { "DeferredLighting.metal", "fragmentBlitLDR",            ::shader_type::pixel  };
     const shader_file_info kShadowFilter   { "ShadowFilter.metal",     "shadow_filter_compute",          ::shader_type::compute };
     const shader_file_info kGIGather       { "DDGIGIGather.metal",     "ddgi_gi_gather",                 ::shader_type::compute };
     const shader_file_info kFusionIndirect { "DeferredLighting.metal", "fragmentFusionIndirect",         ::shader_type::pixel  };
-    const shader_file_info kFusionComposite{ "DeferredLighting.metal", "fragmentFusion",                 ::shader_type::pixel  };
+    const shader_file_info kFusionComposite{ "DeferredLighting.metal", "fragmentFusionEnvironment",                 ::shader_type::pixel  };
     const shader_file_info kSCCardRadiance { "Lumen/DDGICardRadianceAvg.metal",           "ddgi_card_radiance_avg",              ::shader_type::compute };
     const shader_file_info kSCProbeIrr     { "Lumen/DDGIProbeIrradianceFromCards.metal",  "ddgi_probe_irradiance_from_cards",    ::shader_type::compute };
 }
@@ -449,6 +425,17 @@ bool TestModularPipeline::CompileShaders() {
 }
 
 bool TestModularPipeline::InitializePipeline() {
+    // This Metal harness uses the full-resolution Gather/visibility-flush
+    // contract. Vulkan's logical-grid divisor defaults to 2 in the shared
+    // pipeline; make our existing Metal budget explicit before initialization.
+    // Diagnostic overrides remain available and are logged, never hidden.
+    if (!std::getenv("PRIMAL_DDGI_GATHER_BASE"))
+        setenv("PRIMAL_DDGI_GATHER_BASE", "render", 0);
+    if (!std::getenv("PRIMAL_DDGI_GATHER_BASE_DIV"))
+        setenv("PRIMAL_DDGI_GATHER_BASE_DIV", "1", 0);
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MetalSponza] gather_base="
+        << std::getenv("PRIMAL_DDGI_GATHER_BASE") << " divisor="
+        << std::getenv("PRIMAL_DDGI_GATHER_BASE_DIV") << std::endl;
     pipeline_ = std::make_unique<StandardRenderPipeline>();
     if (!pipeline_->Initialize(device_.get())) {
         std::cerr << "[TestModularPipeline] Failed to initialize StandardRenderPipeline" << std::endl;
@@ -508,12 +495,31 @@ bool TestModularPipeline::InitializePipeline() {
         }
     }
 
-    // Metal must keep the proven 1x Medium resource budget: the Vulkan High
-    // preset's 2x working set still causes an Apple GPU address fault even
-    // with SPGI disabled. FinalBlit uses a lightweight FXAA resolve below to
-    // provide edge cleanup without increasing the GI resource sizes.
+    // Retain Medium by default until the full High visual chain is accepted.
+    // The old address-fault observation included a 208B visibility instance
+    // stride against 192B CPU data; High can now be revalidated explicitly.
     lumen::LumenConfig lumenConfig;
-    lumenConfig.quality = lumen::LumenQualityPreset::Medium;
+    const char* highBudget = std::getenv("PRIMAL_METAL_HIGH");
+    lumenConfig.quality = highBudget && std::strcmp(highBudget, "1") == 0
+        ? lumen::LumenQualityPreset::High : lumen::LumenQualityPreset::Medium;
+    if (lumenConfig.quality == lumen::LumenQualityPreset::High) {
+        // Same Sponza world bounds and near-grid policy as the frozen Vulkan
+        // harness. This is scene fitting, not a reduction of rays per probe.
+        lumenConfig.wrc_probe_spacing = 2.0f;
+        if (!std::getenv("SPONZA_DDGI_NO_FIT")) {
+            lumenConfig.ddgi_fit_to_bounds = true;
+            if (std::getenv("SPONZA_FIT_AUTO")) {
+                lumenConfig.ddgi_fit_bounds_auto = true;
+            } else {
+                lumenConfig.ddgi_fit_bounds_min = {-19.21f, -1.26f, -11.83f};
+                lumenConfig.ddgi_fit_bounds_max = {18.00f, 14.29f, 11.05f};
+            }
+            if (const char* spacing = std::getenv("SPONZA_FIT_SPACING")) {
+                const float value = std::strtof(spacing, nullptr);
+                if (value > 0.25f && value < 32.0f) lumenConfig.ddgi_probe_spacing = value;
+            }
+        }
+    }
     lumenConfig.surface_cache_capture_budget = 0;
     // 2026-09-04 闪烁修复：temporal weight 0.02→0.005——增加时域平滑。
     // SC 全量更新后每帧 atlas 微变 → 探针 SH 微变 → 屏幕高频闪烁。
@@ -527,7 +533,7 @@ bool TestModularPipeline::InitializePipeline() {
     // 2026-09-04 启用 SPGI（Screen Probe GI）——Vulkan High 档混合方案
     // = SPGI（主力高频 GI）+ DDGI（低频环境）+ SSGI。Metal 之前缺 SPGI
     // → GI 只有 DDGI 低频 → "很平"无彩色弹射细节。
-    // SPGI Metal still has a known GPU page fault and remains disabled.
+    // SPGI remains opt-in while its native visual/visibility contract is aligned.
     pipeline_->SetLumenConfig(lumenConfig);
 
     // PRIMAL_SPGI=1: enable the Screen Probe GI chain on Metal for stage-by-
@@ -544,8 +550,8 @@ bool TestModularPipeline::InitializePipeline() {
         auto renderSettings = pipeline_->GetSettings();
         renderSettings.lighting.light_direction = {0.5f, -0.7f, 0.3f};
         renderSettings.lighting.light_color = {3.0f, 3.0f, 3.0f, 1.0f};
-        // Preserve the validated Metal SC/probe feedback budget.
-        renderSettings.lighting.ddgi_light_color = {3.0f, 3.0f, 3.0f, 1.0f};
+        // Same probe-light input as the frozen Vulkan Sponza harness.
+        renderSettings.lighting.ddgi_light_color = {5.0f, 5.0f, 5.0f, 1.0f};
         sponza_reference::LightingSettings(renderSettings.lighting);
         pipeline_->UpdateSettings(renderSettings);
     }
@@ -573,9 +579,11 @@ bool TestModularPipeline::InitializePipeline() {
         dbg.fusion = false;
         std::cerr << "[GI] ALL GI passes disabled (direct-only A/B)" << std::endl;
     }
-    if (std::getenv("PRIMAL_SHADOW_PCSS")) {
+    // Same default shadow algorithm as the frozen Vulkan Sponza reference.
+    // Preserve the explicit legacy PCSS override; VSM remains opt-in.
+    if (!std::getenv("PRIMAL_VSM_SHADOWS") || std::getenv("PRIMAL_SHADOW_PCSS")) {
         pipeline_->SetVSMShadows(false);
-        std::cerr << "[Shadow] PCSS path (VSM off)" << std::endl;
+        PRIMAL_LOG_STREAM(Info, "Shadow") << "Metal Sponza PCSS path (VSM off)";
     }
 
     // T8.13 sync: match the Vulkan reference app's pass scope — volume paths
@@ -834,85 +842,77 @@ bool TestModularPipeline::LoadMaterialTextures() {
     }
 
     std::unordered_map<std::string, ResourceHandle> textureCache;
-
+    auto loadCached = [&](const std::string& path, bool srgb) {
+        if (path.empty()) return handles::INVALID_RESOURCE;
+        const std::string key=(srgb ? "srgb:" : "linear:")+path;
+        auto it=textureCache.find(key);
+        if (it!=textureCache.end()) return it->second;
+        const auto texture=LoadTextureFromFile(device_.get(),path,srgb);
+        textureCache.emplace(key,texture);
+        return texture;
+    };
+    auto sibling = [&](const std::string& diffuse, std::initializer_list<const char*> suffixes) {
+        for (const char* suffix : suffixes) {
+            for (const char* token : {"_diffuse","_Albedo","_Diff"}) {
+                const auto at=diffuse.rfind(token);
+                if (at==std::string::npos) continue;
+                const auto path=ResolveTexturePath(assetBaseDir,diffuse.substr(0,at)+suffix);
+                if (!path.empty()) return path;
+            }
+        }
+        return std::string{};
+    };
+    u32 loadedAlbedo=0,loadedNormal=0,loadedORM=0,composedORM=0;
     for (auto& meshInfo : sceneMeshes_) {
         if (!meshInfo.materialInstance) continue;
+        auto albedo=loadCached(ResolveTexturePath(assetBaseDir,meshInfo.diffuseTexturePath),true);
+        if (albedo!=handles::INVALID_RESOURCE) ++loadedAlbedo;
+        else albedo=whiteTexture;
+        meshInfo.materialInstance->SetTexture(0,albedo);
 
-        // Load diffuse
-        if (!meshInfo.diffuseTexturePath.empty()) {
-            std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.diffuseTexturePath);
-            if (!fullPath.empty()) {
-                auto it = textureCache.find(fullPath);
-                ResourceHandle texture;
-                if (it != textureCache.end()) {
-                    texture = it->second;
-                } else {
-                    texture = LoadTextureFromFile(device_.get(), fullPath, true);
-                    if (texture != handles::INVALID_RESOURCE) {
-                        textureCache[fullPath] = texture;
-                    } else {
-                        texture = whiteTexture;
+        auto normalPath=ResolveTexturePath(assetBaseDir,meshInfo.normalTexturePath);
+        if (normalPath.empty()) normalPath=sibling(meshInfo.diffuseTexturePath,{"_normal.png","_Normal.png"});
+        auto normal=loadCached(normalPath,false);
+        if (normal!=handles::INVALID_RESOURCE) ++loadedNormal;
+        else normal=flatNormalTexture;
+        meshInfo.materialInstance->SetTexture(1,normal);
+
+        auto orm=loadCached(ResolveTexturePath(assetBaseDir,meshInfo.ormTexturePath),false);
+        if (orm==handles::INVALID_RESOURCE) {
+            const auto roughPath=sibling(meshInfo.diffuseTexturePath,{"_roughness.png","_Roughness.png"});
+            const auto metalPath=sibling(meshInfo.diffuseTexturePath,{"_metallic.png","_Metallic.png"});
+            const auto key="orm:"+roughPath+"|"+metalPath;
+            const auto it=textureCache.find(key);
+            if (it!=textureCache.end()) orm=it->second;
+            else {
+                int rw=0,rh=0,mw=0,mh=0,channels=0;
+                auto* rough=roughPath.empty()?nullptr:stbi_load(roughPath.c_str(),&rw,&rh,&channels,4);
+                auto* metal=metalPath.empty()?nullptr:stbi_load(metalPath.c_str(),&mw,&mh,&channels,4);
+                if (rough && metal && (rw!=mw || rh!=mh)) {
+                    PRIMAL_LOG_STREAM(Error,"SponzaMaterial") << "ORM source dimensions differ: " << roughPath << " / " << metalPath;
+                    stbi_image_free(rough);stbi_image_free(metal);return false;
+                }
+                if (rough || metal) {
+                    const int width=rough?rw:mw,height=rough?rh:mh;
+                    std::vector<unsigned char> pixels(size_t(width)*height*4);
+                    for (size_t i=0;i<pixels.size()/4;++i) {
+                        pixels[i*4]=255;pixels[i*4+1]=rough?rough[i*4]:128;
+                        pixels[i*4+2]=metal?metal[i*4]:0;pixels[i*4+3]=255;
                     }
+                    orm=CreateTextureFromData(device_.get(),width,height,pixels.data(),false);
+                    if (orm!=handles::INVALID_RESOURCE) ++composedORM;
                 }
-                meshInfo.materialInstance->SetTexture(0, texture);
-            }
-        } else {
-            meshInfo.materialInstance->SetTexture(0, whiteTexture);
-        }
-
-        // Infer normal from diffuse naming
-        if (meshInfo.normalTexturePath.empty() && !meshInfo.diffuseTexturePath.empty()) {
-            const std::string& diff = meshInfo.diffuseTexturePath;
-            std::string inferred;
-            if (diff.find("_diffuse.") != std::string::npos) {
-                inferred = diff;
-                inferred.replace(diff.find("_diffuse."), 9, "_normal.");
-            } else if (diff.find("_Diff.") != std::string::npos) {
-                inferred = diff;
-                inferred.replace(diff.find("_Diff."), 5, "_Normal.");
-            }
-            if (!inferred.empty()) {
-                std::string fullPath = ResolveTexturePath(assetBaseDir, inferred);
-                std::ifstream testFile(fullPath);
-                if (testFile.good()) meshInfo.normalTexturePath = inferred;
+                stbi_image_free(rough);stbi_image_free(metal);
+                textureCache.emplace(key,orm);
             }
         }
-
-        // Load normal
-        ResourceHandle normalTexture = flatNormalTexture;
-        if (!meshInfo.normalTexturePath.empty()) {
-            std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.normalTexturePath);
-            if (!fullPath.empty()) {
-                auto it = textureCache.find(fullPath);
-                if (it != textureCache.end()) {
-                    normalTexture = it->second;
-                } else {
-                    ResourceHandle loaded = LoadTextureFromFile(device_.get(), fullPath, false);
-                    if (loaded != handles::INVALID_RESOURCE) {
-                        normalTexture = loaded;
-                        textureCache[fullPath] = loaded;
-                    }
-                }
-            }
-        }
-        meshInfo.materialInstance->SetTexture(1, normalTexture);
-
-        ResourceHandle ormTexture = defaultORMTexture;
-        if (!meshInfo.ormTexturePath.empty()) {
-            const std::string fullPath = ResolveTexturePath(assetBaseDir, meshInfo.ormTexturePath);
-            auto it = textureCache.find(fullPath);
-            if (it != textureCache.end()) {
-                ormTexture = it->second;
-            } else {
-                ResourceHandle loaded = LoadTextureFromFile(device_.get(), fullPath, false);
-                if (loaded != handles::INVALID_RESOURCE) {
-                    ormTexture = loaded;
-                    textureCache[fullPath] = loaded;
-                }
-            }
-        }
-        meshInfo.materialInstance->SetTexture(2, ormTexture);
+        if (orm!=handles::INVALID_RESOURCE) ++loadedORM;
+        else orm=defaultORMTexture;
+        meshInfo.materialInstance->SetTexture(2,orm);
     }
+    PRIMAL_LOG_STREAM(Info,"SponzaMaterial") << "[MetalSponzaMaterials] meshes=" << sceneMeshes_.size()
+        << " albedo=" << loadedAlbedo << " normal=" << loadedNormal << " orm=" << loadedORM
+        << " composedORM=" << composedORM << " albedoWireFormat=29 linearWireFormat=28 sourceSize=preserved";
 
     return true;
 }
@@ -971,7 +971,9 @@ bool TestModularPipeline::LoadSponzaScene() {
     std::string baseDir = "/Users/zhanyuanwei/Desktop/GameEngine_VulkanCPP/EngineTest/assets/";
     // Render the exact same scene payload as TestVulkanSponzaRenderGraph. The
     // much larger pipeline model remains the offline-SDF source only.
-    std::string modelPath = baseDir + "Sponza.model";
+    const char* requestedModel = std::getenv("PRIMAL_TEST_MODEL");
+    std::string modelPath = baseDir + (requestedModel ? requestedModel : "Sponza.model");
+    PRIMAL_LOG_STREAM(Info, "Render") << "[MetalSponza] model=" << modelPath << std::endl;
 
     // Load .model file
     {
@@ -1046,6 +1048,8 @@ bool TestModularPipeline::LoadSponzaScene() {
         samplerDesc.addressU = TextureAddressMode::Wrap;
         samplerDesc.addressV = TextureAddressMode::Wrap;
         samplerDesc.addressW = TextureAddressMode::Wrap;
+        // Frozen Vulkan Sponza overrides the pipeline default with 8x filtering.
+        samplerDesc.maxAnisotropy = 8;
         samplerDesc.maxLod = 100.0f;
         auto sampler = device_->CreateSampler(samplerDesc);
 
@@ -1168,17 +1172,28 @@ void TestModularPipeline::Run() {
         outputDesc.memoryUsage = GPUMemoryUsage::Static;
         if (capture16f) outputDesc.format = DataFormat::RGBA16_Float;
         captureTarget = device_->CreateTexture(outputDesc);
+        if (captureTarget == handles::INVALID_RESOURCE) {
+            PRIMAL_LOG_STREAM(Error, "SponzaCapture") << "offscreen target creation failed" << std::endl;
+            std::_Exit(7);
+        }
     }
+    const u32 capturedPipelineFrame = static_cast<u32>(pipeline_->GetFrameCount());
     pipeline_->RenderWithCommandBuffer(
         scene_, view_, captureTarget != handles::INVALID_RESOURCE ? captureTarget : backBuffer, outputDesc,
         cmd, bufferIndex, cmdHandle, signalFence);
 
-    cmd->End();
+    if (!cmd->End()) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MetalSponza] command recording failed" << std::endl;
+        std::_Exit(7);
+    }
 
     rhi::QueueSubmitInfo submitInfo{};
     submitInfo.cmdBuffer = cmdHandle;
     submitInfo.signalFence = signalFence;
-    device_->Submit(submitInfo);
+    if (!device_->Submit(submitInfo)) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[MetalSponza] render submission failed" << std::endl;
+        std::_Exit(7);
+    }
 
     renderSystem_.EndFrame();
 
@@ -1203,31 +1218,33 @@ void TestModularPipeline::Run() {
                 region.imageSubresource = {0, 0, 1};
                 region.imageExtent = {size.x, size.y, 1};
                 capture->CopyTextureToBuffer(captureTarget, buffer, &region, 1);
-                capture->End();
+                if (!capture->End()) {
+                    PRIMAL_LOG_STREAM(Error, "SponzaCapture") << "copy recording failed" << std::endl;
+                    std::_Exit(7);
+                }
                 QueueSubmitInfo submit{};
                 submit.cmdBuffer = handle;
-                device_->Submit(submit);
-                capture->WaitForCompletion();
+                if (!device_->Submit(submit) || !capture->WaitForCompletion()) {
+                    // Pending GPU ownership is unknown: do not map or destroy
+                    // the source/staging/command buffer after failed completion.
+                    PRIMAL_LOG_STREAM(Error, "SponzaCapture") << "copy submission/completion failed" << std::endl;
+                    std::_Exit(7);
+                }
                 if (auto* pixels = static_cast<u8*>(device_->MapBuffer(buffer, 0, bd.size))) {
                     std::ofstream out(path, std::ios::binary);
                     out << "P6\n" << size.x << " " << size.y << "\n255\n";
                     for (u64 i = 0; i < static_cast<u64>(size.x) * size.y; ++i) {
                         char rgb[3];
                         if (targetIs16f) {
-                            // RGBA16F half-float ×4 → 8bit RGB（BGR 内存序同 BGRA 包装）。
-                            auto half2float = [](u16 h) -> float {
-                                const u32 s = (h & 0x8000) << 16, e = (h >> 10) & 0x1F, m = h & 0x3FF;
-                                u32 f = s | (e ? ((e - 15 + 127) << 23) | (m << 13)
-                                                : (m ? ((127 - 14) << 23) | (m << 13) : 0));
-                                float r; memcpy(&r, &f, 4); return r;
-                            };
+                            // RGBA16F has RGB channel order; only BGRA8 below is swizzled.
+                            auto half2float = primal::graphics::pcg::PCGSDFReadbackManager::HalfToFloat;
                             const u16* px = reinterpret_cast<const u16*>(pixels + i * 8);
                             auto to8 = [&](float v) {
                                 return static_cast<char>(std::clamp(v, 0.0f, 1.0f) * 255.0f);
                             };
-                            rgb[0] = to8(half2float(px[2]));
+                            rgb[0] = to8(half2float(px[0]));
                             rgb[1] = to8(half2float(px[1]));
-                            rgb[2] = to8(half2float(px[0]));
+                            rgb[2] = to8(half2float(px[2]));
                         } else {
                             rgb[0] = static_cast<char>(pixels[i * 4 + 2]);
                             rgb[1] = static_cast<char>(pixels[i * 4 + 1]);
@@ -1244,6 +1261,51 @@ void TestModularPipeline::Run() {
             if (buffer != handles::INVALID_RESOURCE) device_->DestroyBuffer(buffer);
             PRIMAL_LOG_STREAM(Info, "SponzaCapture") << (saved ? "saved " : "failed ") << path;
             device_->DestroyTexture(captureTarget);
+            if (!saved) std::_Exit(7);
+        }
+    }
+    if (const char* prefix = std::getenv("SPONZA_GBUFFER_CAPTURE_PREFIX")) {
+        const char* requestedFrame = std::getenv("SPONZA_CAPTURE_FRAME");
+        if (frameCount_ == (requestedFrame ? std::atoi(requestedFrame) : 360) &&
+            !CaptureGBuffer(prefix)) std::_Exit(7);
+    }
+    if (const char* prefix = std::getenv("SPONZA_LIGHTING_CAPTURE_PREFIX")) {
+        const char* requestedFrame = std::getenv("SPONZA_CAPTURE_FRAME");
+        if (frameCount_ == (requestedFrame ? std::atoi(requestedFrame) : 360) &&
+            !CaptureLighting(prefix, capturedPipelineFrame, bufferIndex)) std::_Exit(7);
+    }
+    if (const char* prefix = std::getenv("SPONZA_CAPTURE_DDGI")) {
+        const char* requestedFrame = std::getenv("SPONZA_CAPTURE_FRAME");
+        if (frameCount_ == (requestedFrame ? std::atoi(requestedFrame) : 350) &&
+            !CaptureDDGI(prefix, capturedPipelineFrame)) std::_Exit(7);
+    }
+    if (const char* prefix = std::getenv("SPONZA_CAPTURE_SPGI_RAYS")) {
+        const char* requestedFrame = std::getenv("SPONZA_CAPTURE_FRAME");
+        if (frameCount_ == (requestedFrame ? std::atoi(requestedFrame) : 350) &&
+            !CaptureScreenProbeRays(prefix, capturedPipelineFrame)) std::_Exit(7);
+    }
+    if (const char* prefix = std::getenv("SPONZA_CAPTURE_SPGI_TRACE")) {
+        // Bounded diagnostic window; native frame numbers, unlike the final
+        // screenshot's harness counter. The selected probe list is mandatory.
+        if (capturedPipelineFrame <= 350u &&
+            !CaptureScreenProbeSlices(prefix, capturedPipelineFrame)) std::_Exit(7);
+    }
+    if (const char* prefix = std::getenv("SPONZA_CAPTURE_SPGI_HZB")) {
+        const char* requestedFrame = std::getenv("SPONZA_CAPTURE_FRAME");
+        if (frameCount_ == (requestedFrame ? std::atoi(requestedFrame) : 350) &&
+            !CaptureScreenProbeHZB(prefix, capturedPipelineFrame)) std::_Exit(7);
+    }
+    if (const char* prefix = std::getenv("SPONZA_TAA_CAPTURE_PREFIX")) {
+        const char* selected = std::getenv("SPONZA_TAA_CAPTURE_NATIVE_FRAME");
+        if (selected && capturedPipelineFrame == u32(std::strtoul(selected,nullptr,10)) &&
+            !CaptureTAAInputs(prefix,capturedPipelineFrame)) std::_Exit(7);
+    }
+    if (const char* maximum = std::getenv("SPONZA_MAX_FRAMES")) {
+        const long limit = std::strtol(maximum, nullptr, 10);
+        if (limit > 0 && frameCount_ >= static_cast<u32>(limit)) {
+            PRIMAL_LOG_STREAM(Info, "Render") << "[MetalSponza] clean exit at frame "
+                << frameCount_ << std::endl;
+            std::_Exit(0);
         }
     }
     if (frameCount_ <= 3 || frameCount_ % 60 == 0) {
@@ -1267,6 +1329,450 @@ void TestModularPipeline::Run() {
         }
     }
 #endif
+}
+
+bool TestModularPipeline::CaptureDDGI(const std::string& prefix, u32 pipelineFrame) {
+    using namespace primal::graphics::rhi;
+    auto* ddgi=pipeline_->GetDDGIPass();
+    if (!ddgi) return false;
+    const ResourceHandle sources[]={ddgi->GetVolumeUniformBuffer(pipelineFrame),
+        ddgi->GetProbeUpdateListBuffer(pipelineFrame),ddgi->GetHitDistanceBuffer(),
+        ddgi->GetHitNormalBuffer(),ddgi->GetRayDataBuffer(),ddgi->GetRelocatedOriginsBuffer(),
+        ddgi->GetDepthBuffer(pipelineFrame),ddgi->GetIrradianceBuffer(pipelineFrame),
+        ddgi->GetProbePositionBuffer()};
+    const char* names[]={"volume","updates","distance","normal","rays","origins","depth","irradiance","positions"};
+    std::ofstream manifest(prefix+"-capture.json");
+    if (!manifest) return false;
+    manifest << "{\"pipeline_frame\":" << pipelineFrame << ",\"update_count\":" << ddgi->GetLastUpdateCount()
+        << ",\"scope\":\"near-volume post-frame readback; only current update-list prefix is fresh\",\"buffers\":[";
+    for (u32 i=0;i<sizeof(sources)/sizeof(sources[0]);++i) {
+        u64 bytes=0;
+        if (!device_->GetBufferByteSize(sources[i],bytes) || bytes==0 || bytes>64ull*1024*1024) return false;
+        BufferDesc desc{}; desc.size=bytes; desc.type=BufferType::Raw;
+        desc.memoryUsage=GPUMemoryUsage::Readback;
+        const auto destination=device_->CreateBuffer(desc);
+        const auto handle=device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        auto* command=GetCommandBuffer(handle);
+        if (destination==handles::INVALID_RESOURCE || !command || !command->Begin()) {
+            if (handle!=handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(handle);
+            if (destination!=handles::INVALID_RESOURCE) device_->DestroyBuffer(destination);
+            return false;
+        }
+        command->MemoryBarrier(PipelineStage::ComputeShader,PipelineStage::Transfer,AccessFlag::ShaderWrite,AccessFlag::TransferRead);
+        command->CopyBuffer(sources[i],destination,0,0,bytes);
+        command->MemoryBarrier(PipelineStage::Transfer,PipelineStage::Host,AccessFlag::TransferWrite,AccessFlag::HostRead);
+        QueueSubmitInfo submit{};submit.cmdBuffer=handle;
+        if (!command->End() || !device_->Submit(submit) || !command->WaitForCompletion()) {
+            PRIMAL_LOG_STREAM(Error,"SponzaCapture") << "DDGI readback completion failed: " << names[i];
+            std::_Exit(7); // Keep ownership until process exit on unknown completion.
+        }
+        bool saved=false;
+        if (const void* data=device_->MapBuffer(destination,0,bytes)) {
+            std::ofstream out(prefix+"-"+names[i]+".bin",std::ios::binary);
+            out.write(static_cast<const char*>(data),static_cast<std::streamsize>(bytes));saved=out.good();
+            device_->UnmapBuffer(destination);
+        }
+        device_->DestroyCommandBuffer(handle);device_->DestroyBuffer(destination);
+        if (!saved) return false;
+        manifest << (i?",":"") << "{\"name\":\"" << names[i] << "\",\"handle\":" << sources[i]
+            << ",\"bytes\":" << bytes << ",\"completion_checked\":true}";
+    }
+    manifest << "]}\n";
+    PRIMAL_LOG_STREAM(Info,"SponzaCapture") << "saved DDGI buffers: " << prefix;
+    return manifest.good();
+}
+
+bool TestModularPipeline::CaptureScreenProbeRays(const std::string& prefix, u32 pipelineFrame) {
+    using namespace primal::graphics::rhi;
+    auto* spgi=pipeline_->GetScreenProbePass();
+    if (!spgi || !spgi->IsInitialized()) return false;
+    const auto view=spgi->GetCompletedProbeView(pipelineFrame);
+    const ResourceHandle sources[]={spgi->GetRayRadianceBuffer(pipelineFrame),
+        spgi->GetHitDistanceBuffer(),view.positions,view.normals,view.filtered_sh,
+        view.temporal_sh,view.constants,view.history_positions,view.history_normals,view.history_sh};
+    const char* names[]={"radiance","hit-distance","positions","normals","filtered-sh",
+        "temporal-sh","constants","history-positions","history-normals","history-sh"};
+    std::ofstream manifest(prefix+"-capture.json");
+    if (!manifest) return false;
+    manifest << "{\"pipeline_frame\":" << pipelineFrame << ",\"grid_width\":" << spgi->GetGridWidth()
+        << ",\"grid_height\":" << spgi->GetGridHeight()
+        << ",\"rays_per_probe\":" << spgi->GetParams().rays_per_probe
+        << ",\"scope\":\"post-frame screen-probe ray buffers; inactive slots may retain old data\",\"buffers\":[";
+    for (u32 i=0;i<sizeof(sources)/sizeof(sources[0]);++i) {
+        u64 bytes=0;
+        if (!device_->GetBufferByteSize(sources[i],bytes) || bytes==0 || bytes>64ull*1024*1024) return false;
+        BufferDesc desc{}; desc.size=bytes; desc.type=BufferType::Raw;
+        desc.memoryUsage=GPUMemoryUsage::Readback;
+        const auto destination=device_->CreateBuffer(desc);
+        const auto handle=device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        auto* command=GetCommandBuffer(handle);
+        if (destination==handles::INVALID_RESOURCE || !command || !command->Begin()) {
+            if (handle!=handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(handle);
+            if (destination!=handles::INVALID_RESOURCE) device_->DestroyBuffer(destination);
+            return false;
+        }
+        command->MemoryBarrier(PipelineStage::ComputeShader,PipelineStage::Transfer,AccessFlag::ShaderWrite,AccessFlag::TransferRead);
+        command->CopyBuffer(sources[i],destination,0,0,bytes);
+        command->MemoryBarrier(PipelineStage::Transfer,PipelineStage::Host,AccessFlag::TransferWrite,AccessFlag::HostRead);
+        QueueSubmitInfo submit{};submit.cmdBuffer=handle;
+        if (!command->End() || !device_->Submit(submit) || !command->WaitForCompletion()) {
+            PRIMAL_LOG_STREAM(Error,"SponzaCapture") << "screen-probe readback completion failed: " << names[i];
+            std::_Exit(7); // Keep ownership until process exit on unknown completion.
+        }
+        bool saved=false;
+        if (const void* data=device_->MapBuffer(destination,0,bytes)) {
+            std::ofstream out(prefix+"-"+names[i]+".bin",std::ios::binary);
+            out.write(static_cast<const char*>(data),static_cast<std::streamsize>(bytes));saved=out.good();
+            device_->UnmapBuffer(destination);
+        }
+        device_->DestroyCommandBuffer(handle);device_->DestroyBuffer(destination);
+        if (!saved) return false;
+        manifest << (i?",":"") << "{\"name\":\"" << names[i] << "\",\"handle\":" << sources[i]
+            << ",\"bytes\":" << bytes << ",\"completion_checked\":true}";
+    }
+    manifest << "]}\n";
+    PRIMAL_LOG_STREAM(Info,"SponzaCapture") << "saved screen-probe ray buffers: " << prefix;
+    return manifest.good();
+}
+
+bool TestModularPipeline::CaptureScreenProbeSlices(const std::string& prefix, u32 pipelineFrame) {
+    using namespace primal::graphics::rhi;
+    auto* spgi=pipeline_->GetScreenProbePass();
+    if (!spgi || !spgi->IsInitialized() || spgi->Tier3Enabled()) return false;
+    const u32 width=spgi->GetGridWidth(), height=spgi->GetGridHeight();
+    const u32 rays=spgi->GetParams().rays_per_probe;
+    std::vector<u32> probes;
+    const char* cursor=std::getenv("SPONZA_SPGI_TRACE_PROBES");
+    if (!cursor || !*cursor) return false;
+    while (*cursor) {
+        if (*cursor<'0' || *cursor>'9' || probes.size()>=256) return false;
+        char* end=nullptr; const unsigned long index=std::strtoul(cursor,&end,10);
+        if (end==cursor || index>=u64(width)*height || (*end && *end!=',')) return false;
+        probes.push_back(static_cast<u32>(index));
+        if (!*end) break;
+        cursor=end+1; if (!*cursor) return false;
+    }
+    std::sort(probes.begin(),probes.end());
+    probes.erase(std::unique(probes.begin(),probes.end()),probes.end());
+    const auto view=spgi->GetCompletedProbeView(pipelineFrame);
+    struct Slice { const char* name; ResourceHandle source; u64 stride, offset=0, bytes=0; };
+    Slice slices[]={{"radiance",spgi->GetRayRadianceBuffer(pipelineFrame),u64(rays)*16},
+        {"hit",spgi->GetHitDistanceBuffer(),u64(rays)*16},
+        {"positions",view.positions,16},{"normals",view.normals,16},
+        {"filtered-sh",view.filtered_sh,64},{"temporal-sh",view.temporal_sh,64},
+        {"history-positions",view.history_positions,16},{"history-normals",view.history_normals,16},
+        {"history-sh",view.history_sh,64},{"constants",view.constants,0}};
+    u64 total=0;
+    for (auto& s:slices) {
+        u64 sourceBytes=0;
+        if (!device_->GetBufferByteSize(s.source,sourceBytes) || !sourceBytes) return false;
+        if (s.stride && (u64(probes.back())+1)*s.stride>sourceBytes) return false;
+        s.offset=total;s.bytes=s.stride?s.stride*probes.size():sourceBytes;total+=s.bytes;
+    }
+    if (!total || total>2ull*1024*1024) return false;
+    BufferDesc desc{};desc.size=total;desc.type=BufferType::Raw;desc.memoryUsage=GPUMemoryUsage::Readback;
+    const auto staging=device_->CreateBuffer(desc);
+    const auto handle=device_->CreateCommandBuffer(CommandQueueType::Graphics);
+    auto* cmd=GetCommandBuffer(handle);
+    if (staging==handles::INVALID_RESOURCE || !cmd || !cmd->Begin()) {
+        if (handle!=handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(handle);
+        if (staging!=handles::INVALID_RESOURCE) device_->DestroyBuffer(staging);
+        return false;
+    }
+    cmd->MemoryBarrier(PipelineStage::ComputeShader|PipelineStage::Host,PipelineStage::Transfer,
+        AccessFlag::ShaderWrite|AccessFlag::HostWrite,AccessFlag::TransferRead);
+    for (const auto& s:slices) {
+        if (!s.stride) cmd->CopyBuffer(s.source,staging,0,s.offset,s.bytes);
+        else for (u32 i=0;i<probes.size();++i)
+            cmd->CopyBuffer(s.source,staging,u64(probes[i])*s.stride,s.offset+u64(i)*s.stride,s.stride);
+    }
+    cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::Host,AccessFlag::TransferWrite,AccessFlag::HostRead);
+    QueueSubmitInfo submit{};submit.cmdBuffer=handle;
+    if (!cmd->End() || !device_->Submit(submit) || !cmd->WaitForCompletion()) {
+        PRIMAL_LOG_STREAM(Error,"SponzaCapture") << "screen-probe slice completion failed";
+        std::_Exit(7);
+    }
+    const std::string stem=prefix+"-"+std::to_string(pipelineFrame);
+    bool saved=false;
+    if (const void* data=device_->MapBuffer(staging,0,total)) {
+        std::ofstream out(stem+".bin",std::ios::binary);
+        out.write(static_cast<const char*>(data),static_cast<std::streamsize>(total));out.close();saved=out.good();
+        device_->UnmapBuffer(staging);
+    }
+    device_->DestroyCommandBuffer(handle);device_->DestroyBuffer(staging);
+    if (!saved) return false;
+    std::ofstream meta(stem+".json");
+    meta << "{\"native_frame\":" << pipelineFrame << ",\"grid_width\":" << width
+        << ",\"grid_height\":" << height << ",\"rays_per_probe\":" << rays
+        << ",\"completion_checked\":true,\"scope\":\"selected post-frame probe slices; inactive slots may be stale\",\"probes\":[";
+    for (u32 i=0;i<probes.size();++i) meta << (i?",":"") << probes[i];
+    meta << "],\"slices\":[";
+    bool first=true;
+    for (const auto& s:slices) {
+        meta << (first?"":",") << "{\"name\":\"" << s.name << "\",\"offset\":" << s.offset
+            << ",\"bytes\":" << s.bytes << ",\"stride\":" << s.stride << "}";first=false;
+    }
+    meta << "]}\n";return meta.good();
+}
+
+bool TestModularPipeline::CaptureScreenProbeHZB(const std::string& prefix, u32 pipelineFrame) {
+    using namespace primal::graphics::rhi;
+    auto* spgi=pipeline_->GetScreenProbePass();if (!spgi || !spgi->IsInitialized()) return false;
+    const auto texture=spgi->GetTraceHZBTexture();const u32 levels=spgi->GetTraceHZBMipCount();
+    u32 width=0,height=0;
+    // HZBSystem::CreateResources declares R32_Float. Metal currently has no
+    // GetTextureFormat override; do not mistake its Unknown default for a
+    // runtime format check.
+    if (!levels || levels>16 || !device_->GetTextureSize(texture,width,height) || !width || !height) return false;
+    u64 bytes=0;std::vector<BufferTextureCopyRegion> regions;
+    for (u32 mip=0;mip<levels;++mip) {
+        BufferTextureCopyRegion copy{};copy.bufferOffset=bytes;copy.imageSubresource={mip,0,1};
+        copy.imageExtent={std::max(1u,width>>mip),std::max(1u,height>>mip),1};
+        bytes+=u64(copy.imageExtent.width)*copy.imageExtent.height*4;regions.push_back(copy);
+    }
+    if (bytes>64ull*1024*1024) return false;
+    BufferDesc desc{};desc.size=bytes;desc.type=BufferType::Raw;desc.memoryUsage=GPUMemoryUsage::Readback;
+    const auto staging=device_->CreateBuffer(desc);const auto handle=device_->CreateCommandBuffer(CommandQueueType::Graphics);
+    auto* cmd=GetCommandBuffer(handle);
+    if (staging==handles::INVALID_RESOURCE || !cmd || !cmd->Begin()) {
+        if (handle!=handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(handle);
+        if (staging!=handles::INVALID_RESOURCE) device_->DestroyBuffer(staging);return false;
+    }
+    cmd->MemoryBarrier(PipelineStage::ComputeShader,PipelineStage::Transfer,AccessFlag::ShaderWrite,AccessFlag::TransferRead);
+    cmd->CopyTextureToBuffer(texture,staging,regions.data(),static_cast<u32>(regions.size()));
+    cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::Host,AccessFlag::TransferWrite,AccessFlag::HostRead);
+    QueueSubmitInfo submit{};submit.cmdBuffer=handle;
+    if (!cmd->End() || !device_->Submit(submit) || !cmd->WaitForCompletion()) {
+        PRIMAL_LOG_STREAM(Error,"SponzaCapture") << "HZB completion failed";std::_Exit(7);
+    }
+    bool saved=false;
+    if (const void* data=device_->MapBuffer(staging,0,bytes)) {
+        std::ofstream out(prefix+".bin",std::ios::binary);out.write(static_cast<const char*>(data),bytes);
+        out.close();saved=out.good();device_->UnmapBuffer(staging);
+    }
+    device_->DestroyCommandBuffer(handle);device_->DestroyBuffer(staging);
+    if (!saved) return false;
+    std::ofstream meta(prefix+".json");meta << "{\"native_frame\":" << pipelineFrame << ",\"width\":" << width
+        << ",\"height\":" << height << ",\"levels\":" << levels << ",\"bytes\":" << bytes
+        << ",\"format\":\"r32float\",\"format_source\":\"HZBSystem producer declaration\",\"completion_checked\":true}\n";return meta.good();
+}
+
+bool TestModularPipeline::CaptureTAAInputs(const std::string& prefix, u32 pipelineFrame) {
+    PostProcess::TAADiagnosticView view;
+    if (device_->GetPlatform()!=RHIPlatform::Metal ||
+        !PostProcess::GetTAADiagnosticView(pipelineFrame,view)) return false;
+    auto* metal=static_cast<MetalDevice*>(device_.get());
+    const char* names[]={"CurrentHDR","HistoryColor","Velocity","TAA_Output","Parameters","CurrentDepth","PreviousDepth"};
+    const MTL::PixelFormat formats[]={MTL::PixelFormatRGBA16Float,MTL::PixelFormatRGBA16Float,
+        MTL::PixelFormatRG16Float,MTL::PixelFormatRGBA16Float,MTL::PixelFormatInvalid,
+        MTL::PixelFormatDepth32Float,MTL::PixelFormatR32Float};
+    const u32 bpp[]={8,8,4,8,0,4,4};
+    struct Slice { u64 offset=0,bytes=0;u32 width=0,height=0,row=0; } slices[7];
+    u64 total=0;
+    for (u32 i=0;i<7;++i) {
+        auto& s=slices[i];s.offset=(total+255)&~u64(255);
+        if (i==4) {
+            u64 size=0;if (!device_->GetBufferByteSize(view.bindings[i],size) || size<160) return false;
+            s.bytes=160;
+        } else {
+            auto* texture=metal->GetTexture(view.bindings[i]);
+            if (!texture || !texture->GetNativeTexture()) return false;
+            auto* native=texture->GetNativeTexture();
+            if (native->pixelFormat()!=formats[i]) {
+                PRIMAL_LOG_STREAM(Error,"SponzaCapture") << "TAA actual format mismatch: " << names[i];
+                return false;
+            }
+            s.width=u32(native->width());s.height=u32(native->height());
+            if (!s.width || !s.height) return false;
+            s.row=(s.width*bpp[i]+255)&~u32(255);s.bytes=u64(s.row)*s.height;
+        }
+        total=s.offset+s.bytes;
+    }
+    if (!total || total>512ull*1024*1024) return false;
+    BufferDesc desc{};desc.size=total;desc.type=BufferType::Raw;desc.memoryUsage=GPUMemoryUsage::Readback;
+    const auto staging=device_->CreateBuffer(desc);
+    const auto handle=device_->CreateCommandBuffer(CommandQueueType::Graphics);
+    auto* cmd=GetCommandBuffer(handle);
+    if (staging==handles::INVALID_RESOURCE || !cmd || !cmd->Begin()) {
+        if (handle!=handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(handle);
+        if (staging!=handles::INVALID_RESOURCE) device_->DestroyBuffer(staging);
+        return false;
+    }
+    cmd->MemoryBarrier(PipelineStage::AllCommands|PipelineStage::Host,PipelineStage::Transfer,
+        AccessFlag::MemoryWrite|AccessFlag::HostWrite,AccessFlag::TransferRead);
+    for (u32 i=0;i<7;++i) {
+        const auto& s=slices[i];
+        if (i==4) cmd->CopyBuffer(view.bindings[i],staging,0,s.offset,160);
+        else {
+            BufferTextureCopyRegion region{};region.bufferOffset=s.offset;
+            region.bufferRowLength=s.row/bpp[i];region.bufferImageHeight=s.height;
+            region.imageSubresource={0,0,1};region.imageExtent={s.width,s.height,1};
+            cmd->CopyTextureToBuffer(view.bindings[i],staging,&region,1);
+        }
+    }
+    cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::Host,AccessFlag::TransferWrite,AccessFlag::HostRead);
+    QueueSubmitInfo submit{};submit.cmdBuffer=handle;
+    if (!cmd->End() || !device_->Submit(submit) || !cmd->WaitForCompletion()) {
+        PRIMAL_LOG_STREAM(Error,"SponzaCapture") << "TAA input completion failed";std::_Exit(7);
+    }
+    bool saved=false;
+    if (const void* data=device_->MapBuffer(staging,0,total)) {
+        std::filesystem::create_directories(prefix);
+        std::ofstream meta(std::filesystem::path(prefix)/"capture.json");
+        meta << "{\"native_frame\":" << pipelineFrame << ",\"completion_checked\":true,"
+             << "\"scope\":\"dispatch bindings read after completed frame\",\"resources\":[";
+        saved=meta.good();
+        for (u32 i=0;i<7;++i) {
+            const auto& s=slices[i];const std::string file=std::string(names[i])+".raw";
+            std::ofstream raw(std::filesystem::path(prefix)/file,std::ios::binary);
+            const auto* source=static_cast<const char*>(data)+s.offset;
+            if (i==4) raw.write(source,160);
+            else for (u32 y=0;y<s.height;++y) raw.write(source+u64(y)*s.row,u64(s.width)*bpp[i]);
+            raw.close();saved=saved && raw.good();
+            meta << (i?",":"") << "{\"pass\":\"" << (i==3?"TAAPass":"TAAPass.Inputs")
+                 << "\",\"name\":\"" << names[i] << "\",\"file\":\"" << file << "\",\"binding\":" << i
+                 << ",\"resource\":" << view.bindings[i] << ",\"width\":" << s.width << ",\"height\":" << s.height
+                 << ",\"bpp\":" << bpp[i] << ",\"metal_pixel_format\":" << u64(formats[i])
+                 << ",\"bytes\":" << (i==4?160:u64(s.width)*s.height*bpp[i]) << "}";
+        }
+        meta << "]}\n";meta.close();saved=saved && meta.good();device_->UnmapBuffer(staging);
+    }
+    device_->DestroyCommandBuffer(handle);device_->DestroyBuffer(staging);
+    return saved;
+}
+
+bool TestModularPipeline::CaptureLighting(const std::string& prefix, u32 pipelineFrame, u32 bufferIndex) {
+    // One selected completed frame only. These producers declare RGBA16F;
+    // these files preserve linear HDR and alpha, without display transforms.
+    auto* deferred = pipeline_->GetDeferredLightingModule();
+    auto* gather = pipeline_->GetGIGatherModule();
+    auto* fusion = pipeline_->GetFusionCompositeModule();
+    if (!deferred || !gather || !fusion) return false;
+    // Keep the original four-output capture by default. A selected source
+    // allows a follow-up to read just SPGI without duplicating large HDR files.
+    const char* selected = std::getenv("SPONZA_LIGHTING_CAPTURE_SOURCE");
+    if (selected && std::strcmp(selected, "spgi") != 0 &&
+        std::strcmp(selected, "gi") != 0 && std::strcmp(selected, "all") != 0 && std::strcmp(selected, "environment") != 0 && std::strcmp(selected, "taa") != 0) return false;
+    const u32 sourceMask = selected && std::strcmp(selected,"taa")==0 ? ((1u<<3)|(1u<<8)) : selected && std::strcmp(selected,"environment")==0 ? 0xE9u : !selected ? 0xFu : std::strcmp(selected, "all") == 0 ? 0x1Fu :
+        (std::strcmp(selected, "gi") == 0 ? ((1u << 1) | (1u << 4)) : (1u << 4));
+    auto* spgi = selected ? pipeline_->GetScreenProbePass() : nullptr;
+    auto* environment = pipeline_->GetEnvironmentVisibilityModule();
+    const ResourceHandle textures[] = {
+        deferred->GetOutputTexture(bufferIndex), gather->GetOutputTexture(),
+        // GetIndirectOutput returns previousIndex: frame+1 selects the frame
+        // just rendered. Never substitute the swapchain slot for the GI clock.
+        fusion->GetIndirectOutput(pipelineFrame + 1), fusion->GetFusionOutput(pipelineFrame),
+        spgi ? spgi->GetFilteredOutputTexture() : handles::INVALID_RESOURCE,
+        deferred->GetEnvironmentTexture(bufferIndex),
+        environment ? environment->GetVisibilityTexture(bufferIndex) : handles::INVALID_RESOURCE,
+        environment ? environment->GetVisibilityTexture(bufferIndex,true) : handles::INVALID_RESOURCE,
+        PostProcess::GetTAAOutputTexture(pipelineFrame)};
+    const char* names[] = {"direct", "gather", "indirect", "fusion", "spgi", "environment", "visibility", "visibility_half", "taa"};
+    for (u32 i = 0; i < 9; ++i) {
+        if ((sourceMask & (1u << i)) == 0) continue;
+        u32 width = 0, height = 0;
+        if (!device_->GetTextureSize(textures[i], width, height) || !width || !height) return false;
+        BufferDesc desc{};
+        desc.size = u64(width) * height * 8;
+        desc.type = BufferType::Raw;
+        desc.memoryUsage = GPUMemoryUsage::Readback;
+        const auto buffer = device_->CreateBuffer(desc);
+        const auto handle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        auto* command = rhi::GetCommandBuffer(handle);
+        if (buffer == handles::INVALID_RESOURCE || !command || !command->Begin()) {
+            if (handle != handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(handle);
+            if (buffer != handles::INVALID_RESOURCE) device_->DestroyBuffer(buffer);
+            return false;
+        }
+        BufferTextureCopyRegion region{};
+        region.imageSubresource = {0, 0, 1};
+        region.imageExtent = {width, height, 1};
+        command->CopyTextureToBuffer(textures[i], buffer, &region, 1);
+        QueueSubmitInfo submit{};
+        submit.cmdBuffer = handle;
+        if (!command->End() || !device_->Submit(submit) || !command->WaitForCompletion()) {
+            PRIMAL_LOG_STREAM(Error, "SponzaCapture") << "lighting completion failed: " << names[i] << std::endl;
+            std::_Exit(7);
+        }
+        bool saved = false;
+        if (const auto* data = static_cast<const char*>(device_->MapBuffer(buffer, 0, desc.size))) {
+            const std::string stem = prefix + "_" + names[i];
+            std::ofstream raw(stem + ".rgba16f", std::ios::binary);
+            raw.write(data, static_cast<std::streamsize>(desc.size));
+            raw.close();
+            std::ofstream meta(stem + ".json");
+            meta << "{\"format\":\"rgba16f-le\",\"format_source\":\"producer_declaration\","
+                 << "\"width\":" << width << ",\"height\":" << height
+                 << ",\"frame\":" << frameCount_ << ",\"pipeline_frame\":" << pipelineFrame
+                 << ",\"buffer_index\":" << bufferIndex << ",\"resource\":" << textures[i]
+                 << ",\"completion_checked\":true,\"capture_scope\":\"post_frame_output\"}\n";
+            meta.close();
+            saved = raw.good() && meta.good();
+            device_->UnmapBuffer(buffer);
+            PRIMAL_LOG_STREAM(Info, "SponzaCapture") << "lighting " << names[i]
+                << " " << width << "x" << height << " saved=" << saved << " " << stem << std::endl;
+        }
+        device_->DestroyCommandBuffer(handle);
+        device_->DestroyBuffer(buffer);
+        if (!saved) return false;
+    }
+    return true;
+}
+
+bool TestModularPipeline::CaptureGBuffer(const std::string& prefix) {
+    // These three producers are explicitly BGRA8_UNorm in GPUDrivenDrawPipeline.
+    // Capture only the selected frame; dimensions come from the actual texture.
+    auto& draw = GPUDrivenDrawPipeline::Get();
+    const ResourceHandle textures[] = {
+        draw.GetGBufferAlbedo(), draw.GetGBufferNormal(), draw.GetGBufferORM()};
+    const char* names[] = {"albedo", "normal", "orm"};
+    for (u32 i = 0; i < 3; ++i) {
+        u32 width = 0, height = 0;
+        if (!device_->GetTextureSize(textures[i], width, height) || !width || !height)
+            return false;
+        BufferDesc desc{};
+        desc.size = u64(width) * height * 4;
+        desc.type = BufferType::Raw;
+        desc.memoryUsage = GPUMemoryUsage::Readback;
+        const auto buffer = device_->CreateBuffer(desc);
+        const auto handle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+        auto* command = rhi::GetCommandBuffer(handle);
+        if (buffer == handles::INVALID_RESOURCE || !command || !command->Begin()) {
+            if (handle != handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(handle);
+            if (buffer != handles::INVALID_RESOURCE) device_->DestroyBuffer(buffer);
+            return false;
+        }
+        BufferTextureCopyRegion region{};
+        region.imageSubresource = {0, 0, 1};
+        region.imageExtent = {width, height, 1};
+        command->CopyTextureToBuffer(textures[i], buffer, &region, 1);
+        QueueSubmitInfo submit{};
+        submit.cmdBuffer = handle;
+        if (!command->End() || !device_->Submit(submit) || !command->WaitForCompletion()) {
+            PRIMAL_LOG_STREAM(Error, "SponzaCapture") << "GBuffer completion failed: " << names[i] << std::endl;
+            std::_Exit(7); // GPU ownership unknown: never map or destroy pending resources.
+        }
+        bool saved = false;
+        const auto* data = static_cast<const u8*>(device_->MapBuffer(buffer, 0, desc.size));
+        if (data) {
+            const std::string path = prefix + "_" + names[i] + ".ppm";
+            std::ofstream file(path, std::ios::binary);
+            file << "P6\n" << width << " " << height << "\n255\n";
+            for (u64 pixel = 0; pixel < u64(width) * height; ++pixel) {
+                const char rgb[] = {char(data[pixel * 4 + 2]), char(data[pixel * 4 + 1]), char(data[pixel * 4])};
+                file.write(rgb, 3);
+            }
+            file.close();
+            saved = file.good();
+            device_->UnmapBuffer(buffer);
+            PRIMAL_LOG_STREAM(Info, "SponzaCapture") << "GBuffer " << names[i]
+                << " " << width << "x" << height << " saved=" << saved << " " << path << std::endl;
+        }
+        device_->DestroyCommandBuffer(handle);
+        device_->DestroyBuffer(buffer);
+        if (!saved) return false;
+    }
+    return true;
 }
 
 #ifdef TEST_METAL_GI_FUSION

@@ -121,6 +121,11 @@ kernel void screen_probe_gather(
     float3 irradianceSum = float3(0.0f);
     float  confidenceOut = 0.0f;
     float  weightSum     = 0.0f;
+    // Frozen Vulkan tier0 reconstruction: retain the same-surface fallback
+    // when normal attenuation leaves only a sub-threshold weight sum.
+    float3 fallbackIrradianceSum = float3(0.0f);
+    float fallbackConfidenceOut = 0.0f;
+    float fallbackWeightSum = 0.0f;
 
     for (int i = 0; i < 16; ++i) {
         int2 npc = baseProbe + int2(i % 4 - 1, i / 4 - 1);
@@ -157,24 +162,32 @@ kernel void screen_probe_gather(
         float3 irr = evalSHIrradiance(sh0, sh1, sh2, sh3, surfaceNormal);   // B1
         irr = max(irr, float3(0.0f));
 
-        // Reject probes whose normal faces away from the pixel's surface.
+        float baseWeight = spatialWeight * geometryWeight * sh0w;
+        fallbackIrradianceSum += irr * baseWeight;
+        fallbackConfidenceOut += sh0w * baseWeight;
+        fallbackWeightSum += baseWeight;
+
+        // Placement normals attenuate curved/two-sided receivers continuously.
         float normalWeight = 1.0f;
         float4 probeNormData = probeNormals[probeIdx];
         if (probeNormData.w > 0.0f) {
             float3 probeN = normalize(probeNormData.xyz);
-            float nDot = max(dot(surfaceNormal, probeN), 0.0f);
-            // Gentle falloff: probes facing similar direction contribute fully,
-            // orthogonal probes contribute half, opposite probes contribute ~0.
-            normalWeight = pow(nDot, 2.0f);
+            float nDot = dot(surfaceNormal, probeN);
+            normalWeight = mix(0.15f, 1.0f, smoothstep(-0.25f, 0.8f, nDot));
         }
 
-        float w = spatialWeight * geometryWeight * normalWeight * sh0w;
+        float w = baseWeight * normalWeight;
         irradianceSum += irr * w;
         confidenceOut += sh0w * w;
         weightSum += w;
     }
 
-    if (weightSum <= 0.0f) {
+    if (weightSum <= 1e-6f && fallbackWeightSum > 1e-6f) {
+        irradianceSum = fallbackIrradianceSum;
+        confidenceOut = fallbackConfidenceOut;
+        weightSum = fallbackWeightSum;
+    }
+    if (weightSum <= 1e-6f) {
         outputTexture.write(float4(0.0f, 0.0f, 0.0f, 0.0f), tid);
         return;
     }

@@ -30,6 +30,13 @@ struct VisibilityCB {
     math::m4x4 prev_view_projection;
 };
 static_assert(sizeof(VisibilityCB)==208);
+// Keep Vulkan's frozen 208B ABI. Native MSL additionally bounds every BVH read.
+struct MetalVisibilityCB { VisibilityCB base; u32 counts[4]{}; };
+static_assert(sizeof(MetalVisibilityCB)==224);
+static_assert(offsetof(MetalVisibilityCB,counts)==208);
+u64 VisibilityCBSize(RHIDeviceBase* device) {
+    return device->GetPlatform()==RHIPlatform::Metal ? sizeof(MetalVisibilityCB) : sizeof(VisibilityCB);
+}
 static_assert(offsetof(VisibilityCB, camera)==64);
 static_assert(offsetof(VisibilityCB, policy)==96);
 static_assert(offsetof(VisibilityCB, target)==128);
@@ -104,13 +111,13 @@ bool EnvironmentVisibilityModule::UploadOwnGeometry(u32 frame) {
     return ok;
 }
 bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle trace,ShaderHandle resolve,u32 w,u32 h,u32 targetW,u32 targetH) {
-    if(!device||device->GetPlatform()!=RHIPlatform::Vulkan||!w||!h||!targetW||!targetH||trace==handles::INVALID_SHADER||resolve==handles::INVALID_SHADER)return false;
+    if(!device||(device->GetPlatform()!=RHIPlatform::Vulkan && device->GetPlatform()!=RHIPlatform::Metal)||!w||!h||!targetW||!targetH||trace==handles::INVALID_SHADER||resolve==handles::INVALID_SHADER)return false;
     if(device_)Shutdown();
     device_=device;width_=w;height_=h;target_width_=targetW;target_height_=targetH;
     const char* frameAudit=std::getenv("PRIMAL_PAIR_FRAME_AUDIT");frame_audit_enabled_=frameAudit && std::strcmp(frameAudit,"1")==0;
     for(auto& serial:experimental_consumed_serials_)serial=0;
     DescriptorSetLayoutBinding bindings[10]={
-        {0,DescriptorType::SampledDepthImage,1,ShaderStage::Compute,nullptr},
+        {0,device_->GetPlatform()==RHIPlatform::Metal?DescriptorType::SampledImage:DescriptorType::SampledDepthImage,1,ShaderStage::Compute,nullptr},
         {1,DescriptorType::SampledImage,1,ShaderStage::Compute,nullptr},
         {2,DescriptorType::SampledImage,1,ShaderStage::Compute,nullptr},
         {3,DescriptorType::StorageImage,1,ShaderStage::Compute,nullptr},
@@ -130,13 +137,13 @@ bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle 
         pipelines_[p]=device_->CreateComputePipeline(d);
         for(u32 i=0;i<3;++i) {
             sets_[p][i]=device_->CreateDescriptorSet({set_layout_});
-            BufferDesc b{};b.size=sizeof(VisibilityCB);b.type=BufferType::Constant;
+            BufferDesc b{};b.size=VisibilityCBSize(device_);b.type=BufferType::Constant;
             b.usage=b.memoryUsage=GPUMemoryUsage::Dynamic;b.bindFlags=u32(BufferUsageFlags::Uniform);
             cb_[p][i]=device_->CreateBuffer(b);
             if(sets_[p][i]==handles::INVALID_DESCRIPTOR_SET||cb_[p][i]==handles::INVALID_RESOURCE){Shutdown();return false;}
         }
     }
-    if(const char* e=std::getenv("PRIMAL_ENV_SDF_HYBRID");e && std::strcmp(e,"1")==0){
+    if(const char* e=std::getenv("PRIMAL_ENV_SDF_HYBRID");device_->GetPlatform()==RHIPlatform::Vulkan && e && std::strcmp(e,"1")==0){
         hybrid_env_requested_=true;auto exact=[](const char* n){const char* v=std::getenv(n);return v&&std::strcmp(v,"1")==0;};
         const char* wg=std::getenv("PRIMAL_ENV_TRACE_WORKGROUP");const bool compatible=(!wg||std::strcmp(wg,"0")==0)&&!exact("PRIMAL_ENV_CROSS_RAY_PAIR")&&!exact("PRIMAL_EXPERIMENT_ENV_SAH");
         if(compatible){std::ifstream f(environment_hybrid::kShaderPath,std::ios::binary|std::ios::ate);if(f&&f.tellg()>0){const auto n=static_cast<size_t>(f.tellg());std::vector<u8> bytes(n);f.seekg(0);if(f.read(reinterpret_cast<char*>(bytes.data()),n) && environment_hybrid::Hash(bytes)==environment_hybrid::kShaderFNV){hybrid_shader_hash_=environment_hybrid::kShaderFNV;hybrid_shader_=device_->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"main");}}
@@ -148,7 +155,7 @@ bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle 
         }
         PRIMAL_LOG_STREAM(Info,"Render") << "[ENV_FIELD] startup=1 compatible=" << compatible << " pipeline_ready=" << hybrid_requested_;
     }
-    if(const char* e=std::getenv("PRIMAL_ENV_CROSS_RAY_PAIR");e && std::strcmp(e,"1")==0){
+    if(const char* e=std::getenv("PRIMAL_ENV_CROSS_RAY_PAIR");device_->GetPlatform()==RHIPlatform::Vulkan && e && std::strcmp(e,"1")==0){
         pair_env_requested_=true;auto exact=[](const char* n){const char* v=std::getenv(n);return v&&std::strcmp(v,"1")==0;};
         const char* wg=std::getenv("PRIMAL_ENV_TRACE_WORKGROUP");
         const bool compatible=(!wg||std::strcmp(wg,"0")==0) && !exact("PRIMAL_EXPERIMENT_ENV_SAH") &&
@@ -161,7 +168,7 @@ bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle 
         }
         PRIMAL_LOG_STREAM(Info,"Render") << "[ENV_CROSS_RAY_PAIR] startup=1 compatible=" << compatible << " pipeline_ready=" << pair_requested_ << std::endl;
     }
-    const char* workgroupEnv=std::getenv("PRIMAL_ENV_TRACE_WORKGROUP");
+    const char* workgroupEnv=device_->GetPlatform()==RHIPlatform::Vulkan ? std::getenv("PRIMAL_ENV_TRACE_WORKGROUP") : nullptr;
     const bool workgroupValid=workgroup_experiment::Parse(workgroupEnv,false,workgroup_requested_);
     if(workgroupEnv) {
         if(workgroupValid && workgroup_requested_==32) {
@@ -188,7 +195,7 @@ bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle 
     if(!zero){Shutdown();return false;}std::memset(zero,0,64);device_->UnmapBuffer(dummy_geometry_);
     // Immutable fail-closed parameters let a failed per-frame MapBuffer
     // still dispatch black output instead of retaining a prior white frame.
-    BufferDesc failed{};failed.size=sizeof(VisibilityCB);failed.type=BufferType::Constant;
+    BufferDesc failed{};failed.size=VisibilityCBSize(device_);failed.type=BufferType::Constant;
     failed.usage=failed.memoryUsage=GPUMemoryUsage::Dynamic;failed.bindFlags=u32(BufferUsageFlags::Uniform);
     unsupported_cb_=device_->CreateBuffer(failed);
     auto* failedMap=unsupported_cb_!=handles::INVALID_RESOURCE?device_->MapBuffer(unsupported_cb_):nullptr;
@@ -197,6 +204,7 @@ bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle 
     unsupported.dimensions[2]=(target_width_+1)/2;unsupported.dimensions[3]=(target_height_+1)/2;
     unsupported.target[0]=target_width_;unsupported.target[1]=target_height_;
     unsupported.policy[1]=0x80000000u;
+    std::memset(failedMap,0,VisibilityCBSize(device_));
     std::memcpy(failedMap,&unsupported,sizeof(unsupported));device_->UnmapBuffer(unsupported_cb_);
     if(!IsInitialized()){Shutdown();return false;}return true;
 }
@@ -247,7 +255,7 @@ EnvironmentVisibilityOutputs EnvironmentVisibilityModule::AddPasses(RenderGraph&
     if(!IsInitialized()||original.depth==handles::INVALID_RESOURCE||original.normal==handles::INVALID_RESOURCE||original.orm==handles::INVALID_RESOURCE||
        !original.depth_rg.IsValid()||!original.normal_rg.IsValid()||!original.orm_rg.IsValid())return out;
     const u32 slot=original.current_buffer_index%3;
-    if(original.geometry_still_current &&
+    if(device_->GetPlatform()!=RHIPlatform::Metal && original.geometry_still_current &&
        !experimental_sah::TryConsumeSlot(device_->FrameSlotCompletions(),slot,experimental_consumed_serials_)) {
         PRIMAL_LOG_STREAM(Error,"Render") << "[EnvironmentVisibility] experimental_sah_slot_rejected slot=" << slot;
         return out;
@@ -318,9 +326,28 @@ EnvironmentVisibilityOutputs EnvironmentVisibilityModule::AddPasses(RenderGraph&
                 actual.camera.w=jitterValid?jitter.x:0.0f;
                 actual.policy[2]=std::bit_cast<u32>(jitterValid?jitter.y:0.0f);
                 if(!jitterValid){actual.policy[1]|=0x80000000u;actual.policy[0]=0u;}
+                MetalVisibilityCB native{};
+                ResourceHandle nativeGeometry[4]{};
+                const bool metal=device_->GetPlatform()==RHIPlatform::Metal;
+                if(metal) {
+                    constexpr u64 strides[4]={sizeof(ray_geometry::Node),sizeof(ray_geometry::Node),
+                        sizeof(ray_geometry::Triangle),sizeof(ray_geometry::Instance)};
+                    for(u32 i=0;i<4;++i) {
+                        u64 bytes=0;
+                        const bool valid=inputs.geometry[i]!=handles::INVALID_RESOURCE &&
+                            device_->GetBufferByteSize(inputs.geometry[i],bytes) && bytes>=strides[i] &&
+                            bytes/strides[i]<=0xffffffffu;
+                        native.counts[i]=valid?static_cast<u32>(bytes/strides[i]):0u;
+                        // A zero-capacity policy prevents shader reads, but Metal
+                        // validation still requires one element at every argument.
+                        nativeGeometry[i]=valid?inputs.geometry[i]:dummy_geometry_;
+                        if(!valid)actual.policy[0]=0u;
+                    }
+                    native.base=actual;
+                }
                 auto parameterBuffer=unsupported_cb_;
                 if(void* mapped=device_->MapBuffer(cb_[phase][slot])) {
-                    std::memcpy(mapped,&actual,sizeof(actual));device_->UnmapBuffer(cb_[phase][slot]);
+                    std::memcpy(mapped,metal?static_cast<const void*>(&native):&actual,VisibilityCBSize(device_));device_->UnmapBuffer(cb_[phase][slot]);
                     parameterBuffer=cb_[phase][slot];
                 }
                 if(inputs.geometry_still_current) {
@@ -335,6 +362,21 @@ EnvironmentVisibilityOutputs EnvironmentVisibilityModule::AddPasses(RenderGraph&
                 const bool useWorkgroup=!hybrid_env_requested_ && !pair_env_requested_ && phase==0 && workgroup_pipeline_!=handles::INVALID_PIPELINE && actual.policy[0]==1u && !(actual.policy[1]&0x80000000u) && parameterBuffer==cb_[phase][slot] && !inputs.legacy_unoccluded;
                 const bool usePair=!hybrid_env_requested_ && phase==0 && pair_requested_ && !useWorkgroup && actual.policy[0]==1u && !(actual.policy[1]&0x80000000u) && parameterBuffer==cb_[phase][slot] && !inputs.legacy_unoccluded;
                 const bool useHybrid=phase==0 && hybridReady && hybridFrameSerial && hybrid_serial_[slot]==hybridFrameSerial && device_->FrameSlotCompletions().CanReuse(slot,0) && device_->FrameSlotCompletions().Serial(slot)==hybridFrameSerial && inputs.hybrid_still_current && inputs.hybrid_still_current() && actual.policy[0]==1u && !(actual.policy[1]&0x80000000u) && parameterBuffer==cb_[phase][slot] && !inputs.legacy_unoccluded;
+                if(metal) {
+                    const char* prefix=std::getenv("SPONZA_ENV_CAPTURE_PREFIX");
+                    const char* selected=std::getenv("SPONZA_ENV_CAPTURE_NATIVE_FRAME");
+                    if(prefix && selected && inputs.frame_index==std::strtoul(selected,nullptr,10)) {
+                        std::ofstream metadata(std::string(prefix)+(phase?"_resolve.json":"_trace.json"));
+                        metadata << "{\"native_frame\":" << inputs.frame_index << ",\"slot\":" << slot
+                            << ",\"cb_bytes\":224,\"mapped\":" << (parameterBuffer==cb_[phase][slot]?"true":"false")
+                            << ",\"ready\":" << actual.policy[0] << ",\"policy\":" << actual.policy[1]
+                            << ",\"temporal\":" << actual.target[2] << ",\"blend\":" << actual.target[3]
+                            << ",\"jitter\":[" << actual.camera.w << "," << std::bit_cast<float>(actual.policy[2]) << "]"
+                            << ",\"source\":[" << width_ << "," << height_ << "]"
+                            << ",\"target\":[" << target_width_ << "," << target_height_ << "]"
+                            << ",\"counts\":[" << native.counts[0] << "," << native.counts[1] << "," << native.counts[2] << "," << native.counts[3] << "]}\n";
+                    }
+                }
                 const auto selectedSet=useHybrid?hybrid_sets_[slot]:sets_[phase][slot];
                 DescriptorImageInfo images[5]{};DescriptorBufferInfo buffers[6]{};WriteDescriptorSet writes[11]{};
                 const ResourceHandle tex[5]={inputs.depth,inputs.normal,inputs.orm,phase?full_[slot]:half_[slot],phase?half_[slot]:half_[(slot+2)%3]};
@@ -343,12 +385,12 @@ EnvironmentVisibilityOutputs EnvironmentVisibilityModule::AddPasses(RenderGraph&
                     images[i].imageView=tex[i];images[i].sampler=handles::INVALID_SAMPLER;
                     images[i].imageLayout=i==3?ResourceState::UnorderedAccess:ResourceState::ShaderResource;
                     writes[i].dstSet=selectedSet;writes[i].dstBinding=bindings[i];writes[i].descriptorCount=1;
-                    writes[i].descriptorType=i==3?DescriptorType::StorageImage:(i==0?DescriptorType::SampledDepthImage:DescriptorType::SampledImage);writes[i].imageInfo=&images[i];
+                    writes[i].descriptorType=i==3?DescriptorType::StorageImage:(i==0 && !metal?DescriptorType::SampledDepthImage:DescriptorType::SampledImage);writes[i].imageInfo=&images[i];
                 }
-                buffers[0].buffer=parameterBuffer;buffers[0].range=sizeof(VisibilityCB);
+                buffers[0].buffer=parameterBuffer;buffers[0].range=VisibilityCBSize(device_);
                 writes[5].dstSet=selectedSet;writes[5].dstBinding=4;writes[5].descriptorCount=1;writes[5].descriptorType=DescriptorType::UniformBuffer;writes[5].bufferInfo=&buffers[0];
                 for(u32 i=0;i<4;++i) {
-                    buffers[i+1].buffer=inputs.geometry[i]!=handles::INVALID_RESOURCE?inputs.geometry[i]:dummy_geometry_;buffers[i+1].range=~0ull;
+                    buffers[i+1].buffer=metal?nativeGeometry[i]:(inputs.geometry[i]!=handles::INVALID_RESOURCE?inputs.geometry[i]:dummy_geometry_);buffers[i+1].range=~0ull;
                     writes[i+6].dstSet=selectedSet;writes[i+6].dstBinding=13+i;writes[i+6].descriptorCount=1;writes[i+6].descriptorType=DescriptorType::StorageBuffer;writes[i+6].bufferInfo=&buffers[i+1];
                 }
                 if(useHybrid){buffers[5]={hybrid_buffers_[slot],0,environment_hybrid::kFieldBytes};writes[10].dstSet=selectedSet;writes[10].dstBinding=17;writes[10].descriptorCount=1;writes[10].descriptorType=DescriptorType::StorageBuffer;writes[10].bufferInfo=&buffers[5];}

@@ -34,8 +34,7 @@ kernel void ddgi_update_irradiance(
     device float4* irradianceOutput [[buffer(4)]],
     device const uint* probeUpdateList [[buffer(5)]],
     device float* confidenceBuffer [[buffer(6)]],
-    // GI 能量根治方案 Phase 3.1: 每探针 openSky 统计（逃逸占比 EMA），
-    // gather 端天空分类加权用（Vulkan flat binding 7 对等）。
+    // Two floats per probe: escape ratio and sky-energy ratio, matching the host ABI.
     device float* openSkyBuffer [[buffer(7)]]
 )
 {
@@ -55,23 +54,26 @@ kernel void ddgi_update_irradiance(
     // =====================================================================
     threadgroup PartialSH tg_partial[64];
     threadgroup uint tg_hitFlags[64];
+    threadgroup float2 tg_energy[64];
     threadgroup uint tg_escapeFlags[64];   // Phase 3.1: 每 lane 逃逸射线计数
 
     for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i)
         tg_partial[tid].sh[i] = float3(0.0f);
     tg_hitFlags[tid] = 0u;
     tg_escapeFlags[tid] = 0u;
+    tg_energy[tid] = float2(0);
 
     for (uint r = tid; r < vol.RaysPerProbe; r += 64u) {
         DDGIRayData ray = rayData[rayOffset + r];
         float3 radiance = ray.radiance_and_dist.xyz;
         float hitDist = ray.radiance_and_dist.w;
 
-        if (hitDist <= -1.5f) {
+        if (vol.RaySampleMode == 7 ? hitDist == -2.0f : hitDist <= -1.5f) {
             // C3.3：逃逸（w=-2，越出 RayMaxDistance）→ 天空。Phase 1.2 孪生
             // 同步（DDGIUpdateIrradiance.comp）：不再按 w 覆盖成 DDGI_SKY_COLOR
             // 常量——逃逸能量由 finalize 写入 ray_buffer（Vulkan 为
             // EvaluateSkyBase×SkyColor.xyz 单一事实源），这里直接沿用。
+            tg_energy[tid] += float2(dot(radiance,float3(0.2126f,0.7152f,0.0722f)));
             tg_escapeFlags[tid] += 1u;   // Phase 3.1: 逃逸计数
 #ifdef PRIMAL_DDGI_PROJ_NOSKY
             // C 系列归因旋钮：逃逸/覆盖天空能量断电——A/B 实测 escape 天空
@@ -91,6 +93,7 @@ kernel void ddgi_update_irradiance(
             // record self-light and destabilize the SH. Fade them out.
             float bail = smoothstep(0.0f, vol.SdfVoxelSizes[0].x * 2.0f, hitDist);
             radiance *= bail;
+            tg_energy[tid].y += dot(radiance,float3(0.2126f,0.7152f,0.0722f));
             // One lane can process multiple rays when RaysPerProbe > 64.
             // Count every hit rather than recording only a boolean.
             tg_hitFlags[tid] += 1u;
@@ -144,6 +147,7 @@ kernel void ddgi_update_irradiance(
     for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i) shAccum[i] = float3(0.0f);
 
     uint hitCount = 0u;
+    float2 energy = float2(0);
     uint escapeCount = 0u;   // Phase 3.1
     // tg_partial/tg_hitFlags contain one aggregate per physical lane, not one
     // entry per ray.  Iterating RaysPerProbe here read past the 64-entry
@@ -155,6 +159,7 @@ kernel void ddgi_update_irradiance(
         }
         hitCount += tg_hitFlags[t];
         escapeCount += tg_escapeFlags[t];
+        energy += tg_energy[t];
     }
 
     // NOTE (2026-09-10): the former +x/+y/+z neighbor-history blend
@@ -176,7 +181,7 @@ kernel void ddgi_update_irradiance(
 
     uint confidenceBase = probeIdx * 4u;
     float conv = confidenceBuffer[confidenceBase + 3u];
-    bool firstUpdate = conv < 0.5f;
+    bool firstUpdate = vol.RaySampleMode == 7 ? conv <= 0.0f : conv < 0.5f;
     float settledAlpha = clamp(vol.TemporalAlpha, 0.0f, 1.0f);
     // DDGI_FREEZE=1 通过 TemporalAlpha=1.0 传入：alpha=0 → 100% history → 探针冻结
     float alpha = firstUpdate ? 1.0f : mix(0.35f, settledAlpha, min(conv * 2.0f, 1.0f));
@@ -198,7 +203,8 @@ kernel void ddgi_update_irradiance(
     for (uint i = 0; i < DDGI_SH_COEFF_COUNT; ++i) {
         float3 history = irradianceHistory[probeBase + i].xyz;
         uint3 bits = as_type<uint3>(history);
-        if (((bits.x | bits.y | bits.z) & 0x7F800000u) == 0x7F800000u)
+        // Test each exponent independently: OR across finite channels can form 255.
+        if (any((bits & uint3(0x7F800000u)) == uint3(0x7F800000u)))
             history = float3(0.0f);
 
         cachedHist[i] = history;
@@ -240,8 +246,10 @@ kernel void ddgi_update_irradiance(
     // Phase 3.1 孪生同步（DDGIUpdateIrradiance.comp）: openSky 统计写入——
     // 逃逸占比 EMA（α=0.35）；未收敛探针首次非零直接发布，避免系统性低估。
     float curOpen = float(escapeCount) / float(vol.RaysPerProbe);
-    float prevOpen = openSkyBuffer[probeIdx];
-    openSkyBuffer[probeIdx] = (prevOpen <= 0.0f && curOpen > 0.0f && age < 0.5f)
-                                  ? curOpen
-                                  : mix(prevOpen, curOpen, 0.35f);
+    const float2 previous(openSkyBuffer[probeIdx*2u],openSkyBuffer[probeIdx*2u+1u]);
+    const bool firstPublish=previous.x<=0 && curOpen>0 && conv<0.5f;
+    const float ratio=energy.y>1e-6f?clamp(energy.x/energy.y,0.0f,1.0f):previous.y;
+    openSkyBuffer[probeIdx*2u]=firstPublish?curOpen:mix(previous.x,curOpen,0.35f);
+    openSkyBuffer[probeIdx*2u+1u]=energy.y>1e-6f?
+        (firstPublish?ratio:mix(previous.y,ratio,0.35f)):previous.y;
 }

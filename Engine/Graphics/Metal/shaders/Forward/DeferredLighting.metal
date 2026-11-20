@@ -347,8 +347,8 @@ fragment float4 fragmentLighting_v3(
 
     // Specular IBL
     float3 R = reflect(-V, N);
-    float MAX_REFLECTION_LOD = 4.0;
-    float3 prefilteredColor = SamplePrefilter(R, roughness * MAX_REFLECTION_LOD, prefilterMap);
+    float MAX_REFLECTION_LOD = float(prefilterMap.get_num_mip_levels() - 1u);
+    float3 prefilteredColor = SamplePrefilter(R, clamp(roughness, 0.0f, 1.0f) * MAX_REFLECTION_LOD, prefilterMap);
     float2 brdf = SampleBRDFLUT(float2(max(dot(N, V), 0.0), roughness), brdfLUT);
     float3 specular_ibl = prefilteredColor * (F_ibl * brdf.x + brdf.y);
 
@@ -375,6 +375,17 @@ fragment float4 fragmentBlit(
     color = toneMap(color);
 
     return float4(color, 1.0);
+}
+
+// Final display contract: TAA and ToneMapping have already run. Match the
+// frozen Vulkan Blit.frag with one linear LDR sample and opaque output.
+fragment float4 fragmentBlitLDR(
+    VertexOut in [[stage_in]],
+    texture2d<float> inputTex [[texture(0)]])
+{
+    constexpr sampler s(coord::normalized, filter::linear, mip_filter::none,
+                        address::clamp_to_edge);
+    return float4(inputTex.sample(s, in.uv).rgb, 1.0f);
 }
 
 fragment float4 fragmentBlitDDGI(
@@ -472,20 +483,47 @@ float2 DiagShadowMapRaw(float2 screenUV, texture2d<float> sm0, texture2d<float> 
 // GPU-Driven Deferred PBR Lighting with DDGI Indirect
 // ================================================================================================
 
-fragment float4 fragmentLighting_gpuDriven(
-    VertexOut in [[stage_in]],
-    constant ViewData& viewData [[buffer(0)]],
-    constant SceneData& sceneData [[buffer(1)]],
+// Frozen DeferredLighting direct-sun contract. Keep this local: the shared
+// PBR library serves other passes with a different Smith remapping/clamp.
+static float DeferredDistributionGGX(float3 n, float3 h, float roughness) {
+    float a2 = roughness * roughness * roughness * roughness;
+    float nh = max(dot(n, h), 0.f);
+    float denominator = nh * nh * (a2 - 1.f) + 1.f;
+    return a2 / (PI * denominator * denominator);
+}
 
-    texture2d<float> albedoTex [[texture(2)]],
-    texture2d<float> normalTex [[texture(3)]],
-    texture2d<float> ormTex [[texture(4)]],
-    depth2d<float> depthTex [[texture(5)]],
-    texture2d<float> shadowVisibility [[texture(6)]],
-    texture2d<float> shadowMoments0 [[texture(13)]],
-    texture2d<float> shadowMoments1 [[texture(14)]],
+static float DeferredGeometrySmith(float3 n, float3 v, float3 l, float roughness) {
+    float nv = max(dot(n, v), 0.f);
+    float nl = max(dot(n, l), 0.f);
+    // The frozen shader uses raw roughness as k, not (roughness + 1)^2 / 8.
+    return (nv / (nv * (1.f - roughness) + roughness))
+         * (nl / (nl * (1.f - roughness) + roughness));
+}
 
-    sampler defaultSampler [[sampler(8)]]
+static float3 DeferredSky(float3 direction, float3 sun, float3 color) {
+    float3 sky = mix(float3(4.40f, 4.20f, 3.80f), float3(5.50f, 5.76f, 6.00f),
+                     pow(saturate(direction.y), .45f));
+    float3 reference = float3(1.f, .85f, .6f);
+    float3 weights = float3(.2126f, .7152f, .0722f);
+    float luminance = dot(color, weights);
+    float3 halo = luminance > 1e-4f ? color * (dot(reference, weights) / luminance) : reference;
+    return sky + halo * pow(saturate(dot(direction, sun)), 16.f) * 1.2f;
+}
+
+static float4 deferredDirectNative(
+    VertexOut in,
+    constant ViewData& viewData,
+    constant SceneData& sceneData,
+
+    texture2d<float> albedoTex,
+    texture2d<float> normalTex,
+    texture2d<float> ormTex,
+    depth2d<float> depthTex,
+    texture2d<float> shadowVisibility,
+    texture2d<float> shadowMoments0,
+    texture2d<float> shadowMoments1,
+
+    sampler defaultSampler
 ) {
     constexpr sampler linearSampler(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
     constexpr sampler depthSampler(coord::normalized, filter::nearest, mip_filter::none, address::clamp_to_edge);
@@ -498,9 +536,12 @@ fragment float4 fragmentLighting_gpuDriven(
     normal = normal * 2.0 - 1.0;
     float depth = depthTex.sample(depthSampler, uv);
 
-    // Discard background pixels
-    if (depth >= 1.0) {
-        discard_fragment();
+    // Background follows the same sun-colored sky contract as frozen Vulkan.
+    if (depth >= 1.f) {
+        float2 ndc = float2(uv.x * 2.f - 1.f, 1.f - uv.y * 2.f);
+        float4 farPosition = viewData.invViewProjection * float4(ndc, 1.f, 1.f);
+        float3 direction = normalize(farPosition.xyz / max(farPosition.w, 1e-6f) - sceneData.viewPos.xyz);
+        return float4(DeferredSky(direction, normalize(sceneData.lightPos.xyz), sceneData.lightColor.rgb), 1.f);
     }
 
     float4 orm = ormTex.sample(linearSampler, uv);
@@ -545,12 +586,12 @@ fragment float4 fragmentLighting_gpuDriven(
         float3 radiance = sceneData.lightColor.rgb * shadow;
 
         // Cook-Torrance BRDF
-        float NDF = DistributionGGX(N, H, roughness);
-        float G   = GeometrySmith(N, V, L, roughness);
+        float NDF = DeferredDistributionGGX(N, H, roughness);
+        float G   = DeferredGeometrySmith(N, V, L, roughness);
         float3 F  = FresnelSchlick(max(dot(H, V), 0.0), F0);
 
         float3 numerator    = NDF * G * F;
-        float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.0001;
+        float denominator = 4.0 * max(dot(N, V), 0.0) * max(dot(N, L), 0.0) + 0.001;
         float3 specular = numerator / denominator;
 
         float3 kS = F;
@@ -577,6 +618,76 @@ fragment float4 fragmentLighting_gpuDriven(
     // Output: RGB = direct lighting (HDR linear), A = shadow factor for indirect modulation
     return float4(color, shadow);
 }
+fragment float4 fragmentLighting_gpuDriven(
+    VertexOut in [[stage_in]],
+    constant ViewData& viewData [[buffer(0)]],
+    constant SceneData& sceneData [[buffer(1)]],
+
+    texture2d<float> albedoTex [[texture(2)]],
+    texture2d<float> normalTex [[texture(3)]],
+    texture2d<float> ormTex [[texture(4)]],
+    depth2d<float> depthTex [[texture(5)]],
+    texture2d<float> shadowVisibility [[texture(6)]],
+    texture2d<float> shadowMoments0 [[texture(13)]],
+    texture2d<float> shadowMoments1 [[texture(14)]],
+
+    sampler defaultSampler [[sampler(8)]]
+) {
+    return deferredDirectNative(in,viewData,sceneData,albedoTex,normalTex,ormTex,depthTex,shadowVisibility,shadowMoments0,shadowMoments1,defaultSampler);
+}
+
+// Native MRT keeps display IBL separate from direct radiance consumed by GI.
+struct NativeDeferredEnvironment {float4 direct [[color(0)]]; float4 environment [[color(1)]];};
+fragment NativeDeferredEnvironment fragmentLighting_gpuDrivenEnvironment(
+    VertexOut in [[stage_in]],
+    constant ViewData& viewData [[buffer(0)]],
+    constant SceneData& sceneData [[buffer(1)]],
+
+    texture2d<float> albedoTex [[texture(2)]],
+    texture2d<float> normalTex [[texture(3)]],
+    texture2d<float> ormTex [[texture(4)]],
+    depth2d<float> depthTex [[texture(5)]],
+    texture2d<float> shadowVisibility [[texture(6)]],
+    texture2d<float> shadowMoments0 [[texture(13)]],
+    texture2d<float> shadowMoments1 [[texture(14)]],
+
+    texture2d<float> ssaoTex [[texture(7)]],
+    texturecube<float> prefilterMap [[texture(11)]],
+    texture2d<float> brdfLUT [[texture(12)]],
+    sampler defaultSampler [[sampler(8)]]
+) {
+    NativeDeferredEnvironment out;
+    out.direct=deferredDirectNative(in,viewData,sceneData,albedoTex,normalTex,ormTex,depthTex,shadowVisibility,shadowMoments0,shadowMoments1,defaultSampler);
+    const float directShadow=out.direct.a;
+    out.direct.a=1.f; // Frozen deferred MRT contract; shadow is not downstream coverage.
+    out.environment=float4(0);
+    constexpr sampler linear(coord::normalized,filter::linear,mip_filter::linear,address::clamp_to_edge);
+    constexpr sampler nearest(coord::normalized,filter::nearest,mip_filter::none,address::clamp_to_edge);
+    float depth=depthTex.sample(nearest,in.uv);
+    if(depth>=1.f || sceneData.ambientLight.w<.5f)return out;
+    float3 albedo=albedoTex.sample(linear,in.uv).rgb;
+    float3 n=normalize(normalTex.sample(linear,in.uv).xyz*2.f-1.f);
+    float3 orm=ormTex.sample(linear,in.uv).rgb;
+    float4 world=viewData.invViewProjection*float4(in.uv.x*2.f-1.f,1.f-in.uv.y*2.f,depth,1.f);
+    float3 v=normalize(sceneData.viewPos.xyz-world.xyz/max(world.w,1e-6f));
+    float roughness=max(orm.g,.04f),nov=max(dot(n,v),0.f);
+    float3 f0=mix(float3(.04f),albedo,orm.b);
+    float3 f=f0+(max(float3(1.f-roughness),f0)-f0)*pow(clamp(1.f-nov,0.f,1.f),5.f);
+    float lod=clamp(roughness,0.f,1.f)*float(max(prefilterMap.get_num_mip_levels(),1u)-1u);
+    float3 prefiltered=prefilterMap.sample(linear,reflect(-v,n),level(lod)).rgb;
+    float2 brdf=brdfLUT.sample(linear,float2(nov,roughness)).rg;
+    float3 specular=prefiltered*(f*brdf.x+brdf.y)*.35f;
+    // Measured mode has only material micro-occlusion here. Geometry is
+    // evaluated later, and zero visibility must retain alpha ownership.
+    if(sceneData.ambientLight.w>1.5f)specular*=clamp(orm.r,0.f,1.f);
+    else {
+        float ao=ssaoTex.sample(linear,in.uv).r;
+        specular*=mix(.35f,1.f,directShadow)*(ao>0.f?ao:1.f);
+    }
+    out.environment=float4(specular,1.f);
+    return out;
+}
+
 
 // Composite blit: scene color + SSGI indirect lighting with PBR-correct composition
 // SSGI output is irradiance (incoming indirect light from nearby surfaces).
@@ -615,13 +726,10 @@ fragment float4 fragmentBlitComposite(
 // Reads multiple textures in fragment shader where tile cache handles bandwidth efficiently.
 // ================================================================================================
 
-// Fusion Pass 1 (full-res): pre-combine GI sources + albedo + ssao → indirect contribution.
-// T8.7–T8.13 sync: replaces the T2.3 cross-fade with the current Vulkan
-// FusionIndirect.frag formula — radiance-validity gate on SPGI (T8.7),
-// luminance-advantage merge gate (T8.8), sky-leak far-field floor (T8.9),
-// occlusion-modulated floor (T8.10c), SSGI degradation linkage.
-// DDGI is a half-res low-frequency input sampled directly (no blur —
-// matches the Vulkan baseline the 52.5/46.9/97.2/24.7 numbers came from).
+// Native MSL irradiance composition matching frozen Vulkan FusionIndirect.
+// The current Metal host binds no gain/mode UBO: unit display gain is used.
+// With SPGI disabled its black fallback gives DDGI-only composition. When
+// supplied, SPGI confidence replaces DDGI continuously, including dark samples.
 fragment float4 fragmentFusionIndirect(
     VertexOut in [[stage_in]],
     texture2d<float> ssgiColor   [[texture(0)]],
@@ -635,38 +743,14 @@ fragment float4 fragmentFusionIndirect(
     float3 ddgi    = ddgiColor.sample(s, in.uv).rgb;
     float4 spgi4   = spgiColor.sample(s, in.uv);
     float3 albedo  = albedoTex.sample(s, in.uv).rgb;
-    float  ssao    = ssaoTex.sample(s, in.uv).r;
-    if (ssao <= 0.0f) ssao = 1.0f;
-    // SSAO is a local contact-shadow approximation, not a validity mask for
-    // probe lighting — it shapes DDGI without erasing low-frequency bounce.
-    // 2026-09-05 对齐 UE 参考：遮挡区 AO 压制加强（暗拱 93→UE 22 的差距）
-    float ao = mix(0.12f, 1.0f, pow(ssao, 1.2f));
-
-    float3 ssgi_irr  = ssgi4.rgb;
-    float  ssgi_hit  = ssgi4.a;
-    // SSGI confidence normalized against the 30-unit trace cap; ≥0.3 floor.
-    float  ssgi_hit_norm = clamp(ssgi_hit, 0.0f, 30.0f) / 30.0f;
-    float  ssgi_conf = clamp(1.0f - ssgi_hit_norm * 0.7f, 0.3f, 1.0f);
-    // Same irradiance units: confidence blends estimates without selecting
-    // only brighter samples or adding a compensating SPGI gain.
-    float spgi_w = clamp(spgi4.a, 0.0f, 0.9f);
-    albedo = clamp(albedo, float3(0.0f), float3(1.0f));
-
-    float3 gi = mix(ddgi, spgi4.rgb, spgi_w)
-              + ssgi_irr * ssgi_conf * mix(0.25f, 0.15f, spgi_w);
-
-
-    // T8.9 + T8.10c: sky-leak ambient (Lumen far-field) — additive with the
-    // near-field estimate, occlusion-modulated so shadow pockets key it down.
-    gi += float3(0.085f, 0.09f, 0.105f) * ao;   // B9: far-field floor keeps AO（对齐 UE 暗部）
-
-    // B3: indirect follows the same Lambert law as direct (kD·albedo/π·E) —
-    // the direct chain divides by π (line ~307/561) and the indirect chain
-    // never did, biasing indirect π× bright.
-    // B9: the full-stack `indirect *= ao` removed — GTAO double-occluded the
-    // near-field GI (probe visibility already attenuates it); the far-field
-    // floor above keeps its AO modulation (its only visibility cue).
-    float3 indirect = albedo * gi * 0.31830988f;
+    float ssgiHit = clamp(ssgi4.a, 0.0f, 30.0f);
+    float ssgiConfidence = clamp(1.0f - (ssgiHit / 30.0f) * 0.7f, 0.3f, 1.0f);
+    float spgiConfidence = clamp(spgi4.a, 0.0f, 0.9f);
+    float3 gi = mix(ddgi, spgi4.rgb, spgiConfidence)
+              + ssgi4.rgb * ssgiConfidence * mix(0.25f, 0.15f, spgiConfidence);
+    // Irradiance E becomes diffuse radiance rho*E/pi. Probe visibility already
+    // accounts for occlusion: no second SSAO multiplication or ambient floor.
+    float3 indirect = clamp(albedo, float3(0.0f), float3(1.0f)) * gi * 0.31830988f;
 
     return float4(indirect, 1.0f);
 }
@@ -679,9 +763,10 @@ fragment float4 fragmentFusion(
     texture2d<float> sceneColor    [[texture(0)]],
     texture2d<float> indirectColor [[texture(1)]],
     texture2d<float> volumeScatter [[texture(2)]],
-    texture2d<float> albedoTex     [[texture(3)]],
-    texture2d<float> ddgiSpecular  [[texture(4)]],
-    texture2d<float> ormTex        [[texture(5)]])
+    texture2d<float> ssrColor      [[texture(3)]],
+    texture2d<float> ormTex        [[texture(4)]],
+    texture2d<float> albedoTex     [[texture(5)]],
+    texture2d<float> ddgiSpecular  [[texture(6)]])
 {
     constexpr sampler s(coord::normalized, filter::linear, mip_filter::none, address::clamp_to_edge);
     float3 scene   = sceneColor.sample(s, in.uv).rgb;
@@ -690,6 +775,7 @@ fragment float4 fragmentFusion(
     float3 albedo  = albedoTex.sample(s, in.uv).rgb;
     float4 ddgiSpec = ddgiSpecular.sample(s, in.uv);
     float4 orm     = ormTex.sample(s, in.uv);
+    float4 ssr     = ssrColor.sample(s, in.uv);
 
     // T4.3 glossy: analytic split-sum (Karis mobile approximation of the
     // preintegrated DFG LUT — pure ALU, same formula on all backends).
@@ -706,6 +792,9 @@ fragment float4 fragmentFusion(
     // (1 - roughness²) suppresses the double count with the diffuse indirect —
     // the widened lobe converges to E(N) which FusionIndirect already adds.
     reflection *= (1.0f - roughness * roughness) * 0.75f;
+    // Host slots 0..6 match FusionCompositeModule. SSR RGB already carries
+    // its producer strength; alpha only relinquishes the glossy fallback.
+    reflection = ssr.rgb + reflection * (1.0f - clamp(ssr.a, 0.0f, 1.0f));
 
     // Beer-Lambert: attenuate scene by transmittance, add scattered light.
     // T8.13 sync: output HDR linear — Vulkan FusionComposite.frag parity
@@ -833,4 +922,43 @@ fragment float4 fragmentBlitFXAA(
         inputTex.sample(s, in.uv + dir *  0.5f).rgb);
     float lumaB = dot(rgbB, lumaWeights);
     return float4((lumaB < lumaMin || lumaB > lumaMax) ? rgbA : rgbB, 1.0f);
+}
+
+// Environment-aware native composition. Legacy fragmentFusion remains usable
+// by applications that still bind the original seven-texture contract.
+fragment float4 fragmentFusionEnvironment(
+    VertexOut in [[stage_in]],
+    texture2d<float> sceneColor [[texture(0)]],
+    texture2d<float> indirectColor [[texture(1)]],
+    texture2d<float> volumeScatter [[texture(2)]],
+    texture2d<float> ssrColor [[texture(3)]],
+    texture2d<float> ormTex [[texture(4)]],
+    texture2d<float> albedoTex [[texture(5)]],
+    texture2d<float> ddgiSpecular [[texture(6)]],
+    texture2d<float> reflSpecular [[texture(8)]],
+    texture2d<float> environmentSpecular [[texture(9)]],
+    constant float4& environmentParams [[buffer(10)]],
+    texture2d<float> environmentVisibility [[texture(11)]]) {
+    constexpr sampler s(coord::normalized,filter::linear,mip_filter::none,address::clamp_to_edge);
+    float3 scene=sceneColor.sample(s,in.uv).rgb;
+    float3 indirect=indirectColor.sample(s,in.uv).rgb;
+    float4 vol=volumeScatter.sample(s,in.uv),ssr=ssrColor.sample(s,in.uv),orm=ormTex.sample(s,in.uv);
+    float3 albedo=albedoTex.sample(s,in.uv).rgb;
+    float4 ddgi=ddgiSpecular.sample(s,in.uv),off=reflSpecular.sample(s,in.uv),environment=environmentSpecular.sample(s,in.uv);
+    float roughness=clamp(orm.g,.04f,1.f),nov=clamp(ddgi.a,.05f,1.f);
+    float4 r=roughness*float4(-1.f,-.0275f,-.572f,.022f)+float4(1.f,.0425f,1.04f,-.04f);
+    float a004=min(r.x*r.x,exp2(-9.28f*nov))*r.x+r.y;
+    float2 ab=float2(-1.04f,1.04f)*a004+r.zw;
+    float3 f0=mix(float3(.04f),albedo,orm.b);
+    float3 glossy=ddgi.rgb*(f0*ab.x+ab.y)*(1.f-roughness*roughness)*.75f;
+    float ssrW=clamp(ssr.a,0.f,1.f),offW=clamp(off.a,0.f,1.f);
+    float environmentW=environmentParams.x*clamp(environment.a,0.f,1.f);
+    float visibility=environmentParams.w>.5f?clamp(environmentVisibility.sample(s,in.uv).r,0.f,1.f):1.f;
+    environment.rgb*=visibility;
+    float3 fallback=mix(glossy,environment.rgb*environmentParams.y,environmentW);
+    float3 reflection=ssr.rgb+off.rgb*offW*(1.f-ssrW)+fallback*(1.f-ssrW)*(1.f-offW);
+    if(environmentParams.z>.5f){indirect=float3(0);reflection=environment.rgb*environmentParams.y*environmentW;}
+    float3 f=f0+(float3(1)-f0)*pow(1.f-nov,5.f);
+    float3 result=(scene+indirect*(1.f-orm.b)*(float3(1)-f)+reflection)*vol.a+vol.rgb;
+    return float4(clamp(result,float3(0),float3(64)),1);
 }

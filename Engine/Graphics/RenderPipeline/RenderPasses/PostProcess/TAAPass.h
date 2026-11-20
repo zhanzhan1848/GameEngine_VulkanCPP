@@ -29,10 +29,10 @@ struct TAADepthInputs {
     rhi::ResourceHandle prevDepth{ rhi::handles::INVALID_RESOURCE }; // previous frame R32 depth copy
     math::m4x4 currInvViewProj{};
     math::m4x4 prevViewProj{};
-    // Vulkan only: evaluated after the GBuffer producer executed. Never use
+    // Vulkan/Metal/D3D12: evaluated after the GBuffer producer executed. Never use
     // an expected Halton value or a getter evaluated while constructing RG.
     std::function<bool(math::v2&)> raster_jitter_provider;
-    bool require_raster_jitter{false}; // explicit Vulkan contract, missing provider fails closed
+    bool require_raster_jitter{false}; // explicit raster contract, missing provider fails closed
     u32 previous_depth_frame{~u32(0)};
     RGResourceHandle current_depth_rg{}; // canonical GBuffer producer identity
 };
@@ -61,6 +61,15 @@ void ResetTAAHistory();
 
 // Completed-frame diagnostics; frameIndex is the native pipeline frame.
 rhi::ResourceHandle GetTAAOutputTexture(u32 frameIndex);
+
+// Opt-in Metal diagnostic: exact bindings recorded at dispatch, consumed only
+// after that frame completes and before starting another frame. Binding 4 is
+// the 160-byte uniform buffer; all other entries are texture handles.
+struct TAADiagnosticView {
+    u32 frame{~u32(0)};
+    rhi::ResourceHandle bindings[7]{};
+};
+bool GetTAADiagnosticView(u32 frameIndex, TAADiagnosticView& view);
 
 } // namespace PostProcess
 } // namespace primal::graphics

@@ -386,6 +386,22 @@ public:
         return probe_radiance_buffer_;
     }
     rhi::ResourceHandle GetHitDistanceBuffer() const { return hit_distance_buffer_; }
+    // Post-frame diagnostic view: Average storage has been overwritten by
+    // spatial filtering/history publication. Reading data requires checked
+    // GPU completion; returning these handles does not certify completion.
+    struct CompletedProbeView {
+        rhi::ResourceHandle positions, normals, filtered_sh, temporal_sh, constants;
+        rhi::ResourceHandle history_positions, history_normals, history_sh;
+    };
+    CompletedProbeView GetCompletedProbeView(u32 frame) const {
+        const u32 slot = frame % 3, history = (frame + 2) % 3;
+        return {probe_positions_buffer_[slot], probe_normals_buffer_[slot],
+            probe_avg_radiance_[slot], probe_temporal_radiance_[slot], global_cb_[slot],
+            probe_positions_buffer_[history], probe_normals_buffer_[history],
+            probe_avg_radiance_[history]};
+    }
+    rhi::ResourceHandle GetTraceHZBTexture() const { return hzb_texture_; }
+    u32 GetTraceHZBMipCount() const { return hzb_mip_levels_; }
     // [E0-I 2026-09-21 决策仪表] SC 产出率漏斗 + 下行失败射线计数
     //（8×u32，永远累加，Vulkan host-visible；语义见 finalize shader 声明）。
     rhi::ResourceHandle GetFailStatsBuffer() const { return fail_stats_buffer_; }

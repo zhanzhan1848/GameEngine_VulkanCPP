@@ -36,6 +36,7 @@ struct TAAGlobals {
     float4x4 currInvViewProj;  // this frame's inverse view-projection
     float4x4 prevViewProj;     // previous frame's view-projection
 };
+static_assert(sizeof(TAAGlobals)==160,"TAA host uniform ABI");
 
 // Manual bilinear via 4 reads — no sampler, mirrors the GLSL samplerless path.
 float3 sampleBilinear(texture2d<float, access::read> tex, float2 uv, int2 dims) {
