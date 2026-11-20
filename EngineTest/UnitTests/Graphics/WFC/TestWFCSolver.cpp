@@ -722,6 +722,6 @@ int main() {
     TEST_CASE(suite, "DefaultObserver_IsMinEntropy", TestWFCSolver_DefaultObserver_IsMinEntropy);
     TEST_CASE(suite, "SetObserver_PreservesDefaultBehavior", TestWFCSolver_SetObserver_PreservesDefaultBehavior);
     TEST_CASE(suite, "SetObserver_DistanceChangesOrder", TestWFCSolver_SetObserver_DistanceChangesOrder);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

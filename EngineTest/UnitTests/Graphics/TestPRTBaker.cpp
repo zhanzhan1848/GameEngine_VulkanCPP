@@ -106,6 +106,6 @@ int main()
 {
     Engine::Test::TestSuite suite("PRT Baker Tests");
     primal::test::RegisterPRTTests(suite);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

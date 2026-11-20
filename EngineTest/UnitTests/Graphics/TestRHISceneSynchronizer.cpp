@@ -315,6 +315,6 @@ private:
 int main() {
     auto suite = std::make_shared<TestRHISceneSynchronizer>();
     Engine::Test::TestRunner::RegisterTestSuite(suite);
-    Engine::Test::TestRunner::RunAllSuites();
-    return 0;
+    const auto runStats = Engine::Test::TestRunner::RunAllSuites();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

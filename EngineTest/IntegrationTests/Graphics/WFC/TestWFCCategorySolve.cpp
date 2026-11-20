@@ -116,6 +116,6 @@ int main() {
     TestSuite suite("WFCCategorySolve");
     TEST_CASE(suite, "RuinsOnly_AllCollapsedTilesAreRuins",
               TestCategorySolve_RuinsOnly_AllCollapsedTilesAreRuins);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

@@ -33,6 +33,6 @@ int main() {
     TEST_CASE(suite, "HasMeshHandlesArray",  TestWFCTile_HasMeshHandlesArray);
     TEST_CASE(suite, "MaxVariantsIs4",       TestWFCTile_MaxVariantsIs4);
     TEST_CASE(suite, "SizeMatchesStaticAssert", TestWFCTile_SizeMatchesStaticAssert);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

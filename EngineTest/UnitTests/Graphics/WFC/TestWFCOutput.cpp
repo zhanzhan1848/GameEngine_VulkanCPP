@@ -151,6 +151,6 @@ int main() {
               TestWFCOutput_Multi_Step_Drains_Buffer);
     TEST_CASE(suite, "FlagDriven_Rotation_For_NonSymmetric_Tile",
               TestWFCOutput_FlagDriven_Rotation_For_NonSymmetric_Tile);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

@@ -235,6 +235,6 @@ private:
 
 int main() {
     TestMetalCommandEncodingSuite suite;
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

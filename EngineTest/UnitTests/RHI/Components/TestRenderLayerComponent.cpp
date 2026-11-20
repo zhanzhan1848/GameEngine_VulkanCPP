@@ -79,7 +79,7 @@ int main() {
     suite.AddTestCase({"Match", TestRenderLayerComponent_Match});
     suite.AddTestCase({"ViewportScissor", TestRenderLayerComponent_ViewportScissor});
     
-    suite.RunAllTests();
+    const auto runStats = suite.RunAllTests();
     
-    return 0;
+    return runStats.failedTests == 0 ? 0 : 1;
 }

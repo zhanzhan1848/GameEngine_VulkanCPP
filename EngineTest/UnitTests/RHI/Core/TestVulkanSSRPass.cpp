@@ -425,8 +425,8 @@ void RegisterVulkanSSRPass_Tests() {
 
 int main() {
     RegisterVulkanSSRPass_Tests();
-    TestRunner::RunAllSuites();
-    return 0;
+    const auto runStats = TestRunner::RunAllSuites();
+    return runStats.failedTests == 0 ? 0 : 1;
 }
 
 #else // ENABLE_VULKAN undefined

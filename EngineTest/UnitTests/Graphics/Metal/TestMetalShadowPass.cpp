@@ -482,8 +482,8 @@ int main() {
     auto suite = std::make_shared<TestSuite>("MetalShadowPassTests");
     suite->AddTestCase(TestCase("RenderSphere4Cascades", TestShadowPass_RenderSphere_Metal));
     TestRunner::RegisterTestSuite(suite);
-    TestRunner::RunAllSuites();
-    return 0;
+    const auto runStats = TestRunner::RunAllSuites();
+    return runStats.failedTests == 0 ? 0 : 1;
 }
 
 #else // !__APPLE__

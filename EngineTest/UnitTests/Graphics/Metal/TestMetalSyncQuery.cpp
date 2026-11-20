@@ -247,7 +247,7 @@ void RegisterMetalSyncQueryTests() {
 #ifndef UNIT_TEST_LIB
 int main() {
     RegisterMetalSyncQueryTests();
-    TestRunner::RunAllSuites();
-    return 0;
+    const auto runStats = TestRunner::RunAllSuites();
+    return runStats.failedTests == 0 ? 0 : 1;
 }
 #endif

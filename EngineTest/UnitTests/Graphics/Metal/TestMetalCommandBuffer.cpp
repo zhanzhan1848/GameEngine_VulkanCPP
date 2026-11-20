@@ -555,6 +555,6 @@ int main() {
     suite->AddTestCase(TestCase("DescriptorArrayBinding", TestDescriptorArrayBinding));
     
     TestRunner::RegisterTestSuite(suite);
-    TestRunner::RunAllSuites();
-    return 0;
+    const auto runStats = TestRunner::RunAllSuites();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

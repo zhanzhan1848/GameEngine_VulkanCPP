@@ -47,6 +47,6 @@ int main() {
     TEST_CASE(suite, "MaxTilesBumped",            TestMaxTilesBumped);
     TEST_CASE(suite, "BitForTileVariantInRange",  TestBitForTileVariantInRange);
     TEST_CASE(suite, "MaskWordDecomposition",     TestMaskWordDecomposition);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

@@ -129,6 +129,6 @@ int main() {
     TEST_CASE(suite, "GenerateTileMeshProducesGeometry",TestGenerateTileMeshProducesGeometry);
     TEST_CASE(suite, "GenerateTileMeshDoorOnPosXFace",  TestGenerateTileMeshDoorOnPosXFace);
     TEST_CASE(suite, "GenerateTileMeshNoDoorOnNegXFace",TestGenerateTileMeshNoDoorOnNegXFace);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

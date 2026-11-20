@@ -91,6 +91,6 @@ int main() {
     TestSuite suite("WFCRuinsRestart");
     TEST_CASE(suite, "RuinsRestart_DeadlockSeedRecovers",
               TestRuinsRestart_DeadlockSeedRecovers);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

@@ -74,6 +74,6 @@ int main() {
     TEST_CASE(suite, "Clear", TestTileAdjacency_Clear);
     TEST_CASE(suite, "GetCompatible_Returns_All_Matches", TestTileAdjacency_GetCompatible_Returns_All_Matches);
     TEST_CASE(suite, "GetCompatible_No_Matches", TestTileAdjacency_GetCompatible_No_Matches);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }

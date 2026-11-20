@@ -96,6 +96,6 @@ int main() {
     TestSuite suite("WFCRuinsMixedCategories");
     TEST_CASE(suite, "MixedCategories_PrimitiveAndRuins_ReasonableShare",
               TestMixedCategories_PrimitiveAndRuins_ReasonableShare);
-    suite.RunAllTests();
-    return 0;
+    const auto runStats = suite.RunAllTests();
+    return runStats.failedTests == 0 ? 0 : 1;
 }
