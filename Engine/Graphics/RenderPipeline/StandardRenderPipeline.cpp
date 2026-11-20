@@ -5865,7 +5865,7 @@ void R23BlackStageDumpBufferStats(rhi::RHIDeviceBase* device, const char* name,
 ///（死写为 pass 级问题）；读回零 = 引擎级 UAV 写失效（描述符物化/根签名/
 /// 状态机方向收敛）。taskM §12-13：四管线（voxelization/ShadowBlit/SPGI/
 /// DDGI）同形态"dispatch 录制有效 → imageStore 落零"且 RT 写全活。
-void R34UavWriteProbe(rhi::RHIDeviceBase* device) {
+void R34UavWriteProbe(rhi::RHIDeviceBase* device, rhi::ResourceHandle srcTex) {
     using namespace rhi;
     // —— 资源（任一创建失败即退出，fail 声明进日志） ——
     TextureDesc td{};
@@ -5877,12 +5877,16 @@ void R34UavWriteProbe(rhi::RHIDeviceBase* device) {
     td.memoryUsage = GPUMemoryUsage::Static;
     ResourceHandle tex = device->CreateTexture(td);
 
-    DescriptorSetLayoutBinding b{};
-    b.binding = 0;
-    b.descriptorCount = 1;
-    b.descriptorType = DescriptorType::StorageImage;
-    b.stageFlags = ShaderStage::Compute;
-    DescriptorSetLayoutDesc layoutDesc{1, &b};
+    DescriptorSetLayoutBinding b[2]{};
+    b[0].binding = 0;
+    b[0].descriptorCount = 1;
+    b[0].descriptorType = DescriptorType::StorageImage;
+    b[0].stageFlags = ShaderStage::Compute;
+    b[1].binding = 1;
+    b[1].descriptorCount = 1;
+    b[1].descriptorType = DescriptorType::SampledImage;
+    b[1].stageFlags = ShaderStage::Compute;
+    DescriptorSetLayoutDesc layoutDesc{2, b};
     auto setLayout = device->CreateDescriptorSetLayout(layoutDesc);
     PipelineLayoutDesc pipeLayoutDesc{1, &setLayout};
     auto pipeLayout = device->CreatePipelineLayout(pipeLayoutDesc);
