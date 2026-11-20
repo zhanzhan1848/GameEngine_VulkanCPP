@@ -570,14 +570,21 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
     // R39（黑帧线）：每个纹理创建回显 GPU VA——同堆内两资源 VA 区间相交
     // 即分配器别名/重叠实锤（R37 rg 探针读出 velocity 类数据的
     // memory-overlap 假说判别面）。VA=0 仅 wrap/view 特例。诊断专用。
-    PRIMAL_LOG_STREAM(Info, "RHI")
-        << "[D3D12_VA] name='" << texDesc_.name << "' "
-        << GetNativeDesc().Width << "x" << GetNativeDesc().Height
-        << " array=" << static_cast<unsigned>(GetNativeDesc().DepthOrArraySize)
-        << " mips=" << GetNativeDesc().MipLevels
-        << " fmt=" << static_cast<unsigned>(texDesc_.format)
-        << " va=" << (resource_ ? resource_->GetGPUVirtualAddress() : 0ull)
-        << std::endl;
+    // R39c：实测本构建 GPU VA 全 0（9394/9394，含正常渲染的资源）——
+    // GetGPUVirtualAddress 不可用作判据，改报 D3D12MA 分配偏移/大小
+    //（placed 堆内唯一，offset 区间相交 = 别名实锤）。
+    {
+        const auto rd2 = GetNativeDesc();
+        PRIMAL_LOG_STREAM(Info, "RHI")
+            << "[D3D12_VA] name='" << texDesc_.name << "' "
+            << rd2.Width << "x" << rd2.Height
+            << " array=" << static_cast<unsigned>(rd2.DepthOrArraySize)
+            << " mips=" << rd2.MipLevels
+            << " fmt=" << static_cast<unsigned>(texDesc_.format)
+            << " va=" << (resource_ ? resource_->GetGPUVirtualAddress() : 0ull)
+            << " alloff=" << AllocOffset() << " allsz=" << AllocSize()
+            << std::endl;
+    }
     return true;
 }
 

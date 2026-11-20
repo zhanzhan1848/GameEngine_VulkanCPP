@@ -65,6 +65,16 @@ public:
     ID3D12Resource* GetNativeResource() const { return resource_.Get(); }
     const TextureDesc& GetTextureDesc() const { return texDesc_; }
 
+    /// R39 黑帧诊断：GPU VA（同堆内两资源 VA 区间相交 = 分配器别名实锤；
+    /// 跨堆 VA 重叠属正常，不作判据）。诊断专用。
+    u64 GpuVA() const { return resource_ ? resource_->GetGPUVirtualAddress() : 0; }
+
+    /// R39c：D3D12MA placed 堆内偏移（heap 内唯一——**offset 区间相交 =
+    /// 分配器别名/重叠实锤**；GPU VA 在本构建全 0 不可用作判据）。
+    /// wrap/view = ~0ull（无堆内偏移语义）。诊断专用。
+    u64 AllocOffset() const { return allocation_ ? allocation_->GetOffset() : ~0ull; }
+    u64 AllocSize() const { return allocation_ ? allocation_->GetSize() : 0; }
+
     /// 资源描述（footprint / CopyTextureRegion / GenerateMipmaps 类路径用）。
     D3D12_RESOURCE_DESC GetNativeDesc() const {
         return resource_ ? resource_->GetDesc() : D3D12_RESOURCE_DESC{};
