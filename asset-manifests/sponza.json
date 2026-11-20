@@ -1,0 +1,1138 @@
+{
+  "version": 1,
+  "publication": "r2-verified",
+  "description": "R2 inventory verified by SHA-256 on 2026-11-20. Public development URL is enabled; license and source provenance must be checked before wider redistribution.",
+  "assets": [
+    {
+      "id": "sponza-tangent",
+      "path": "EngineTest/assets/SponzaTangentFrames.model",
+      "sha256": "974efb3a95d7773519691ee937c493fcb306dd717066e42431c691ea7af66d5e",
+      "size": 189764292,
+      "key": "sha256/974efb3a95d7773519691ee937c493fcb306dd717066e42431c691ea7af66d5e/SponzaTangentFrames.model",
+      "groups": [
+        "vulkan-reference",
+        "windows-f350",
+        "dawn-mode11"
+      ],
+      "gzip": {
+        "size": 18460236,
+        "key": "sha256/b647690997f40be0c919278eba69f673370079a25eb3b6eb51fe28347e9c6b6b/SponzaTangentFrames.model.gz"
+      }
+    },
+    {
+      "id": "sponza-default",
+      "path": "EngineTest/assets/Sponza.model",
+      "sha256": "b0c1f2d5e583508aab922c6e4c2c38cf2a564f952709f45827ac10d4c4757390",
+      "size": 7491644,
+      "key": "sha256/b0c1f2d5e583508aab922c6e4c2c38cf2a564f952709f45827ac10d4c4757390/Sponza.model",
+      "groups": [
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web"
+      ],
+      "gzip": {
+        "size": 3101186,
+        "key": "sha256/cbb07d1e582556e3f7fac8938d7d9555aa185729e64191121ebd5b1fc18dec4f/Sponza.model.gz"
+      }
+    },
+    {
+      "id": "sponza-sdf-source",
+      "path": "EngineTest/assets/Sponza_pipeline_signed_v5.model",
+      "sha256": "578958bd2dc4fac5ceb2419b80194c00a795a9645f2f5b6c485bc6f4c101a09d",
+      "size": 150864708,
+      "key": "sha256/578958bd2dc4fac5ceb2419b80194c00a795a9645f2f5b6c485bc6f4c101a09d/Sponza_pipeline_signed_v5.model",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350"
+      ]
+    },
+    {
+      "id": "sponza-sdf-cache",
+      "path": "EngineTest/assets/Sponza_global_sdf.v3.cache",
+      "sha256": "0f00339ae8fc472a0f5b003bc060ab1f7a1b64e2c7d5b5e3d6b93146214ec581",
+      "size": 113246264,
+      "key": "sha256/0f00339ae8fc472a0f5b003bc060ab1f7a1b64e2c7d5b5e3d6b93146214ec581/Sponza_global_sdf.v3.cache",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-mode11"
+      ],
+      "gzip": {
+        "size": 17488892,
+        "key": "sha256/180de01dd4f4163c0805ed178865cbf2f8cdd35b73004f633626bc036f69a123/Sponza_global_sdf.v3.cache.gz"
+      }
+    },
+    {
+      "id": "sunset-hdr",
+      "path": "EngineTest/assets/textures/hdr/sunset.hdr",
+      "sha256": "49627ecb64a77e12567c8c3853cb63248a14013fd7553ebffb904f8fd428ffec",
+      "size": 1814489,
+      "key": "sha256/49627ecb64a77e12567c8c3853cb63248a14013fd7553ebffb904f8fd428ffec/sunset.hdr",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-background-albedo",
+      "path": "EngineTest/assets/models/Sponza/Background_Albedo.png",
+      "sha256": "2e0f213306f8d0112bf063a4baa13ffd64699dd9629f202ce9794139c9ea7212",
+      "size": 1475696,
+      "key": "sha256/2e0f213306f8d0112bf063a4baa13ffd64699dd9629f202ce9794139c9ea7212/Background_Albedo.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-background-normal",
+      "path": "EngineTest/assets/models/Sponza/Background_Normal.png",
+      "sha256": "9029742aba0dd858878e68ab577dadb8d75a2b49625c61bc2ad865d731a01c39",
+      "size": 1104374,
+      "key": "sha256/9029742aba0dd858878e68ab577dadb8d75a2b49625c61bc2ad865d731a01c39/Background_Normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-background-roughness",
+      "path": "EngineTest/assets/models/Sponza/Background_Roughness.png",
+      "sha256": "ca9a4e8b191536d0e26299e1041c08138ba8f6ee293af659c11e4de0976d364c",
+      "size": 442366,
+      "key": "sha256/ca9a4e8b191536d0e26299e1041c08138ba8f6ee293af659c11e4de0976d364c/Background_Roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-chaintexture-albedo",
+      "path": "EngineTest/assets/models/Sponza/ChainTexture_Albedo.png",
+      "sha256": "cd13f8235c87ea3a478929ac5d94ca53e261a10a8be7db0b3577f65d8274bf02",
+      "size": 657964,
+      "key": "sha256/cd13f8235c87ea3a478929ac5d94ca53e261a10a8be7db0b3577f65d8274bf02/ChainTexture_Albedo.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-chaintexture-metallic",
+      "path": "EngineTest/assets/models/Sponza/ChainTexture_Metallic.png",
+      "sha256": "34c7290f62a5dc9b8dec3ef08801039588175ab3c4eea9a951641bb163c5d731",
+      "size": 418127,
+      "key": "sha256/34c7290f62a5dc9b8dec3ef08801039588175ab3c4eea9a951641bb163c5d731/ChainTexture_Metallic.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-chaintexture-normal",
+      "path": "EngineTest/assets/models/Sponza/ChainTexture_Normal.png",
+      "sha256": "6dc3379c6a87eb8eb2264a404faf8e8b54a26d685b5506f96fc2d26533e11177",
+      "size": 267008,
+      "key": "sha256/6dc3379c6a87eb8eb2264a404faf8e8b54a26d685b5506f96fc2d26533e11177/ChainTexture_Normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-chaintexture-roughness",
+      "path": "EngineTest/assets/models/Sponza/ChainTexture_Roughness.png",
+      "sha256": "feb7db36d70793cbc5c35c00b66b7571add1fb01a502f42082d13181199afd2c",
+      "size": 360721,
+      "key": "sha256/feb7db36d70793cbc5c35c00b66b7571add1fb01a502f42082d13181199afd2c/ChainTexture_Roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-dielectric-metallic",
+      "path": "EngineTest/assets/models/Sponza/Dielectric_metallic.png",
+      "sha256": "131aac4be26830be109a962dfaca07ebbab81911985094e9488d09ed7d9f2777",
+      "size": 398,
+      "key": "sha256/131aac4be26830be109a962dfaca07ebbab81911985094e9488d09ed7d9f2777/Dielectric_metallic.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-lion-albedo",
+      "path": "EngineTest/assets/models/Sponza/Lion_Albedo.png",
+      "sha256": "ac2ec75de359e7da8c316ee0b05205afad7a4c76eebb051184aefd54b2c653d5",
+      "size": 1946021,
+      "key": "sha256/ac2ec75de359e7da8c316ee0b05205afad7a4c76eebb051184aefd54b2c653d5/Lion_Albedo.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-lion-normal",
+      "path": "EngineTest/assets/models/Sponza/Lion_Normal.png",
+      "sha256": "698034e787ff9c28d77c035a3a1d315d312dfbb6839228b8b248c2c3666e9a3c",
+      "size": 1580749,
+      "key": "sha256/698034e787ff9c28d77c035a3a1d315d312dfbb6839228b8b248c2c3666e9a3c/Lion_Normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-lion-roughness",
+      "path": "EngineTest/assets/models/Sponza/Lion_Roughness.png",
+      "sha256": "adbe62003bab3cfa905026101ebbfeb4da90fd7eadd204bd3663254af395f2a4",
+      "size": 286940,
+      "key": "sha256/adbe62003bab3cfa905026101ebbfeb4da90fd7eadd204bd3663254af395f2a4/Lion_Roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-metallic-metallic",
+      "path": "EngineTest/assets/models/Sponza/Metallic_metallic.png",
+      "sha256": "10022a907e23c05839845c5228e1f6c0fcb3c1ae6fd3fa2013cc43f6e2dcea23",
+      "size": 785,
+      "key": "sha256/10022a907e23c05839845c5228e1f6c0fcb3c1ae6fd3fa2013cc43f6e2dcea23/Metallic_metallic.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-arch-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Arch_diffuse.png",
+      "sha256": "a25ad763854f541220fd5f677a94ff1db4d8b3bec1c739213a376864590a0b49",
+      "size": 1828026,
+      "key": "sha256/a25ad763854f541220fd5f677a94ff1db4d8b3bec1c739213a376864590a0b49/Sponza_Arch_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-arch-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Arch_normal.png",
+      "sha256": "71aca0160441cbea78d81b96135dbad050933b8148cdba21705cbd2e8cc5cd15",
+      "size": 317112,
+      "key": "sha256/71aca0160441cbea78d81b96135dbad050933b8148cdba21705cbd2e8cc5cd15/Sponza_Arch_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-arch-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Arch_roughness.png",
+      "sha256": "8655fe922a95cb3901a5967eb8cffb181ec466f195eee2feee1d69f0ddad7363",
+      "size": 535731,
+      "key": "sha256/8655fe922a95cb3901a5967eb8cffb181ec466f195eee2feee1d69f0ddad7363/Sponza_Arch_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-bricks-a-albedo",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Bricks_a_Albedo.png",
+      "sha256": "0c42ecbbb582def069d07dca371b030ea5ef9cb1a3db3b004e70c6f92a4e7f90",
+      "size": 2141296,
+      "key": "sha256/0c42ecbbb582def069d07dca371b030ea5ef9cb1a3db3b004e70c6f92a4e7f90/Sponza_Bricks_a_Albedo.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-bricks-a-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Bricks_a_Normal.png",
+      "sha256": "c4461542a7eaf64f032206f59a19edb2c28916841db11aac9aaf4519654966b2",
+      "size": 1194997,
+      "key": "sha256/c4461542a7eaf64f032206f59a19edb2c28916841db11aac9aaf4519654966b2/Sponza_Bricks_a_Normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-bricks-a-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Bricks_a_Roughness.png",
+      "sha256": "e93f8dbb2bda5d64af0612dbb680c5dff7884d5c02e61c830ff93f254ee461a4",
+      "size": 511823,
+      "key": "sha256/e93f8dbb2bda5d64af0612dbb680c5dff7884d5c02e61c830ff93f254ee461a4/Sponza_Bricks_a_Roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-ceiling-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Ceiling_diffuse.png",
+      "sha256": "0e46cf1f1cc03ef437534e820aab670f7abc03b01d06eb85934b36f95fe8f79c",
+      "size": 2001101,
+      "key": "sha256/0e46cf1f1cc03ef437534e820aab670f7abc03b01d06eb85934b36f95fe8f79c/Sponza_Ceiling_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-ceiling-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Ceiling_normal.png",
+      "sha256": "36399acf920f983045da3b4331a36a236a0b7efb1236a18534939c59b06c469b",
+      "size": 2514967,
+      "key": "sha256/36399acf920f983045da3b4331a36a236a0b7efb1236a18534939c59b06c469b/Sponza_Ceiling_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-ceiling-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Ceiling_roughness.png",
+      "sha256": "2c5a7fd4764064e9dd342fcdb27faeee6758880b2420568f0e49b5884d304559",
+      "size": 639307,
+      "key": "sha256/2c5a7fd4764064e9dd342fcdb27faeee6758880b2420568f0e49b5884d304559/Sponza_Ceiling_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-column-a-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Column_a_diffuse.png",
+      "sha256": "3af4ac5b278bc10588e012e0cc1bddfeafc678e7fe452a42f53742acca8cc830",
+      "size": 2014450,
+      "key": "sha256/3af4ac5b278bc10588e012e0cc1bddfeafc678e7fe452a42f53742acca8cc830/Sponza_Column_a_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-column-a-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Column_a_normal.png",
+      "sha256": "527f46d25c76b4df358b4c342706f1eff83bed48103e2df974fbbcf940a75ff1",
+      "size": 1358109,
+      "key": "sha256/527f46d25c76b4df358b4c342706f1eff83bed48103e2df974fbbcf940a75ff1/Sponza_Column_a_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-column-a-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Column_a_roughness.png",
+      "sha256": "11bdfcd9cb358571a56759ea1236adf0c02e708b1865a626ecc25ab4f7e02b96",
+      "size": 422631,
+      "key": "sha256/11bdfcd9cb358571a56759ea1236adf0c02e708b1865a626ecc25ab4f7e02b96/Sponza_Column_a_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-column-b-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Column_b_diffuse.png",
+      "sha256": "e3d456dacf797176d20466fea3adcdc727251d325104af9b9ab1ed11570092cd",
+      "size": 2449955,
+      "key": "sha256/e3d456dacf797176d20466fea3adcdc727251d325104af9b9ab1ed11570092cd/Sponza_Column_b_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-column-b-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Column_b_normal.png",
+      "sha256": "37d3de681e37e094283c87c404ed0fbf9a8f3ec86b54bc37c43de4ebd7ab3ce7",
+      "size": 1293337,
+      "key": "sha256/37d3de681e37e094283c87c404ed0fbf9a8f3ec86b54bc37c43de4ebd7ab3ce7/Sponza_Column_b_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-column-b-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Column_b_roughness.png",
+      "sha256": "64c39701265eabdde155c5dd995968704741264d2a317eda6d66939484bb30b8",
+      "size": 527284,
+      "key": "sha256/64c39701265eabdde155c5dd995968704741264d2a317eda6d66939484bb30b8/Sponza_Column_b_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-column-c-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Column_c_diffuse.png",
+      "sha256": "5c3a6e75eb15949319db0c7c4a1e385e664f16709e649dd13f70112c7e912b1d",
+      "size": 2366422,
+      "key": "sha256/5c3a6e75eb15949319db0c7c4a1e385e664f16709e649dd13f70112c7e912b1d/Sponza_Column_c_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-column-c-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Column_c_normal.png",
+      "sha256": "61bb46d1f65986864e641270a66ee99d8c4a9388e730f867ff2005df46aee437",
+      "size": 1600317,
+      "key": "sha256/61bb46d1f65986864e641270a66ee99d8c4a9388e730f867ff2005df46aee437/Sponza_Column_c_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-column-c-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Column_c_roughness.png",
+      "sha256": "1d3a9ee4ef3d5df4a7ecd3ba9760b889296430218fdb19a8e52aeeac3bfe0187",
+      "size": 345197,
+      "key": "sha256/1d3a9ee4ef3d5df4a7ecd3ba9760b889296430218fdb19a8e52aeeac3bfe0187/Sponza_Column_c_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-curtain-blue-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Curtain_Blue_diffuse.png",
+      "sha256": "1b956bc85145164791ef819e233f4c472c052331653cfe191980614720a30bb9",
+      "size": 2896574,
+      "key": "sha256/1b956bc85145164791ef819e233f4c472c052331653cfe191980614720a30bb9/Sponza_Curtain_Blue_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-curtain-blue-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Curtain_Blue_normal.png",
+      "sha256": "d515c10265ba6e445e5459ae27115298dd1fb9c64b1f32a55e20bad8828034b4",
+      "size": 3008251,
+      "key": "sha256/d515c10265ba6e445e5459ae27115298dd1fb9c64b1f32a55e20bad8828034b4/Sponza_Curtain_Blue_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-curtain-green-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Curtain_Green_diffuse.png",
+      "sha256": "5193bf120318fe3b1a7954af9a4fff61b993c8c4680a991bdd210bd7c28f1eb0",
+      "size": 2579157,
+      "key": "sha256/5193bf120318fe3b1a7954af9a4fff61b993c8c4680a991bdd210bd7c28f1eb0/Sponza_Curtain_Green_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-curtain-green-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Curtain_Green_normal.png",
+      "sha256": "988b5e8c0ce849af165292fde126120696a7f5baaf777b8b75137e3ff722eb86",
+      "size": 3008251,
+      "key": "sha256/988b5e8c0ce849af165292fde126120696a7f5baaf777b8b75137e3ff722eb86/Sponza_Curtain_Green_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-curtain-red-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Curtain_Red_diffuse.png",
+      "sha256": "436ab9b4cdd416e7d6b1e0145e6d5a5466e8d882c6327486cfe22fab581246f7",
+      "size": 2763979,
+      "key": "sha256/436ab9b4cdd416e7d6b1e0145e6d5a5466e8d882c6327486cfe22fab581246f7/Sponza_Curtain_Red_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-curtain-red-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Curtain_Red_normal.png",
+      "sha256": "cdc10a13e04ad75f041be6df3e06a07ae1b41226afe70fb1e2b1c5c1d3112aa8",
+      "size": 3008251,
+      "key": "sha256/cdc10a13e04ad75f041be6df3e06a07ae1b41226afe70fb1e2b1c5c1d3112aa8/Sponza_Curtain_Red_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-curtain-metallic",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Curtain_metallic.png",
+      "sha256": "09ced61d92d166784069f5d62452802d0f9de0d572cdd6b0d8c4302b67a4c6ca",
+      "size": 186725,
+      "key": "sha256/09ced61d92d166784069f5d62452802d0f9de0d572cdd6b0d8c4302b67a4c6ca/Sponza_Curtain_metallic.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-curtain-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Curtain_roughness.png",
+      "sha256": "2a21e5584c1065f3e725ba76cee4d4638e838181946b9db0c087b51d9979b343",
+      "size": 197494,
+      "key": "sha256/2a21e5584c1065f3e725ba76cee4d4638e838181946b9db0c087b51d9979b343/Sponza_Curtain_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-details-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Details_diffuse.png",
+      "sha256": "f697fd7809c243c9223485dac2c291725565a77df594c317c10caf036feae2a4",
+      "size": 1554828,
+      "key": "sha256/f697fd7809c243c9223485dac2c291725565a77df594c317c10caf036feae2a4/Sponza_Details_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-details-metallic",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Details_metallic.png",
+      "sha256": "965de9c714580177f6c706fa568a63e52a541c56b935f96f78cd7e287c04616b",
+      "size": 380534,
+      "key": "sha256/965de9c714580177f6c706fa568a63e52a541c56b935f96f78cd7e287c04616b/Sponza_Details_metallic.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-details-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Details_normal.png",
+      "sha256": "b017fdbdf6740996a22a5170b4d93d58f2501638c08964517e509eab5582ff43",
+      "size": 1907865,
+      "key": "sha256/b017fdbdf6740996a22a5170b4d93d58f2501638c08964517e509eab5582ff43/Sponza_Details_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-details-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Details_roughness.png",
+      "sha256": "0e195a08205a5a9b84ab054670a6bd6244b8e9bd7fdfa6a8361b337b213da8d0",
+      "size": 611203,
+      "key": "sha256/0e195a08205a5a9b84ab054670a6bd6244b8e9bd7fdfa6a8361b337b213da8d0/Sponza_Details_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-fabric-blue-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Fabric_Blue_diffuse.png",
+      "sha256": "3117c2aa314e10aa49417d185636a207a3dc1b94d21bdce5b119063d153c7ecf",
+      "size": 2431397,
+      "key": "sha256/3117c2aa314e10aa49417d185636a207a3dc1b94d21bdce5b119063d153c7ecf/Sponza_Fabric_Blue_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-fabric-blue-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Fabric_Blue_normal.png",
+      "sha256": "236682b4b7eef6c72f65b0690bc6b4b5bdb39e61f90ca1ddae86368b6f1a2af2",
+      "size": 2561265,
+      "key": "sha256/236682b4b7eef6c72f65b0690bc6b4b5bdb39e61f90ca1ddae86368b6f1a2af2/Sponza_Fabric_Blue_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-fabric-green-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Fabric_Green_diffuse.png",
+      "sha256": "99061aec49d26013638caa9448398618fc5a214b41d515fe047c684a43963d4a",
+      "size": 2483485,
+      "key": "sha256/99061aec49d26013638caa9448398618fc5a214b41d515fe047c684a43963d4a/Sponza_Fabric_Green_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-fabric-green-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Fabric_Green_normal.png",
+      "sha256": "7533686b4e17f81c603746a5dff7340a17ff8fd31346d28ba7b22f47a92bd5e5",
+      "size": 2561265,
+      "key": "sha256/7533686b4e17f81c603746a5dff7340a17ff8fd31346d28ba7b22f47a92bd5e5/Sponza_Fabric_Green_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-fabric-red-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Fabric_Red_diffuse.png",
+      "sha256": "3b621d4dce1321c8cd3e1d11a97e0e518a45c84680eee9a55817405808f5bf5e",
+      "size": 2535471,
+      "key": "sha256/3b621d4dce1321c8cd3e1d11a97e0e518a45c84680eee9a55817405808f5bf5e/Sponza_Fabric_Red_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-fabric-red-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Fabric_Red_normal.png",
+      "sha256": "004b6dc4a7bb92f4d4664987708f95dc8aa8c3667ec9254a76b17b421b0ae376",
+      "size": 2561265,
+      "key": "sha256/004b6dc4a7bb92f4d4664987708f95dc8aa8c3667ec9254a76b17b421b0ae376/Sponza_Fabric_Red_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-fabric-metallic",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Fabric_metallic.png",
+      "sha256": "b59eef5d732f481a3aef25f67f0ee4679267eb675c9d98c91c1a20cc6db7d475",
+      "size": 520908,
+      "key": "sha256/b59eef5d732f481a3aef25f67f0ee4679267eb675c9d98c91c1a20cc6db7d475/Sponza_Fabric_metallic.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-fabric-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Fabric_roughness.png",
+      "sha256": "d79d4225ab90b8875cffb8539c1c4b072f7503b537fcac8675501f38fd0e7738",
+      "size": 101121,
+      "key": "sha256/d79d4225ab90b8875cffb8539c1c4b072f7503b537fcac8675501f38fd0e7738/Sponza_Fabric_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-flagpole-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_FlagPole_diffuse.png",
+      "sha256": "934cabc76751c8f34d1f4c598f52b5ebf5b8b1f07e325693856b35d2502fe7fc",
+      "size": 1518875,
+      "key": "sha256/934cabc76751c8f34d1f4c598f52b5ebf5b8b1f07e325693856b35d2502fe7fc/Sponza_FlagPole_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-flagpole-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_FlagPole_normal.png",
+      "sha256": "4662b1c6c932ecfc1bde3c84be5b3887de694a00b40169c0bea7c65467592578",
+      "size": 2098492,
+      "key": "sha256/4662b1c6c932ecfc1bde3c84be5b3887de694a00b40169c0bea7c65467592578/Sponza_FlagPole_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-flagpole-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_FlagPole_roughness.png",
+      "sha256": "46801b24c528d2f631e911d0dfbb7d4c3f7d23bcc66bd010ecf3c927b1a97773",
+      "size": 585513,
+      "key": "sha256/46801b24c528d2f631e911d0dfbb7d4c3f7d23bcc66bd010ecf3c927b1a97773/Sponza_FlagPole_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-floor-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Floor_diffuse.png",
+      "sha256": "a9891576ccb2801e1ca71331f9cf530149f343a955ce658e258638fb8bff0d9e",
+      "size": 2153651,
+      "key": "sha256/a9891576ccb2801e1ca71331f9cf530149f343a955ce658e258638fb8bff0d9e/Sponza_Floor_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-floor-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Floor_normal.png",
+      "sha256": "dfdc892b42908c757aea7eb39e05e753539be5f0e60dcfeb06367f6464a71e44",
+      "size": 2309748,
+      "key": "sha256/dfdc892b42908c757aea7eb39e05e753539be5f0e60dcfeb06367f6464a71e44/Sponza_Floor_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-floor-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Floor_roughness.png",
+      "sha256": "3a024fa6f97bca7852c24ef234d32e06f81328182040d1c6c423f1c2b32b022e",
+      "size": 571204,
+      "key": "sha256/3a024fa6f97bca7852c24ef234d32e06f81328182040d1c6c423f1c2b32b022e/Sponza_Floor_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-roof-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Roof_diffuse.png",
+      "sha256": "565d8fb7abf68b3bd70bfaccc8425c69b792603fb4e95105048e7abd250f8de0",
+      "size": 2721399,
+      "key": "sha256/565d8fb7abf68b3bd70bfaccc8425c69b792603fb4e95105048e7abd250f8de0/Sponza_Roof_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-roof-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Roof_normal.png",
+      "sha256": "c26bf46cd7e3a7d3bc9b2ce31173d11d50eaeccb9c57edc2b9cb961c20e28a2f",
+      "size": 3490829,
+      "key": "sha256/c26bf46cd7e3a7d3bc9b2ce31173d11d50eaeccb9c57edc2b9cb961c20e28a2f/Sponza_Roof_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-roof-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Roof_roughness.png",
+      "sha256": "aeffe5932adda766c15d1bc77e5d328153e1e66156fc9d3560c4071e15337287",
+      "size": 731535,
+      "key": "sha256/aeffe5932adda766c15d1bc77e5d328153e1e66156fc9d3560c4071e15337287/Sponza_Roof_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-thorn-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Thorn_diffuse.png",
+      "sha256": "f0567834b6bf75795cb7a1397658520225568c9cc845aaa01d7d4bf49f770e68",
+      "size": 1597533,
+      "key": "sha256/f0567834b6bf75795cb7a1397658520225568c9cc845aaa01d7d4bf49f770e68/Sponza_Thorn_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-thorn-normal",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Thorn_normal.png",
+      "sha256": "106d06c887f36e988ded590a2cd508c1d712b2e7df89780a9b598fc5e05f35e0",
+      "size": 1473176,
+      "key": "sha256/106d06c887f36e988ded590a2cd508c1d712b2e7df89780a9b598fc5e05f35e0/Sponza_Thorn_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-sponza-thorn-roughness",
+      "path": "EngineTest/assets/models/Sponza/Sponza_Thorn_roughness.png",
+      "sha256": "a65b03400f3cf6fb73b140d58d8e5efd8aee3e4dcd530a76c0e0a1230bd98997",
+      "size": 470450,
+      "key": "sha256/a65b03400f3cf6fb73b140d58d8e5efd8aee3e4dcd530a76c0e0a1230bd98997/Sponza_Thorn_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-vasehanging-diffuse",
+      "path": "EngineTest/assets/models/Sponza/VaseHanging_diffuse.png",
+      "sha256": "6ca5f7f5f1b05712d84291771ec0768cabe09ba743917997a40a25e053643abd",
+      "size": 1448030,
+      "key": "sha256/6ca5f7f5f1b05712d84291771ec0768cabe09ba743917997a40a25e053643abd/VaseHanging_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-vasehanging-normal",
+      "path": "EngineTest/assets/models/Sponza/VaseHanging_normal.png",
+      "sha256": "deed2df273d9f621901c30f256de93e7fac74aed3de7e20ad5030aa4dc8ec7d4",
+      "size": 2000278,
+      "key": "sha256/deed2df273d9f621901c30f256de93e7fac74aed3de7e20ad5030aa4dc8ec7d4/VaseHanging_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-vasehanging-roughness",
+      "path": "EngineTest/assets/models/Sponza/VaseHanging_roughness.png",
+      "sha256": "1dbfe3bc0e74c70c261f4df6c451a64905e2075c28a54116b8fec975da51aa5f",
+      "size": 518629,
+      "key": "sha256/1dbfe3bc0e74c70c261f4df6c451a64905e2075c28a54116b8fec975da51aa5f/VaseHanging_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-vaseplant-diffuse",
+      "path": "EngineTest/assets/models/Sponza/VasePlant_diffuse.png",
+      "sha256": "a816ce17b2f29f086f0d43020d9cb603104071a9aec1e398159cabe7e24c06ce",
+      "size": 856840,
+      "key": "sha256/a816ce17b2f29f086f0d43020d9cb603104071a9aec1e398159cabe7e24c06ce/VasePlant_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-vaseplant-normal",
+      "path": "EngineTest/assets/models/Sponza/VasePlant_normal.png",
+      "sha256": "f3bc44bc27c68d7050c3d5e92db9c5c8fda8a564c35a7c9549a3f05e1aaefc8e",
+      "size": 1048363,
+      "key": "sha256/f3bc44bc27c68d7050c3d5e92db9c5c8fda8a564c35a7c9549a3f05e1aaefc8e/VasePlant_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-vaseplant-roughness",
+      "path": "EngineTest/assets/models/Sponza/VasePlant_roughness.png",
+      "sha256": "403b68ad436276dbbd764537b8cbdde8f43a3b0541bd282c4e857e10f71cb170",
+      "size": 262530,
+      "key": "sha256/403b68ad436276dbbd764537b8cbdde8f43a3b0541bd282c4e857e10f71cb170/VasePlant_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-vaseround-diffuse",
+      "path": "EngineTest/assets/models/Sponza/VaseRound_diffuse.png",
+      "sha256": "68bfd873ce1f7e83ae38f99ff3d4d2312282309cbc9e50d3b922bf9c72bad09b",
+      "size": 2071681,
+      "key": "sha256/68bfd873ce1f7e83ae38f99ff3d4d2312282309cbc9e50d3b922bf9c72bad09b/VaseRound_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-vaseround-normal",
+      "path": "EngineTest/assets/models/Sponza/VaseRound_normal.png",
+      "sha256": "1590b79d00c6fca1be20423933416891d26a6b3edd394e84c6ea8c97adc787e4",
+      "size": 232509,
+      "key": "sha256/1590b79d00c6fca1be20423933416891d26a6b3edd394e84c6ea8c97adc787e4/VaseRound_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-vaseround-roughness",
+      "path": "EngineTest/assets/models/Sponza/VaseRound_roughness.png",
+      "sha256": "220726600dd94ae903f0e64212cb6e942b874e076c049a2199d31be57435c729",
+      "size": 57128,
+      "key": "sha256/220726600dd94ae903f0e64212cb6e942b874e076c049a2199d31be57435c729/VaseRound_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-vase-diffuse",
+      "path": "EngineTest/assets/models/Sponza/Vase_diffuse.png",
+      "sha256": "3c05e24b775fe75af8d5c1b9cc27ddf1af527e980ea49d6186807ef6e2a3dd4f",
+      "size": 2005918,
+      "key": "sha256/3c05e24b775fe75af8d5c1b9cc27ddf1af527e980ea49d6186807ef6e2a3dd4f/Vase_diffuse.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-vase-normal",
+      "path": "EngineTest/assets/models/Sponza/Vase_normal.png",
+      "sha256": "d1ac97235573c1f9eb0fbfff49d6a135f66ad198ccb61dcaa333f034f888a62e",
+      "size": 1848395,
+      "key": "sha256/d1ac97235573c1f9eb0fbfff49d6a135f66ad198ccb61dcaa333f034f888a62e/Vase_normal.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-vase-roughness",
+      "path": "EngineTest/assets/models/Sponza/Vase_roughness.png",
+      "sha256": "410aa74f2a784071faa988a83010a14726d0446d9fe0ffb1407d29365c63924b",
+      "size": 443847,
+      "key": "sha256/410aa74f2a784071faa988a83010a14726d0446d9fe0ffb1407d29365c63924b/Vase_roughness.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    },
+    {
+      "id": "sponza-texture-gi-flag",
+      "path": "EngineTest/assets/models/Sponza/gi_flag.png",
+      "sha256": "71c725237791a1c6e1ff7e9463a4d4222d3a0dbff4ef7324d52219aa31275596",
+      "size": 16627,
+      "key": "sha256/71c725237791a1c6e1ff7e9463a4d4222d3a0dbff4ef7324d52219aa31275596/gi_flag.png",
+      "groups": [
+        "vulkan-reference",
+        "vulkan-default",
+        "windows-f350",
+        "dawn-web",
+        "dawn-mode11"
+      ]
+    }
+  ],
+  "storage": {
+    "provider": "cloudflare-r2",
+    "bucket": "gameengine-vulkancpp",
+    "access": "public-development",
+    "verified_on": "2026-11-20"
+  }
+}

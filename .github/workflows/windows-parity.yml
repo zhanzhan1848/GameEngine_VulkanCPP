@@ -142,7 +142,7 @@ jobs:
           Check ([bool]$glslang) "glslangValidator ($glslang)"
           Check ([bool]$cross) "spirv-cross ($cross)"
           Check ([bool]$dxc) "dxc ($dxc)"
-          Check ([bool]$env:PRIMAL_CI_ASSET_DIR) "PRIMAL_CI_ASSET_DIR (local assets: Sponza.model, SponzaTangentFrames.model, sunset.hdr, Sponza_global_sdf.v3.cache)"
+          Check ([bool]($env:PRIMAL_CI_ASSET_DIR -or $env:PRIMAL_CI_ASSET_SOURCE)) "PRIMAL_CI_ASSET_DIR or PRIMAL_CI_ASSET_SOURCE (versioned asset source)"
           Check ([bool]$env:PRIMAL_CI_THIRD_PARTY_DIR) "PRIMAL_CI_THIRD_PARTY_DIR (vendored third_party: VHACD\ only - collision module needs it; FBX SDK is the system Autodesk install))"
           Check ([bool]$env:PRIMAL_CI_SDK_MODULES) "PRIMAL_CI_SDK_MODULES (diagnostic-sdk-modules: DirectXTex/FBX config packages for find_package)"
           if (-not $env:PRIMAL_CI_HARNESS_BASELINE) {
@@ -161,6 +161,13 @@ jobs:
       - name: Stage local assets (SHA-gated)
         shell: powershell
         run: |
+          if ($env:PRIMAL_CI_ASSET_SOURCE) {
+            $python = Get-Command python -ErrorAction SilentlyContinue
+            if (-not $python) { $python = Get-Command python3 -ErrorAction Stop }
+            & $python.Source scripts/fetch_assets.py fetch windows-f350 --source $env:PRIMAL_CI_ASSET_SOURCE
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            exit 0
+          }
           $src = $env:PRIMAL_CI_ASSET_DIR
           $assets = @(
             @{ s = 'Sponza.model';                 d = 'EngineTest\assets\Sponza.model';                 sha = 'b0c1f2d5e583508aab922c6e4c2c38cf2a564f952709f45827ac10d4c4757390' },
