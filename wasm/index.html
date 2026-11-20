@@ -369,6 +369,7 @@
   </div>
 
   <script src="package_loader.js"></script>
+  <script src="dawn_asset_loader.js?v=2"></script>
   <script>
     // web-cloud-delivery S1：项目包入口——?package=<url> 时 fetch+解析 v2 运行时包
     //（与 PrimalPlayer 同一行式契约），侧栏展示场景/实体/资产/序列摘要与诊断；
@@ -457,6 +458,12 @@
       };
 
       window.hideLoading = function() {
+        if (new URLSearchParams(location.search).get('mode') !== '11') {
+          for (let i = 0; i < 7; i++) {
+            const slider = document.getElementById('param_' + i);
+            if (slider) window._setDebugParam(i, Number(slider.value));
+          }
+        }
         loadingOverlay.classList.add('hidden');
         statusLeft.textContent = 'Running';
         // Notify parent launcher (if any) that this iframe's demo is ready.
@@ -477,8 +484,8 @@
         if (infoEl) infoEl.textContent = 'Mode ' + modeIndex + ': ' + modeName;
 
         // Mode-aware visibility: DDGI group only for 7/10/11; Lighting group for 7+.
-        var showDDGI = (modeIndex === 7 || modeIndex === 10 || modeIndex === 11);
-        var showForward = (modeIndex >= 7);
+        var showDDGI = (modeIndex === 7 || modeIndex === 10);
+        var showForward = (modeIndex >= 7 && modeIndex < 11);
         var ddgiGroup = document.getElementById('paramGroup_ddgi');
         var fwdGroup = document.getElementById('paramGroup_forward');
         if (ddgiGroup) ddgiGroup.style.display = showDDGI ? 'block' : 'none';
@@ -582,82 +589,50 @@
       }
       requestAnimationFrame(updateFps);
 
-      // Emscripten module config
-      // We fetch all needed files (shaders + assets) at runtime into MEMFS so
-      // the page loads instantly (no 400MB+ data file). The file list comes
-      // from wasm_manifest.js, which CMake regenerates on every build.
-      //
-      // Note: the IIFE that defines Module runs *before* the manifest script
-      // loads (manifest is appended dynamically). The preRun callback runs
-      // much later, so we resolve the asset list lazily inside stageAssets().
-      function getAssetList() {
-        if (window.WASM_MANIFEST) {
-          return (window.WASM_MANIFEST.shaders || []).concat(window.WASM_MANIFEST.assets || []);
-        }
-        // Sponza.model is embedded, fallback list only needs textures
-        return [];
-      }
+      const referenceGI = new URLSearchParams(location.search).get('mode') === '11';
+      let mountFileSystem;
+      const fileSystemReady = new Promise(resolve => { mountFileSystem = resolve; });
+      let sceneReady;
 
-      function fetchAndStage(item) {
-        return new Promise(function(resolve) {
-          var xhr = new XMLHttpRequest();
-          xhr.open('GET', item.url, true);
-          xhr.responseType = 'arraybuffer';
-          xhr.onload = function() {
-            if (xhr.status === 200) {
-              try {
-                var dir = item.fsPath.substring(0, item.fsPath.lastIndexOf('/'));
-                if (dir && dir !== '' && !FS.analyzePath(dir).exists) {
-                  FS.mkdirTree(dir);
-                }
-                FS.writeFile(item.fsPath, new Uint8Array(xhr.response));
-              } catch (err) {
-                console.warn('[Assets] Failed to stage ' + item.fsPath + ':', err);
-              }
-            }
-            resolve();
-          };
-          xhr.onerror = function() { resolve(); };
-          xhr.send();
+      function prepareScene() {
+        var items = referenceGI
+          ? window.DAWN_ASSETS.filter(item => item.fsPath !== '/assets/Sponza.model').concat(window.DAWN_GI_INPUTS)
+          : window.DAWN_ASSETS;
+        return DawnAssetLoader.stageAssets(items, {
+          modelPath: referenceGI ? '/assets/SponzaTangentFrames.model' : '/assets/Sponza.model',
+          fs: fileSystemReady, fetch: window.fetch.bind(window), crypto: window.crypto, cacheStorage: window.caches,
+          progress: function(done, total, ready, bytes) {
+            const mb = value => (value / 1000000).toFixed(1);
+            setProgress(Math.round(10 + 80 * ready / bytes),
+              'Preparing scene ' + mb(ready) + ' / ' + mb(bytes) + ' MB (' + done + '/' + total + ')');
+          }
         });
       }
 
-      // Sponza.model is embedded directly in the WASM binary (--embed-file in
-      // CMakeLists.txt), so it's already in MEMFS before main() runs.
-      // Textures are fetched in preRun so they're available before main() starts.
       function stageAllAssets() {
-        var list = getAssetList();
-        var textures = list.filter(function(item) {
-          return item.fsPath !== '/assets/Sponza.model';
+        addRunDependency('dawn-assets');
+        mountFileSystem(FS);
+        sceneReady.then(function(error) {
+          if (error) throw error;
+          if (referenceGI) {
+            FS.mkdirTree('/EngineTest');
+            FS.symlink('/assets', '/EngineTest/assets');
+            window.addEventListener('keydown', function(event) {
+              if (event.key === 'Tab' && !event.repeat) {
+                event.preventDefault();
+                var url = new URL(location.href);
+                url.searchParams.set('mode', '0');
+                location.replace(url.href);
+              }
+            });
+          }
+          setProgress(90, 'Initializing engine...');
+          removeRunDependency('dawn-assets');
+        }).catch(function(error) {
+          console.error('[Assets] Failed to load Dawn scene:', error);
+          statusLeft.textContent = 'Scene load failed; reload to retry.';
+          setProgress(0, 'Scene load failed: ' + error.message);
         });
-        console.log('[Assets] Pre-fetching ' + textures.length + ' textures before main()');
-        setProgress(10, 'Loading textures 0/' + textures.length);
-
-        addRunDependency('textures');
-
-        var concurrency = 8;
-        var idx = 0;
-        var completed = 0;
-        function next() {
-          if (idx >= textures.length) return;
-          var current = idx++;
-          fetchAndStage(textures[current]).then(function() {
-            completed++;
-            if (completed % 5 === 0 || completed === textures.length) {
-              var pct = Math.round(10 + (completed / textures.length) * 80);
-              setProgress(pct, 'Loading textures ' + completed + '/' + textures.length);
-            }
-            if (completed === textures.length) {
-              console.log('[Assets] All ' + textures.length + ' textures staged');
-              setProgress(90, 'Initializing engine...');
-              removeRunDependency('textures');
-            }
-            next();
-          });
-        }
-        for (var i = 0; i < Math.min(concurrency, textures.length); i++) {
-          next();
-        }
       }
 
       var Module = {
@@ -675,7 +650,10 @@
         },
         printErr: function(text) {
           console.error('[WASM]', text);
-          window.setStatus(text);
+        },
+        onAbort: function(reason) {
+          window.setStatus('Engine stopped: ' + reason);
+          setProgress(0, 'Engine stopped: ' + reason);
         },
         canvas: canvas,
         setStatus: function(text) {
@@ -701,15 +679,15 @@
       // Load the asset manifest (auto-generated by CMake, lists all WGSL
       // shaders + Sponza assets the WASM module will need at runtime)
       var manifestScript = document.createElement('script');
-      manifestScript.src = 'wasm_manifest.js';
+      manifestScript.src = 'dawn_assets_manifest.js';
       manifestScript.onload = function() {
-        // Once manifest is loaded, kick off the Emscripten module
+        // Fetch both origins concurrently. Each asset worker waits for MEMFS
+        // only after its first object is ready for mounting.
+        sceneReady = prepareScene().then(() => null, error => error);
         setProgress(10, 'Loading engine... / 加载引擎...');
         var script = document.createElement('script');
         script.src = 'TestDawnWASM.js';
-        script.onload = function() {
-          setProgress(15, 'Engine loaded. / 引擎已加载');
-        };
+
         script.onerror = function() {
           setProgress(0, 'Failed to load TestDawnWASM.js / 加载失败');
           statusLeft.textContent = 'Error: Failed to load WASM module';

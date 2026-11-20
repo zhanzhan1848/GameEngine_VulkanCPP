@@ -696,10 +696,17 @@ jobs:
       - name: Pre-fetch emdawnwebgpu port
         run: embuilder build emdawnwebgpu --force 2>&1 || true
 
+      - name: Verify Dawn web asset manifest and loader
+        run: |
+          python3 scripts/generate_dawn_web_manifest.py
+          git diff --exit-code -- wasm/dawn_assets_manifest.js
+          node --test wasm/tests/dawn_asset_loader.test.cjs
+
       - name: Configure (Emscripten + WebGPU)
         run: |
           emcmake cmake -B build_wasm \
             -DENABLE_WEBGPU=ON \
+            -DPRIMAL_DAWN_REMOTE_ASSETS=ON \
             -DCMAKE_BUILD_TYPE=MinSizeRel
 
       - name: Build
@@ -807,6 +814,9 @@ jobs:
           if [ -f wasm/index.html ]; then
             cp wasm/index.html deploy/wasm.html
           fi
+          cp wasm/dawn_asset_loader.js wasm/dawn_assets_manifest.js wasm/package_loader.js deploy/
+          python3 scripts/generate_dawn_web_manifest.py
+          cmp wasm/dawn_assets_manifest.js deploy/dawn_assets_manifest.js
           if [ -f build_wasm/wasm_manifest.js ]; then
             cp build_wasm/wasm_manifest.js deploy/
           fi
