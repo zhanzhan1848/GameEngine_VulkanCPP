@@ -391,15 +391,30 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
                       [](const Item& a, const Item& b) { return a.binding < b.binding; });
 
             // 连续且同 stageFlags 的 binding 段合并为一个 range。
+            // R46（2026-11-21，blit 恒零根因）：合并条件补 offset 连续性——
+            // D3D12 range 契约=连续寄存器→连续描述符（offset 逐项 +count）。
+            // R14 孪生行追加在自然行之后物化（mainOffset 递增），其 binding
+            // 却可以小于同类型自然行：blit 布局 = b0 SampledDepthImage（SRV
+            // 自然行 +1 + UAV 孪生 +3）+ b1 StorageImage（UAV 自然行 +2）——
+            // UAV items 按 binding 排序为 [b0(off3), b1(off2)]，按 binding
+            // 相邻盲并产出 "reg=0 x2 +3"：GPU 认为寄存器 u0→+3、u1→+4，而
+            // 写入路径实际落 +3(u0 死槽)/+2(u1)——**shader 的 u1（shadowMap
+            // 输出）读到 set 外未定义描述符 → imageStore 落空 → shadow_map
+            // 恒零**（R44-R45 判读链闭环：CB 内容正确/VA 健康/shadowMap 可
+            // 写均排除后唯一残留面；PSO 验证只查覆盖不查 offset，静默通过）。
+            // 修=不连续即拆段，各段 offset 链自洽；连续段合并行为不变。
             u32 segFirst = 0;
             while (segFirst < items.size()) {
                 u32 segLast = segFirst;
                 u32 covered = items[segFirst].binding + items[segFirst].count;
+                u32 nextOffset = items[segFirst].offset + items[segFirst].count;
                 while (segLast + 1 < items.size()
                        && items[segLast + 1].binding == covered
-                       && items[segLast + 1].stage == items[segFirst].stage) {
+                       && items[segLast + 1].stage == items[segFirst].stage
+                       && items[segLast + 1].offset == nextOffset) {
                     ++segLast;
                     covered += items[segLast].count;
+                    nextOffset += items[segLast].count;
                 }
                 D3D12_DESCRIPTOR_RANGE range{};
                 range.RangeType = type;
@@ -435,14 +450,18 @@ bool BuildRootSignature(D3D12Device& device, const PipelineLayoutDesc& desc,
             }
             std::sort(items.begin(), items.end(),
                       [](const SItem& a, const SItem& b) { return a.binding < b.binding; });
+            // R46：同主段——合并条件补 offset 连续性（D3D12 range 契约）。
             u32 segFirst = 0;
             while (segFirst < items.size()) {
                 u32 segLast = segFirst;
                 u32 covered = items[segFirst].binding + items[segFirst].count;
+                u32 nextOffset = items[segFirst].offset + items[segFirst].count;
                 while (segLast + 1 < items.size()
-                       && items[segLast + 1].binding == covered) {
+                       && items[segLast + 1].binding == covered
+                       && items[segLast + 1].offset == nextOffset) {
                     ++segLast;
                     covered += items[segLast].count;
+                    nextOffset += items[segLast].count;
                 }
                 D3D12_DESCRIPTOR_RANGE range{};
                 range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
