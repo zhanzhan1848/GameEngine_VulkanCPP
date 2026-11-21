@@ -1537,7 +1537,7 @@ void D3D12Device::destroyDescriptorSetImpl(DescriptorSetHandle handle) {
     descriptorSetAllocator_.Free(static_cast<u32>(handle));
 }
 
-void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
+void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set, u64 srcHandle) {
     if (!set) return;
     // R21-C 时效判定 = (帧槽, 纪元) 双键。旧判定只比 ownerSlot ==
     // currentFrameIndex_：set 恰好隔一整个槽周期（3 帧）未被触碰后同槽
@@ -1612,17 +1612,16 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set) {
         const bool fromLimbo = sameSlotStale
             && heaps.CbvSrvUavLimboMatches(oldOwnerSlot, oldOwnerEpoch);
         if (sameSlotStale && !fromLimbo) {
-            // R39：去 warned-once——全量打点每次 beyond-limbo 迁移（含 set
-            // base/main_count，R34 已加）。"region left for write-path
-            // rebuild" 的假设（逐帧 set 全量重写）若对某 set 不成立，其
-            // 垃圾描述符永驻 = 死写候选；多发生频次/多 set 归属是判别面。
+            // R41：全量打点（去 warned-once 已在 R39 落地）——22 条/轮
+            // 已确认；本轮补帧号+序列号+base 归属（旧区段地址即 set 身份）。
+            static std::atomic<u32> s_blSeq{0};
             PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
-                << "[D3D12Device] set migration beyond limbo snapshot (slot "
-                << oldOwnerSlot << " epoch " << oldOwnerEpoch
-                << " base=" << set->BaseSlot()
+                << "[D3D12Device] beyond-limbo #" << s_blSeq.fetch_add(1, std::memory_order_relaxed)
+                << " slot=" << oldOwnerSlot << " epoch=" << oldOwnerEpoch
+                << " old_base=" << oldBase
+                << " new_base=" << set->BaseSlot()
                 << " main_count=" << set->MainCount()
-                << "): content not recoverable, skipping copy (region left "
-                   "for write-path rebuild)" << std::endl;
+                << std::endl;
         }
         if (!sameSlotStale || fromLimbo) {
             native->CopyDescriptorsSimple(
