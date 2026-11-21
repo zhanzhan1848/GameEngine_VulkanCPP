@@ -4591,12 +4591,27 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
                 rb.bindFlags = static_cast<u32>(rhi::BufferUsageFlags::TransferDst);
                 rb.memoryUsage = rhi::GPUMemoryUsage::Readback;
                 rg.readback = device_->CreateBuffer(rb);
-                rhi::DescriptorSetLayoutBinding pb{};
-                pb.binding = 0;
-                pb.descriptorCount = 1;
-                pb.descriptorType = rhi::DescriptorType::StorageImage;
-                pb.stageFlags = rhi::ShaderStage::Compute;
-                rhi::DescriptorSetLayoutDesc pld{1, &pb};
+                // R42：layout 对齐 R41 双源 UavProbe.comp（b0 UAV + b1/b2
+                // SampledImage）——旧单 binding 布局对 R41 shader 产出缺
+                // t1/t2 的根签名，PSO E_INVALIDARG（R41b 实证
+                // "SRV BaseShaderRegister=1 not fully bound"）→ 探针静默
+                // 死亡。b1/b2 均绑本 blit 的 depthRT（D32）：shader 输出
+                // R=1+d*0.25 / B=0.25+d*0.5——D32 SRV 读活则非纯常数，
+                // 读死则 (1, 0.5, 0.25)——正是 blit 读侧死因的判别面。
+                rhi::DescriptorSetLayoutBinding pb[3]{};
+                pb[0].binding = 0;
+                pb[0].descriptorCount = 1;
+                pb[0].descriptorType = rhi::DescriptorType::StorageImage;
+                pb[0].stageFlags = rhi::ShaderStage::Compute;
+                pb[1].binding = 1;
+                pb[1].descriptorCount = 1;
+                pb[1].descriptorType = rhi::DescriptorType::SampledImage;
+                pb[1].stageFlags = rhi::ShaderStage::Compute;
+                pb[2].binding = 2;
+                pb[2].descriptorCount = 1;
+                pb[2].descriptorType = rhi::DescriptorType::SampledImage;
+                pb[2].stageFlags = rhi::ShaderStage::Compute;
+                rhi::DescriptorSetLayoutDesc pld{3, pb};
                 rg.setLayout = device_->CreateDescriptorSetLayout(pld);
                 rhi::PipelineLayoutDesc ppld{1, &rg.setLayout};
                 rg.layout = device_->CreatePipelineLayout(ppld);
@@ -4632,13 +4647,30 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
             if (rg.ready) {
                 rhi::DescriptorImageInfo pImg{rhi::handles::INVALID_SAMPLER, rg.tex,
                                               rhi::ResourceState::UnorderedAccess};
-                rhi::WriteDescriptorSet pw{};
-                pw.dstSet = rg.set;
-                pw.dstBinding = 0;
-                pw.descriptorCount = 1;
-                pw.descriptorType = rhi::DescriptorType::StorageImage;
-                pw.imageInfo = &pImg;
-                device_->UpdateDescriptorSets(1, &pw);
+                // R42：b1/b2 绑当前 blit 的 depthRT（D32 SRV 读判别面，见
+                // 上方 layout 注）——blit 的 barrier 已把 depthRT 转到
+                // ShaderResource，本 dispatch 同 cmd 直接采样合法。
+                rhi::DescriptorImageInfo pSrc{rhi::handles::INVALID_SAMPLER, depthRT,
+                                              rhi::ResourceState::ShaderResource};
+                rhi::DescriptorImageInfo pDep{rhi::handles::INVALID_SAMPLER, depthRT,
+                                              rhi::ResourceState::ShaderResource};
+                rhi::WriteDescriptorSet pw[3]{};
+                pw[0].dstSet = rg.set;
+                pw[0].dstBinding = 0;
+                pw[0].descriptorCount = 1;
+                pw[0].descriptorType = rhi::DescriptorType::StorageImage;
+                pw[0].imageInfo = &pImg;
+                pw[1].dstSet = rg.set;
+                pw[1].dstBinding = 1;
+                pw[1].descriptorCount = 1;
+                pw[1].descriptorType = rhi::DescriptorType::SampledImage;
+                pw[1].imageInfo = &pSrc;
+                pw[2].dstSet = rg.set;
+                pw[2].dstBinding = 2;
+                pw[2].descriptorCount = 1;
+                pw[2].descriptorType = rhi::DescriptorType::SampledImage;
+                pw[2].imageInfo = &pDep;
+                device_->UpdateDescriptorSets(3, pw);
 
                 rhi::ResourceBarrier toUav{};
                 toUav.resource = rg.tex;

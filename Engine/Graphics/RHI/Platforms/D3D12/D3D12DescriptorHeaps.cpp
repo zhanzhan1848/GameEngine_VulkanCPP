@@ -157,6 +157,8 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
     }
     mainLimboEpoch_.assign(frameSlotCount_, 0);
     samplerLimboEpoch_.assign(frameSlotCount_, 0);
+    mainLimboValid_.assign(frameSlotCount_, 0);    // R42：valid 标志取代 epoch==0 哨兵
+    samplerLimboValid_.assign(frameSlotCount_, 0);
     // CBV/SRV/UAV 主堆布局：前段持久（纹理 SRV/UAV 拷贝源），后段帧槽线性
     // （set 实例表）。
     if (config.cbvSrvUavPersistentCapacity >= config.cbvSrvUavCapacity) {
@@ -218,6 +220,8 @@ void D3D12DescriptorHeapManager::Shutdown() {
     perSlotGuardTarget_.clear();
     mainLimboEpoch_.clear();       // R23
     samplerLimboEpoch_.clear();    // R23
+    mainLimboValid_.clear();       // R42
+    samplerLimboValid_.clear();    // R42
 }
 
 // ============================================================================
@@ -274,11 +278,19 @@ void D3D12DescriptorHeapManager::BeginFrame(u32 frameSlot, D3D12FencePool& fence
     // 分配覆写之前整段拷入 limbo 堆。此后同槽旧纪元 set 的迁移（cbIdx 三缓
     // 冲 set 每第 3 帧回归）从 limbo 取源——既消除 debug-layer #653 的区间
     // 重叠 UB，也消除"源区段已被本帧更早分配覆写→静默拷入垃圾"的通路。
-    // 快照纪元 = 刚结束那一轮的纪元（SlotEpoch 已自增，-1 即上一轮）；
-    // 槽上一轮无分配（首周期 / 空轮）时清零哨兵（LimboMatches 恒 false）。
+    // 快照纪元 = 刚结束那一轮的纪元（SlotEpoch 已自增，-1 即上一轮）。
     // 开销：每 3 帧一次 lastCycleHigh 个描述符的 CPU 拷贝（CI 实测高水位
     // ~2868/槽 ≈ 90KB，可忽略）。
-    if (device_ && mainLinear_.SlotEpoch(currentSlot_) >= 2) {
+    // R42（2026-11-21）三修：
+    //  ① 去 SlotEpoch>=2 门——首周期同样可能有上一轮内容（init 期分配全部
+    //    落在 slot 0 的 epoch 0，首个 slot-0 BeginFrame 跳过即丢，19 个
+    //    init 期 set 首触迁移 beyond-limbo 丢内容 = R41b 实证）；空轮由
+    //    n>0 判定自然跳过（LastCycleHighFor 已随策略 R42 修复为本槽
+    //    上一轮真实终值——旧实现被上一槽的消耗跨槽污染，快照长度错误，
+    //    截断后高位 set 从 limbo 拷到旧纪元陈旧描述符 = FwdVelocity 错位
+    //    机制闭环）。
+    //  ② valid 标志取代 epoch==0 哨兵——prevEpoch=0 是合法首周期纪元。
+    if (device_) {
         const u64 prevEpoch = mainLinear_.SlotEpoch(currentSlot_) - 1;
         const u32 n = mainLinear_.LastCycleHighFor(currentSlot_);
         if (n > 0 && cbvSrvUavLimboHeap_) {
@@ -290,8 +302,9 @@ void D3D12DescriptorHeapManager::BeginFrame(u32 frameSlot, D3D12FencePool& fence
                        * cbvSrvUavDescriptorSize_;
             device_->CopyDescriptorsSimple(n, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             mainLimboEpoch_[currentSlot_] = prevEpoch;
+            mainLimboValid_[currentSlot_] = 1;
         } else {
-            mainLimboEpoch_[currentSlot_] = 0;
+            mainLimboValid_[currentSlot_] = 0;
         }
         const u32 sn = samplerLinear_.LastCycleHighFor(currentSlot_);
         if (sn > 0 && samplerLimboHeap_) {
@@ -303,8 +316,9 @@ void D3D12DescriptorHeapManager::BeginFrame(u32 frameSlot, D3D12FencePool& fence
                        * samplerDescriptorSize_;
             device_->CopyDescriptorsSimple(sn, dst, src, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
             samplerLimboEpoch_[currentSlot_] = prevEpoch;
+            samplerLimboValid_[currentSlot_] = 1;
         } else {
-            samplerLimboEpoch_[currentSlot_] = 0;
+            samplerLimboValid_[currentSlot_] = 0;
         }
     }
     if (FrameTraceEnabled()) {

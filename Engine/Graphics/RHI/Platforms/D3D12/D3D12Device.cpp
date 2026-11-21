@@ -1614,12 +1614,14 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set, u64 src
         if (sameSlotStale && !fromLimbo) {
             // R41：全量打点（去 warned-once 已在 R39 落地）——22 条/轮
             // 已确认；本轮补帧号+序列号+base 归属（旧区段地址即 set 身份）。
+            // R42：new_base 打分配真值 newBase（旧实现打 set->BaseSlot()，
+            // 此时仍是旧值——R41b 日志里 old==new 全部成对即此假象）。
             static std::atomic<u32> s_blSeq{0};
             PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
                 << "[D3D12Device] beyond-limbo #" << s_blSeq.fetch_add(1, std::memory_order_relaxed)
                 << " slot=" << oldOwnerSlot << " epoch=" << oldOwnerEpoch
                 << " old_base=" << oldBase
-                << " new_base=" << set->BaseSlot()
+                << " new_base=" << newBase
                 << " main_count=" << set->MainCount()
                 << std::endl;
         }

@@ -239,6 +239,36 @@ TestResult TestHighWaterTracking() {
     return TestResult::Passed;
 }
 
+TestResult TestLastCycleHighNotCrossSlotPolluted() {
+    // R42 回归：lastCycleHigh_[S] 必须是槽 S 自己上一轮的终值，而不是
+    // BeginFrame 进入时共享 bump_ 里残留的上一个槽（帧序 S-1）的终值。
+    // 旧实现下 limbo 快照长度被跨槽污染：长度不足即截断快照，高位偏移
+    // 的 set 从 limbo 拷到旧纪元陈旧描述符（D3D12 描述符指向错资源根因，
+    // R37-R40 探针读 FwdVelocity 族的机制闭环）。
+    auto p = MakeProductionLikePolicy();
+    u32 base = 0;
+    // 槽 0：本槽消耗 10。
+    p.BeginFrame(0);
+    TEST_ASSERT(p.Alloc(10, base), "slot0 alloc");
+    // 槽 1：本槽消耗 900（远大于槽 0）。
+    p.BeginFrame(1);
+    TEST_ASSERT(p.Alloc(900, base), "slot1 alloc");
+    // 槽 2：本槽消耗 33。
+    p.BeginFrame(2);
+    TEST_ASSERT(p.Alloc(33, base), "slot2 alloc");
+    // 回绕槽 0：LastCycleHighFor(0) 必须是 10（槽 0 自己上一轮），
+    // 而不是槽 2 的 33（旧实现的跨槽污染值）。
+    p.BeginFrame(0);
+    TEST_ASSERT(p.LastCycleHighFor(0) == 10,
+                "slot0 last-cycle high is slot0's own prior bump (not slot2's)");
+    // 再进槽 1：快照必须还是槽 1 自己上一轮的 900，而不是槽 0 上一轮
+    // 的消耗（旧实现取共享 bump_ 残留=跨槽污染）。
+    p.BeginFrame(1);
+    TEST_ASSERT(p.LastCycleHighFor(1) == 900,
+                "slot1 snapshot is its own prior bump, preserved across absence");
+    return TestResult::Passed;
+}
+
 // ============================================================================
 // R22-S1：sampler 表内容级共享（SamplerTableSharingPolicy）
 // ============================================================================
@@ -535,6 +565,7 @@ void RegisterD3D12DescriptorSlotPolicyTests() {
     suite->AddTestCase(TestCase("EpochDisjointInvariantAcrossCycle", TestEpochDisjointInvariantAcrossCycle));
     suite->AddTestCase(TestCase("EpochAdvancesPerSlotOnly", TestEpochAdvancesPerSlotOnly));
     suite->AddTestCase(TestCase("HighWaterTracking", TestHighWaterTracking));
+    suite->AddTestCase(TestCase("LastCycleHighNotCrossSlotPolluted", TestLastCycleHighNotCrossSlotPolluted));
     // R22-S1：sampler 表内容级共享。
     suite->AddTestCase(TestCase("SamplerKeyHashSemantics", TestSamplerKeyHashSemantics));
     suite->AddTestCase(TestCase("SamplerSharingEntryEpochLifecycle", TestSamplerSharingEntryEpochLifecycle));

@@ -56,28 +56,35 @@ public:
         slotCapacity_ = slotCapacity;
         frameSlotCount_ = frameSlotCount == 0 ? 1 : frameSlotCount;
         currentSlot_ = 0;
-        bump_ = 0;
+        bump_.assign(frameSlotCount_, 0);
         epoch_.assign(frameSlotCount_, 0);
         highWater_.assign(frameSlotCount_, 0);
         lastCycleHigh_.assign(frameSlotCount_, 0);
     }
 
     /// 帧槽推进：槽切换 + bump 归零 + 该槽纪元自增（旧纪元分配全部作废）。
+    /// R42（2026-11-21）：bump 改每槽独立——旧实现共享单个 bump_，BeginFrame
+    /// 快照 lastCycleHigh_[S] 时 bump_ 是上一个槽（S-1 帧序）的终值 → 跨槽
+    /// 污染：limbo 快照长度 = 上一槽的消耗而非本槽上一轮的消耗。长度不足即
+    /// 截断快照，高位偏移的 set 在 limbo 里保留更旧纪元的内容，而 epoch 戳
+    /// 声称保真——fromLimbo 迁移据此把陈旧描述符当有效内容拷给 set（描述符
+    /// 指向错资源，R37-R40 "探针读 FwdVelocity"族错位的完整机制）。
     void BeginFrame(u32 frameSlot) {
         currentSlot_ = frameSlot % frameSlotCount_;
-        // 进入槽的 bump_ 仍保留其上一轮终值（该槽自上轮未被触碰）——
-        // 先快照为"上一轮峰值"再归零（FRAME_TRACE 逐帧消耗量对账用）。
-        lastCycleHigh_[currentSlot_] = bump_;
-        bump_ = 0;
+        // 本槽 bump_ 自上轮未被触碰——先快照为"上一轮终值"再归零
+        //（FRAME_TRACE 逐帧消耗量对账 + R23 limbo 快照长度依据）。
+        lastCycleHigh_[currentSlot_] = bump_[currentSlot_];
+        bump_[currentSlot_] = 0;
         ++epoch_[currentSlot_];
     }
 
     /// 当前槽线性分配 count 个槽位；容量耗尽返回 false（不回绕）。
     bool Alloc(u32 count, u32& outBaseSlot) {
-        if (u64(bump_) + count > slotCapacity_) return false;
-        outBaseSlot = SlotBase() + bump_;
-        bump_ += count;
-        if (bump_ > highWater_[currentSlot_]) highWater_[currentSlot_] = bump_;
+        u32& bump = bump_[currentSlot_];
+        if (u64(bump) + count > slotCapacity_) return false;
+        outBaseSlot = SlotBase() + bump;
+        bump += count;
+        if (bump > highWater_[currentSlot_]) highWater_[currentSlot_] = bump;
         return true;
     }
 
@@ -93,7 +100,9 @@ public:
     u64 SlotEpoch(u32 slot) const {
         return slot < frameSlotCount_ ? epoch_[slot] : 0;
     }
-    u32 Bump() const { return bump_; }
+    u32 Bump() const {
+        return currentSlot_ < frameSlotCount_ ? bump_[currentSlot_] : 0;
+    }
     u32 SlotCapacity() const { return slotCapacity_; }
     u32 LinearBase() const { return linearBase_; }
     u32 SlotBase() const { return linearBase_ + currentSlot_ * slotCapacity_; }
@@ -115,10 +124,10 @@ private:
     u32 slotCapacity_ = 0;     ///< 每槽子区域容量
     u32 frameSlotCount_ = 1;   ///< 帧槽数（= MAX_FRAMES_IN_FLIGHT）
     u32 currentSlot_ = 0;      ///< 当前帧槽
-    u32 bump_ = 0;             ///< 当前槽内 bump 偏移
+    std::vector<u32> bump_;        ///< 每槽当前 bump 偏移（R42：每槽独立）
     std::vector<u64> epoch_;       ///< 每槽纪元（BeginFrame 自增）
     std::vector<u32> highWater_;   ///< 每槽历史峰值 bump（诊断）
-    std::vector<u32> lastCycleHigh_; ///< 每槽上一轮终值 bump（逐帧对账）
+    std::vector<u32> lastCycleHigh_; ///< 每槽上一轮终值 bump（逐帧对账 + limbo 快照长度）
 };
 
 // ============================================================================

@@ -395,15 +395,18 @@ public:
         h.ptr += static_cast<SIZE_T>(slot) * samplerDescriptorSize_;
         return h;
     }
-    /// limbo 是否保真持有 (frameSlot, ownerEpoch) 那一轮的线性区内容
-    ///（epoch==0 为"无快照"哨兵——槽上一轮无分配或首周期）。
+    /// limbo 是否保真持有 (frameSlot, ownerEpoch) 那一轮的线性区内容。
+    /// R42：valid 标志取代"epoch==0 哨兵"——epoch 0 是合法首周期纪元
+    /// （init 期创建的 set 全部 ownerEpoch==0），旧哨兵把这一整类 set 排除
+    /// 在 limbo 保真迁移之外（首触迁移即丢内容，GlobalSDF voxel set =
+    /// R41b beyond-limbo #0 实证）。
     bool CbvSrvUavLimboMatches(u32 frameSlot, u64 ownerEpoch) const {
         const u32 s = frameSlot % frameSlotCount_;
-        return ownerEpoch != 0 && mainLimboEpoch_[s] == ownerEpoch;
+        return mainLimboValid_[s] != 0 && mainLimboEpoch_[s] == ownerEpoch;
     }
     bool SamplerLimboMatches(u32 frameSlot, u64 ownerEpoch) const {
         const u32 s = frameSlot % frameSlotCount_;
-        return ownerEpoch != 0 && samplerLimboEpoch_[s] == ownerEpoch;
+        return samplerLimboValid_[s] != 0 && samplerLimboEpoch_[s] == ownerEpoch;
     }
 
     // ------------------------------------------------------------------
@@ -554,8 +557,10 @@ private:
     DescriptorFrameSlotPolicy samplerLinear_; ///< sampler 堆线性区（同上）
     SamplerTableSharingPolicy samplerSharing_; ///< R22-S1：sampler 表内容级共享记账
     std::vector<u64> perSlotGuardTarget_;  ///< 各槽上次提交护拦（复用判定）
-    std::vector<u64> mainLimboEpoch_;      ///< R23：各槽 limbo 快照所属纪元（0=无）
+    std::vector<u64> mainLimboEpoch_;      ///< R23：各槽 limbo 快照所属纪元
     std::vector<u64> samplerLimboEpoch_;   ///< R23：同上（sampler 线性区）
+    std::vector<u8> mainLimboValid_;       ///< R42：limbo 快照有效标志（epoch 0 合法，0 哨兵废除）
+    std::vector<u8> samplerLimboValid_;    ///< R42：同上（sampler 线性区）
 
     SlotPool cbvSrvUavPersistentSlots_;
     SlotPool rtvSlots_;
