@@ -607,7 +607,29 @@ void D3D12CommandBufferImpl::BeginRenderPass(const RenderPassDesc& desc) {
     u32 rtCount = 0;
     for (const RenderPassDesc::Attachment& attachment : desc.colorAttachments) {
         D3D12Texture* tex = dev.GetTexture(attachment.texture);
-        if (!tex || tex->RtvSlot() == D3D12Texture::kInvalidDescriptorSlot) continue;
+        if (!tex || tex->RtvSlot() == D3D12Texture::kInvalidDescriptorSlot) {
+            // R52：attachment 被 skip 点名（deferred_out 恒零=R50 z=8 常数
+            // 亦零定位到绘制层后，rtCount=0 假说的直接判别面——RTV 槽无效
+            // 即 OMSet 空绑、draw 写无处落、RT 保持回收零）。
+            static std::unordered_set<u64> s_rtpassSkipped;
+            const u64 key = static_cast<u64>(reinterpret_cast<unsigned long long>(
+                                  attachment.texture));
+            if (s_rtpassSkipped.insert(key).second) {
+                const D3D12_RESOURCE_DESC d = tex ? tex->GetNativeDesc()
+                                                  : D3D12_RESOURCE_DESC{};
+                PRIMAL_LOG_STREAM(Error, "RHI")
+                    << "[D3D12_RTPASS] color attachment SKIPPED: handle="
+                    << attachment.texture
+                    << " tex=" << (tex ? "resolved" : "null")
+                    << " rtvSlot="
+                    << (tex ? static_cast<int>(tex->RtvSlot()) : -1)
+                    << " extent=" << d.Width << "x" << d.Height
+                    << " fmt=" << static_cast<unsigned>(d.Format)
+                    << " (rtCount 不增→OMSet 空绑→draw 写无处落)"
+                    << std::endl;
+            }
+            continue;
+        }
         rtvs[rtCount] = dev.GetDescriptorHeaps().RtvCpuHandle(tex->RtvSlot());
         // 线性子资源索引（mip + mipLevels * arrayLayer；tracker 契约）。
         const u32 subresource = attachment.mipLevel
