@@ -398,6 +398,15 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
     auto currentTex = output_textures_[cbIdx];
     if (pipeline_ == handles::INVALID_PIPELINE || currentTex == handles::INVALID_RESOURCE)
         return outputs;
+    // R51：哨兵 Clear 判别（D3D12-only）——提升到 declare lambda 外
+    // （该 lambda 不捕 this）。dump 出哨兵色 (0.25,0.5,0.75) = render pass
+    // 层活（clear 落地）而 fragment 零；仍全零 = render pass 本身没发生。
+    const bool clearSentinel =
+        device_->GetPlatform() == RHIPlatform::D3D12 &&
+        [] {
+            const char* e = std::getenv("PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL");
+            return e && e[0] == '1' && e[1] == '\0';
+        }();
 
     // ImportTexture（非 ImportResource）：携带 desc、注册为 Texture 类型，
     // 下游按类型守卫解析 desc 才不会回退空 desc（同 FusionOutput 修复）。
@@ -425,7 +434,7 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
     graph.AddPass<PassData>("DeferredLighting",
         rendergraph::RGPassType::Graphics,
         rendergraph::RGPassCategory::Lighting,
-        [deferredRG, environmentRG, visRG = inputs.shadow_visibility_rg,
+        [deferredRG, environmentRG, clearSentinel, visRG = inputs.shadow_visibility_rg,
              transRG = inputs.shadow_translucent_rg,
              mom0RG = inputs.shadow_moments_rg[0],
              mom1RG = inputs.shadow_moments_rg[1],
@@ -462,12 +471,28 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                 builder.Read(depthRG, ResourceState::ShaderResource);
 
             rendergraph::RGRenderPassDesc rpDesc;
-            rpDesc.colors.push_back({
-                .texture = data.output,
-                .loadOp = LoadAction::DontCare,
-                .storeOp = StoreAction::Store,
-                .clearColor = { math::v4{0, 0, 0, 1} }
-            });
+            // R51：哨兵 Clear 判别（PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL=1
+            // 时 RT0 loadOp=DontCare→Clear(0.25,0.5,0.75)）——deferred 恒零
+            // 已定位到 draw/光栅化层（R50 z=8 纯常数亦零=fragment 从未产生），
+            // 本档拆分 pass 层 vs draw 层：dump 出哨兵色 = render pass 层活
+            // （clear 落地）而 fragment 零（draw 录制/光栅化面）；dump 仍全零
+            // = render pass 本身没发生（RG execute/BeginRenderPass 的 D3D12
+            // 面）。canonical 不受影响（env 门控默认关）。
+            if (clearSentinel) {
+                rpDesc.colors.push_back({
+                    .texture = data.output,
+                    .loadOp = LoadAction::Clear,
+                    .storeOp = StoreAction::Store,
+                    .clearColor = { math::v4{0.25f, 0.5f, 0.75f, 1.0f} }
+                });
+            } else {
+                rpDesc.colors.push_back({
+                    .texture = data.output,
+                    .loadOp = LoadAction::DontCare,
+                    .storeOp = StoreAction::Store,
+                    .clearColor = { math::v4{0, 0, 0, 1} }
+                });
+            }
             if (environmentRG.IsValid())
                 rpDesc.colors.push_back({.texture = data.environment, .loadOp = LoadAction::DontCare,
                     .storeOp = StoreAction::Store, .clearColor = {math::v4{0, 0, 0, 0}}});

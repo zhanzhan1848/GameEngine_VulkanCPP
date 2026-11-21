@@ -402,6 +402,10 @@ jobs:
           # R50：零依赖档（z=8 常数 / z=9 屏幕梯度）——fragment 是否产生过
           $env:PRIMAL_F350_LIGHTING_CONST_DIAG = '1'
           $env:PRIMAL_F350_LIGHTING_GRADIENT_DIAG = '1'
+          # R51：哨兵 Clear 判别——render pass 层活（clear 落地）而 fragment
+          # 零（draw/光栅化面）vs render pass 本身没发生（RG execute 面）。
+          # D3D12-only 平台门在模块内。
+          $env:PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL = '1'
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350
           exit 0
 
