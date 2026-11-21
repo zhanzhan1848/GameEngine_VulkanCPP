@@ -1,6 +1,5 @@
 #include "DeferredLightingModule.h"
 #include "Engine/Common/CoreLogStream.h"
-#include <atomic>
 #include "Graphics/Nanite/GPUDrivenDrawPipeline.h"
 #include "Graphics/RHI/Core/RHICommand.h"
 #include "Graphics/RHI/Core/RHIMath.h"
@@ -771,53 +770,10 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
             const DescriptorSetHandle sets[] = { descriptor_sets_[cbIdx] };
             cmd->BindDescriptorSets(PipelineBindPoint::Graphics, layout_, 0, 1, sets, 0, nullptr);
             cmd->Draw(3, 0, 1, 0);
-
-            // R53：Draw 后同 cmd 读回 RT0 角落（诊断，D3D12-only，一次性
-            // 创建持久 readback 后每帧 copy）——R37 RG 探针同款机制。与
-            // 帧尾 R23 dump 面互为对账：此处读到哨兵色/常数而 dump 零 =
-            // dump 读回路径问题；此处亦零 = GPU 写真死（fragment/光栅化）。
-            if (device_->GetPlatform() == RHIPlatform::D3D12
-                && output_textures_[cbIdx] != handles::INVALID_RESOURCE) {
-                if (rt_readback_[cbIdx] == handles::INVALID_RESOURCE) {
-                    BufferDesc rbDesc{};
-                    rbDesc.size = 64ull * 64ull * 8ull;  // 64² RGBA16F 紧凑
-                    rbDesc.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
-                    rbDesc.memoryUsage = GPUMemoryUsage::Readback;
-                    rbDesc.name = "DeferredRT_Readback";
-                    rt_readback_[cbIdx] = device_->CreateBuffer(rbDesc);
-                }
-                if (rt_readback_[cbIdx] != handles::INVALID_RESOURCE) {
-                    rhi::ResourceBarrier rtToCopy{};
-                    rtToCopy.resource = output_textures_[cbIdx];
-                    rtToCopy.beforeState = ResourceState::RenderTarget;
-                    rtToCopy.afterState = ResourceState::CopySource;
-                    rtToCopy.subresource = RHI_ALL_SUBRESOURCES;
-                    rtToCopy.queueFamily = 0xFFFFFFFF;
-                    cmd->InsertBarrier(&rtToCopy, 1);
-                    rhi::BufferTextureCopyRegion region{};
-                    region.imageSubresource = {0, 0, 1};
-                    region.imageExtent = {64, 64, 1};
-                    cmd->CopyTextureToBuffer(output_textures_[cbIdx],
-                                             rt_readback_[cbIdx], &region, 1);
-                }
-                // 上一帧同槽 readback 直读（持久映射，帧序=写后读）。
-                if (rt_readback_[cbIdx] != handles::INVALID_RESOURCE) {
-                    static std::atomic<u32> s_rtPrintCount{0};
-                    if (s_rtPrintCount.fetch_add(1, std::memory_order_relaxed) < 30) {
-                        if (const void* p = device_->MapBuffer(rt_readback_[cbIdx])) {
-                            const float* f = static_cast<const float*>(p);
-                            PRIMAL_LOG_STREAM(Error, "Render")
-                                << "[D3D12_DEFERRED_RT] cbIdx=" << cbIdx
-                                << " px(0,0)=(" << f[0] << "," << f[1] << "," << f[2]
-                                << "," << f[3] << ") px(32,32)=("
-                                << f[32 * 4 + 32 * 256] << "," << f[32 * 4 + 32 * 256 + 1]
-                                << "," << f[32 * 4 + 32 * 256 + 2] << ")"
-                                << " (64x64 corner, prev-frame copy)" << std::endl;
-                            device_->UnmapBuffer(rt_readback_[cbIdx]);
-                        }
-                    }
-                }
-            }
+            // R53 撤销注记：pass 内 RT→CS barrier+CopyTextureToBuffer 曾使
+            // GPU hang（fence 永不 signal，WATCHDOG exit 7——R53 run 实测，
+            // OM 绑定中的 RT0 transition+copy 组合）。同 cmd GPU 侧可见性
+            // 仪器待换机制（独立 cmd 在 EndRenderPass 后读）。
         }
     );
 
