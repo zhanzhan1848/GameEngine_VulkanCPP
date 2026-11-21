@@ -259,7 +259,7 @@ private:
     /// 帧槽 → 当前槽重分配 + CopyDescriptorsSimple 迁移内容 + 更新属主。
     /// R22-S1：只迁移主堆区段与"私有"sampler 区段；共享 sampler 区段改由
     /// ResolveSharedSamplerRegion 按内容条目自身的 (slot, epoch) 解析。
-    void EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set);
+    void EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set, u64 srcHandle = 0);
 
     /// R22-S1：写入路径的 sampler 区段解析——prescan 本调用内该 set 的全部
     /// sampler 写入得到终态处方，命中共享区间直接复用；miss 则在当前槽按
