@@ -539,8 +539,13 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                                           ibl_prefilter_ != handles::INVALID_RESOURCE && ibl_prefilter_ != 0 &&
                                           ibl_brdf_lut_ != handles::INVALID_RESOURCE && ibl_brdf_lut_ != 0) ? (inputs.measured_environment_visibility ? 2.0f : 1.0f) : 0.0f;
                     // Raw Vulkan diagnostics keep the selected shadow method.
+                    // R48：放开 D3D12——deferred_out 恒零判别（shadow_vis 已
+                    // 复活而 deferred 未跟随，R27 因果断链）；z=4 输出 albedo
+                    // 采样、z=3 输出 shadowVisibility——采样链 vs vis 采样
+                    // 一轮拆分。仅诊断组 env 门控，canonical 组不受影响。
                     if (const char* debug = std::getenv("PRIMAL_LIGHTING_DEBUG");
-                        debug && device_->GetPlatform() == rhi::RHIPlatform::Vulkan) {
+                        debug && (device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
+                                  device_->GetPlatform() == rhi::RHIPlatform::D3D12)) {
                         if (std::strcmp(debug, "normal") == 0) sd->shadowParams.z = 1.0f;
                         if (std::strcmp(debug, "ndotl") == 0) sd->shadowParams.z = 2.0f;
                         if (std::strcmp(debug, "shadow") == 0) sd->shadowParams.z = 3.0f;

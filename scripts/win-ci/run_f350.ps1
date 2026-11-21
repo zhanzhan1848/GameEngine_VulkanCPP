@@ -70,6 +70,18 @@ if ($env:PRIMAL_F350_FRAME50_DUMP_DIAG -eq '1') {
     $diagGroups += @{ name = 'd3d12-gion-frame4'; api = 'd3d12'; gi = 1;
                       ppm = 'art2_win_d3d12_frame4_f350.ppm'; diag = 3 }
 }
+# R48 deferred 采样链拆分判别（PRIMAL_F350_LIGHTING_ALBEDO_DIAG=1 /
+# PRIMAL_F350_LIGHTING_SHADOW_DIAG=1）：PRIMAL_LIGHTING_DEBUG 放开 D3D12
+# 后，z=4 → deferred_out=albedo 采样（采样链死活），z=3 → shadowVisibility
+# （vis 采样死活）。R46 后 shadow_vis 已复活而 deferred_out 仍零的分流面。
+if ($env:PRIMAL_F350_LIGHTING_ALBEDO_DIAG -eq '1') {
+    $diagGroups += @{ name = 'd3d12-gion-albedo'; api = 'd3d12'; gi = 1;
+                      ppm = 'art2_win_d3d12_albedo_f350.ppm'; diag = 4 }
+}
+if ($env:PRIMAL_F350_LIGHTING_SHADOW_DIAG -eq '1') {
+    $diagGroups += @{ name = 'd3d12-gion-shadowdiag'; api = 'd3d12'; gi = 1;
+                      ppm = 'art2_win_d3d12_shadowdiag_f350.ppm'; diag = 5 }
+}
 
 # Asset gates (same files the r11 launchers hard-require before running).
 $assetGates = @(
@@ -105,6 +117,7 @@ foreach ($g in ($groups + $diagGroups)) {
     Remove-Item Env:GI_ISOLATE -ErrorAction SilentlyContinue
     Remove-Item Env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL -ErrorAction SilentlyContinue
     Remove-Item Env:RHI_TEST_PLATFORM -ErrorAction SilentlyContinue
+    Remove-Item Env:PRIMAL_LIGHTING_DEBUG -ErrorAction SilentlyContinue
 
     $env:PRIMAL_DDGI_GEOMETRY_VISIBILITY = '1'
     $env:PRIMAL_TEST_MODEL = 'SponzaTangentFrames.model'
@@ -141,14 +154,18 @@ foreach ($g in ($groups + $diagGroups)) {
     if ($g.gi -eq 1) { $env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL = '1' }
     else { $env:GI_ISOLATE = 'all' }
     # R29/R33/R36b 诊断组开关（diag=1 TAA_OFF，diag=2 SHADOW_RENDER_OFF，
-    # diag=3 BLACK_STAGE_FRAME=50；canonical 组确保无残留）
+    # diag=3 BLACK_STAGE_FRAME=50；diag=4/5 PRIMAL_LIGHTING_DEBUG=albedo/
+    # shadow（R48 deferred 采样链拆分）；canonical 组确保无残留）
     if ($g.diag -eq 1) { $env:TAA_OFF = '1' }
     elseif ($g.diag -eq 2) { $env:PRIMAL_SHADOW_RENDER_OFF = '1' }
     elseif ($g.diag -eq 3) { $env:PRIMAL_D3D12_BLACK_STAGE_FRAME = '4' }
+    elseif ($g.diag -eq 4) { $env:PRIMAL_LIGHTING_DEBUG = 'albedo' }
+    elseif ($g.diag -eq 5) { $env:PRIMAL_LIGHTING_DEBUG = 'shadow' }
     else {
         Remove-Item Env:TAA_OFF -ErrorAction SilentlyContinue
         Remove-Item Env:PRIMAL_SHADOW_RENDER_OFF -ErrorAction SilentlyContinue
         Remove-Item Env:PRIMAL_D3D12_BLACK_STAGE_FRAME -ErrorAction SilentlyContinue
+        Remove-Item Env:PRIMAL_LIGHTING_DEBUG -ErrorAction SilentlyContinue
     }
 
     $so = Join-Path $OutDir ($g.name + '.stdout.log')

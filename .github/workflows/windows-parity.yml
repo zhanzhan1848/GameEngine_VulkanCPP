@@ -391,6 +391,11 @@ jobs:
           # R36b：时序判别组（BLACK_STAGE_FRAME=50——SPGI/blit 在 frame 50
           # 是否有内容：中途死亡 vs 从未工作）
           $env:PRIMAL_F350_FRAME50_DUMP_DIAG = '1'
+          # R48：deferred 采样链拆分判别（PRIMAL_LIGHTING_DEBUG=albedo →
+          # deferred_out=albedo 采样；=shadow → shadowVisibility。R46 后
+          # shadow_vis 复活而 deferred_out 未跟随的分流面）
+          $env:PRIMAL_F350_LIGHTING_ALBEDO_DIAG = '1'
+          $env:PRIMAL_F350_LIGHTING_SHADOW_DIAG = '1'
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350
           exit 0
 
