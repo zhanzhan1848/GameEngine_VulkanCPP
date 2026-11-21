@@ -91,6 +91,15 @@ if ($env:PRIMAL_F350_LIGHTING_SHADOWLOAD_DIAG -eq '1') {
     $diagGroups += @{ name = 'd3d12-gion-shadowload'; api = 'd3d12'; gi = 1;
                       ppm = 'art2_win_d3d12_shadowload_f350.ppm'; diag = 7 }
 }
+# R50 零依赖组（z=8 常数 / z=9 屏幕梯度）——fragment 是否产生过
+if ($env:PRIMAL_F350_LIGHTING_CONST_DIAG -eq '1') {
+    $diagGroups += @{ name = 'd3d12-gion-constdiag'; api = 'd3d12'; gi = 1;
+                      ppm = 'art2_win_d3d12_constdiag_f350.ppm'; diag = 8 }
+}
+if ($env:PRIMAL_F350_LIGHTING_GRADIENT_DIAG -eq '1') {
+    $diagGroups += @{ name = 'd3d12-gion-gradient'; api = 'd3d12'; gi = 1;
+                      ppm = 'art2_win_d3d12_gradient_f350.ppm'; diag = 9 }
+}
 
 # Asset gates (same files the r11 launchers hard-require before running).
 $assetGates = @(
@@ -172,6 +181,8 @@ foreach ($g in ($groups + $diagGroups)) {
     elseif ($g.diag -eq 5) { $env:PRIMAL_LIGHTING_DEBUG = 'shadow' }
     elseif ($g.diag -eq 6) { $env:PRIMAL_LIGHTING_DEBUG = 'albedo_load' }
     elseif ($g.diag -eq 7) { $env:PRIMAL_LIGHTING_DEBUG = 'shadow_load' }
+    elseif ($g.diag -eq 8) { $env:PRIMAL_LIGHTING_DEBUG = 'const' }
+    elseif ($g.diag -eq 9) { $env:PRIMAL_LIGHTING_DEBUG = 'gradient' }
     else {
         Remove-Item Env:TAA_OFF -ErrorAction SilentlyContinue
         Remove-Item Env:PRIMAL_SHADOW_RENDER_OFF -ErrorAction SilentlyContinue

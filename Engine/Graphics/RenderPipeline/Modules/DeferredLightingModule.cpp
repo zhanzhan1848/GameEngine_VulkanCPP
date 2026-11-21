@@ -554,6 +554,10 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                         // Sample 同纹理对照——采样器死 vs SRV 死一刀切）。
                         if (std::strcmp(debug, "albedo_load") == 0) sd->shadowParams.z = 6.0f;
                         if (std::strcmp(debug, "shadow_load") == 0) sd->shadowParams.z = 7.0f;
+                        // R50：零依赖档（z=8 常数 / z=9 屏幕梯度）——fragment
+                        // 是否产生过=(A) draw 层死 vs (B) SRV/采样器投递死。
+                        if (std::strcmp(debug, "const") == 0) sd->shadowParams.z = 8.0f;
+                        if (std::strcmp(debug, "gradient") == 0) sd->shadowParams.z = 9.0f;
                     }
                     // sun-audit P2 材质消融（z+10 编码，与 PRIMAL_LIGHTING_DEBUG
                     // 互斥，后写覆盖）：gray_albedo/flat_normal/fixed_roughness。
