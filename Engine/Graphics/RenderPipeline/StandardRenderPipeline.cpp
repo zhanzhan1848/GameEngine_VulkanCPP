@@ -5865,7 +5865,8 @@ void R23BlackStageDumpBufferStats(rhi::RHIDeviceBase* device, const char* name,
 ///（死写为 pass 级问题）；读回零 = 引擎级 UAV 写失效（描述符物化/根签名/
 /// 状态机方向收敛）。taskM §12-13：四管线（voxelization/ShadowBlit/SPGI/
 /// DDGI）同形态"dispatch 录制有效 → imageStore 落零"且 RT 写全活。
-void R34UavWriteProbe(rhi::RHIDeviceBase* device, rhi::ResourceHandle srcTex) {
+void R34UavWriteProbe(rhi::RHIDeviceBase* device, rhi::ResourceHandle srcTex,
+                      rhi::ResourceHandle depthTex) {
     using namespace rhi;
     // —— 资源（任一创建失败即退出，fail 声明进日志） ——
     TextureDesc td{};
@@ -5877,7 +5878,7 @@ void R34UavWriteProbe(rhi::RHIDeviceBase* device, rhi::ResourceHandle srcTex) {
     td.memoryUsage = GPUMemoryUsage::Static;
     ResourceHandle tex = device->CreateTexture(td);
 
-    DescriptorSetLayoutBinding b[2]{};
+    DescriptorSetLayoutBinding b[3]{};
     b[0].binding = 0;
     b[0].descriptorCount = 1;
     b[0].descriptorType = DescriptorType::StorageImage;
@@ -5886,7 +5887,11 @@ void R34UavWriteProbe(rhi::RHIDeviceBase* device, rhi::ResourceHandle srcTex) {
     b[1].descriptorCount = 1;
     b[1].descriptorType = DescriptorType::SampledImage;
     b[1].stageFlags = ShaderStage::Compute;
-    DescriptorSetLayoutDesc layoutDesc{2, b};
+    b[2].binding = 2;
+    b[2].descriptorCount = 1;
+    b[2].descriptorType = DescriptorType::SampledImage;
+    b[2].stageFlags = ShaderStage::Compute;
+    DescriptorSetLayoutDesc layoutDesc{3, b};
     auto setLayout = device->CreateDescriptorSetLayout(layoutDesc);
     PipelineLayoutDesc pipeLayoutDesc{1, &setLayout};
     auto pipeLayout = device->CreatePipelineLayout(pipeLayoutDesc);
@@ -5938,11 +5943,12 @@ void R34UavWriteProbe(rhi::RHIDeviceBase* device, rhi::ResourceHandle srcTex) {
     //   输出 > 常数 → SRV 读活（读路径正常，死写在别处）
     //   输出 = 纯常数 → SRV 读零（描述符/状态错位实锤）
     //   输出 = 零 → UAV 写死（不应出现——R35b 已证独立 cmd 写活）
-    DescData params[2]{
+    DescData params[3]{
         {0, DescriptorType::StorageImage, tex},
         {1, DescriptorType::SampledImage, srcTex},
+        {2, DescriptorType::SampledImage, depthTex},
     };
-    UpdateDesc(device, descSet, params, 2);
+    UpdateDesc(device, descSet, params, 3);
 
     // —— dispatch（独立命令缓冲，与 dump 读回同一提交纪律） ——
     bool dispatched = false;
@@ -6256,7 +6262,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             // 探针/各资源的 GPU VA 由 R39 的 [D3D12_VA] 创建期回显面覆盖
             //（D3D12Texture.cpp，WIN32 侧）。R40：传入 gbuffer albedo 作
             // SRV 读判别源（输出 = 常数 + 采样×0.5）。
-            R34UavWriteProbe(device_, gpuDrawStage.GetGBufferAlbedo());
+            R34UavWriteProbe(device_, gpuDrawStage.GetGBufferAlbedo(),
+                             gpuDrawStage.GetShadowDepthRenderTarget(0, prevSlot));
             // R37：RG 命令缓冲内探针读回（blit cmd 内 dispatch+copy，
             // frame ~2 落盘、此时读出）——与 R35 独立 cmd 探针对照：
             //   rg 活+独立活 → 业务死因在各管线自身绑定/输入

@@ -14,9 +14,17 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0, rgba16f) writeonly uniform image2D u_probe;
 layout(set = 0, binding = 1) uniform texture2D u_probe_src;
+layout(set = 0, binding = 2) uniform texture2D u_probe_depth;
 
+// R41 双源编码（读回 rgb 通道）：
+//   R = 1.0 + albedo.x * 0.25     （albedo SRV 活 → R > 1.0）
+//   G = 0.5 + albedo.y * 0.25
+//   B = 0.25 + depth.x * 0.5      （D32 SRV 活 → B > 0.25；死 → B = 0.25）
+// 全零 = UAV 写死（不应出现）；纯常数 (1,0.5,0.25) = 双 SRV 全死。
 void main() {
-    vec4 sampled = texelFetch(u_probe_src, ivec2(gl_GlobalInvocationID.xy), 0);
+    vec4 a = texelFetch(u_probe_src, ivec2(gl_GlobalInvocationID.xy), 0);
+    float d = texelFetch(u_probe_depth, ivec2(gl_GlobalInvocationID.xy), 0).x;
     imageStore(u_probe, ivec2(gl_GlobalInvocationID.xy),
-               vec4(1.0, 0.75, 0.5, 1.0) + sampled * 0.5);
+               vec4(1.0 + a.x * 0.25, 0.5 + a.y * 0.25,
+                    0.25 + d * 0.5, 1.0));
 }
