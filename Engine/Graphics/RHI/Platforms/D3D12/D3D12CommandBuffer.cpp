@@ -612,8 +612,7 @@ void D3D12CommandBufferImpl::BeginRenderPass(const RenderPassDesc& desc) {
             // 亦零定位到绘制层后，rtCount=0 假说的直接判别面——RTV 槽无效
             // 即 OMSet 空绑、draw 写无处落、RT 保持回收零）。
             static std::unordered_set<u64> s_rtpassSkipped;
-            const u64 key = static_cast<u64>(reinterpret_cast<unsigned long long>(
-                                  attachment.texture));
+            const u64 key = attachment.texture;
             if (s_rtpassSkipped.insert(key).second) {
                 const D3D12_RESOURCE_DESC d = tex ? tex->GetNativeDesc()
                                                   : D3D12_RESOURCE_DESC{};
