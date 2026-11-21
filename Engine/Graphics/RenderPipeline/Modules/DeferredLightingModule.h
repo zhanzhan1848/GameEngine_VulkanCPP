@@ -127,6 +127,16 @@ private:
         rhi::handles::INVALID_RESOURCE,
         rhi::handles::INVALID_RESOURCE
     };
+    // R53：deferred RT0 角落同 cmd copy 读回（诊断）——R37 RG 探针同款
+    // 机制：Draw(3) 后同 cmd 内 RT→CopySource barrier + CopyTextureRegion
+    // 64×64 角落 → 持久 Readback，下一帧 execute 开头 Map 打印。分离
+    // "GPU 写真死"与"帧尾 dump 面读回路径问题"（R53 面向 deferred_out
+    // 恒零的最终判别）。
+    rhi::ResourceHandle rt_readback_[3]{
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE,
+        rhi::handles::INVALID_RESOURCE
+    };
     // sun-audit P2 第二步: 探针参数 UBO（三缓冲）+ dummy 探针深度 SSBO
     rhi::ResourceHandle probe_param_cb_[3]{
         rhi::handles::INVALID_RESOURCE,
