@@ -1614,14 +1614,12 @@ void D3D12Device::EnsureSetRegionCurrent(d3d12::D3D12DescriptorSet* set, u64 src
         if (sameSlotStale && !fromLimbo) {
             // R41：全量打点（去 warned-once 已在 R39 落地）——22 条/轮
             // 已确认；本轮补帧号+序列号+base 归属（旧区段地址即 set 身份）。
-            // R42：new_base 打分配真值 newBase（旧实现打 set->BaseSlot()，
-            // 此时仍是旧值——R41b 日志里 old==new 全部成对即此假象）。
             static std::atomic<u32> s_blSeq{0};
             PRIMAL_LOG_STREAM(Warn, "RHI.D3D12")
                 << "[D3D12Device] beyond-limbo #" << s_blSeq.fetch_add(1, std::memory_order_relaxed)
                 << " slot=" << oldOwnerSlot << " epoch=" << oldOwnerEpoch
                 << " old_base=" << oldBase
-                << " new_base=" << newBase
+                << " new_base=" << set->BaseSlot()
                 << " main_count=" << set->MainCount()
                 << std::endl;
         }
@@ -1934,6 +1932,26 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                         D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{};
                         cbv.BufferLocation = buffer->GetGpuAddress() + bi.offset;
                         cbv.SizeInBytes = static_cast<UINT>((range + 255) & ~u64(255));
+                        // R45：CBV BufferLocation 审计（一次性）——R44 GPU copy
+                        // readback 不可信后的交付链原料打点：VA=0（R39b 曾见纹理
+                        // 全 0 现象，buffer 是否同症）即 shader 读零 → early-out
+                        // 族恒零机制；顺带记录 SizeInBytes 超资源尾（M7 只垫了
+                        // UPLOAD，DEFAULT 堆 Uniform 未对齐家族）。
+                        {
+                            static std::atomic<u32> s_cbvAuditCount{0};
+                            if (s_cbvAuditCount.fetch_add(1, std::memory_order_relaxed) < 8) {
+                                PRIMAL_LOG_STREAM(Error, "RHI")
+                                    << "[D3D12_CBV] set=" << write.dstSet
+                                    << " binding=" << write.dstBinding
+                                    << " va=0x" << std::hex << cbv.BufferLocation
+                                    << std::dec << " viewSize=" << cbv.SizeInBytes
+                                    << " bufSize=" << buffer->GetBufferDesc().size
+                                    << " heapDefault="
+                                    << (buffer->GetHeapType() == D3D12_HEAP_TYPE_DEFAULT ? 1 : 0)
+                                    << " name='" << buffer->GetBufferDesc().name << "'"
+                                    << std::endl;
+                            }
+                        }
                         native->CreateConstantBufferView(&cbv, dst);
                         break;
                     }

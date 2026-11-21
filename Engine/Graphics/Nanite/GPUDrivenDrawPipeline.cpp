@@ -4484,6 +4484,27 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
         memcpy(mapped, &resolution, 8);
         device_->UnmapBuffer(frame.blit_resolution_cb[cascade_index]);
     }
+    // R45：blit 分辨率 CB CPU 侧直读回验（一次性）。R44 判读：GPU copy
+    // 通道的 readback 不可信（UPLOAD 源 COPY_SOURCE 转换疑被毒化闸门丢弃，
+    // 读到回收堆垃圾 (1023,2047,0,0)）；持久映射绕开 GPU——memcpy 后直读，
+    // CPU 写入是否落位在此一行。CBV 侧的 BufferLocation（GetGpuAddress）
+    // 审计在 D3D12Device 的 CBV 创建点统一打点（[D3D12_CBV] 行）。
+    {
+        static const bool s_cbAudit = [] {
+            const char* v = std::getenv("PRIMAL_D3D12_BLACK_STAGE_DUMP");
+            return v && v[0] == '1' && v[1] == '\0';
+        }();
+        static bool s_cbAuditDone = false;
+        if (s_cbAudit && !s_cbAuditDone && mapped) {
+            s_cbAuditDone = true;
+            const u32 u0 = static_cast<const u32*>(mapped)[0];
+            const u32 u1 = static_cast<const u32*>(mapped)[1];
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[D3D12_BLIT_CB] post-map readback=(" << u0 << "," << u1
+                << ") expected=(2048,2048) size=16 heap=UPLOAD "
+                   "(CPU persistent map, no GPU copy)" << std::endl;
+        }
+    }
 
     // T4.6.5 part 28 (B7+HZB layout fix): insert layout transitions before the
     // blit dispatch. ExecuteShadowRaster's render pass left depthRT in
