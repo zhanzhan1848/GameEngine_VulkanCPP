@@ -413,6 +413,19 @@ void main() {
         if (shadowParams.z == 2.0) diagnostic = vec3(NdotL);
         if (shadowParams.z == 3.0) diagnostic = vec3(shadowVisibility);
         if (shadowParams.z == 4.0) diagnostic = albedo;
+        // R49（2026-11-22）：Load 对照模式——D3D12 上 z=4（Sample albedo）与
+        // z=3（Sample vis）双双全零而纹理内容活（dump 面）、签名自洽、
+        // ShadowFilter 的 SampleLevel 活。z=6/7 用 texelFetch（无采样器，
+        // 与探针同机制）采样同一批纹理：z=6 活而 z=4 零 → 采样器侧死
+        // （deferred set 的采样器表物化/绑定）；z=6 亦零 → SRV 描述符投递
+        // 死（set 区段槽位）。canonical（z=0）行为零变化。
+        if (shadowParams.z == 6.0) diagnostic = texelFetch(albedoTex, ivec2(gl_FragCoord.xy), 0).rgb;
+        if (shadowParams.z == 7.0) {
+            ivec2 visSize = textureSize(shadowVisTex, 0);
+            ivec2 scrSize = textureSize(albedoTex, 0);
+            ivec2 vp2 = ivec2(vec2(gl_FragCoord.xy) * (vec2(visSize) / max(vec2(scrSize), vec2(1.0))));
+            diagnostic = vec3(texelFetch(shadowVisTex, clamp(vp2, ivec2(0), visSize - ivec2(1)), 0).r);
+        }
         if (shadowParams.z == 5.0) {
             // sun-audit P2: IBL ambient 项直出（环境镜面解耦 A/B 测量）。
             // IBL_DIFFUSE_INTENSITY=0 时 = 纯环境镜面；可见性处理与主路径

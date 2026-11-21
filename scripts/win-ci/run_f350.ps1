@@ -82,6 +82,15 @@ if ($env:PRIMAL_F350_LIGHTING_SHADOW_DIAG -eq '1') {
     $diagGroups += @{ name = 'd3d12-gion-shadowdiag'; api = 'd3d12'; gi = 1;
                       ppm = 'art2_win_d3d12_shadowdiag_f350.ppm'; diag = 5 }
 }
+# R49 Load 对照组（texelFetch 绕过采样器，与 z=4/z=3 Sample 对照）
+if ($env:PRIMAL_F350_LIGHTING_ALBEDOLOAD_DIAG -eq '1') {
+    $diagGroups += @{ name = 'd3d12-gion-albedoload'; api = 'd3d12'; gi = 1;
+                      ppm = 'art2_win_d3d12_albedoload_f350.ppm'; diag = 6 }
+}
+if ($env:PRIMAL_F350_LIGHTING_SHADOWLOAD_DIAG -eq '1') {
+    $diagGroups += @{ name = 'd3d12-gion-shadowload'; api = 'd3d12'; gi = 1;
+                      ppm = 'art2_win_d3d12_shadowload_f350.ppm'; diag = 7 }
+}
 
 # Asset gates (same files the r11 launchers hard-require before running).
 $assetGates = @(
@@ -161,6 +170,8 @@ foreach ($g in ($groups + $diagGroups)) {
     elseif ($g.diag -eq 3) { $env:PRIMAL_D3D12_BLACK_STAGE_FRAME = '4' }
     elseif ($g.diag -eq 4) { $env:PRIMAL_LIGHTING_DEBUG = 'albedo' }
     elseif ($g.diag -eq 5) { $env:PRIMAL_LIGHTING_DEBUG = 'shadow' }
+    elseif ($g.diag -eq 6) { $env:PRIMAL_LIGHTING_DEBUG = 'albedo_load' }
+    elseif ($g.diag -eq 7) { $env:PRIMAL_LIGHTING_DEBUG = 'shadow_load' }
     else {
         Remove-Item Env:TAA_OFF -ErrorAction SilentlyContinue
         Remove-Item Env:PRIMAL_SHADOW_RENDER_OFF -ErrorAction SilentlyContinue

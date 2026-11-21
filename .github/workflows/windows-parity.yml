@@ -396,6 +396,9 @@ jobs:
           # shadow_vis 复活而 deferred_out 未跟随的分流面）
           $env:PRIMAL_F350_LIGHTING_ALBEDO_DIAG = '1'
           $env:PRIMAL_F350_LIGHTING_SHADOW_DIAG = '1'
+          # R49：Load 对照（texelFetch 绕过采样器——采样器死 vs SRV 死）
+          $env:PRIMAL_F350_LIGHTING_ALBEDOLOAD_DIAG = '1'
+          $env:PRIMAL_F350_LIGHTING_SHADOWLOAD_DIAG = '1'
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350
           exit 0
 

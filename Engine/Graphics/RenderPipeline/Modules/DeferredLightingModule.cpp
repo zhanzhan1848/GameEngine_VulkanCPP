@@ -550,6 +550,10 @@ DeferredLightingOutputs DeferredLightingModule::AddPasses(rendergraph::RenderGra
                         if (std::strcmp(debug, "ndotl") == 0) sd->shadowParams.z = 2.0f;
                         if (std::strcmp(debug, "shadow") == 0) sd->shadowParams.z = 3.0f;
                         if (std::strcmp(debug, "albedo") == 0) sd->shadowParams.z = 4.0f;
+                        // R49：Load 对照档（texelFetch 无采样器，与 z=4/z=3 的
+                        // Sample 同纹理对照——采样器死 vs SRV 死一刀切）。
+                        if (std::strcmp(debug, "albedo_load") == 0) sd->shadowParams.z = 6.0f;
+                        if (std::strcmp(debug, "shadow_load") == 0) sd->shadowParams.z = 7.0f;
                     }
                     // sun-audit P2 材质消融（z+10 编码，与 PRIMAL_LIGHTING_DEBUG
                     // 互斥，后写覆盖）：gray_albedo/flat_normal/fixed_roughness。
