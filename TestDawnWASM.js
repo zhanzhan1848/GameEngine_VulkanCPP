@@ -839,6 +839,8 @@ async function createWasm() {
       }
       return str;
     };
+  var UTF8ToString_cache = {
+  };
   
     /**
    * Given a pointer 'ptr' to a null-terminated UTF8-encoded string in the
@@ -855,7 +857,24 @@ async function createWasm() {
    */
   var UTF8ToString = (ptr, maxBytesToRead, ignoreNul) => {
       assert(typeof ptr === 'number', `UTF8ToString expects a number (got ${typeof ptr})`);
-      return ptr ? UTF8ArrayToString(HEAPU8, ptr, maxBytesToRead, ignoreNul) : '';
+  
+      // Only cache full string reads (when maxBytesToRead is omitted).
+      // We use `== null` here since its shorter than `=== undefined`
+      var useCache = maxBytesToRead == null && ptr >= 1024 && ptr < 771269;
+      if (useCache) {
+        var rtn = UTF8ToString_cache[ptr];
+        if (rtn != null) {
+          return rtn;
+        }
+      }
+  
+      var rtn = ptr ? UTF8ArrayToString(HEAPU8, ptr, maxBytesToRead, ignoreNul) : '';
+  
+      if (useCache) {
+        UTF8ToString_cache[ptr] = rtn;
+      }
+  
+      return rtn;
     };
   var ___assert_fail = (condition, filename, line, func) =>
       abort(`Assertion failed: ${UTF8ToString(condition)}, at: ` + [filename ? UTF8ToString(filename) : 'unknown filename', line, func ? UTF8ToString(func) : 'unknown function']);
@@ -952,6 +971,26 @@ async function createWasm() {
       uncaughtExceptionCount++;
       __Unwind_RaiseException(ptr);
     };
+  const EINVAL = 28;
+  const EACCES = 2;
+  const EAGAIN = 6;
+  const EBADF = 8;
+  const EBUSY = 10;
+  const EEXIST = 20;
+  const EFBIG = 22;
+  const EIO = 29;
+  const EISDIR = 31;
+  const ELOOP = 32;
+  const EMFILE = 33;
+  const EMLINK = 34;
+  const ENODEV = 43;
+  const ENOENT = 44;
+  const ENOMEM = 48;
+  const ENOSYS = 52;
+  const ENOTDIR = 54;
+  const ENOTEMPTY = 55;
+  const ENOTTY = 59;
+  const EPERM = 63;
   var ERRNO_CODES = {
       'EPERM': 63,
       'ENOENT': 44,
@@ -1075,6 +1114,8 @@ async function createWasm() {
       'EOWNERDEAD': 62,
       'ESTRPIPE': 135,
     };
+  const ESPIPE = 70;
+  const EXDEV = 75;
   const FS_MAX_OPEN_FDS = 4096;
   var FS_createDataFile = (...args) => FS.createDataFile(...args);
   var preloadPlugins = [];
@@ -1376,21 +1417,30 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       }
       return data;
     };
+  const S_IRUGO = 292;
+  const S_IWUGO = 146;
+  const S_IXUGO = 73;
   var FS_getMode = (canRead, canWrite) => {
       var mode = 0;
-      if (canRead) mode |= 292 | 73;
-      if (canWrite) mode |= 146;
+      if (canRead) mode |= S_IRUGO | S_IXUGO;
+      if (canWrite) mode |= S_IWUGO;
       return mode;
     };
+  const O_APPEND = 1024;
+  const O_CREAT = 64;
+  const O_RDONLY = 0;
+  const O_RDWR = 2;
+  const O_TRUNC = 512;
+  const O_WRONLY = 1;
   var FS_modeStringToFlags = (str) => {
       if (typeof str !== 'string') return str;
       var flagModes = {
-        'r': 0,
-        'r+': 2,
-        'w': 512 | 64 | 1,
-        'w+': 512 | 64 | 2,
-        'a': 1024 | 64 | 1,
-        'a+': 1024 | 64 | 2,
+        'r': O_RDONLY,
+        'r+': O_RDWR,
+        'w': O_TRUNC | O_CREAT | O_WRONLY,
+        'w+': O_TRUNC | O_CREAT | O_RDWR,
+        'a': O_APPEND | O_CREAT | O_WRONLY,
+        'a+': O_APPEND | O_CREAT | O_RDWR,
       };
       var flags = flagModes[str];
       if (typeof flags === 'undefined') {
@@ -1398,18 +1448,24 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       }
       return flags;
     };
+  const MAP_PRIVATE = 2;
+  const SEEK_CUR = 1;
+  const SEEK_END = 2;
+  const S_IFDIR = 16384;
+  const S_IFLNK = 40960;
+  const S_IRWXUGO = 511;
   var mmapAlloc = (size) => {
       abort('internal error: mmapAlloc called but `emscripten_builtin_memalign` native symbol not exported');
     };
   var MEMFS = {
   ops_table:null,
   mount(mount) {
-        return MEMFS.createNode(null, '/', 16895, 0);
+        return MEMFS.createNode(null, '/', S_IFDIR | S_IRWXUGO, 0);
       },
   createNode(parent, name, mode, dev = undefined) {
         if (FS.isBlkdev(mode) || FS.isFIFO(mode)) {
           // not supported
-          throw new FS.ErrnoError(63);
+          throw new FS.ErrnoError(EPERM);
         }
         MEMFS.ops_table ||= {
           dir: {
@@ -1554,7 +1610,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           }
         },
   lookup(parent, name) {
-          throw new FS.ErrnoError(44);
+          throw new FS.ErrnoError(ENOENT);
         },
   mknod(parent, name, mode, dev = undefined) {
           return MEMFS.createNode(parent, name, mode, dev);
@@ -1567,7 +1623,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           if (new_node && FS.isDir(old_node.mode)) {
             // if we're overwriting a directory at new_name, make sure it's empty.
             for (var i in new_node.contents) {
-              throw new FS.ErrnoError(55);
+              throw new FS.ErrnoError(ENOTEMPTY);
             }
           }
           // do the internal rewiring
@@ -1583,7 +1639,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   rmdir(parent, name) {
           var node = FS.lookupNode(parent, name);
           for (var i in node.contents) {
-            throw new FS.ErrnoError(55);
+            throw new FS.ErrnoError(ENOTEMPTY);
           }
           delete parent.contents[name];
           parent.ctime = parent.mtime = Date.now();
@@ -1592,13 +1648,13 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           return ['.', '..', ...Object.keys(node.contents)];
         },
   symlink(parent, newname, oldpath) {
-          var node = MEMFS.createNode(parent, newname, 0o777 | 40960, 0);
+          var node = MEMFS.createNode(parent, newname, S_IRWXUGO | S_IFLNK, 0);
           node.link = oldpath;
           return node;
         },
   readlink(node) {
           if (!FS.isLink(node.mode)) {
-            throw new FS.ErrnoError(28);
+            throw new FS.ErrnoError(EINVAL);
           }
           return node.link;
         },
@@ -1643,27 +1699,27 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         },
   llseek(stream, offset, whence) {
           var position = offset;
-          if (whence === 1) {
+          if (whence === SEEK_CUR) {
             position += stream.position;
-          } else if (whence === 2) {
+          } else if (whence === SEEK_END) {
             if (FS.isFile(stream.node.mode)) {
               position += stream.node.usedBytes;
             }
           }
           if (position < 0) {
-            throw new FS.ErrnoError(28);
+            throw new FS.ErrnoError(EINVAL);
           }
           return position;
         },
   mmap(stream, length, position, prot, flags) {
           if (!FS.isFile(stream.node.mode)) {
-            throw new FS.ErrnoError(43);
+            throw new FS.ErrnoError(ENODEV);
           }
           var ptr;
           var allocated;
           var contents = stream.node.contents;
           // Only make a new copy when MAP_PRIVATE is specified.
-          if (!(flags & 2) && contents.buffer === HEAP8.buffer) {
+          if (!(flags & MAP_PRIVATE) && contents.buffer === HEAP8.buffer) {
             // We can't emulate MAP_SHARED when the file is not backed by the
             // buffer we're mapping to (e.g. the HEAP buffer).
             allocated = false;
@@ -1672,7 +1728,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
             allocated = true;
             ptr = mmapAlloc(length);
             if (!ptr) {
-              throw new FS.ErrnoError(48);
+              throw new FS.ErrnoError(ENOMEM);
             }
             if (contents) {
               // Try to avoid unnecessary slices.
@@ -1695,6 +1751,32 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         },
   },
   };
+  const NAME_MAX = 255;
+  const O_ACCMODE = 2097155;
+  const O_DIRECTORY = 65536;
+  const O_EXCL = 128;
+  const O_NOFOLLOW = 131072;
+  const POLLNVAL = 32;
+  const PROT_WRITE = 2;
+  const SEEK_SET = 0;
+  const SYMLOOP_MAX = 40;
+  const S_IALLUGO = 4095;
+  const S_IFBLK = 24576;
+  const S_IFCHR = 8192;
+  const S_IFIFO = 4096;
+  const S_IFMT = 61440;
+  const S_IFREG = 32768;
+  const S_IFSOCK = 49152;
+  const S_ISVTX = 512;
+  const B38400 = 15;
+  const CREAD = 128;
+  const CSIZE = 48;
+  const ECHO = 8;
+  const ECHOCTL = 512;
+  const ECHOE = 16;
+  const ECHOK = 32;
+  const ECHOKE = 2048;
+  const ENXIO = 60;
   var FS_stdin_getChar_buffer = [];
   var FS_stdin_getChar = () => {
       if (!FS_stdin_getChar_buffer.length) {
@@ -1714,6 +1796,15 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       }
       return FS_stdin_getChar_buffer.shift();
     };
+  const ICANON = 2;
+  const ICRNL = 256;
+  const IEXTEN = 32768;
+  const IMAXBEL = 8192;
+  const ISIG = 1;
+  const IUTF8 = 16384;
+  const IXON = 1024;
+  const ONLCR = 4;
+  const OPOST = 1;
   var TTY = {
   ttys:[],
   init() {
@@ -1745,7 +1836,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   open(stream) {
           var tty = TTY.ttys[stream.node.rdev];
           if (!tty) {
-            throw new FS.ErrnoError(43);
+            throw new FS.ErrnoError(ENODEV);
           }
           stream.tty = tty;
           stream.seekable = false;
@@ -1759,7 +1850,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         },
   read(stream, buffer, offset, length, pos /* ignored */) {
           if (!stream.tty || !stream.tty.ops.get_char) {
-            throw new FS.ErrnoError(60);
+            throw new FS.ErrnoError(ENXIO);
           }
           var bytesRead = 0;
           for (var i = 0; i < length; i++) {
@@ -1767,10 +1858,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
             try {
               result = stream.tty.ops.get_char(stream.tty);
             } catch (e) {
-              throw new FS.ErrnoError(29);
+              throw new FS.ErrnoError(EIO);
             }
             if (result === undefined && !bytesRead) {
-              throw new FS.ErrnoError(6);
+              throw new FS.ErrnoError(EAGAIN);
             }
             if (result === null || result === undefined) break;
             bytesRead++;
@@ -1786,14 +1877,14 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         },
   write(stream, buffer, offset, length, pos) {
           if (!stream.tty || !stream.tty.ops.put_char) {
-            throw new FS.ErrnoError(60);
+            throw new FS.ErrnoError(ENXIO);
           }
           try {
             for (var i = 0; i < length; i++) {
               stream.tty.ops.put_char(stream.tty, buffer[offset+i]);
             }
           } catch (e) {
-            throw new FS.ErrnoError(29);
+            throw new FS.ErrnoError(EIO);
           }
           if (length) {
             stream.node.mtime = stream.node.ctime = Date.now();
@@ -1822,10 +1913,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   ioctl_tcgets(tty) {
           // typical setting
           return {
-            c_iflag: 25856,
-            c_oflag: 5,
-            c_cflag: 191,
-            c_lflag: 35387,
+            c_iflag: ICRNL | IXON | IMAXBEL | IUTF8,
+            c_oflag: OPOST | ONLCR,
+            c_cflag: B38400 | CSIZE | CREAD,
+            c_lflag: ISIG | ICANON | ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE | IEXTEN,
             c_cc: [
               0x03, 0x1c, 0x7f, 0x15, 0x04, 0x00, 0x01, 0x00, 0x11, 0x13, 0x1a, 0x00,
               0x12, 0x0f, 0x17, 0x16, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -1904,13 +1995,13 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           this.node = val;
         }
         get isRead() {
-          return (this.flags & 2097155) !== 1;
+          return (this.flags & O_ACCMODE) !== O_WRONLY;
         }
         get isWrite() {
-          return (this.flags & 2097155) !== 0;
+          return (this.flags & O_ACCMODE) !== O_RDONLY;
         }
         get isAppend() {
-          return (this.flags & 1024);
+          return (this.flags & O_APPEND);
         }
         get flags() {
           return this.shared.flags;
@@ -1928,8 +2019,8 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   FSNode:class {
         node_ops = {};
         stream_ops = {};
-        readMode = 292 | 73;
-        writeMode = 146;
+        readMode = S_IRUGO | S_IXUGO;
+        writeMode = S_IWUGO;
         mounted = null;
         constructor(parent, name, mode, rdev) {
           if (!parent) {
@@ -2006,7 +2097,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       },
   lookupPath(path, opts = {}) {
         if (!path) {
-          throw new FS.ErrnoError(44);
+          throw new FS.ErrnoError(ENOENT);
         }
         opts.follow_mount ??= true
   
@@ -2015,7 +2106,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         }
   
         // limit max consecutive symlinks to SYMLOOP_MAX.
-        linkloop: for (var nlinks = 0; nlinks < 40; nlinks++) {
+        linkloop: for (var nlinks = 0; nlinks < SYMLOOP_MAX; nlinks++) {
           // split the absolute path
           var parts = path.split('/').filter((p) => !!p);
   
@@ -2055,7 +2146,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
               // if noent_okay is true, suppress a ENOENT in the last component
               // and return an object with an undefined node. This is needed for
               // resolving symlinks in the path when creating a file.
-              if ((e?.errno === 44) && islast && opts.noent_okay) {
+              if ((e?.errno === ENOENT) && islast && opts.noent_okay) {
                 return { path: current_path };
               }
               throw e;
@@ -2070,7 +2161,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
             // setting opts.follow = true will override this behavior.
             if (FS.isLink(current.mode) && (!islast || opts.follow)) {
               if (!current.node_ops.readlink) {
-                throw new FS.ErrnoError(52);
+                throw new FS.ErrnoError(ENOSYS);
               }
               var link = current.node_ops.readlink(current);
               if (!PATH.isAbs(link)) {
@@ -2082,7 +2173,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           }
           return { path: current_path, node: current };
         }
-        throw new FS.ErrnoError(32);
+        throw new FS.ErrnoError(ELOOP);
       },
   getPath(node) {
         var path;
@@ -2157,29 +2248,29 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         return !!node.mounted;
       },
   isFile(mode) {
-        return (mode & 61440) === 32768;
+        return (mode & S_IFMT) === S_IFREG;
       },
   isDir(mode) {
-        return (mode & 61440) === 16384;
+        return (mode & S_IFMT) === S_IFDIR;
       },
   isLink(mode) {
-        return (mode & 61440) === 40960;
+        return (mode & S_IFMT) === S_IFLNK;
       },
   isChrdev(mode) {
-        return (mode & 61440) === 8192;
+        return (mode & S_IFMT) === S_IFCHR;
       },
   isBlkdev(mode) {
-        return (mode & 61440) === 24576;
+        return (mode & S_IFMT) === S_IFBLK;
       },
   isFIFO(mode) {
-        return (mode & 61440) === 4096;
+        return (mode & S_IFMT) === S_IFIFO;
       },
   isSocket(mode) {
-        return (mode & 49152) === 49152;
+        return (mode & S_IFSOCK) === S_IFSOCK;
       },
   flagsToPermissionString(flag) {
         var perms = ['r', 'w', 'rw'][flag & 3];
-        if ((flag & 512)) {
+        if ((flag & O_TRUNC)) {
           perms += 'w';
         }
         return perms;
@@ -2189,31 +2280,31 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           return 0;
         }
         // return 0 if any user, group or owner bits are set.
-        if (perms.includes('r') && !(node.mode & 292)) {
-          return 2;
+        if (perms.includes('r') && !(node.mode & S_IRUGO)) {
+          return EACCES;
         }
-        if (perms.includes('w') && !(node.mode & 146)) {
-          return 2;
+        if (perms.includes('w') && !(node.mode & S_IWUGO)) {
+          return EACCES;
         }
-        if (perms.includes('x') && !(node.mode & 73)) {
-          return 2;
+        if (perms.includes('x') && !(node.mode & S_IXUGO)) {
+          return EACCES;
         }
         return 0;
       },
   mayLookup(dir) {
-        if (!FS.isDir(dir.mode)) return 54;
+        if (!FS.isDir(dir.mode)) return ENOTDIR;
         var errCode = FS.nodePermissions(dir, 'x');
         if (errCode) return errCode;
-        if (!dir.node_ops.lookup) return 2;
+        if (!dir.node_ops.lookup) return EACCES;
         return 0;
       },
   mayCreate(dir, name) {
         if (!FS.isDir(dir.mode)) {
-          return 54;
+          return ENOTDIR;
         }
         try {
           var node = FS.lookupNode(dir, name);
-          return 20;
+          return EEXIST;
         } catch (e) {
         }
         return FS.nodePermissions(dir, 'wx');
@@ -2231,29 +2322,29 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         }
         if (isdir) {
           if (!FS.isDir(node.mode)) {
-            return 54;
+            return ENOTDIR;
           }
           if (FS.isRoot(node) || FS.getPath(node) === FS.cwd()) {
-            return 10;
+            return EBUSY;
           }
         } else if (FS.isDir(node.mode)) {
-          return 31;
+          return EISDIR;
         }
         return 0;
       },
   mayOpen(node, flags) {
         if (!node) {
-          return 44;
+          return ENOENT;
         }
         if (FS.isLink(node.mode)) {
-          return 32;
+          return ELOOP;
         }
         var mode = FS.flagsToPermissionString(flags);
         if (FS.isDir(node.mode)) {
           // opening for write
           // TODO: check for O_SEARCH? (== search for dir only)
-          if (mode !== 'r' || (flags & (512 | 64))) {
-            return 31;
+          if (mode !== 'r' || (flags & (O_TRUNC | O_CREAT))) {
+            return EISDIR;
           }
         }
         return FS.nodePermissions(node, mode);
@@ -2270,12 +2361,12 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
             return fd;
           }
         }
-        throw new FS.ErrnoError(33);
+        throw new FS.ErrnoError(EMFILE);
       },
   getStreamChecked(fd) {
         var stream = FS.getStream(fd);
         if (!stream) {
-          throw new FS.ErrnoError(8);
+          throw new FS.ErrnoError(EBADF);
         }
         return stream;
       },
@@ -2304,12 +2395,12 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         var setattr = stream?.stream_ops.setattr;
         var arg = setattr ? stream : node;
         setattr ??= node.node_ops.setattr;
-        FS.checkOpExists(setattr, 63)
+        FS.checkOpExists(setattr, EPERM)
         try {
           setattr(arg, attr);
         } catch (e) {
           if (e instanceof RangeError) {
-            throw new FS.ErrnoError(22);
+            throw new FS.ErrnoError(EFBIG);
           }
           throw e;
         }
@@ -2323,7 +2414,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           stream.stream_ops.open?.(stream);
         },
   llseek() {
-          throw new FS.ErrnoError(70);
+          throw new FS.ErrnoError(ESPIPE);
         },
   },
   major:(dev) => ((dev) >> 8),
@@ -2401,7 +2492,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         var node;
   
         if (root && FS.root) {
-          throw new FS.ErrnoError(10);
+          throw new FS.ErrnoError(EBUSY);
         } else if (!root && !pseudo) {
           var lookup = FS.lookupPath(mountpoint, { follow_mount: false });
   
@@ -2409,11 +2500,11 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           node = lookup.node;
   
           if (FS.isMountpoint(node)) {
-            throw new FS.ErrnoError(10);
+            throw new FS.ErrnoError(EBUSY);
           }
   
           if (!FS.isDir(node.mode)) {
-            throw new FS.ErrnoError(54);
+            throw new FS.ErrnoError(ENOTDIR);
           }
         }
   
@@ -2447,7 +2538,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         var lookup = FS.lookupPath(mountpoint, { follow_mount: false });
   
         if (!FS.isMountpoint(lookup.node)) {
-          throw new FS.ErrnoError(28);
+          throw new FS.ErrnoError(EINVAL);
         }
   
         // destroy the nodes for this mount, and all its child mounts
@@ -2483,17 +2574,17 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         var parent = lookup.node;
         var name = PATH.basename(path);
         if (!name) {
-          throw new FS.ErrnoError(28);
+          throw new FS.ErrnoError(EINVAL);
         }
         if (name === '.' || name === '..') {
-          throw new FS.ErrnoError(20);
+          throw new FS.ErrnoError(EEXIST);
         }
         var errCode = FS.mayCreate(parent, name);
         if (errCode) {
           throw new FS.ErrnoError(errCode);
         }
         if (!parent.node_ops.mknod) {
-          throw new FS.ErrnoError(63);
+          throw new FS.ErrnoError(EPERM);
         }
         return parent.node_ops.mknod(parent, name, mode, dev);
       },
@@ -2520,7 +2611,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           ffree: FS.nextInode - 1,
           fsid: 42,
           flags: 2,
-          namelen: 255,
+          namelen: NAME_MAX,
         };
   
         if (node.node_ops.statfs) {
@@ -2528,17 +2619,17 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         }
         return rtn;
       },
-  create(path, mode = 0o666) {
-        mode &= 4095;
-        mode |= 32768;
+  create(path, mode = S_IRUGO | S_IWUGO) {
+        mode &= S_IALLUGO;
+        mode |= S_IFREG;
         return FS.mknod(path, mode, 0);
       },
-  mkdir(path, mode = 0o777) {
-        mode &= 511 | 512;
-        mode |= 16384;
+  mkdir(path, mode = S_IRWXUGO) {
+        mode &= S_IRWXUGO | S_ISVTX;
+        mode |= S_IFDIR;
         return FS.mknod(path, mode, 0);
       },
-  mkdirTree(path, mode = 0o777) {
+  mkdirTree(path, mode = S_IRWXUGO) {
         var dirs = path.split('/');
         var d = '';
         for (var dir of dirs) {
@@ -2548,26 +2639,26 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           try {
             FS.mkdir(d, mode);
           } catch(e) {
-            if (e.errno != 20) throw e;
+            if (e.errno != EEXIST) throw e;
           }
         }
       },
   mkdev(path, mode, dev = undefined) {
         if (typeof dev === 'undefined') {
           dev = mode;
-          mode = 0o666;
+          mode = S_IRUGO | S_IWUGO;
         }
-        mode |= 8192;
+        mode |= S_IFCHR;
         return FS.mknod(path, mode, dev);
       },
   symlink(oldpath, newpath) {
         if (!PATH_FS.resolve(oldpath)) {
-          throw new FS.ErrnoError(44);
+          throw new FS.ErrnoError(ENOENT);
         }
         var lookup = FS.lookupPath(newpath, { parent: true });
         var parent = lookup.node;
         if (!parent) {
-          throw new FS.ErrnoError(44);
+          throw new FS.ErrnoError(ENOENT);
         }
         var newname = PATH.basename(newpath);
         var errCode = FS.mayCreate(parent, newname);
@@ -2575,7 +2666,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           throw new FS.ErrnoError(errCode);
         }
         if (!parent.node_ops.symlink) {
-          throw new FS.ErrnoError(63);
+          throw new FS.ErrnoError(EPERM);
         }
         return parent.node_ops.symlink(parent, newname, oldpath);
       },
@@ -2583,7 +2674,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         var lookup = FS.lookupPath(newpath, { parent: true });
         var parent = lookup.node;
         if (!parent) {
-          throw new FS.ErrnoError(44);
+          throw new FS.ErrnoError(ENOENT);
         }
         var newname = PATH.basename(newpath);
         var errCode = FS.mayCreate(parent, newname);
@@ -2594,7 +2685,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         // `link` node op (e.g. NODERAWFS backed by the host). NODEFS omits it:
         // a host hardlink cannot be confined to the mount root.
         if (!parent.node_ops.link) {
-          throw new FS.ErrnoError(34);
+          throw new FS.ErrnoError(EMLINK);
         }
         return parent.node_ops.link(parent, newname, oldpath, flags);
       },
@@ -2612,22 +2703,22 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         lookup = FS.lookupPath(new_path, { parent: true });
         new_dir = lookup.node;
   
-        if (!old_dir || !new_dir) throw new FS.ErrnoError(44);
+        if (!old_dir || !new_dir) throw new FS.ErrnoError(ENOENT);
         // need to be part of the same mount
         if (old_dir.mount !== new_dir.mount) {
-          throw new FS.ErrnoError(75);
+          throw new FS.ErrnoError(EXDEV);
         }
         // source must exist
         var old_node = FS.lookupNode(old_dir, old_name);
         // old path should not be an ancestor of the new path
         var relative = PATH_FS.relative(old_path, new_dirname);
         if (relative.charAt(0) !== '.') {
-          throw new FS.ErrnoError(28);
+          throw new FS.ErrnoError(EINVAL);
         }
         // new path should not be an ancestor of the old path
         relative = PATH_FS.relative(new_path, old_dirname);
         if (relative.charAt(0) !== '.') {
-          throw new FS.ErrnoError(55);
+          throw new FS.ErrnoError(ENOTEMPTY);
         }
         // see if the new path already exists
         var new_node;
@@ -2655,10 +2746,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           throw new FS.ErrnoError(errCode);
         }
         if (!old_dir.node_ops.rename) {
-          throw new FS.ErrnoError(63);
+          throw new FS.ErrnoError(EPERM);
         }
         if (FS.isMountpoint(old_node) || (new_node && FS.isMountpoint(new_node))) {
-          throw new FS.ErrnoError(10);
+          throw new FS.ErrnoError(EBUSY);
         }
         // if we are going to change the parent, check write permissions
         if (new_dir !== old_dir) {
@@ -2698,10 +2789,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           throw new FS.ErrnoError(errCode);
         }
         if (!parent.node_ops.rmdir) {
-          throw new FS.ErrnoError(63);
+          throw new FS.ErrnoError(EPERM);
         }
         if (FS.isMountpoint(node)) {
-          throw new FS.ErrnoError(10);
+          throw new FS.ErrnoError(EBUSY);
         }
         parent.node_ops.rmdir(parent, name);
         FS.destroyNode(node);
@@ -2709,14 +2800,14 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   readdir(path) {
         var lookup = FS.lookupPath(path, { follow: true });
         var node = lookup.node;
-        var readdir = FS.checkOpExists(node.node_ops.readdir, 54);
+        var readdir = FS.checkOpExists(node.node_ops.readdir, ENOTDIR);
         return readdir(node);
       },
   unlink(path) {
         var lookup = FS.lookupPath(path, { parent: true });
         var parent = lookup.node;
         if (!parent) {
-          throw new FS.ErrnoError(44);
+          throw new FS.ErrnoError(ENOENT);
         }
         var name = PATH.basename(path);
         var node = FS.lookupNode(parent, name);
@@ -2728,10 +2819,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           throw new FS.ErrnoError(errCode);
         }
         if (!parent.node_ops.unlink) {
-          throw new FS.ErrnoError(63);
+          throw new FS.ErrnoError(EPERM);
         }
         if (FS.isMountpoint(node)) {
-          throw new FS.ErrnoError(10);
+          throw new FS.ErrnoError(EBUSY);
         }
         parent.node_ops.unlink(parent, name);
         FS.destroyNode(node);
@@ -2740,17 +2831,17 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         var lookup = FS.lookupPath(path);
         var link = lookup.node;
         if (!link) {
-          throw new FS.ErrnoError(44);
+          throw new FS.ErrnoError(ENOENT);
         }
         if (!link.node_ops.readlink) {
-          throw new FS.ErrnoError(28);
+          throw new FS.ErrnoError(EINVAL);
         }
         return link.node_ops.readlink(link);
       },
   stat(path, dontFollow = false) {
         var lookup = FS.lookupPath(path, { follow: !dontFollow });
         var node = lookup.node;
-        var getattr = FS.checkOpExists(node.node_ops.getattr, 63);
+        var getattr = FS.checkOpExists(node.node_ops.getattr, EPERM);
         return getattr(node);
       },
   fstat(fd) {
@@ -2759,7 +2850,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         var getattr = stream.stream_ops.getattr;
         var arg = getattr ? stream : node;
         getattr ??= node.node_ops.getattr;
-        FS.checkOpExists(getattr, 63)
+        FS.checkOpExists(getattr, EPERM)
         return getattr(arg);
       },
   lstat(path) {
@@ -2767,7 +2858,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       },
   doChmod(stream, node, mode, dontFollow = false) {
         FS.doSetAttr(stream, node, {
-          mode: (mode & 4095) | (node.mode & ~4095),
+          mode: (mode & S_IALLUGO) | (node.mode & ~S_IALLUGO),
           ctime: Date.now(),
           dontFollow
         });
@@ -2815,10 +2906,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       },
   doTruncate(stream, node, len) {
         if (FS.isDir(node.mode)) {
-          throw new FS.ErrnoError(31);
+          throw new FS.ErrnoError(EISDIR);
         }
         if (!FS.isFile(node.mode)) {
-          throw new FS.ErrnoError(28);
+          throw new FS.ErrnoError(EINVAL);
         }
         var errCode = FS.nodePermissions(node, 'w');
         if (errCode) {
@@ -2831,7 +2922,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       },
   truncate(path, len) {
         if (len < 0) {
-          throw new FS.ErrnoError(28);
+          throw new FS.ErrnoError(EINVAL);
         }
         var node;
         if (typeof path === 'string') {
@@ -2844,8 +2935,8 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       },
   ftruncate(fd, len) {
         var stream = FS.getStreamChecked(fd);
-        if (len < 0 || (stream.flags & 2097155) === 0) {
-          throw new FS.ErrnoError(28);
+        if (len < 0 || (stream.flags & O_ACCMODE) === O_RDONLY) {
+          throw new FS.ErrnoError(EINVAL);
         }
         FS.doTruncate(stream, stream.node, len);
       },
@@ -2857,13 +2948,13 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           dontFollow
         });
       },
-  open(path, flags, mode = 0o666) {
+  open(path, flags, mode = S_IRUGO | S_IWUGO) {
         if (path === '') {
-          throw new FS.ErrnoError(44);
+          throw new FS.ErrnoError(ENOENT);
         }
         flags = FS_modeStringToFlags(flags);
-        if ((flags & 64)) {
-          mode = (mode & 4095) | 32768;
+        if ((flags & O_CREAT)) {
+          mode = (mode & S_IALLUGO) | S_IFREG;
         } else {
           mode = 0;
         }
@@ -2877,7 +2968,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           // doesn't exist, lookupPath returns `node: undefined`. `path` will be
           // updated to point to the target of all symlinks.
           var lookup = FS.lookupPath(path, {
-            follow: !(flags & 131072),
+            follow: !(flags & O_NOFOLLOW),
             noent_okay: true
           });
           node = lookup.node;
@@ -2885,33 +2976,33 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         }
         // perhaps we need to create the node
         var created = false;
-        if ((flags & 64)) {
+        if ((flags & O_CREAT)) {
           if (node) {
             // if O_CREAT and O_EXCL are set, error out if the node already exists
-            if ((flags & 128)) {
-              throw new FS.ErrnoError(20);
+            if ((flags & O_EXCL)) {
+              throw new FS.ErrnoError(EEXIST);
             }
           } else if (isDirPath) {
-            throw new FS.ErrnoError(31);
+            throw new FS.ErrnoError(EISDIR);
           } else {
             // node doesn't exist, try to create it
             // Ignore the permission bits here to ensure we can `open` this new
             // file below. We use chmod below to apply the permissions once the
             // file is open.
-            node = FS.mknod(path, mode | 0o777, 0);
+            node = FS.mknod(path, mode | S_IRWXUGO, 0);
             created = true;
           }
         }
         if (!node) {
-          throw new FS.ErrnoError(44);
+          throw new FS.ErrnoError(ENOENT);
         }
         // can't truncate a device
         if (FS.isChrdev(node.mode)) {
-          flags &= ~512;
+          flags &= ~O_TRUNC;
         }
         // if asked only for a directory, then this must be one
-        if ((flags & 65536) && !FS.isDir(node.mode)) {
-          throw new FS.ErrnoError(54);
+        if ((flags & O_DIRECTORY) && !FS.isDir(node.mode)) {
+          throw new FS.ErrnoError(ENOTDIR);
         }
         // check permissions, if this is not a file we just created now (it is ok to
         // create and write to a file with read-only permissions; it is read-only
@@ -2923,11 +3014,11 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           }
         }
         // do truncation if necessary
-        if ((flags & 512) && !created) {
+        if ((flags & O_TRUNC) && !created) {
           FS.truncate(node, 0);
         }
         // we've already handled these, don't pass down to the underlying vfs
-        flags &= ~(128 | 512 | 131072);
+        flags &= ~(O_EXCL | O_TRUNC | O_NOFOLLOW);
   
         // register the stream with the filesystem
         var stream = FS.createStream({
@@ -2946,20 +3037,20 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           stream.stream_ops.open(stream);
         }
         if (created) {
-          FS.chmod(node, mode & 0o777);
+          FS.chmod(node, mode & S_IRWXUGO);
         }
         return stream;
       },
   close(stream) {
         if (FS.isClosed(stream)) {
-          throw new FS.ErrnoError(8);
+          throw new FS.ErrnoError(EBADF);
         }
         if (stream.getdents) stream.getdents = null; // free readdir state
         // The fd is going away: wake anything waiting on it (poll/epoll) with
         // POLLNVAL so a blocking wait unblocks and an epoll registration is evicted
         // on its next derive. Only sockets/pipes/epoll ever carry a wait-queue, so
         // for every other stream (incl. nodeless noderawfs stdio) this is a no-op.
-        stream.node?.notifyListeners(32);
+        stream.node?.notifyListeners(POLLNVAL);
         try {
           if (stream.stream_ops.close) {
             stream.stream_ops.close(stream);
@@ -2976,13 +3067,13 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       },
   llseek(stream, offset, whence) {
         if (FS.isClosed(stream)) {
-          throw new FS.ErrnoError(8);
+          throw new FS.ErrnoError(EBADF);
         }
         if (!stream.seekable || !stream.stream_ops.llseek) {
-          throw new FS.ErrnoError(70);
+          throw new FS.ErrnoError(ESPIPE);
         }
-        if (whence != 0 && whence != 1 && whence != 2) {
-          throw new FS.ErrnoError(28);
+        if (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END) {
+          throw new FS.ErrnoError(EINVAL);
         }
         stream.position = stream.stream_ops.llseek(stream, offset, whence);
         stream.ungotten = [];
@@ -2991,25 +3082,25 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   read(stream, buffer, offset, length, position = undefined) {
         assert(offset >= 0);
         if (length < 0 || position < 0) {
-          throw new FS.ErrnoError(28);
+          throw new FS.ErrnoError(EINVAL);
         }
         if (FS.isClosed(stream)) {
-          throw new FS.ErrnoError(8);
+          throw new FS.ErrnoError(EBADF);
         }
-        if ((stream.flags & 2097155) === 1) {
-          throw new FS.ErrnoError(8);
+        if ((stream.flags & O_ACCMODE) === O_WRONLY) {
+          throw new FS.ErrnoError(EBADF);
         }
         if (FS.isDir(stream.node.mode)) {
-          throw new FS.ErrnoError(31);
+          throw new FS.ErrnoError(EISDIR);
         }
         if (!stream.stream_ops.read) {
-          throw new FS.ErrnoError(28);
+          throw new FS.ErrnoError(EINVAL);
         }
         var seeking = typeof position !== 'undefined';
         if (!seeking) {
           position = stream.position;
         } else if (!stream.seekable) {
-          throw new FS.ErrnoError(70);
+          throw new FS.ErrnoError(ESPIPE);
         }
         var bytesRead = stream.stream_ops.read(stream, buffer, offset, length, position);
         if (!seeking) stream.position += bytesRead;
@@ -3019,29 +3110,29 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         assert(offset >= 0);
         assert(buffer.subarray, 'FS.write expects a TypedArray');
         if (length < 0 || position < 0) {
-          throw new FS.ErrnoError(28);
+          throw new FS.ErrnoError(EINVAL);
         }
         if (FS.isClosed(stream)) {
-          throw new FS.ErrnoError(8);
+          throw new FS.ErrnoError(EBADF);
         }
-        if ((stream.flags & 2097155) === 0) {
-          throw new FS.ErrnoError(8);
+        if ((stream.flags & O_ACCMODE) === O_RDONLY) {
+          throw new FS.ErrnoError(EBADF);
         }
         if (FS.isDir(stream.node.mode)) {
-          throw new FS.ErrnoError(31);
+          throw new FS.ErrnoError(EISDIR);
         }
         if (!stream.stream_ops.write) {
-          throw new FS.ErrnoError(28);
+          throw new FS.ErrnoError(EINVAL);
         }
-        if (stream.seekable && stream.flags & 1024) {
+        if (stream.seekable && stream.flags & O_APPEND) {
           // seek to the end before writing in append mode
-          FS.llseek(stream, 0, 2);
+          FS.llseek(stream, 0, SEEK_END);
         }
         var seeking = typeof position !== 'undefined';
         if (!seeking) {
           position = stream.position;
         } else if (!stream.seekable) {
-          throw new FS.ErrnoError(70);
+          throw new FS.ErrnoError(ESPIPE);
         }
         var bytesWritten = stream.stream_ops.write(stream, buffer, offset, length, position, canOwn);
         if (!seeking) stream.position += bytesWritten;
@@ -3054,19 +3145,19 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         // to write to file opened in read-only mode with MAP_PRIVATE flag,
         // as all modifications will be visible only in the memory of
         // the current process.
-        if ((prot & 2)
-            && !(flags & 2)
-            && (stream.flags & 2097155) !== 2) {
-          throw new FS.ErrnoError(2);
+        if ((prot & PROT_WRITE)
+            && !(flags & MAP_PRIVATE)
+            && (stream.flags & O_ACCMODE) !== O_RDWR) {
+          throw new FS.ErrnoError(EACCES);
         }
-        if ((stream.flags & 2097155) === 1) {
-          throw new FS.ErrnoError(2);
+        if ((stream.flags & O_ACCMODE) === O_WRONLY) {
+          throw new FS.ErrnoError(EACCES);
         }
         if (!stream.stream_ops.mmap) {
-          throw new FS.ErrnoError(43);
+          throw new FS.ErrnoError(ENODEV);
         }
         if (!length) {
-          throw new FS.ErrnoError(28);
+          throw new FS.ErrnoError(EINVAL);
         }
         return stream.stream_ops.mmap(stream, length, position, prot, flags);
       },
@@ -3079,12 +3170,12 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       },
   ioctl(stream, cmd, arg) {
         if (!stream.stream_ops.ioctl) {
-          throw new FS.ErrnoError(59);
+          throw new FS.ErrnoError(ENOTTY);
         }
         return stream.stream_ops.ioctl(stream, cmd, arg);
       },
   readFile(path, opts = {}) {
-        opts.flags ??= 0;
+        opts.flags ??= O_RDONLY;
         opts.encoding ??= 'binary';
         if (opts.encoding !== 'utf8' && opts.encoding !== 'binary') {
           abort(`Invalid encoding type "${opts.encoding}"`);
@@ -3101,7 +3192,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         return buf;
       },
   writeFile(path, data, opts = {}) {
-        opts.flags ??= 577;
+        opts.flags ??= O_TRUNC | O_CREAT | O_WRONLY;
         var stream = FS.open(path, opts.flags, opts.mode);
         data = FS_fileDataToTypedArray(data);
         FS.write(stream, data, 0, data.byteLength, undefined, opts.canOwn);
@@ -3111,10 +3202,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   chdir(path) {
         var lookup = FS.lookupPath(path, { follow: true });
         if (lookup.node === null) {
-          throw new FS.ErrnoError(44);
+          throw new FS.ErrnoError(ENOENT);
         }
         if (!FS.isDir(lookup.node.mode)) {
-          throw new FS.ErrnoError(54);
+          throw new FS.ErrnoError(ENOTDIR);
         }
         var errCode = FS.nodePermissions(lookup.node, 'x');
         if (errCode) {
@@ -3169,7 +3260,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         FS.mkdir('/proc/self/fd');
         FS.mount({
           mount() {
-            var node = FS.createNode(proc_self, 'fd', 16895, 73);
+            var node = FS.createNode(proc_self, 'fd', S_IFDIR | S_IRWXUGO, S_IXUGO);
             node.stream_ops = {
               llseek: MEMFS.stream_ops.llseek,
             };
@@ -3222,9 +3313,9 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         }
   
         // open default streams for the stdin, stdout and stderr devices
-        var stdin = FS.open('/dev/stdin', 0);
-        var stdout = FS.open('/dev/stdout', 1);
-        var stderr = FS.open('/dev/stderr', 1);
+        var stdin = FS.open('/dev/stdin', O_RDONLY);
+        var stdout = FS.open('/dev/stdout', O_WRONLY);
+        var stderr = FS.open('/dev/stderr', O_WRONLY);
         assert(stdin.fd === 0, `invalid handle for stdin (${stdin.fd})`);
         assert(stdout.fd === 1, `invalid handle for stdout (${stdout.fd})`);
         assert(stderr.fd === 2, `invalid handle for stderr (${stderr.fd})`);
@@ -3299,7 +3390,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           try {
             FS.mkdir(current);
           } catch (e) {
-            if (e.errno != 20) throw e;
+            if (e.errno != EEXIST) throw e;
           }
           parent = current;
         }
@@ -3321,8 +3412,8 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         if (data) {
           data = FS_fileDataToTypedArray(data);
           // make sure we can write to the file
-          FS.chmod(node, mode | 146);
-          var stream = FS.open(node, 577);
+          FS.chmod(node, mode | S_IWUGO);
+          var stream = FS.open(node, O_TRUNC | O_CREAT | O_WRONLY);
           FS.write(stream, data, 0, data.length, 0, canOwn);
           FS.close(stream);
           FS.chmod(node, mode);
@@ -3352,10 +3443,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
               try {
                 result = input();
               } catch (e) {
-                throw new FS.ErrnoError(29);
+                throw new FS.ErrnoError(EIO);
               }
               if (result === undefined && !bytesRead) {
-                throw new FS.ErrnoError(6);
+                throw new FS.ErrnoError(EAGAIN);
               }
               if (result === null || result === undefined) break;
               bytesRead++;
@@ -3371,7 +3462,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
               try {
                 output(buffer[offset+i]);
               } catch (e) {
-                throw new FS.ErrnoError(29);
+                throw new FS.ErrnoError(EIO);
               }
             }
             if (length) {
@@ -3390,7 +3481,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           try {
             obj.contents = readBinary(obj.url);
           } catch (e) {
-            throw new FS.ErrnoError(29);
+            throw new FS.ErrnoError(EIO);
           }
         }
       },
@@ -3546,7 +3637,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           FS.forceLoadFile(node);
           var ptr = mmapAlloc(length);
           if (!ptr) {
-            throw new FS.ErrnoError(48);
+            throw new FS.ErrnoError(ENOMEM);
           }
           writeChunks(stream, HEAP8, ptr, length, position);
           return { ptr, allocated: true };
@@ -3555,8 +3646,22 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         return node;
       },
   };
+  const F_DUPFD = 0;
+  const F_GETFD = 1;
+  const F_GETFL = 3;
+  const F_GETLK = 12;
+  const F_SETFD = 2;
+  const F_SETFL = 4;
+  const F_SETLK = 13;
+  const F_SETLKW = 14;
+  const F_UNLCK = 2;
   /** @type {!Int16Array} */
   var HEAP16;
+  const O_ASYNC = 8192;
+  const O_DIRECT = 16384;
+  const O_NOATIME = 262144;
+  const O_NONBLOCK = 2048;
+  const AT_FDCWD = -100;
   /** not-@type {!BigInt64Array} */
   var HEAP64;
   var SYSCALLS = {
@@ -3567,7 +3672,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         }
         // relative path
         var dir;
-        if (dirfd === -100) {
+        if (dirfd === AT_FDCWD) {
           dir = FS.cwd();
         } else {
           var dirstream = SYSCALLS.getStreamFromFD(dirfd);
@@ -3575,7 +3680,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         }
         if (path.length == 0) {
           if (!allowEmpty) {
-            throw new FS.ErrnoError(44);;
+            throw new FS.ErrnoError(ENOENT);;
           }
           return dir;
         }
@@ -3617,9 +3722,9 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       },
   doMsync(addr, stream, len, flags, offset) {
         if (!FS.isFile(stream.node.mode)) {
-          throw new FS.ErrnoError(43);
+          throw new FS.ErrnoError(ENODEV);
         }
-        if (flags & 2) {
+        if (flags & MAP_PRIVATE) {
           // MAP_PRIVATE calls need not to be synced back to underlying fs
           return 0;
         }
@@ -3649,10 +3754,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   
       var stream = SYSCALLS.getStreamFromFD(fd);
       switch (cmd) {
-        case 0: {
+        case F_DUPFD: {
           var arg = syscallGetVarargI();
           if (arg < 0) {
-            return -28;
+            return -EINVAL;
           }
           while (FS.streams[arg]) {
             arg++;
@@ -3661,33 +3766,33 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           newStream = FS.dupStream(stream, arg);
           return newStream.fd;
         }
-        case 1:
-        case 2:
+        case F_GETFD:
+        case F_SETFD:
           return 0;  // FD_CLOEXEC makes no sense for a single process.
-        case 3:
+        case F_GETFL:
           return stream.flags;
-        case 4: {
+        case F_SETFL: {
           var arg = syscallGetVarargI();
-          var mask = 289792;
+          var mask = O_APPEND | O_ASYNC | O_DIRECT | O_NOATIME | O_NONBLOCK;
           stream.flags = (stream.flags & ~mask) | (arg & mask);
           return 0;
         }
-        case 12: {
+        case F_GETLK: {
           var arg = syscallGetVarargP();
           var offset = 0;
           // We're always unlocked.
-          HEAP16[(((arg)+(offset))>>1)] = 2;
+          HEAP16[(((arg)+(offset))>>1)] = F_UNLCK;
           return 0;
         }
-        case 13:
-        case 14:
+        case F_SETLK:
+        case F_SETLKW:
           // Pretend that the locking is successful. These are process-level locks,
           // and Emscripten programs are a single process. If we supported linking a
           // filesystem between programs, we'd need to do more here.
           // See https://github.com/emscripten-core/emscripten/issues/23697
           return 0;
       }
-      return -28;
+      return -EINVAL;
     } catch (e) {
     if (typeof FS === 'undefined' || !(e.name === 'ErrnoError')) throw e;
     return -e.errno;
@@ -3704,6 +3809,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   }
   }
   
+  const ERANGE = 68;
   var stringToUTF8 = (str, outPtr, maxBytesToWrite) => {
       assert(typeof maxBytesToWrite === 'number', 'stringToUTF8 requires a third parameter that specifies the length of the output buffer');
       return stringToUTF8Array(str, HEAPU8, outPtr, maxBytesToWrite);
@@ -3711,10 +3817,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   function ___syscall_getcwd(buf, size) {
   try {
   
-      if (!size) return -28;
+      if (!size) return -EINVAL;
       var cwd = FS.cwd();
       var cwdLengthInBytes = lengthBytesUTF8(cwd) + 1;
-      if (size < cwdLengthInBytes) return -68;
+      if (size < cwdLengthInBytes) return -ERANGE;
       stringToUTF8(cwd, buf, size);
       return cwdLengthInBytes;
     } catch (e) {
@@ -3723,18 +3829,34 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   }
   }
   
+  const FIONBIO = 21537;
+  const FIONREAD = 21531;
+  const NCCS = 32;
+  const TCFLSH = 21515;
+  const TCGETA = 21509;
+  const TCGETS = 21505;
+  const TCSETA = 21510;
+  const TCSETAF = 21512;
+  const TCSETAW = 21511;
+  const TCSETS = 21506;
+  const TCSETSF = 21508;
+  const TCSETSW = 21507;
+  const TIOCGPGRP = 21519;
+  const TIOCGWINSZ = 21523;
+  const TIOCSPGRP = 21520;
+  const TIOCSWINSZ = 21524;
   function ___syscall_ioctl(fd, op, varargs) {
   SYSCALLS.varargs = varargs;
   try {
   
       var stream = SYSCALLS.getStreamFromFD(fd);
       switch (op) {
-        case 21509: {
-          if (!stream.tty) return -59;
+        case TCGETA: {
+          if (!stream.tty) return -ENOTTY;
           return 0;
         }
-        case 21505: {
-          if (!stream.tty) return -59;
+        case TCGETS: {
+          if (!stream.tty) return -ENOTTY;
           if (stream.tty.ops.ioctl_tcgets) {
             var termios = stream.tty.ops.ioctl_tcgets(stream);
             var argp = syscallGetVarargP();
@@ -3742,23 +3864,23 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
             HEAP32[(((argp)+(4))>>2)] = termios.c_oflag || 0;
             HEAP32[(((argp)+(8))>>2)] = termios.c_cflag || 0;
             HEAP32[(((argp)+(12))>>2)] = termios.c_lflag || 0;
-            for (var i = 0; i < 32; i++) {
+            for (var i = 0; i < NCCS; i++) {
               HEAP8[(argp + i)+(17)] = termios.c_cc[i] || 0;
             }
             return 0;
           }
           return 0;
         }
-        case 21510:
-        case 21511:
-        case 21512: {
-          if (!stream.tty) return -59;
+        case TCSETA:
+        case TCSETAW:
+        case TCSETAF: {
+          if (!stream.tty) return -ENOTTY;
           return 0; // no-op, not actually adjusting terminal settings
         }
-        case 21506:
-        case 21507:
-        case 21508: {
-          if (!stream.tty) return -59;
+        case TCSETS:
+        case TCSETSW:
+        case TCSETSF: {
+          if (!stream.tty) return -ENOTTY;
           if (stream.tty.ops.ioctl_tcsets) {
             var argp = syscallGetVarargP();
             var c_iflag = HEAP32[((argp)>>2)];
@@ -3766,32 +3888,32 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
             var c_cflag = HEAP32[(((argp)+(8))>>2)];
             var c_lflag = HEAP32[(((argp)+(12))>>2)];
             var c_cc = []
-            for (var i = 0; i < 32; i++) {
+            for (var i = 0; i < NCCS; i++) {
               c_cc.push(HEAP8[(argp + i)+(17)]);
             }
             return stream.tty.ops.ioctl_tcsets(stream.tty, op, { c_iflag, c_oflag, c_cflag, c_lflag, c_cc });
           }
           return 0; // no-op, not actually adjusting terminal settings
         }
-        case 21519: {
-          if (!stream.tty) return -59;
+        case TIOCGPGRP: {
+          if (!stream.tty) return -ENOTTY;
           var argp = syscallGetVarargP();
           HEAP32[((argp)>>2)] = 0;
           return 0;
         }
-        case 21520: {
-          if (!stream.tty) return -59;
-          return -28; // not supported
+        case TIOCSPGRP: {
+          if (!stream.tty) return -ENOTTY;
+          return -EINVAL; // not supported
         }
-        case 21537:
-        case 21531: {
+        case FIONBIO:
+        case FIONREAD: {
           var argp = syscallGetVarargP();
           return FS.ioctl(stream, op, argp);
         }
-        case 21523: {
+        case TIOCGWINSZ: {
           // TODO: in theory we should write to the winsize struct that gets
           // passed in, but for now musl doesn't read anything on it
-          if (!stream.tty) return -59;
+          if (!stream.tty) return -ENOTTY;
           if (stream.tty.ops.ioctl_tiocgwinsz) {
             var winsize = stream.tty.ops.ioctl_tiocgwinsz(stream.tty);
             var argp = syscallGetVarargP();
@@ -3800,18 +3922,18 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           }
           return 0;
         }
-        case 21524: {
+        case TIOCSWINSZ: {
           // TODO: technically, this ioctl call should change the window size.
           // but, since emscripten doesn't have any concept of a terminal window
           // yet, we'll just silently throw it away as we do TIOCGWINSZ
-          if (!stream.tty) return -59;
+          if (!stream.tty) return -ENOTTY;
           return 0;
         }
-        case 21515: {
-          if (!stream.tty) return -59;
+        case TCFLSH: {
+          if (!stream.tty) return -ENOTTY;
           return 0;
         }
-        default: return -28; // not supported
+        default: return -EINVAL; // not supported
       }
     } catch (e) {
     if (typeof FS === 'undefined' || !(e.name === 'ErrnoError')) throw e;
@@ -3844,13 +3966,16 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   }
   }
   
+  const AT_EMPTY_PATH = 4096;
+  const AT_NO_AUTOMOUNT = 2048;
+  const AT_SYMLINK_NOFOLLOW = 256;
   function ___syscall_newfstatat(dirfd, path, buf, flags) {
   try {
   
       path = SYSCALLS.getStr(path);
-      var nofollow = flags & 256;
-      var allowEmpty = flags & 4096;
-      flags = flags & (~6400);
+      var nofollow = flags & AT_SYMLINK_NOFOLLOW;
+      var allowEmpty = flags & AT_EMPTY_PATH;
+      flags = flags & (~(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH | AT_NO_AUTOMOUNT));
       assert(!flags, `unknown flags in __syscall_newfstatat: ${flags}`);
       path = SYSCALLS.calculateAt(dirfd, path, allowEmpty);
       return SYSCALLS.writeStat(buf, nofollow ? FS.lstat(path) : FS.stat(path));
@@ -3867,7 +3992,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       path = SYSCALLS.getStr(path);
       path = SYSCALLS.calculateAt(dirfd, path);
       var mode = varargs ? syscallGetVarargI() : 0;
-      if (flags & 64) {
+      if (flags & O_CREAT) {
         mode &= ~SYSCALLS.currentUmask;
       }
       return FS.open(path, flags, mode).fd;
@@ -3882,7 +4007,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   
       path = SYSCALLS.getStr(path);
       path = SYSCALLS.calculateAt(dirfd, path);
-      if (bufsize <= 0) return -28;
+      if (bufsize <= 0) return -EINVAL;
       var ret = FS.readlink(path);
   
       var len = Math.min(bufsize, lengthBytesUTF8(ret));
@@ -3925,6 +4050,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         FS.createDataFile(name, null, HEAP8.subarray(content, content + len), true, true, /*canOwn=*/true);
       } while (HEAPU32[((ptr)>>2)]);
     };
+  const TZNAME_MAX = 16;
   var __tzset_js = (timezone, daylight, std_name, dst_name) => {
       // TODO: Use (malleable) environment variables instead of system settings.
       var currentYear = new Date().getFullYear();
@@ -3966,21 +4092,23 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       var summerName = extractZone(summerOffset);
       assert(winterName);
       assert(summerName);
-      assert(lengthBytesUTF8(winterName) <= 16, `timezone name truncated to fit in TZNAME_MAX (${winterName})`);
-      assert(lengthBytesUTF8(summerName) <= 16, `timezone name truncated to fit in TZNAME_MAX (${summerName})`);
+      assert(lengthBytesUTF8(winterName) <= TZNAME_MAX, `timezone name truncated to fit in TZNAME_MAX (${winterName})`);
+      assert(lengthBytesUTF8(summerName) <= TZNAME_MAX, `timezone name truncated to fit in TZNAME_MAX (${summerName})`);
       if (summerOffset < winterOffset) {
         // Northern hemisphere
-        stringToUTF8(winterName, std_name, 17);
-        stringToUTF8(summerName, dst_name, 17);
+        stringToUTF8(winterName, std_name, TZNAME_MAX + 1);
+        stringToUTF8(summerName, dst_name, TZNAME_MAX + 1);
       } else {
-        stringToUTF8(winterName, dst_name, 17);
-        stringToUTF8(summerName, std_name, 17);
+        stringToUTF8(winterName, dst_name, TZNAME_MAX + 1);
+        stringToUTF8(summerName, std_name, TZNAME_MAX + 1);
       }
     };
+  const __WASI_CLOCKID_REALTIME = 0;
   const INT53_MAX = 9007199254740992;
   const INT53_MIN = -9007199254740992;
   var bigintToI53Checked = (num) => (num < INT53_MIN || num > INT53_MAX) ? NaN : Number(num);
-  var checkWasiClock = (clock_id) => clock_id >= 0 && clock_id <= 3;
+  const __WASI_CLOCKID_THREAD_CPUTIME_ID = 3;
+  var checkWasiClock = (clock_id) => clock_id >= __WASI_CLOCKID_REALTIME && clock_id <= __WASI_CLOCKID_THREAD_CPUTIME_ID;
   const nowIsMonotonic = 1;
   var _emscripten_date_now = () => Date.now();
   var _emscripten_get_now = () => performance.now();
@@ -3989,16 +4117,16 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   
   
       if (!checkWasiClock(clk_id)) {
-        return 28;
+        return EINVAL;
       }
       var now;
       // all wasi clocks but realtime are monotonic
-      if (clk_id === 0) {
+      if (clk_id === __WASI_CLOCKID_REALTIME) {
         now = _emscripten_date_now();
       } else if (nowIsMonotonic) {
         now = _emscripten_get_now();
       } else {
-        return 52;
+        return ENOSYS;
       }
       // "now" is in ms, and wasi times are in ns.
       var nsec = Math.round(now * 1_000_000);
@@ -4139,6 +4267,11 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   var _emscripten_run_script = (ptr) => {
       eval(UTF8ToString(ptr));
     };
+  const EMSCRIPTEN_EVENT_KEYDOWN = 2;
+  const EM_HTML5_SHORT_STRING_LEN_BYTES = 32;
+  const EMSCRIPTEN_RESULT_INVALID_PARAM = -5;
+  const EMSCRIPTEN_RESULT_SUCCESS = 0;
+  const EMSCRIPTEN_RESULT_UNKNOWN_TARGET = -4;
   var JSEvents = {
   removeAllEventListeners() {
         while (JSEvents.eventHandlers.length) {
@@ -4214,7 +4347,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         if (!eventHandler.target) {
           err('registerOrRemoveHandler: the target element for event handler registration does not exist, when processing the following event handler registration:');
           console.dir(eventHandler);
-          return -4;
+          return EMSCRIPTEN_RESULT_UNKNOWN_TARGET;
         }
         if (eventHandler.callbackfunc) {
           eventHandler.eventListenerFunc = function(event) {
@@ -4243,7 +4376,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
              }
           }
         }
-        return 0;
+        return EMSCRIPTEN_RESULT_SUCCESS;
       },
   removeSingleHandler(eventHandler) {
         let success = false;
@@ -4258,7 +4391,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
             success = true;
           }
         }
-        return success ? 0 : -5;
+        return success ? EMSCRIPTEN_RESULT_SUCCESS : EMSCRIPTEN_RESULT_INVALID_PARAM;
       },
   getNodeNameForTarget(target) {
         if (target == window) return '#window';
@@ -4273,12 +4406,14 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
          ;
       },
   };
+  const EMSCRIPTEN_EVENT_TARGET_WINDOW = 2;
   var maybeCStringToJsString = (cString) => {
-      // 'cString > 2' checks if the input is a number, and isn't of the special
-      // values we accept here, EMSCRIPTEN_EVENT_TARGET_* (which map to 0, 1, 2).
-      // In other words, if cString > 2 then it's a pointer to a valid place in
-      // memory, and points to a C string.
-      return cString > 2 ? UTF8ToString(cString) : cString;
+      // 'cString > EMSCRIPTEN_EVENT_TARGET_WINDOW' checks if the input is a
+      // pointer, and isn't of the special values we accept here,
+      // EMSCRIPTEN_EVENT_TARGET_* (which map to 0, 1, 2).
+      // In other words, if cString > EMSCRIPTEN_EVENT_TARGET_WINDOW then it's a
+      // pointer to a valid place in memory, and points to a C string.
+      return cString > EMSCRIPTEN_EVENT_TARGET_WINDOW ? UTF8ToString(cString) : cString;
     };
   /** @type {Object} */
   var specialHTMLTargets = [0, document, window];
@@ -4308,10 +4443,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         HEAP32[idx + 5] = e.charCode;
         HEAP32[idx + 6] = e.keyCode;
         HEAP32[idx + 7] = e.which;
-        stringToUTF8(e.key ?? '', keyEventData + 32, 32);
-        stringToUTF8(e.code ?? '', keyEventData + 64, 32);
-        stringToUTF8(e.char ?? '', keyEventData + 96, 32);
-        stringToUTF8(e.locale ?? '', keyEventData + 128, 32);
+        stringToUTF8(e.key ?? '', keyEventData + 32, EM_HTML5_SHORT_STRING_LEN_BYTES);
+        stringToUTF8(e.code ?? '', keyEventData + 64, EM_HTML5_SHORT_STRING_LEN_BYTES);
+        stringToUTF8(e.char ?? '', keyEventData + 96, EM_HTML5_SHORT_STRING_LEN_BYTES);
+        stringToUTF8(e.locale ?? '', keyEventData + 128, EM_HTML5_SHORT_STRING_LEN_BYTES);
   
         if (((a1, a2, a3) => dynCall_iiii(callbackfunc, a1, a2, a3))(eventTypeId, keyEventData, userData)) e.preventDefault();
       };
@@ -4328,9 +4463,12 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       return JSEvents.registerOrRemoveHandler(eventHandler);
     };
   var _emscripten_set_keydown_callback_on_thread = (target, userData, useCapture, callbackfunc, targetThread) =>
-      registerKeyEventCallback(target, userData, useCapture, callbackfunc, 2, 'keydown', targetThread);
+      registerKeyEventCallback(target, userData, useCapture, callbackfunc, EMSCRIPTEN_EVENT_KEYDOWN, 'keydown', targetThread);
+  const EMSCRIPTEN_EVENT_KEYUP = 3;
   var _emscripten_set_keyup_callback_on_thread = (target, userData, useCapture, callbackfunc, targetThread) =>
-      registerKeyEventCallback(target, userData, useCapture, callbackfunc, 3, 'keyup', targetThread);
+      registerKeyEventCallback(target, userData, useCapture, callbackfunc, EMSCRIPTEN_EVENT_KEYUP, 'keyup', targetThread);
+  const EM_TIMING_RAF = 1;
+  const EM_TIMING_SETTIMEOUT = 0;
   var handleException = (e) => {
       // Certain exception types we do not treat as errors since they are used for
       // internal control flow.
@@ -4394,6 +4532,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         maybeExit();
       }
     };
+  const EM_TIMING_SETIMMEDIATE = 2;
   var _emscripten_set_main_loop_timing = (mode, value) => {
       MainLoop.timingMode = mode;
       MainLoop.timingValue = value;
@@ -4403,17 +4542,17 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         return 1; // Return non-zero on failure, can't set timing mode when there is no main loop.
       }
   
-      if (mode == 0) {
+      if (mode == EM_TIMING_SETTIMEOUT) {
         MainLoop.scheduler = function MainLoop_scheduler_setTimeout() {
           var timeUntilNextTick = Math.max(0, MainLoop.tickStartTime + value - _emscripten_get_now())|0;
           setTimeout(MainLoop.runner, timeUntilNextTick); // doing this each time means that on exception, we stop
         };
-      } else if (mode == 1) {
+      } else if (mode == EM_TIMING_RAF) {
         MainLoop.scheduler = function MainLoop_scheduler_rAF() {
           MainLoop.requestAnimationFrame(MainLoop.runner);
         };
       } else {
-        assert(mode == 2);
+        assert(mode == EM_TIMING_SETIMMEDIATE);
         if (!MainLoop.setImmediate) {
           if (globalThis.scheduler) {
             // Some modern browsers implement scheduler.postTask, but not all.
@@ -4584,11 +4723,11 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   
         // Implement very basic swap interval control
         MainLoop.currentFrameNumber = MainLoop.currentFrameNumber + 1 | 0;
-        if (MainLoop.timingMode == 1 && MainLoop.timingValue > 1 && MainLoop.currentFrameNumber % MainLoop.timingValue != 0) {
+        if (MainLoop.timingMode == EM_TIMING_RAF && MainLoop.timingValue > 1 && MainLoop.currentFrameNumber % MainLoop.timingValue != 0) {
           // Not the scheduled time to render this frame - skip.
           MainLoop.scheduler();
           return;
-        } else if (MainLoop.timingMode == 0) {
+        } else if (MainLoop.timingMode == EM_TIMING_SETTIMEOUT) {
           MainLoop.tickStartTime = _emscripten_get_now();
           if (Module['ctx']) {
             warnOnce('Looks like you are rendering without using requestAnimationFrame for the main loop. You should use 0 for the frame rate in emscripten_set_main_loop in order to use requestAnimationFrame, as that can greatly improve your frame rates!');
@@ -4605,10 +4744,10 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   
       if (!noSetTiming) {
         if (fps > 0) {
-          _emscripten_set_main_loop_timing(0, 1000.0 / fps);
+          _emscripten_set_main_loop_timing(EM_TIMING_SETTIMEOUT, 1000.0 / fps);
         } else {
           // Do rAF by rendering each frame (no decimating)
-          _emscripten_set_main_loop_timing(1, 1);
+          _emscripten_set_main_loop_timing(EM_TIMING_RAF, 1);
         }
   
         MainLoop.scheduler();
@@ -4622,6 +4761,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       var iterFunc = (() => dynCall_v(func));
       setMainLoop(iterFunc, fps, simulateInfiniteLoop);
     };
+  const EMSCRIPTEN_EVENT_MOUSEDOWN = 5;
   var getBoundingClientRect = (e) => specialHTMLTargets.includes(e) ? {'left':0,'top':0} : e.getBoundingClientRect();
   var fillMouseEventData = (eventStruct, e, target) => {
       assert(eventStruct % 4 == 0);
@@ -4672,11 +4812,13 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       return JSEvents.registerOrRemoveHandler(eventHandler);
     };
   var _emscripten_set_mousedown_callback_on_thread = (target, userData, useCapture, callbackfunc, targetThread) =>
-      registerMouseEventCallback(target, userData, useCapture, callbackfunc, 5, 'mousedown', targetThread);
+      registerMouseEventCallback(target, userData, useCapture, callbackfunc, EMSCRIPTEN_EVENT_MOUSEDOWN, 'mousedown', targetThread);
+  const EMSCRIPTEN_EVENT_MOUSEMOVE = 8;
   var _emscripten_set_mousemove_callback_on_thread = (target, userData, useCapture, callbackfunc, targetThread) =>
-      registerMouseEventCallback(target, userData, useCapture, callbackfunc, 8, 'mousemove', targetThread);
+      registerMouseEventCallback(target, userData, useCapture, callbackfunc, EMSCRIPTEN_EVENT_MOUSEMOVE, 'mousemove', targetThread);
+  const EMSCRIPTEN_EVENT_MOUSEUP = 6;
   var _emscripten_set_mouseup_callback_on_thread = (target, userData, useCapture, callbackfunc, targetThread) =>
-      registerMouseEventCallback(target, userData, useCapture, callbackfunc, 6, 'mouseup', targetThread);
+      registerMouseEventCallback(target, userData, useCapture, callbackfunc, EMSCRIPTEN_EVENT_MOUSEUP, 'mouseup', targetThread);
   const ASYNCIFY_STACK_SIZE = 262144;
   var createNamedFunction = (name, func) => Object.defineProperty(func, 'name', { value: name });
   var runAndAbortIfError = (func) => {
@@ -4938,11 +5080,11 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         wakeUp(await startAsync());
       }),
   };
-  var _emscripten_sleep = function(ms) {
+  function _emscripten_sleep(ms) {
     let innerFunc =  () => new Promise((resolve) => setTimeout(resolve, ms));
     return Asyncify.handleAsync(innerFunc);
   }
-  ;
+  
   _emscripten_sleep.isAsync = true;
   var readI53FromI64 = (ptr) => {
       return HEAPU32[((ptr)>>2)] + HEAP32[(((ptr)+(4))>>2)] * 4294967296;
@@ -5494,7 +5636,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         }
       },
   fillAdapterInfoStruct:(info, infoStruct) => {
-        assert(infoStruct);assert(HEAPU32[((infoStruct)>>2)] === 0);
+        assert(infoStruct);
   
         // Populate subgroup limits.
         HEAPU32[(((infoStruct)+(52))>>2)] = info.subgroupMinSize;
@@ -5525,6 +5667,29 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         HEAP32[(((infoStruct)+(40))>>2)] = adapterType;
         HEAPU32[(((infoStruct)+(44))>>2)] = 0;
         HEAPU32[(((infoStruct)+(48))>>2)] = 0;
+  
+        WebGPU.iterateExtensions(infoStruct, {
+          327739: (ext) => {
+            let configCount = 0;
+            let configsPtr = 0;
+            if (info.subgroupMatrixConfigs) {
+              configCount = info.subgroupMatrixConfigs.length;
+              configsPtr = _malloc(configCount * 28);
+              for (const [i, cfg] of info.subgroupMatrixConfigs.entries()) {
+                const ptr = configsPtr + i * 28;
+                const componentType = WebGPU.SubgroupMatrixComponentType.indexOf(cfg.componentType);
+                const resultComponentType = WebGPU.SubgroupMatrixComponentType.indexOf(cfg.resultComponentType);
+                HEAP32[((ptr)>>2)] = componentType;
+                HEAP32[(((ptr)+(4))>>2)] = resultComponentType;
+                HEAPU32[(((ptr)+(8))>>2)] = cfg.M;
+                HEAPU32[(((ptr)+(12))>>2)] = cfg.N;
+                HEAPU32[(((ptr)+(16))>>2)] = cfg.K;
+              }
+            }
+            HEAPU32[(((ext)+(12))>>2)] = configsPtr;
+            HEAPU32[(((ext)+(8))>>2)] = configCount;
+          },
+        });
       },
   AddressMode:[,"clamp-to-edge","repeat","mirror-repeat"],
   BlendFactor:[,"zero","one","src","one-minus-src","src-alpha","one-minus-src-alpha","dst","one-minus-dst","dst-alpha","one-minus-dst-alpha","src-alpha-saturated","constant","one-minus-constant","src1","one-minus-src1","src1-alpha","one-minus-src1-alpha"],
@@ -5561,8 +5726,12 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   20:"texture-formats-tier2",
   21:"primitive-index",
   22:"texture-component-swizzle",
+  23:"subgroup-size-control",
+  24:"texture-compression-unaligned",
+  25:"atomic-vec2u-min-max",
   327692:"chromium-experimental-unorm16-texture-formats",
   327729:"chromium-experimental-multi-draw-indirect",
+  327732:"chromium-experimental-subgroup-matrix",
   },
   FilterMode:[,"nearest","linear"],
   FrontFace:[,"ccw","cw"],
@@ -5580,6 +5749,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   StencilOperation:[,"keep","zero","replace","invert","increment-clamp","decrement-clamp","increment-wrap","decrement-wrap"],
   StorageTextureAccess:[,,"write-only","read-only","read-write"],
   StoreOp:[,"store","discard"],
+  SubgroupMatrixComponentType:[,"f32","f16","u32","i32","u8","i8"],
   SurfaceGetCurrentTextureStatus:[,"success-optimal","success-suboptimal","timeout","outdated","lost","error"],
   TextureAspect:[,"all","stencil-only","depth-only"],
   TextureDimension:[,"1d","2d","3d"],
@@ -5587,9 +5757,9 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   TextureSampleType:[,,"float","unfilterable-float","depth","sint","uint"],
   TextureViewDimension:[,"1d","2d","2d-array","cube","cube-array","3d"],
   ToneMappingMode:[,"standard","extended"],
-  VertexFormat:[,"uint8","uint8x2","uint8x4","sint8","sint8x2","sint8x4","unorm8","unorm8x2","unorm8x4","snorm8","snorm8x2","snorm8x4","uint16","uint16x2","uint16x4","sint16","sint16x2","sint16x4","unorm16","unorm16x2","unorm16x4","snorm16","snorm16x2","snorm16x4","float16","float16x2","float16x4","float32","float32x2","float32x3","float32x4","uint32","uint32x2","uint32x3","uint32x4","sint32","sint32x2","sint32x3","sint32x4","unorm10-10-10-2","unorm8x4-bgra"],
+  VertexFormat:[,"uint8","uint8x2","uint8x4","sint8","sint8x2","sint8x4","unorm8","unorm8x2","unorm8x4","snorm8","snorm8x2","snorm8x4","uint16","uint16x2","uint16x4","sint16","sint16x2","sint16x4","unorm16","unorm16x2","unorm16x4","snorm16","snorm16x2","snorm16x4","float16","float16x2","float16x4","float32","float32x2","float32x3","float32x4","uint32","uint32x2","uint32x3","uint32x4","sint32","sint32x2","sint32x3","sint32x4","unorm10-10-10-2","unorm8x4-bgra","snorm10-10-10-2"],
   VertexStepMode:[,"vertex","instance"],
-  WGSLLanguageFeatureName:[,"readonly_and_readwrite_storage_textures","packed_4x8_integer_dot_product","unrestricted_pointer_parameters","pointer_composite_access","uniform_buffer_standard_layout","subgroup_id","texture_and_sampler_let","subgroup_uniformity","texture_formats_tier1","linear_indexing"],
+  WGSLLanguageFeatureName:[,"readonly_and_readwrite_storage_textures","packed_4x8_integer_dot_product","unrestricted_pointer_parameters","pointer_composite_access","uniform_buffer_standard_layout","subgroup_id","texture_and_sampler_let","subgroup_uniformity","texture_formats_tier1","linear_indexing","immediate_address_space","buffer_view","swizzle_assignment","fragment_depth"],
   };
   var emwgpuStringToInt_DeviceLostReason = {
               'undefined': 1,  // For older browsers
@@ -5805,7 +5975,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       });
       return data;
     };
-  var _emwgpuBufferMapAsync = function(bufferPtr, futureId, mode, offset, size) {
+  function _emwgpuBufferMapAsync(bufferPtr, futureId, mode, offset, size) {
     futureId = bigintToI53Checked(futureId);
     mode = bigintToI53Checked(mode);
   
@@ -5837,7 +6007,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         });
       }));
     ;
-  };
+  }
   var _emwgpuBufferUnmap = (bufferPtr) => {
       var buffer = WebGPU.getJsObject(bufferPtr);
   
@@ -5918,7 +6088,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       device.onuncapturederror = null;
       device.destroy()
     };
-  var _emwgpuDevicePopErrorScope = function(devicePtr, futureId) {
+  function _emwgpuDevicePopErrorScope(devicePtr, futureId) {
     futureId = bigintToI53Checked(futureId);
   
   
@@ -5952,7 +6122,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         });
       }));
     ;
-  };
+  }
   function _emwgpuInstanceRequestAdapter(instancePtr, futureId, options, adapterPtr) {
     futureId = bigintToI53Checked(futureId);
   
@@ -6015,7 +6185,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
       }));
     ;
   }
-  var _emwgpuQueueOnSubmittedWorkDone = function(queuePtr, futureId) {
+  function _emwgpuQueueOnSubmittedWorkDone(queuePtr, futureId) {
     futureId = bigintToI53Checked(futureId);
   
   
@@ -6029,13 +6199,13 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         });
       }));
     ;
-  };
+  }
   var emwgpuStringToInt_CompilationMessageType = {
               'error': 1,
               'warning': 2,
               'info': 3,
           };
-  var _emwgpuShaderModuleGetCompilationInfo = function(shaderModulePtr, futureId, compilationInfoPtr) {
+  function _emwgpuShaderModuleGetCompilationInfo(shaderModulePtr, futureId, compilationInfoPtr) {
     futureId = bigintToI53Checked(futureId);
   
   
@@ -6109,7 +6279,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         abort('Unexpected failure in GPUShaderModule.getCompilationInfo().')
       }));
     ;
-  };
+  }
   var ENV = {
   };
   var getExecutableName = () => thisProgram;
@@ -6175,6 +6345,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   }
   }
   
+  const EWOULDBLOCK = 6;
   /** @param {number=} offset */
   var doReadv = (stream, iov, iovcnt, offset) => {
       var ret = 0;
@@ -6189,7 +6360,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
           // already gathered data. POSIX readv is a single gather-read: return
           // what we have rather than failing the whole call.
           if (ret > 0 && e instanceof FS.ErrnoError &&
-              (e.errno == 6 || e.errno == 6)) {
+              (e.errno == EAGAIN || e.errno == EWOULDBLOCK)) {
             break;
           }
           throw e;
@@ -6222,11 +6393,11 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   
   try {
   
-      if (isNaN(offset)) return 22;
+      if (isNaN(offset)) return EFBIG;
       var stream = SYSCALLS.getStreamFromFD(fd);
       FS.llseek(stream, offset, whence);
       HEAP64[((newOffset)>>3)] = BigInt(stream.position);
-      if (stream.getdents && !offset && whence === 0) stream.getdents = null; // reset readdir state
+      if (stream.getdents && !offset && whence === SEEK_SET) stream.getdents = null; // reset readdir state
       return 0;
     } catch (e) {
     if (typeof FS === 'undefined' || !(e.name === 'ErrnoError')) throw e;
@@ -6666,6 +6837,7 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
         "label": WebGPU.makeStringFromOptionalStringView(
           descriptor + 4),
         "bindGroupLayouts": bgls,
+        "immediateSize": HEAPU32[(((descriptor)+(20))>>2)],
       };
   
       var device = WebGPU.getJsObject(devicePtr);
@@ -7172,7 +7344,8 @@ var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
   
   FS.createPreloadedFile = FS_createPreloadedFile;
   FS.preloadFile = FS_preloadFile;
-  FS.staticInit();;
+  FS.staticInit();
+  ;
   
       Module['requestAnimationFrame'] = MainLoop.requestAnimationFrame;
       Module['pauseMainLoop'] = MainLoop.pause;
@@ -7271,7 +7444,6 @@ if (Module['printErr']) err = Module['printErr'];
   'getEmptyTableSlot',
   'updateTableMap',
   'getFunctionAddress',
-  'addFunction',
   'removeFunction',
   'setValue',
   'getValue',
@@ -7446,6 +7618,7 @@ missingLibrarySymbols.forEach(missingLibrarySymbol)
   'STACK_ALIGN',
   'freeTableIndexes',
   'functionsInTableMap',
+  'addFunction',
   'PATH',
   'PATH_FS',
   'UTF8Decoder',
