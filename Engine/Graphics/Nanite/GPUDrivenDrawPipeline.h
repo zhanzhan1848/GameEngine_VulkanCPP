@@ -352,6 +352,16 @@ public:
     // R37：RG 命令缓冲内 UAV 探针读回（blit cmd 内 dispatch+copy 的结果；
     // 未拷贝/不可映射时返回 false）。黑帧 dump 面调用。
     bool ReadRGUavProbe(float* outFloats, u32 count) const;
+    /// R43：RG 探针输出纹理本体（静态探针资源，创建后不销毁）——dump 面
+    /// 经 R23BlackStageDumpTexture 独立读回，与 R37 的静态 readback 拷贝
+    /// 互为对账（分离"写未落地"与"静态 readback 陈旧"）。
+    rhi::ResourceHandle GetRGProbeTexture() const { return rg_probe_tex_; }
+    /// R43：blit 分辨率 CB 句柄（dump 面 CopyBufferRegion 读回核对 UPLOAD
+    /// 直填；诊断专用，非 const——reborn 块持有可变引用）。
+    rhi::ResourceHandle DebugBlitResolutionCb(u32 cascade_index, u32 buffer_index) {
+        return shadow_frames_[buffer_index % 3]
+            .blit_resolution_cb[cascade_index % ShadowFrameResources::kShadowCascades];
+    }
 
     // GBuffer texture accessors for downstream passes (SSGI, DDGI, etc.)
     /// TAA sub-pixel jitter gate. Only enable when a TAA resolve pass actually
@@ -654,6 +664,7 @@ private:
     // R37：RG 命令缓冲内 UAV 探针（blit cmd 内 dispatch+copy 的 READBACK；
     // dump 面经 ReadRGUavProbe 读出）
     rhi::ResourceHandle rgProbeReadback_{ rhi::handles::INVALID_RESOURCE };
+    rhi::ResourceHandle rg_probe_tex_{ rhi::handles::INVALID_RESOURCE };  // R43
     bool rgProbeCopied_{ false };
 
     // GBuffer depth blit resources (reuses shadow_blit_pipeline_/layout/set_layout)

@@ -333,6 +333,8 @@ void ReportDroppedBarrierOp(ID3D12Resource* resource, u32 before, u32 after) {
     if (!fresh) return;
     if (g_barrierFlagDropReports.fetch_add(1, std::memory_order_relaxed) >= 32) return;
     const D3D12_RESOURCE_DESC d = resource->GetDesc();
+    // R43：补尺寸/格式/mips——native desc 字段唯一定位资源本体（工程侧
+    // 引擎名不在 ID3D12Resource 上），下轮按尺寸对账点名 usage 声明缺口。
     PRIMAL_LOG_STREAM(Error, "RHI")
         << "[D3D12CommandBuffer] barrier op dropped: state bits exceed "
            "resource flags (would poison the list with debug-layer id=524 "
@@ -342,7 +344,10 @@ void ReportDroppedBarrierOp(ID3D12Resource* resource, u32 before, u32 after) {
         << " after=0x" << after
         << " flags=0x" << d.Flags
         << " dimension=" << static_cast<unsigned>(d.Dimension)
-        << std::dec
+        << " extent=" << std::dec << d.Width << "x" << d.Height
+        << "x" << static_cast<unsigned>(d.DepthOrArraySize)
+        << " mips=" << static_cast<unsigned>(d.MipLevels)
+        << " fmt=" << static_cast<unsigned>(d.Format)
         << " (flag-gated bits: UAV requires ALLOW_UNORDERED_ACCESS; RT "
            "requires ALLOW_RENDER_TARGET; DS requires ALLOW_DEPTH_STENCIL; "
            "fix: resource owner must set the usage/bind flag so creation "

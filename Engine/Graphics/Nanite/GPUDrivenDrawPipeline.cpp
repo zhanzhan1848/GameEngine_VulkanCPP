@@ -4586,6 +4586,7 @@ bool GPUDrivenDrawPipeline::ExecuteShadowDepthBlit(rhi::RHICommandBuffer* cmd_bu
                 td.memoryUsage = rhi::GPUMemoryUsage::Static;
                 td.name = "R37_RG_UAV_PROBE";
                 rg.tex = device_->CreateTexture(td);
+                rg_probe_tex_ = rg.tex;  // R43：dump 面独立读回本体
                 rhi::BufferDesc rb{};
                 rb.size = 64ull * 64ull * 8ull;
                 rb.bindFlags = static_cast<u32>(rhi::BufferUsageFlags::TransferDst);

@@ -5866,9 +5866,15 @@ void R23BlackStageDumpBufferStats(rhi::RHIDeviceBase* device, const char* name,
 /// 状态机方向收敛）。taskM §12-13：四管线（voxelization/ShadowBlit/SPGI/
 /// DDGI）同形态"dispatch 录制有效 → imageStore 落零"且 RT 写全活。
 void R34UavWriteProbe(rhi::RHIDeviceBase* device, rhi::ResourceHandle srcTex,
-                      rhi::ResourceHandle depthTex) {
+                      rhi::ResourceHandle depthTex,
+                      rhi::ResourceHandle outOverride = rhi::handles::INVALID_RESOURCE,
+                      const char* label = "uav_probe") {
     using namespace rhi;
     // —— 资源（任一创建失败即退出，fail 声明进日志） ——
+    // R43：outOverride 非空时把常数写进调用方指定的纹理（如 blit 的
+    // shadowMap）——区分"shadowMap 本体可写性/其 UAV 持久槽内容正确性"
+    // 与"blit 管线/set 自身问题"：探针管线写 shadowMap 落地 = shadowMap
+    // 与 UAV 通路全活，blit 死因收窄到 blit 的 set/管线/输入。
     TextureDesc td{};
     td.size = {64, 64, 1};
     td.format = DataFormat::RGBA16_Float;
@@ -5876,7 +5882,9 @@ void R34UavWriteProbe(rhi::RHIDeviceBase* device, rhi::ResourceHandle srcTex,
     td.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource |
                TextureUsage::CopySource;
     td.memoryUsage = GPUMemoryUsage::Static;
-    ResourceHandle tex = device->CreateTexture(td);
+    ResourceHandle tex = outOverride != handles::INVALID_RESOURCE
+                             ? outOverride
+                             : device->CreateTexture(td);
 
     DescriptorSetLayoutBinding b[3]{};
     b[0].binding = 0;
@@ -5973,14 +5981,15 @@ void R34UavWriteProbe(rhi::RHIDeviceBase* device, rhi::ResourceHandle srcTex,
         device->DestroyCommandBuffer(ch);
     }
     PRIMAL_LOG_STREAM(Error, "Render")
-        << "[D3D12_UAV_PROBE] dispatch " << (dispatched ? "submitted" : "FAILED")
+        << "[D3D12_UAV_PROBE] label=" << (label ? label : "uav_probe")
+        << " dispatch " << (dispatched ? "submitted" : "FAILED")
         << " — readback follows" << std::endl;
 
     // —— 读回（既有 dump 通道；tracker 权威解析 UA→CopySource） ——
-    R23BlackStageDumpTexture(device, "uav_probe", tex);
+    R23BlackStageDumpTexture(device, label ? label : "uav_probe", tex);
 
-    // —— 清理 ——
-    device->DestroyTexture(tex);
+    // —— 清理（override 目标属调用方，不销毁） ——
+    if (outOverride == handles::INVALID_RESOURCE) device->DestroyTexture(tex);
     device->DestroyDescriptorSet(descSet);
     device->DestroyPipeline(pipe);
     device->DestroyPipelineLayout(pipeLayout);
@@ -6301,6 +6310,28 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 device_->DestroyCommandBuffer(rbch);
                 R23BlackStageDumpTexture(device_, "shadow_map_reborn",
                                          gpuDrawStage.GetShadowMap(0, prevSlot));
+                // R43 三判别器（blit 恒零的收束面——R38 reborn 恒零但全路径
+                // 等价重放，唯一未检验面=shadowMap 本体可写性/其 UAV 持久槽
+                // 内容/CB 交付）：
+                // ①探针管线写 shadowMap——落地（非纯常数）= shadowMap 本体
+                //   +其 UAV 持久槽+独立 cmd UAV 写全活，死因收窄到 blit 的
+                //   set/管线；恒零 = shadowMap 的 UAV 描述符创建期即坏。
+                R34UavWriteProbe(device_, gpuDrawStage.GetGBufferAlbedo(),
+                                 gpuDrawStage.GetShadowDepthRenderTarget(0, prevSlot),
+                                 gpuDrawStage.GetShadowMap(0, prevSlot), "uav_probe_sm");
+                // ②blit 分辨率 CB 的 GPU 侧内容（UPLOAD 直填核对——CBV 读零
+                //   会触发 ShadowBlit.hlsl 首行早退=写零像素的精确机制）。
+                {
+                    rhi::ResourceHandle cbHandle =
+                        gpuDrawStage.DebugBlitResolutionCb(0, prevSlot);
+                    R23BlackStageDumpBufferStats(device_, "blit_cb_readback",
+                                                 cbHandle, 16);
+                }
+                // ③rg 探针输出纹理本体独立读回（R37 静态 readback 的对账面
+                //   ——分离"RG cmd 内写未落地"与"静态 readback 陈旧"）。
+                if (gpuDrawStage.GetRGProbeTexture() != rhi::handles::INVALID_RESOURCE)
+                    R23BlackStageDumpTexture(device_, "rg_probe_tex",
+                                             gpuDrawStage.GetRGProbeTexture());
             }
             PRIMAL_LOG_STREAM(Error, "Render") << "[D3D12_BLACK_STAGE] end" << std::endl;
         }
