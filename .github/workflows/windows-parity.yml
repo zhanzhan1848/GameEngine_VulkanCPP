@@ -489,9 +489,11 @@ jobs:
             Write-Host "PIX already installed at $pixDir"
           } else {
             $installer = "$env:TEMP\PixInstaller.exe"
-            Invoke-WebRequest -Uri 'https://data.xboxlive.com/pix/PixInstaller.exe' `
-              -OutFile $installer -UseBasicParsing
-            Write-Host "PixInstaller: $((Get-Item $installer).Length) bytes"
+            # R61b：curl.exe（Win10+ 自带）多重试——Invoke-WebRequest 在本
+            # runner 对 data.xboxlive.com 3 分钟超时失败（网络差已知面）
+            curl.exe -L --retry 5 --retry-delay 3 --connect-timeout 30 `
+              -o $installer 'https://data.xboxlive.com/pix/PixInstaller.exe'
+            Write-Host "PixInstaller: $((Get-Item $installer -ErrorAction SilentlyContinue).Length) bytes"
             $p = Start-Process -FilePath $installer `
                    -ArgumentList '/silent','/dir=C:\PIX' -PassThru -Wait
             Write-Host "PixInstaller exit: $($p.ExitCode)"

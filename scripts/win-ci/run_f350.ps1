@@ -191,9 +191,12 @@ foreach ($g in ($groups + $diagGroups)) {
     elseif ($g.diag -eq 8) { $env:PRIMAL_LIGHTING_DEBUG = 'const' }
     elseif ($g.diag -eq 9) { $env:PRIMAL_LIGHTING_DEBUG = 'gradient' }
     elseif ($g.diag -eq 10) {
+        # R61b：GBV 慢 10-100x——4 帧 + watchdog 放宽到 900s（第一帧 GBV
+        # 校验本身可能 >300s，R62 实测 300s watchdog 连第一帧都没出）
         $env:PRIMAL_D3D12_GBV = '1'
-        $env:SPONZA_MAX_FRAMES = '12'
-        $env:SPONZA_CAPTURE_FRAME = '12'
+        $env:SPONZA_MAX_FRAMES = '4'
+        $env:SPONZA_CAPTURE_FRAME = '4'
+        $env:PRIMAL_SPONZA_WATCHDOG_SECS = '900'
     }
     else {
         Remove-Item Env:TAA_OFF -ErrorAction SilentlyContinue
