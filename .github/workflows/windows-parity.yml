@@ -383,6 +383,7 @@ jobs:
             exit 1
           }
           Write-Output "[f350] exe = $exe"
+          Write-Output $exe | Out-File -FilePath ci-out\exe-path.txt -Encoding utf8
           # R29：诊断消融组（TAA_OFF 直通链，写独立 diag_gates.json 不进门禁）
           $env:PRIMAL_F350_TAAOFF_DIAG = '1'
           # R33：因果对分组（PRIMAL_SHADOW_RENDER_OFF 跳过阴影 GPU 渲染，
@@ -406,6 +407,9 @@ jobs:
           # 零（draw/光栅化面）vs render pass 本身没发生（RG execute 面）。
           # D3D12-only 平台门在模块内。
           $env:PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL = '1'
+          # R61：GBV 组（GPU-based validation，12 帧短跑）——deferred pass
+          # 的描述符/资源状态 GPU 侧校验，错误经帧首 InfoQueue drain 落日志
+          $env:PRIMAL_F350_GBV_DIAG = '1'
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350
           exit 0
 
@@ -469,6 +473,72 @@ jobs:
             ci-out/f350/*.log
             ci-out/f350/*.md
           if-no-files-found: warn
+          retention-days: 14
+
+      - name: PIX 安装 + GPU 抓帧（R61，best-effort 不进门禁）
+        if: always()
+        continue-on-error: true
+        shell: powershell
+        run: |
+          # R61：用户指令"runner 装 PIX"。官方 PixInstaller 静默装到 C:\PIX，
+          # pixtool attach 抓 12 帧 d3d12 短跑一帧 .wpicap 上传（deferred
+          # pass 从 frame ~3-4 起执行，25s 窗口覆盖）。任何失败仅告警。
+          $ErrorActionPreference = 'Continue'
+          $pixDir = 'C:\PIX'
+          if (Test-Path "$pixDir\pixtool.exe") {
+            Write-Host "PIX already installed at $pixDir"
+          } else {
+            $installer = "$env:TEMP\PixInstaller.exe"
+            Invoke-WebRequest -Uri 'https://data.xboxlive.com/pix/PixInstaller.exe' `
+              -OutFile $installer -UseBasicParsing
+            Write-Host "PixInstaller: $((Get-Item $installer).Length) bytes"
+            $p = Start-Process -FilePath $installer `
+                   -ArgumentList '/silent','/dir=C:\PIX' -PassThru -Wait
+            Write-Host "PixInstaller exit: $($p.ExitCode)"
+          }
+          $pixtool = Get-ChildItem $pixDir -Recurse -Filter pixtool.exe `
+                      -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $pixtool) {
+            $pixtool = Get-ChildItem "$env:ProgramFiles*\Microsoft PIX" -Recurse `
+                         -Filter pixtool.exe -ErrorAction SilentlyContinue |
+                        Select-Object -First 1
+          }
+          if (-not $pixtool) {
+            Write-Host '::warning::pixtool.exe not found — PIX capture skipped'
+            exit 0
+          }
+          $pixExe = $pixtool.FullName
+          Write-Host "pixtool: $pixExe"
+          & $pixExe version 2>&1 | Select-Object -First 3 | ForEach-Object { Write-Host "  $_" }
+          # 短跑目标 exe（复用 f350 步持久化的路径）
+          $exe = (Get-Content ci-out\exe-path.txt -ErrorAction SilentlyContinue |
+                  Select-Object -First 1).Trim()
+          if (-not $exe -or -not (Test-Path $exe)) {
+            Write-Host '::warning::f350 exe path unavailable — PIX capture skipped'
+            exit 0
+          }
+          $capPath = Join-Path (Get-Location) 'ci-out\f350\deferred_frame10.wpicap'
+          $env:RHI_TEST_PLATFORM = 'd3d12'
+          $env:SPONZA_MAX_FRAMES = '12'
+          $proc = Start-Process -FilePath $exe -WorkingDirectory (Get-Location) -PassThru
+          Start-Sleep -Seconds 25   # frame ~5-10：shadow/deferred 均已执行
+          & $pixExe attach $proc.Id -command '^capture_once' `
+              -command "save-capture `"$capPath`"" 2>&1 | Write-Host
+          Start-Sleep -Seconds 10   # 等 capture 落盘
+          try { $proc.Kill() } catch { }
+          if (Test-Path $capPath) {
+            Write-Host "capture saved: $capPath ($((Get-Item $capPath).Length) bytes)"
+          } else {
+            Write-Host '::warning::no capture file produced'
+          }
+
+      - name: Upload PIX capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pix-capture
+          path: ci-out/f350/*.wpicap
+          if-no-files-found: ignore
           retention-days: 14
 
       - name: Upload build log (failure)

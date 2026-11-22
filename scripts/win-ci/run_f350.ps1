@@ -100,6 +100,13 @@ if ($env:PRIMAL_F350_LIGHTING_GRADIENT_DIAG -eq '1') {
     $diagGroups += @{ name = 'd3d12-gion-gradient'; api = 'd3d12'; gi = 1;
                       ppm = 'art2_win_d3d12_gradient_f350.ppm'; diag = 9 }
 }
+# R61 GBV 组（PRIMAL_F350_GBV_DIAG=1）：PRIMAL_D3D12_GBV=1 + 12 帧短跑——
+# GPU-based validation 对 deferred pass 的描述符/资源状态做 GPU 侧校验，
+# 错误经帧首 InfoQueue drain 落日志（GBV 慢 ~10-100x，短跑防超时）。
+if ($env:PRIMAL_F350_GBV_DIAG -eq '1') {
+    $diagGroups += @{ name = 'd3d12-gbv'; api = 'd3d12'; gi = 1;
+                      ppm = 'art2_win_d3d12_gbv_f350.ppm'; diag = 10 }
+}
 
 # Asset gates (same files the r11 launchers hard-require before running).
 $assetGates = @(
@@ -183,11 +190,19 @@ foreach ($g in ($groups + $diagGroups)) {
     elseif ($g.diag -eq 7) { $env:PRIMAL_LIGHTING_DEBUG = 'shadow_load' }
     elseif ($g.diag -eq 8) { $env:PRIMAL_LIGHTING_DEBUG = 'const' }
     elseif ($g.diag -eq 9) { $env:PRIMAL_LIGHTING_DEBUG = 'gradient' }
+    elseif ($g.diag -eq 10) {
+        $env:PRIMAL_D3D12_GBV = '1'
+        $env:SPONZA_MAX_FRAMES = '12'
+        $env:SPONZA_CAPTURE_FRAME = '12'
+    }
     else {
         Remove-Item Env:TAA_OFF -ErrorAction SilentlyContinue
         Remove-Item Env:PRIMAL_SHADOW_RENDER_OFF -ErrorAction SilentlyContinue
         Remove-Item Env:PRIMAL_D3D12_BLACK_STAGE_FRAME -ErrorAction SilentlyContinue
         Remove-Item Env:PRIMAL_LIGHTING_DEBUG -ErrorAction SilentlyContinue
+        Remove-Item Env:PRIMAL_D3D12_GBV -ErrorAction SilentlyContinue
+        $env:SPONZA_MAX_FRAMES = '400'
+        $env:SPONZA_CAPTURE_FRAME = '350'
     }
 
     $so = Join-Path $OutDir ($g.name + '.stdout.log')
