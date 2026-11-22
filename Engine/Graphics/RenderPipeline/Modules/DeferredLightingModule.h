@@ -76,6 +76,13 @@ public:
 
     DeferredLightingOutputs AddPasses(rendergraph::RenderGraph& graph, const DeferredLightingInputs& inputs);
 
+    /// R55：deferred 绘制独立 cmd 重放（诊断）——在调用方给定的 cmd 上
+    /// 重放 viewport/管线/描述符/Draw(3)（不含 render pass 包装，调用方
+    /// 负责 BeginRenderPass/RT 状态）。R53b shadow_map_reborn 的 graphics
+    /// 对照：独立 cmd 重放活=RG cmd 上下文问题；恒零=deferred 管线/draw
+    /// 语义自身问题（D3D12 光栅化层专项）。
+    void DebugStandaloneDraw(rhi::RHICommandBuffer* cmd, u32 buffer_index);
+
     rhi::ResourceHandle GetOutputTexture(u32 buffer_index) const;
     rhi::ResourceHandle GetEnvironmentTexture(u32 slot) const { return slot<3?environment_textures_[slot]:rhi::handles::INVALID_RESOURCE; }
 

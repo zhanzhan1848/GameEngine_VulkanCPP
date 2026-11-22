@@ -382,6 +382,23 @@ ResourceHandle DeferredLightingModule::GetOutputTexture(u32 buffer_index) const 
     return (buffer_index < 3) ? output_textures_[buffer_index] : handles::INVALID_RESOURCE;
 }
 
+// R55：deferred 绘制独立 cmd 重放（R53b shadow_map_reborn 的 graphics
+// 对照）——viewport/管线/描述符/Draw(3) 原样重放到调用方 cmd（render
+// pass 包装由调用方负责）。RT0 状态由调用方的 loadOp Clear 进入。
+void DeferredLightingModule::DebugStandaloneDraw(rhi::RHICommandBuffer* cmd,
+                                                 u32 buffer_index) {
+    if (!cmd || pipeline_ == handles::INVALID_PIPELINE
+        || descriptor_sets_[buffer_index % 3] == handles::INVALID_DESCRIPTOR_SET)
+        return;
+    cmd->SetViewport({{0, 0}, {static_cast<float>(render_width_),
+                                static_cast<float>(render_height_)}, 0, 1});
+    cmd->SetScissor({{0, 0}, {render_width_, render_height_}});
+    cmd->BindGraphicsPipeline(pipeline_);
+    const DescriptorSetHandle sets[] = { descriptor_sets_[buffer_index % 3] };
+    cmd->BindDescriptorSets(PipelineBindPoint::Graphics, layout_, 0, 1, sets, 0, nullptr);
+    cmd->Draw(3, 0, 1, 0);
+}
+
 void DeferredLightingModule::SetIBLResources(rhi::ResourceHandle irradiance,
                                              rhi::ResourceHandle prefilter,
                                              rhi::ResourceHandle brdfLUT) {

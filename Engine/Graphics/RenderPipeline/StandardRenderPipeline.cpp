@@ -6332,6 +6332,46 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 if (gpuDrawStage.GetRGProbeTexture() != rhi::handles::INVALID_RESOURCE)
                     R23BlackStageDumpTexture(device_, "rg_probe_tex",
                                              gpuDrawStage.GetRGProbeTexture());
+                // R55：deferred 绘制独立 cmd 重放——R53b reborn 的 graphics
+                // 对照（compute 版 reborn 恒零已证，graphics 版未测）。RT0
+                // 直转型+手动 RenderPassDesc（物理句柄直绑，零 RG 上下文）+
+                // 模块 DebugStandaloneDraw + dump。独立 cmd 活（非零）=RG
+                // cmd 上下文问题；恒零=deferred 管线/draw 语义自身问题。
+                if (deferred_module_
+                    && deferred_module_->GetOutputTexture(prevSlot)
+                           != rhi::handles::INVALID_RESOURCE) {
+                    rhi::ResourceHandle defOut =
+                        deferred_module_->GetOutputTexture(prevSlot);
+                    rhi::ResourceBarrier toRT{};
+                    toRT.resource = defOut;
+                    toRT.beforeState = rhi::ResourceState::Unknown;
+                    toRT.afterState = rhi::ResourceState::RenderTarget;
+                    toRT.subresource = RHI_ALL_SUBRESOURCES;
+                    toRT.queueFamily = 0xFFFFFFFF;
+                    CommandBufferHandle dch =
+                        device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                    if (RHICommandBuffer* rc = GetCommandBuffer(dch)) {
+                        if (rc->Begin()) {
+                            rc->InsertBarrier(&toRT, 1);
+                            rhi::RenderPassDesc rp{};
+                            rp.colorAttachments.push_back({
+                                .texture = defOut,
+                                .loadOp = rhi::LoadAction::DontCare,
+                                .storeOp = rhi::StoreAction::Store,
+                                .clearValue = { rhi::ClearValue{ math::v4{0, 0, 0, 1} } } });
+                            rc->BeginRenderPass(rp);
+                            deferred_module_->DebugStandaloneDraw(rc, prevSlot);
+                            rc->EndRenderPass();
+                            if (!(rc->End() && rc->Submit() && rc->WaitForCompletion())) {
+                                PRIMAL_LOG_STREAM(Error, "Render")
+                                    << "[D3D12_BLACK_STAGE] deferred_reborn resubmit"
+                                       " failed" << std::endl;
+                            }
+                        }
+                    }
+                    device_->DestroyCommandBuffer(dch);
+                    R23BlackStageDumpTexture(device_, "deferred_reborn", defOut);
+                }
             }
             PRIMAL_LOG_STREAM(Error, "Render") << "[D3D12_BLACK_STAGE] end" << std::endl;
         }
