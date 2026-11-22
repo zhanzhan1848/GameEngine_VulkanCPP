@@ -484,6 +484,15 @@ set(JPH_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 # Engine/CMakeLists.txt 里按 EMSCRIPTEN 排除，仓库不变量"Jolt 头只出现在
 # Simulation/ 内部"保证其余引擎代码自洽。
 if(NOT EMSCRIPTEN)
+# R54（2026-11-22）：关闭 Jolt 自带的 Vulkan compute 后端——引擎只用 Jolt
+# 的 CPU 物理 API（全仓零引用 ComputeSystemVK），而该后端的 shader 编译
+# 链要求 glslc（Vulkan_GLSLC_EXECUTABLE）：Linux CI runner 无 glslc 包
+# （glslang-tools 只有 glslangValidator，且 Jolt.cmake 的 glslc→dxc 字符串
+# 替换对 "GLSLC" 大小写不匹配 → dxc 同样 NOTFOUND）→ Jolt 目标编译即死
+# （ci.yml linux gcc/clang "编译 Engine 目标" 双红）。option() 不覆盖已有
+# 变量，此处 set 对子目录生效。若未来引擎需要 Jolt GPU compute，在消费
+# 侧接入时连同 runner 的 glslc/dxc 一起恢复。
+set(JPH_USE_VK OFF)
 set(JOLT_ORIG_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
 if(NOT CMAKE_BUILD_TYPE MATCHES "^(Debug|Release|ReleaseASAN|ReleaseUBSAN|ReleaseTSAN|ReleaseCoverage|Distribution)$")
     set(CMAKE_BUILD_TYPE Debug)
