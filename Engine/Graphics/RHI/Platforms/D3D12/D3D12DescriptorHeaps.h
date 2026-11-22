@@ -494,6 +494,7 @@ private:
     class SlotPool {
     public:
         void Init(u32 capacity);
+        void SetName(const char* name) { name_ = name; }
         u32 Alloc();
         void Free(u32 slot);
         // R34：静默耗尽判别遥测——Alloc 返回 kInvalidSlot 前调用方无水位
@@ -504,6 +505,7 @@ private:
         u32 next_ = 0;
         u32 capacity_ = 0;
         u32 highWater_ = 0;
+        const char* name_ = "?";  // R57：double-free 探测的池名
         std::vector<u32> free_;
     };
 

@@ -52,7 +52,19 @@ u32 D3D12DescriptorHeapManager::SlotPool::Alloc() {
 }
 
 void D3D12DescriptorHeapManager::SlotPool::Free(u32 slot) {
-    if (slot != kInvalidSlot && slot < capacity_) free_.push_back(slot);
+    if (slot != kInvalidSlot && slot < capacity_) {
+        // R57：double-free 探测——槽复用冲突（两活纹理同 RTV/UAV 槽）会把
+        // 先创建者的描述符覆盖掉（clear/draw 全写到别人资源上，本体恒零——
+        // deferred_out 恒零的新统一嫌疑，与 R42 主堆 SlotPool 同族）。
+        if (std::find(free_.begin(), free_.end(), slot) != free_.end()) {
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12_SLOTPOOL] DOUBLE FREE: pool='" << (name_ ? name_ : "?")
+                << "' slot=" << slot << " (两活对象共享同一描述符槽→描述符被"
+                   "覆盖→写零族)" << std::endl;
+            return;  // 拒绝二次入队
+        }
+        free_.push_back(slot);
+    }
 }
 
 // ============================================================================
@@ -191,6 +203,11 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
     rtvSlots_.Init(config.rtvCapacity);
     dsvSlots_.Init(config.dsvCapacity);
     samplerSlots_.Init(config.samplerPersistentCapacity);
+    // R57：double-free 探测的池名
+    cbvSrvUavPersistentSlots_.SetName("cbvSrvUavPersistent");
+    rtvSlots_.SetName("rtv");
+    dsvSlots_.SetName("dsv");
+    samplerSlots_.SetName("samplerPersistent");
     // R18-B：容量随初始化落日志——十七测"31+2>32"式耗尽在 Windows 侧
     // 可直接对账（采样器堆 2048 规范上限满配，见头文件容量规划注）。
     PRIMAL_LOG_STREAM(Info, "RHI")

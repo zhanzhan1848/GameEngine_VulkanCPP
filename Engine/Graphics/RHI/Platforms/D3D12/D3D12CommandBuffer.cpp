@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <mutex>
+#include <string>
 #include <unordered_set>
 
 namespace primal::graphics::rhi::d3d12 {
@@ -662,6 +663,28 @@ void D3D12CommandBufferImpl::BeginRenderPass(const RenderPassDesc& desc) {
     }
 
     commandList_->OMSetRenderTargets(rtCount, rtvs, FALSE, hasDepth ? &dsv : nullptr);
+    // R57：前 8 次 render pass 的 RT 绑定快照（一次性诊断）——rtCount、
+    // 逐附件 handle:rtvSlot。deferred 恒零的槽位复用冲突假说对账面：
+    // deferred pass 的两个附件槽位若与其他活纹理的 RTV 槽重合即实锤。
+    {
+        static std::atomic<u32> s_rtSnapCount{0};
+        const u32 n = s_rtSnapCount.fetch_add(1, std::memory_order_relaxed);
+        if (n < 8) {
+            std::string snaps;
+            for (const RenderPassDesc::Attachment& attachment : desc.colorAttachments) {
+                if (D3D12Texture* t = dev.GetTexture(attachment.texture)) {
+                    snaps += " h" + std::to_string(static_cast<u64>(attachment.texture))
+                             + ":rtv" + std::to_string(t->RtvSlot());
+                } else {
+                    snaps += " h" + std::to_string(static_cast<u64>(attachment.texture))
+                             + ":null";
+                }
+            }
+            PRIMAL_LOG_STREAM(Error, "RHI")
+                << "[D3D12_RTPASS_SNAP] pass#" << n << " rtCount=" << rtCount
+                << " depth=" << (hasDepth ? 1 : 0) << snaps << std::endl;
+        }
+    }
 
     // 视口/裁剪：RenderPass 携带时直接应用（负高度契约见 SetViewport）。
     if (desc.viewport.size.x > 0 && desc.viewport.size.y > 0) {
