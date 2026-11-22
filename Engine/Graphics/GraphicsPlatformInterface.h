@@ -2,6 +2,16 @@
 #include "CommonHeaders.h"
 #include "Renderer.h"
 
+// R54：gcc 新版默认开启 -Wchanges-meaning（error 级）——本废弃头的匿名
+// struct 成员名（surface/camera/light）与函数指针表内使用的同名类型撞车
+// （[basic.scope.class] 成员声明改变名字含义）。整头已废弃（Phase 2 删），
+// 不改成员名（会波及三处旧后端填充者），GCC/Clang 下局部压制该诊断；
+// MSVC 无此诊断，零影响。
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wchanges-meaning"
+#endif
+
 namespace primal::graphics {
 	// === Phase 1 Sub-step 1.2.6': platform_interface 已废弃 ===
 	// 整套 platform_interface 函数指针表是旧的"后端动态分发"机制，
@@ -86,4 +96,8 @@ namespace primal::graphics {
 
 		graphics_platform platform = (graphics_platform) - 1;
 	};
-}
+} // namespace primal::graphics
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
