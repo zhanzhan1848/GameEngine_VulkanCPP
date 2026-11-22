@@ -6360,6 +6360,11 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                                 .storeOp = rhi::StoreAction::Store,
                                 .clearValue = { rhi::ClearValue{ math::v4{0, 0, 0, 1} } } });
                             rc->BeginRenderPass(rp);
+                            // R60：注入 z=8 常数诊断档——全屏常数 0.5 落地
+                            // ⟹ fragment 在独立 cmd 内可跑（RG 路径特有）；
+                            // 仍零 ⟹ deferred draw 语义自身（PSO/vert/draw
+                            // 深挖）。z 直写 scene_cb（offset 496 布局探针）。
+                            deferred_module_->DebugSetDiagnosticZ(prevSlot, 8.0f);
                             deferred_module_->DebugStandaloneDraw(rc, prevSlot);
                             rc->EndRenderPass();
                             if (!(rc->End() && rc->Submit() && rc->WaitForCompletion())) {

@@ -83,6 +83,10 @@ public:
     /// 语义自身问题（D3D12 光栅化层专项）。
     void DebugStandaloneDraw(rhi::RHICommandBuffer* cmd, u32 buffer_index);
 
+    /// R60：scene_cb shadowParams.z 直写（诊断）——独立 cmd 重放前把诊断
+    /// 档（z=8 常数）写进指定槽的 SceneData，绕开每帧 env 写路径。
+    void DebugSetDiagnosticZ(u32 buffer_index, float z);
+
     rhi::ResourceHandle GetOutputTexture(u32 buffer_index) const;
     rhi::ResourceHandle GetEnvironmentTexture(u32 slot) const { return slot<3?environment_textures_[slot]:rhi::handles::INVALID_RESOURCE; }
 
