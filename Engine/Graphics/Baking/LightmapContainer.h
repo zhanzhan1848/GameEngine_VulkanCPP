@@ -23,6 +23,7 @@
 //   Data: f16 RGBA 交织纹素，页连续。
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
