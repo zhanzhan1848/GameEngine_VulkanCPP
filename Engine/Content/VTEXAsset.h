@@ -14,6 +14,7 @@
 #include "../../ContentTools/common/VTBaker.h"
 
 #include <cstdint>
+#include <cstring>
 
 namespace primal::content {
 
