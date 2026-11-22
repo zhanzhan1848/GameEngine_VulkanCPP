@@ -6371,6 +6371,13 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     }
                     device_->DestroyCommandBuffer(dch);
                     R23BlackStageDumpTexture(device_, "deferred_reborn", defOut);
+                    // R58：探针管线写 deferred_out 本体（outOverride 机制）——
+                    // 落地（角落非零）= 纹理可写+UAV 投递活，死因收窄到
+                    // deferred 管线/Draw；恒零 = deferred_out 纹理本体
+                    // （RTV/资源面）坏。与 deferred_reborn（管线重放）正交。
+                    R34UavWriteProbe(device_, gpuDrawStage.GetGBufferAlbedo(),
+                                     gpuDrawStage.GetShadowDepthRenderTarget(0, prevSlot),
+                                     defOut, "uav_probe_defout");
                 }
             }
             PRIMAL_LOG_STREAM(Error, "Render") << "[D3D12_BLACK_STAGE] end" << std::endl;
