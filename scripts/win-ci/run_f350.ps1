@@ -116,12 +116,21 @@ if ($env:PRIMAL_F350_GBV_DIAG -eq '1') {
 # 与 R32-R38 "GPU 路径插入后写全灭/区段错位"全部证据相容）。
 # 三分对分：minenv=1 全关（基线）；minenv=2 仅 DDGI 族开；minenv=3 仅
 # SC+ALBEDO_MIPS 开（DDGI 关）。
+# R66 判读（run 45137944823）：base=0482929d 非全黑（tonemap 0.0199 链活，
+# 画面 84 色深灰微光）→ 附加旋钮假说成立；ddgi=847b7f79 逐字节等于
+# canonical 全黑 → DDGI 族单独复现全黑（连 base 里活着的 composite/tonemap
+# 也归零）；scmip=b3ace7b9 非全黑 → SC/MIPS 无辜。gi0 组黑且不设
+# QUERY_KERNEL → 凶手在其余 5 旋钮。R67 续分（minenv=4/5）：
+# A=DDGI_RAY_SAMPLE+SPGI_DDGI_VISIBILITY（采样/可见性查询侧）；
+# B=DDGI_MEASURED_GEOMETRY+GEOMETRY_VISIBILITY+TRAVERSAL_AUDIT（几何侧）。
 $minEnvGroups = @()
 if ($env:PRIMAL_F350_MINENV_DIAG -eq '1') {
     $minEnvGroups += @(
         @{ name = 'd3d12-minenv-base';  api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_base_f350.ppm';  minenv = 1 },
         @{ name = 'd3d12-minenv-ddgi';  api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgi_f350.ppm';  minenv = 2 },
-        @{ name = 'd3d12-minenv-scmip'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_scmip_f350.ppm'; minenv = 3 }
+        @{ name = 'd3d12-minenv-scmip'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_scmip_f350.ppm'; minenv = 3 },
+        @{ name = 'd3d12-minenv-ddgiA'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA_f350.ppm'; minenv = 4 },
+        @{ name = 'd3d12-minenv-ddgiB'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiB_f350.ppm'; minenv = 5 }
     )
 }
 
@@ -218,6 +227,19 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups)) {
         if ($g.minenv -eq 3) {
             $env:PRIMAL_SC_OWNER_CARD_DIRECTORY = '1'
             $env:PRIMAL_VK_ALBEDO_MIPS = '1'
+        }
+        # R67：DDGI 族内部对分（gi0 组黑且不设 QUERY_KERNEL → 凶手在其余 5 个）。
+        # minenv=4 = A 组：采样/可见性查询侧（DDGI_RAY_SAMPLE+SPGI_DDGI_VISIBILITY）。
+        # minenv=5 = B 组：几何侧（DDGI_MEASURED_GEOMETRY+GEOMETRY_VISIBILITY+
+        # TRAVERSAL_AUDIT——SWRT 审计注：MEASURED_GEOMETRY 实为 BVH 替换开关）。
+        if ($g.minenv -eq 4) {
+            $env:DDGI_RAY_SAMPLE = '7'
+            $env:SPGI_DDGI_VISIBILITY = '2'
+        }
+        if ($g.minenv -eq 5) {
+            $env:DDGI_MEASURED_GEOMETRY = '1'
+            $env:PRIMAL_DDGI_GEOMETRY_VISIBILITY = '1'
+            $env:PRIMAL_DDGI_TRAVERSAL_AUDIT = '0'
         }
     }
     # R29/R33/R36b 诊断组开关（diag=1 TAA_OFF，diag=2 SHADOW_RENDER_OFF，
