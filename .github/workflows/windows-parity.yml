@@ -407,9 +407,9 @@ jobs:
           # 零（draw/光栅化面）vs render pass 本身没发生（RG execute 面）。
           # D3D12-only 平台门在模块内。
           $env:PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL = '1'
-          # R61：GBV 组（GPU-based validation，12 帧短跑）——deferred pass
-          # 的描述符/资源状态 GPU 侧校验，错误经帧首 InfoQueue drain 落日志
-          $env:PRIMAL_F350_GBV_DIAG = '1'
+          # R61：GBV 组——R62 实测 1060 上 900s watchdog 第一帧仍无法完成
+          # （GBV 校验过慢/挂），默认关闭；runner SDK/驱动变化后改回 '1'
+          $env:PRIMAL_F350_GBV_DIAG = '0'
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350
           exit 0
 
@@ -498,19 +498,22 @@ jobs:
                    -ArgumentList '/silent','/dir=C:\PIX' -PassThru -Wait
             Write-Host "PixInstaller exit: $($p.ExitCode)"
           }
-          $pixtool = Get-ChildItem $pixDir -Recurse -Filter pixtool.exe `
-                      -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $pixtool) {
-            $pixtool = Get-ChildItem "$env:ProgramFiles*\Microsoft PIX" -Recurse `
-                         -Filter pixtool.exe -ErrorAction SilentlyContinue |
-                        Select-Object -First 1
+          # R62：用户已手动装 Microsoft PIX 2611.19（WinPix 单文件分发，
+          # 路径 C:\Program Files\Microsoft PIX\<ver>\WinPix.exe）——pixtool
+          # 与 WinPix 同 CLI（launch/attach/^capture_once/save-capture），
+          # 双名探测。
+          $pixExe = $null
+          foreach ($root in @($pixDir, "$env:ProgramFiles\Microsoft PIX")) {
+            if (-not (Test-Path $root)) { continue }
+            $hit = Get-ChildItem $root -Recurse -Include pixtool.exe,WinPix.exe `
+                    -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($hit) { $pixExe = $hit.FullName; break }
           }
-          if (-not $pixtool) {
-            Write-Host '::warning::pixtool.exe not found — PIX capture skipped'
+          if (-not $pixExe) {
+            Write-Host '::warning::pixtool/WinPix not found — PIX capture skipped'
             exit 0
           }
-          $pixExe = $pixtool.FullName
-          Write-Host "pixtool: $pixExe"
+          Write-Host "pix CLI: $pixExe"
           & $pixExe version 2>&1 | Select-Object -First 3 | ForEach-Object { Write-Host "  $_" }
           # 短跑目标 exe（复用 f350 步持久化的路径）
           $exe = (Get-Content ci-out\exe-path.txt -ErrorAction SilentlyContinue |
