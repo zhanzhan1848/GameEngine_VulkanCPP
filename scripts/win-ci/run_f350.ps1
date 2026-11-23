@@ -127,10 +127,9 @@ $minEnvGroups = @()
 if ($env:PRIMAL_F350_MINENV_DIAG -eq '1') {
     $minEnvGroups += @(
         @{ name = 'd3d12-minenv-base';  api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_base_f350.ppm';  minenv = 1 },
-        @{ name = 'd3d12-minenv-ddgi';  api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgi_f350.ppm';  minenv = 2 },
-        @{ name = 'd3d12-minenv-scmip'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_scmip_f350.ppm'; minenv = 3 },
         @{ name = 'd3d12-minenv-ddgiA'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA_f350.ppm'; minenv = 4 },
-        @{ name = 'd3d12-minenv-ddgiB'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiB_f350.ppm'; minenv = 5 }
+        @{ name = 'd3d12-minenv-ddgiA1'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA1_f350.ppm'; minenv = 6 },
+        @{ name = 'd3d12-minenv-ddgiA2'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA2_f350.ppm'; minenv = 7 }
     )
 }
 
@@ -236,10 +235,21 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups)) {
             $env:DDGI_RAY_SAMPLE = '7'
             $env:SPGI_DDGI_VISIBILITY = '2'
         }
-        if ($g.minenv -eq 5) {
-            $env:DDGI_MEASURED_GEOMETRY = '1'
-            $env:PRIMAL_DDGI_GEOMETRY_VISIBILITY = '1'
-            $env:PRIMAL_DDGI_TRAVERSAL_AUDIT = '0'
+        # R67 判读（run 45143876421）：ddgiA=847b7f79 逐字节=canonical 全黑
+        # （采样侧锁死）；ddgiB=dcc52c94 非全黑（几何侧无辜——D3D12 上
+        # measuredVisibility=(vk||metal)&&… 恒 false，B 组 vis mode 走 0 无
+        # 变化，自洽）。R68 单旋钮拆分：
+        # minenv=6 = A1：仅 DDGI_RAY_SAMPLE=7（LumenDDGI trace 方向 mode，
+        #   measured oct strata——改 ray 生成 shader 分支）。
+        # minenv=7 = A2：仅 SPGI_DDGI_VISIBILITY=2（SPGI gather 可见性 mode 2，
+        #   shader 读 ddgi_depth_buffer_/relocated_origins_ 做可见性查询——
+        #   D3D12 上若该数据链没填对（R35 D32 SRV 采样零家族）→ 极端值/NaN
+        #   → UNORM 写 NaN=0 全黑传播）。
+        if ($g.minenv -eq 6) {
+            $env:DDGI_RAY_SAMPLE = '7'
+        }
+        if ($g.minenv -eq 7) {
+            $env:SPGI_DDGI_VISIBILITY = '2'
         }
     }
     # R29/R33/R36b 诊断组开关（diag=1 TAA_OFF，diag=2 SHADOW_RENDER_OFF，
