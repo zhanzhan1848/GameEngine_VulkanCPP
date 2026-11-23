@@ -486,14 +486,17 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      # R70：A3（mode7+measured，D3D12 首跑）隔离探针——run109 attempt1/2
-      # 同在 f350 批量步骤丢 runner（零 artifact/日志 BlobNotFound），锁定该
-      # 组合触发机器级问题（GPU hang/驱动崩，R62 PIX 崩机同型风险）。四道
-      # 防护：独立开关单独调用、4 帧短跑+900s watchdog（GBV 先例）、放在
-      # evidence upload 之后（崩机不丢其他组证据）、continue-on-error 永不
-      # 拖红 job。
-      - name: R70 A3 isolation probe (4-frame best-effort, known machine-crash risk)
-        if: always()
+      # R70/R71：A3（mode7+measured，D3D12 首跑）隔离探针——run109 attempt1/2
+      # 同在 f350 批量步骤丢 runner（零 artifact/日志 BlobNotFound），**用户
+      # 实证 Windows 机器崩溃重启**——mode7+measured 的 D3D12 路径存在驱动
+      # 级 bug（R62 PIX 崩机同型，且更重：整机重启）。四道防护：独立开关
+      # 单独调用、4 帧短跑+900s watchdog（GBV 先例）、放在 evidence upload
+      # 之后（崩机不丢其他组证据）、continue-on-error 永不拖红 job。
+      # R71：默认禁用（防机器反复重启）——repo variable
+      # `PRIMAL_CI_A3_ISO='1'` 可无代码重开（R63 PIX 同款先例）。引擎侧
+      # mode7+measured 的 D3D12 断点修复并经隔离验证前不得重开。
+      - name: R70 A3 isolation probe (DISABLED by default — machine reboot risk)
+        if: always() && vars.PRIMAL_CI_A3_ISO == '1'
         continue-on-error: true
         shell: powershell
         env:
@@ -507,7 +510,7 @@ jobs:
           exit 0
 
       - name: Upload A3 isolation evidence
-        if: always()
+        if: always() && vars.PRIMAL_CI_A3_ISO == '1'
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
