@@ -108,6 +108,23 @@ if ($env:PRIMAL_F350_GBV_DIAG -eq '1') {
                       ppm = 'art2_win_d3d12_gbv_f350.ppm'; diag = 10 }
 }
 
+# R66 env 对分组（PRIMAL_F350_MINENV_DIAG=1 时启用；写 diag_gates.json 不进门禁）。
+# 依据：GPU 1.wpix（PIX 手动会话，R63b 最小 env——无 DDGI/SC/SPGI 附加旋钮）
+# 嵌入 PNG 1280x720 逐像素非全黑（直射光/布幔/柱廊完整），而 CI canonical
+# 全集 capture 逐字节全黑且 10 个消融组 SHA 相同。嫌疑收敛=canonical 附加
+# 旋钮在 D3D12 上搞死中段资源（gbuffer 活、deferred/fusion/spgi 死，
+# 与 R32-R38 "GPU 路径插入后写全灭/区段错位"全部证据相容）。
+# 三分对分：minenv=1 全关（基线）；minenv=2 仅 DDGI 族开；minenv=3 仅
+# SC+ALBEDO_MIPS 开（DDGI 关）。
+$minEnvGroups = @()
+if ($env:PRIMAL_F350_MINENV_DIAG -eq '1') {
+    $minEnvGroups += @(
+        @{ name = 'd3d12-minenv-base';  api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_base_f350.ppm';  minenv = 1 },
+        @{ name = 'd3d12-minenv-ddgi';  api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgi_f350.ppm';  minenv = 2 },
+        @{ name = 'd3d12-minenv-scmip'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_scmip_f350.ppm'; minenv = 3 }
+    )
+}
+
 # Asset gates (same files the r11 launchers hard-require before running).
 $assetGates = @(
     'EngineTest\assets\SponzaTangentFrames.model',
@@ -119,7 +136,7 @@ $assetGates = @(
 $results = @()
 $diagResults = @()
 
-foreach ($g in ($groups + $diagGroups)) {
+foreach ($g in ($groups + $diagGroups + $minEnvGroups)) {
     $missing = @()
     foreach ($a in $assetGates) {
         if (-not (Test-Path (Join-Path $Repo $a))) { $missing += $a }
@@ -132,7 +149,7 @@ foreach ($g in ($groups + $diagGroups)) {
             ppm_exists = $false; ppm_sha256 = ''; watchdog = $false;
             anchors = @(); missing_assets = $missing
         }
-        if ($g.diag) { $diagResults += $skipEntry } else { $results += $skipEntry }
+        if ($g.diag -or $g.minenv) { $diagResults += $skipEntry } else { $results += $skipEntry }
         continue
     }
 
@@ -178,6 +195,31 @@ foreach ($g in ($groups + $diagGroups)) {
     }
     if ($g.gi -eq 1) { $env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL = '1' }
     else { $env:GI_ISOLATE = 'all' }
+    # R66 minenv 对分覆盖（在 canonical 设置与 gi 设置之后执行才能摘干净）。
+    # minenv=1：摘掉全部附加旋钮（DDGI 族+SC+ALBEDO_MIPS——R63b 最小 env 同款）。
+    # minenv=2：恢复 DDGI 族（QUERY_KERNEL 含内）。minenv=3：恢复 SC+ALBEDO_MIPS。
+    if ($g.minenv) {
+        Remove-Item Env:PRIMAL_DDGI_GEOMETRY_VISIBILITY -ErrorAction SilentlyContinue
+        Remove-Item Env:DDGI_RAY_SAMPLE -ErrorAction SilentlyContinue
+        Remove-Item Env:DDGI_MEASURED_GEOMETRY -ErrorAction SilentlyContinue
+        Remove-Item Env:SPGI_DDGI_VISIBILITY -ErrorAction SilentlyContinue
+        Remove-Item Env:PRIMAL_DDGI_TRAVERSAL_AUDIT -ErrorAction SilentlyContinue
+        Remove-Item Env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL -ErrorAction SilentlyContinue
+        Remove-Item Env:PRIMAL_SC_OWNER_CARD_DIRECTORY -ErrorAction SilentlyContinue
+        Remove-Item Env:PRIMAL_VK_ALBEDO_MIPS -ErrorAction SilentlyContinue
+        if ($g.minenv -eq 2) {
+            $env:PRIMAL_DDGI_GEOMETRY_VISIBILITY = '1'
+            $env:DDGI_RAY_SAMPLE = '7'
+            $env:DDGI_MEASURED_GEOMETRY = '1'
+            $env:SPGI_DDGI_VISIBILITY = '2'
+            $env:PRIMAL_DDGI_TRAVERSAL_AUDIT = '0'
+            $env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL = '1'
+        }
+        if ($g.minenv -eq 3) {
+            $env:PRIMAL_SC_OWNER_CARD_DIRECTORY = '1'
+            $env:PRIMAL_VK_ALBEDO_MIPS = '1'
+        }
+    }
     # R29/R33/R36b 诊断组开关（diag=1 TAA_OFF，diag=2 SHADOW_RENDER_OFF，
     # diag=3 BLACK_STAGE_FRAME=50；diag=4/5 PRIMAL_LIGHTING_DEBUG=albedo/
     # shadow（R48 deferred 采样链拆分）；canonical 组确保无残留）
@@ -270,7 +312,7 @@ foreach ($g in ($groups + $diagGroups)) {
         ppm_sha256 = $sha; watchdog = $watchdogFired; anchors = $anchors;
         missing_assets = @()
     }
-    if ($g.diag) { $diagResults += $entry } else { $results += $entry }
+    if ($g.diag -or $g.minenv) { $diagResults += $entry } else { $results += $entry }
 }
 
 $json = ConvertTo-Json -InputObject $results -Depth 4

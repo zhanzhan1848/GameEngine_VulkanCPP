@@ -413,6 +413,11 @@ jobs:
           # 可写性一刀切）。dump 面新增 deferred_copywrite 行。
           $env:PRIMAL_D3D12_RTVAUDIT = '1'
           $env:PRIMAL_D3D12_DEFERRED_COPY_WRITE = '1'
+          # R66：minenv 对分三组（GPU 1.wpix 最小 env 会话渲染正常 vs
+          # canonical 全集全黑——嫌疑=附加旋钮 DDGI 族/SC/ALBEDO_MIPS 在
+          # D3D12 上搞死中段资源；base 全关 / ddgi 仅 DDGI 族 / scmip 仅
+          # SC+MIPS，写 diag_gates.json 不进门禁）
+          $env:PRIMAL_F350_MINENV_DIAG = '1'
           # R61：GBV 组——R62 实测 1060 上 900s watchdog 第一帧仍无法完成
           # （GBV 校验过慢/挂），默认关闭；runner SDK/驱动变化后改回 '1'
           $env:PRIMAL_F350_GBV_DIAG = '0'
