@@ -717,9 +717,13 @@ def compile_shader(item, out_dir, timeout=120):
         record["out"] = out_rel
     if kind == "glsl" and extra:
         record["defines"] = list(extra)
-    record["hlsl"] = os.path.relpath(hlsl_out, out_dir)
+    # manifest key 统一正斜杠：os.path.relpath 在 Windows 返回反斜杠
+    # （R64 run#104：harness SHADER_GATE 用 'Forward/X.cso' 查表查不到
+    # 'Forward\\X.cso' → M6 GI init fail-fast；生成器自检用同一套 key 所以
+    # freshness gate 仍绿。Windows 生成的 manifest 必须与平台无关。）
+    record["hlsl"] = os.path.relpath(hlsl_out, out_dir).replace("\\", "/")
     record["hlsl_sha256"] = sha256_file(hlsl_out, text=True)  # 文本，规范化
-    record["cso"] = os.path.relpath(cso_out, out_dir)
+    record["cso"] = os.path.relpath(cso_out, out_dir).replace("\\", "/")
     record["cso_sha256"] = sha256_file(cso_out)  # DXIL 二进制，绝不规范化
     return True, record, errors
 

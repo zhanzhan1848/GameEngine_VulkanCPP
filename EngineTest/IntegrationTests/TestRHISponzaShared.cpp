@@ -398,6 +398,11 @@ inline Manifest ParseManifest(const std::vector<u8>& bytes) {
         const bool gotSha =
             FindKeyValue(text, i, objEnd, "cso_sha256", sha, dummy);
         if (gotCso && gotSha && sha.size() == 64) {
+            // 防御：旧版生成器在 Windows 写过反斜杠 key（R64 run#104），
+            // 归一化后新旧 manifest 都能查到。
+            for (char& ch : cso) {
+                if (ch == '\\') ch = '/';
+            }
             m.csoToSha[cso] = sha;
             ++pairCount;
         }
