@@ -475,14 +475,19 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: PIX 安装 + GPU 抓帧（R61，best-effort 不进门禁）
-        if: always()
+      - name: PIX 安装 + GPU 抓帧（R61→R63 默认关：attach 曾崩 Windows）
+        if: always() && vars.PRIMAL_CI_PIX_CAPTURE == '1'
         continue-on-error: true
         shell: powershell
         run: |
-          # R61：用户指令"runner 装 PIX"。官方 PixInstaller 静默装到 C:\PIX，
-          # pixtool attach 抓 12 帧 d3d12 短跑一帧 .wpicap 上传（deferred
-          # pass 从 frame ~3-4 起执行，25s 窗口覆盖）。任何失败仅告警。
+          # R63：PIX attach 抓帧在 R62 run（45094962965）实测**崩掉 Windows
+          # 重启**（PIX 注入 + 1060 驱动 attach 模式系统不稳定）——默认禁用。
+          # 手动抓帧流程（推荐，GUI 可见驱动崩溃不挂 CI）：runner 机器本地
+          # 开 WinPix.exe GUI → 打开 EngineTest Sponza 工程（或 launch
+          # TestVulkanSponzaRenderGraph.exe）→ 抓 frame ~6-10 → 看 deferred
+          # pass 的 Draw(3) GPU 时间/像素统计与 RTV 内容。
+          # 自动抓帧重开：runner/驱动稳定后设 env PRIMAL_CI_PIX_CAPTURE=1。
+          Write-Host '::warning::PIX auto-capture disabled (attach crashed Windows, R62); set PRIMAL_CI_PIX_CAPTURE=1 to enable'
           $ErrorActionPreference = 'Continue'
           $pixDir = 'C:\PIX'
           if (Test-Path "$pixDir\pixtool.exe") {
