@@ -486,6 +486,39 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+      # R70：A3（mode7+measured，D3D12 首跑）隔离探针——run109 attempt1/2
+      # 同在 f350 批量步骤丢 runner（零 artifact/日志 BlobNotFound），锁定该
+      # 组合触发机器级问题（GPU hang/驱动崩，R62 PIX 崩机同型风险）。四道
+      # 防护：独立开关单独调用、4 帧短跑+900s watchdog（GBV 先例）、放在
+      # evidence upload 之后（崩机不丢其他组证据）、continue-on-error 永不
+      # 拖红 job。
+      - name: R70 A3 isolation probe (4-frame best-effort, known machine-crash risk)
+        if: always()
+        continue-on-error: true
+        shell: powershell
+        env:
+          PRIMAL_F350_A3_ONLY: '1'
+        run: |
+          $exe = Get-Content ci-out/exe-path.txt -Raw
+          $exe = $exe.Trim()
+          if (-not (Test-Path $exe)) { Write-Output "[a3] exe missing - skip"; exit 0 }
+          Write-Output "[a3] exe = $exe"
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350-a3
+          exit 0
+
+      - name: Upload A3 isolation evidence
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: f350-a3-iso
+          path: |
+            ci-out/f350-a3/*.ppm
+            ci-out/f350-a3/*.json
+            ci-out/f350-a3/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: PIX 安装 + GPU 抓帧（R61→R63 默认关：attach 曾崩 Windows）
         if: always() && vars.PRIMAL_CI_PIX_CAPTURE == '1'
         continue-on-error: true

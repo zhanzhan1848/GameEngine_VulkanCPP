@@ -129,12 +129,17 @@ if ($env:PRIMAL_F350_MINENV_DIAG -eq '1') {
         @{ name = 'd3d12-minenv-base';  api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_base_f350.ppm';  minenv = 1 },
         @{ name = 'd3d12-minenv-ddgiA'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA_f350.ppm'; minenv = 4 },
         @{ name = 'd3d12-minenv-ddgiA1'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA1_f350.ppm'; minenv = 6 },
-        @{ name = 'd3d12-minenv-ddgiA2'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA2_f350.ppm'; minenv = 7 },
-        # R69：A3=mode7+measured 完整组合（无其他旋钮）——判 D3D12 上
-        # mode7+measured 是否独立健康；同时引擎侧 mode7 无 measured 已回落
-        # mode0（LumenDDGIPass R69 门），A1 组自本轮起应≈base。
-        @{ name = 'd3d12-minenv-ddgiA3'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA3_f350.ppm'; minenv = 8 }
+        @{ name = 'd3d12-minenv-ddgiA2'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA2_f350.ppm'; minenv = 7 }
     )
+}
+# R70：A3（mode7+measured 完整组合，D3D12 首跑）与主批量隔离——run109 两连
+# 死（attempt1/2 同在 step12 丢 runner、零 artifact、日志 BlobNotFound）锁定
+# A3 触发机器级问题（GPU hang/驱动崩，R62 PIX 崩机同型风险）。改为独立开关
+# 调用：4 帧短跑（GBV 组 diag=10 先例）+ workflow 侧插在 evidence upload 之后
+# + continue-on-error，崩机也不丢其他组证据。
+if ($env:PRIMAL_F350_A3_ONLY -eq '1') {
+    $minEnvGroups += @{ name = 'd3d12-minenv-a3iso'; api = 'd3d12'; gi = 1;
+                        ppm = 'art2_win_d3d12_minenv_a3_f350.ppm'; minenv = 8; short = 1 }
 }
 
 # Asset gates (same files the r11 launchers hard-require before running).
@@ -293,6 +298,13 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups)) {
         $env:SPONZA_MAX_FRAMES = '400'
         $env:SPONZA_CAPTURE_FRAME = '350'
     }
+    # R70：隔离短跑档（diag 开关之后覆盖才生效）——A3 崩机风险面缩到 4 帧
+    # + 900s watchdog（GBV 组 diag=10 同款先例）。
+    if ($g.short) {
+        $env:SPONZA_MAX_FRAMES = '4'
+        $env:SPONZA_CAPTURE_FRAME = '4'
+        $env:PRIMAL_SPONZA_WATCHDOG_SECS = '900'
+    }
 
     $so = Join-Path $OutDir ($g.name + '.stdout.log')
     $se = Join-Path $OutDir ($g.name + '.stderr.log')
@@ -364,9 +376,11 @@ Set-Content -Path (Join-Path $OutDir 'f350_gates.json') -Value $json -Encoding U
 Write-Output '[f350] all groups done; gates written to f350_gates.json'
 if ($diagResults.Count -gt 0) {
     # R29 诊断组独立 gates 文件——parity_report 只消费 f350_gates.json，
-    # 诊断组不影响任何门禁裁决。
+    # 诊断组不影响任何门禁裁决。R70：A3 隔离调用（PRIMAL_F350_A3_ONLY=1）
+    # 写独立 a3_gates.json，防同 OutDir 复用时覆盖主调用的 diag_gates.json。
+    $diagGatesName = if ($env:PRIMAL_F350_A3_ONLY -eq '1') { 'a3_gates.json' } else { 'diag_gates.json' }
     $diagJson = ConvertTo-Json -InputObject $diagResults -Depth 4
-    Set-Content -Path (Join-Path $OutDir 'diag_gates.json') -Value $diagJson -Encoding UTF8
-    Write-Output '[f350] diagnostic groups done; gates written to diag_gates.json'
+    Set-Content -Path (Join-Path $OutDir $diagGatesName) -Value $diagJson -Encoding UTF8
+    Write-Output "[f350] diagnostic groups done; gates written to $diagGatesName"
 }
 exit 0
