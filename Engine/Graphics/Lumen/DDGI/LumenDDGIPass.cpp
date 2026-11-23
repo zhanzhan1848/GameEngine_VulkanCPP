@@ -240,6 +240,22 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
     measured_geometry_requested_=UsesMeasuredVisibility() && measuredGeometryEnv &&
         std::strcmp(measuredGeometryEnv,"1")==0;
 
+    // R68 run108 裁决：mode 7 与 measured 几何强耦合——cameraPos.w==7 令
+    // gather shader（DDGIGIGather.comp:549）硬走 measured 分支，而 binding 19
+    // （nearRelocatedOrigins）在 measured volume 未加载时绑 dummy_buffer_
+    // （GIGatherModule flatWrites[2]），shader 的 pIdx>=length() 防御把全部
+    // 探针 skip → GI/composite 精确归零（D3D12 f350 全黑的最小复现旋钮
+    // DDGI_RAY_SAMPLE=7；canonical Vulkan 恒两者同设故从未暴露）。
+    // mode 7 没有 measured 数据时回落 mode 0（open 初始化语义自洽）并显式
+    // 点名原因；mode7+measured 的 D3D12 健康度由 R69 minenv-A3 组单独判别。
+    if (UsesMeasuredVisibility() && !measured_geometry_requested_) {
+        PRIMAL_LOG_STREAM(Error, "Render")
+            << "[LumenDDGI] DDGI_RAY_SAMPLE=7 requires DDGI_MEASURED_GEOMETRY=1"
+            << " (measured volume absent -> near-relocated origins unbound);"
+            << " falling back to mode 0" << std::endl;
+        ray_sample_mode_ = 0u;
+    }
+
     // The first-surface distance candidate is intentionally a Vulkan-only,
     // scalar-mode experiment.  Latching the exact request before descriptor
     // layout creation lets the opt-in pipeline use its independent 16-binding

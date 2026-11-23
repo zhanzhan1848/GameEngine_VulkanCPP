@@ -129,7 +129,11 @@ if ($env:PRIMAL_F350_MINENV_DIAG -eq '1') {
         @{ name = 'd3d12-minenv-base';  api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_base_f350.ppm';  minenv = 1 },
         @{ name = 'd3d12-minenv-ddgiA'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA_f350.ppm'; minenv = 4 },
         @{ name = 'd3d12-minenv-ddgiA1'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA1_f350.ppm'; minenv = 6 },
-        @{ name = 'd3d12-minenv-ddgiA2'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA2_f350.ppm'; minenv = 7 }
+        @{ name = 'd3d12-minenv-ddgiA2'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA2_f350.ppm'; minenv = 7 },
+        # R69：A3=mode7+measured 完整组合（无其他旋钮）——判 D3D12 上
+        # mode7+measured 是否独立健康；同时引擎侧 mode7 无 measured 已回落
+        # mode0（LumenDDGIPass R69 门），A1 组自本轮起应≈base。
+        @{ name = 'd3d12-minenv-ddgiA3'; api = 'd3d12'; gi = 1; ppm = 'art2_win_d3d12_minenv_ddgiA3_f350.ppm'; minenv = 8 }
     )
 }
 
@@ -250,6 +254,14 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups)) {
         }
         if ($g.minenv -eq 7) {
             $env:SPGI_DDGI_VISIBILITY = '2'
+        }
+        # R69 A3：mode7+measured 完整组合（DDGI_RAY_SAMPLE=7 +
+        # DDGI_MEASURED_GEOMETRY=1）——引擎回落门落地后判 D3D12 上
+        # 该组合是否独立健康（黑=mode7+measured 独立断点；活=canonical
+        # 黑因在其他旋钮×mode7 交互）。
+        if ($g.minenv -eq 8) {
+            $env:DDGI_RAY_SAMPLE = '7'
+            $env:DDGI_MEASURED_GEOMETRY = '1'
         }
     }
     # R29/R33/R36b 诊断组开关（diag=1 TAA_OFF，diag=2 SHADOW_RENDER_OFF，
