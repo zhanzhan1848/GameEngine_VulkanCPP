@@ -206,12 +206,17 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
         // r5w2: mode 7 的采样分布是 UBO 运行时参数（DDGIVolumeData.
         // RaySampleMode，shader 侧 ProbeSampleLib 按 uniform 分派），无
         // 编译期 kernel 形状/buffer 尺寸耦合（mode 5 的 128 深度尾射线与
-        // gather 特判不适用于 7）——向 D3D12 开放（.cso 镜像由
-        // build_d3d12_shaders.py 提供）。mode 5 仍 Vulkan-only（GIGatherModule
+        // gather 特判不适用于 7）。mode 5 仍 Vulkan-only（GIGatherModule
         // 的 mode5 特判与 distance 尾射线 buffer 加宽未镜像）。
+        // R72：D3D12 从 measuredModeAllowed 移除——r5w2 只考虑了 shader
+        // 编译面（.cso 镜像存在），没考虑 measured BVH 数据链是 Vulkan/
+        // Metal-only（first_cache_ BVH epoch/SWRT 替换链 D3D12 未实现）。
+        // 实证（run108-111）：D3D12 mode7+measured 渲染全黑（canonical
+        // 847b7f79）且整机崩溃重启（run109 两连死+用户确认）；mode7 无
+        // measured 则 dummy binding19 全探针 skip 精确归零（R69 回落门）。
+        // D3D12 measured 链实现前 mode7 保持 Vulkan-only。
         const bool measuredModeAllowed =
             device_->GetPlatform() == RHIPlatform::Vulkan ||
-            device_->GetPlatform() == RHIPlatform::D3D12 ||
             (device_->GetPlatform() == RHIPlatform::Metal &&
              std::getenv("PRIMAL_METAL_MEASURED_GEOMETRY") &&
              std::strcmp(std::getenv("PRIMAL_METAL_MEASURED_GEOMETRY"), "1") == 0 &&
