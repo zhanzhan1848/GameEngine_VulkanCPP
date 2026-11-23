@@ -407,6 +407,12 @@ jobs:
           # 零（draw/光栅化面）vs render pass 本身没发生（RG execute 面）。
           # D3D12-only 平台门在模块内。
           $env:PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL = '1'
+          # R64：RTV 通道审计（deferred 哨兵附件现场重建全新 RTV 描述符
+          # clear 标志色——持久槽描述符内容 vs 执行链 vs 资源内存三分判）
+          # + CopyBufferToTexture 纯资源直写判别（零描述符参与——内存本体
+          # 可写性一刀切）。dump 面新增 deferred_copywrite 行。
+          $env:PRIMAL_D3D12_RTVAUDIT = '1'
+          $env:PRIMAL_D3D12_DEFERRED_COPY_WRITE = '1'
           # R61：GBV 组——R62 实测 1060 上 900s watchdog 第一帧仍无法完成
           # （GBV 校验过慢/挂），默认关闭；runner SDK/驱动变化后改回 '1'
           $env:PRIMAL_F350_GBV_DIAG = '0'

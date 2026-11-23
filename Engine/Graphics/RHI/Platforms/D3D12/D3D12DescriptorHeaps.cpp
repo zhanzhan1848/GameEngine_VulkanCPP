@@ -208,6 +208,9 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
     rtvSlots_.SetName("rtv");
     dsvSlots_.SetName("dsv");
     samplerSlots_.SetName("samplerPersistent");
+    // R64：堆代数自增——纹理创建期（[D3D12_VA]）与 pass 执行期
+    //（[D3D12_RTVAUDIT]）各打一次，代数漂移 = 槽号跨堆重建陈旧。
+    ++heapGeneration_;
     // R18-B：容量随初始化落日志——十七测"31+2>32"式耗尽在 Windows 侧
     // 可直接对账（采样器堆 2048 规范上限满配，见头文件容量规划注）。
     PRIMAL_LOG_STREAM(Info, "RHI")
@@ -217,7 +220,8 @@ bool D3D12DescriptorHeapManager::Initialize(ID3D12Device* device, const Config& 
         << ", sampler=" << config.samplerCapacity
         << " (persistent " << config.samplerPersistentCapacity
         << ", per-slot " << samplerLinear_.SlotCapacity() << ")"
-        << ", rtv=" << config.rtvCapacity << ", dsv=" << config.dsvCapacity << std::endl;
+        << ", rtv=" << config.rtvCapacity << ", dsv=" << config.dsvCapacity
+        << ", gen=" << heapGeneration_ << std::endl;
     return true;
 }
 

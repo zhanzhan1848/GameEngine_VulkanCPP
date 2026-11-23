@@ -642,6 +642,62 @@ void D3D12CommandBufferImpl::BeginRenderPass(const RenderPassDesc& desc) {
                                     attachment.clearValue.color.z,
                                     attachment.clearValue.color.w};
             commandList_->ClearRenderTargetView(rtvs[rtCount], color, 0, nullptr);
+            // R64：RTV 通道审计（PRIMAL_D3D12_RTVAUDIT=1 且 deferred 哨兵色
+            // 附件 (0.25,0.5,0.75)）——持久槽描述符之外，现场用专用静态槽
+            // 按当前附件纹理重建全新 RTV 视图再 Clear 标志色
+            // (0.125,0.0625,0.03125)（fp16 精确可表示，与哨兵色区分）。
+            // dump 三分判：哨兵色=双通道活（fragment 单独死）；标志色=持久
+            // 槽描述符内容错（槽覆写/陈旧族）；双零（copy-write 又活）=
+            // OM/clear 执行面或帧内后置清零者。哨兵 env 由 workflow 常开。
+            static const bool s_rtvAudit = [] {
+                const char* e = std::getenv("PRIMAL_D3D12_RTVAUDIT");
+                return e && e[0] == '1' && e[1] == '\0';
+            }();
+            if (s_rtvAudit
+                && attachment.clearValue.color.x == 0.25f
+                && attachment.clearValue.color.y == 0.5f
+                && attachment.clearValue.color.z == 0.75f) {
+                D3D12DescriptorHeapManager& heaps = dev.GetDescriptorHeaps();
+                static u32 s_auditSlot = D3D12DescriptorHeapManager::kInvalidSlot;
+                if (s_auditSlot == D3D12DescriptorHeapManager::kInvalidSlot)
+                    s_auditSlot = heaps.AllocRtv();
+                if (s_auditSlot != D3D12DescriptorHeapManager::kInvalidSlot) {
+                    D3D12_RENDER_TARGET_VIEW_DESC ad{};
+                    ad.Format = static_cast<DXGI_FORMAT>(
+                        ToDxgiFormat(tex->GetTextureDesc().format));
+                    const D3D12_RESOURCE_DESC nd = tex->GetNativeDesc();
+                    if (nd.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
+                        ad.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
+                        ad.Texture3D.MipSlice = 0;
+                        ad.Texture3D.FirstWSlice = 0;
+                        ad.Texture3D.WSize = nd.DepthOrArraySize;
+                    } else if (nd.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D
+                               && nd.DepthOrArraySize > 1) {
+                        ad.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+                        ad.Texture2DArray.MipSlice = 0;
+                        ad.Texture2DArray.FirstArraySlice = 0;
+                        ad.Texture2DArray.ArraySize = nd.DepthOrArraySize;
+                        ad.Texture2DArray.PlaneSlice = 0;
+                    } else {
+                        ad.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+                        ad.Texture2D.MipSlice = 0;
+                        ad.Texture2D.PlaneSlice = 0;
+                    }
+                    dev.GetNativeDevice()->CreateRenderTargetView(
+                        tex->GetNativeResource(), &ad, heaps.RtvCpuHandle(s_auditSlot));
+                    const float auditColor[4] = {0.125f, 0.0625f, 0.03125f, 1.0f};
+                    commandList_->ClearRenderTargetView(
+                        heaps.RtvCpuHandle(s_auditSlot), auditColor, 0, nullptr);
+                    static std::atomic<u32> s_auditCount{0};
+                    if (s_auditCount.fetch_add(1, std::memory_order_relaxed) < 4) {
+                        PRIMAL_LOG_STREAM(Error, "RHI")
+                            << "[D3D12_RTVAUDIT] fresh-rtv clear recorded: persistSlot="
+                            << tex->RtvSlot() << " auditSlot=" << s_auditSlot
+                            << " heapgen=" << heaps.HeapGeneration()
+                            << " texHandle=" << attachment.texture << std::endl;
+                    }
+                }
+            }
         }
         ++rtCount;
     }

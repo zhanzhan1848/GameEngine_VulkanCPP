@@ -569,10 +569,14 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
     }
     // R39（黑帧线）：每个纹理创建回显 GPU VA——同堆内两资源 VA 区间相交
     // 即分配器别名/重叠实锤（R37 rg 探针读出 velocity 类数据的
-    // memory-overlap 假说判别面）。VA=0 仅 wrap/view 特例。诊断专用。
+    // memory-overlap 假说判别面）。VA=0 仅 wrap/view 特例。
     // R39c：实测本构建 GPU VA 全 0（9394/9394，含正常渲染的资源）——
     // GetGPUVirtualAddress 不可用作判据，改报 D3D12MA 分配偏移/大小
     //（placed 堆内唯一，offset 区间相交 = 别名实锤）。
+    // R64：补 heap 指针 + 堆代数——R39c 审计的结构性缺口是缺 heap 身份
+    //（不同堆同 offset 合法、同堆同 offset=别名，offset 单独不可判）。
+    // heap=0 = committed/wrap（无共享堆）；heap 非 0 时同堆 offset 区间
+    // 相交 = 内存别名实锤。committed 的 GetOffset() 恒 0，勿并入相交审计。
     {
         const auto rd2 = GetNativeDesc();
         PRIMAL_LOG_STREAM(Info, "RHI")
@@ -582,7 +586,9 @@ bool D3D12Texture::createDescriptors() {    D3D12Device& dev = static_cast<D3D12
             << " mips=" << rd2.MipLevels
             << " fmt=" << static_cast<unsigned>(texDesc_.format)
             << " va=" << (resource_ ? resource_->GetGPUVirtualAddress() : 0ull)
+            << " heap=" << (allocation_ ? reinterpret_cast<u64>(allocation_->GetHeap()) : 0ull)
             << " alloff=" << AllocOffset() << " allsz=" << AllocSize()
+            << " heapgen=" << static_cast<D3D12Device&>(device_).GetDescriptorHeaps().HeapGeneration()
             << std::endl;
     }
     return true;

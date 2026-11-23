@@ -5655,6 +5655,19 @@ float R23F16Decode(u16 h16) {
     return f;
 }
 
+/// R64：RGBA16F 半精度编码（copy-write 判别器的 pattern 上传用）。
+/// 正常范围截断实现（判别 pattern 取 2 的幂/精确可表示值，无舍入路径）。
+u16 R23F16Encode(float f) {
+    u32 bits = 0;
+    std::memcpy(&bits, &f, 4);
+    const u32 sign = (bits >> 16) & 0x8000u;
+    const s32 exp = static_cast<s32>((bits >> 23) & 0xFFu) - 127 + 15;
+    const u32 mant = (bits >> 13) & 0x3FFu;
+    if (exp <= 0) return static_cast<u16>(sign);             // 下溢 → ±0
+    if (exp >= 31) return static_cast<u16>(sign | 0x7C00u);  // 上溢 → ±inf
+    return static_cast<u16>(sign | (static_cast<u32>(exp) << 10) | mant);
+}
+
 void R23BlackStageDumpTexture(rhi::RHIDeviceBase* device, const char* name,
                               rhi::ResourceHandle tex) {
     using namespace rhi;
@@ -6383,6 +6396,78 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     R34UavWriteProbe(device_, gpuDrawStage.GetGBufferAlbedo(),
                                      gpuDrawStage.GetShadowDepthRenderTarget(0, prevSlot),
                                      defOut, "uav_probe_defout");
+                    // R64：CopyBufferToTexture 上传写判别
+                    //（PRIMAL_D3D12_DEFERRED_COPY_WRITE=1）——纯资源直写零
+                    // 描述符参与（RTV/UAV 持久槽全绕开）：pattern 落地 =
+                    // deferred_out 内存本体可写（死因收窄 RTV/draw 执行链，
+                    // 与 RTVAUDIT 的三分判配对）；仍零 = 资源内存层死
+                    //（placement/residency/别名 → heap 身份审计与 PIX）。
+                    // pattern=(0.125,0.0625,0.03125)——fp16 精确可表示且与
+                    // R51 哨兵色 (0.25,0.5,0.75)、RTVAUDIT 标志色同款区分。
+                    static const bool s_copyWrite = [] {
+                        const char* e = std::getenv("PRIMAL_D3D12_DEFERRED_COPY_WRITE");
+                        return e && e[0] == '1' && e[1] == '\0';
+                    }();
+                    if (s_copyWrite) {
+                        u32 cw = 0, chh = 0;
+                        if (device_->GetTextureSize(defOut, cw, chh) && cw && chh) {
+                            rhi::BufferDesc cd{};
+                            cd.size = static_cast<u64>(cw) * chh * 8;
+                            cd.bindFlags = static_cast<u32>(rhi::BufferUsageFlags::TransferSrc);
+                            cd.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
+                            rhi::ResourceHandle staging = device_->CreateBuffer(cd);
+                            if (staging != rhi::handles::INVALID_RESOURCE) {
+                                if (u16* mapped = static_cast<u16*>(
+                                        device_->MapBuffer(staging, 0, cd.size))) {
+                                    const u16 pat[4] = {R23F16Encode(0.125f),
+                                                        R23F16Encode(0.0625f),
+                                                        R23F16Encode(0.03125f),
+                                                        R23F16Encode(1.0f)};
+                                    for (u64 i = 0; i < static_cast<u64>(cw) * chh; ++i)
+                                        for (int k = 0; k < 4; ++k)
+                                            mapped[i * 4 + k] = pat[k];
+                                    device_->UnmapBuffer(staging);
+                                    CommandBufferHandle cch = device_->CreateCommandBuffer(
+                                        CommandQueueType::Graphics);
+                                    bool okCopy = false;
+                                    if (RHICommandBuffer* cc = GetCommandBuffer(cch)) {
+                                        if (cc->Begin()) {
+                                            rhi::ResourceBarrier toDst{};
+                                            toDst.resource = defOut;
+                                            toDst.beforeState = rhi::ResourceState::Unknown;
+                                            toDst.afterState = rhi::ResourceState::CopyDest;
+                                            toDst.subresource = RHI_ALL_SUBRESOURCES;
+                                            toDst.queueFamily = 0xFFFFFFFF;
+                                            cc->InsertBarrier(&toDst, 1);
+                                            rhi::BufferTextureCopyRegion cr{};
+                                            cr.bufferOffset = 0;
+                                            cr.imageSubresource.baseArrayLayer = 0;
+                                            cr.imageSubresource.layerCount = 1;
+                                            cr.imageOffset = {0, 0, 0};
+                                            cr.imageExtent = {cw, chh, 1};
+                                            cc->CopyBufferToTexture(staging, defOut, &cr, 1);
+                                            rhi::ResourceBarrier backSR{};
+                                            backSR.resource = defOut;
+                                            backSR.beforeState = rhi::ResourceState::CopyDest;
+                                            backSR.afterState = rhi::ResourceState::ShaderResource;
+                                            backSR.subresource = RHI_ALL_SUBRESOURCES;
+                                            backSR.queueFamily = 0xFFFFFFFF;
+                                            cc->InsertBarrier(&backSR, 1);
+                                            okCopy = cc->End() && cc->Submit()
+                                                     && cc->WaitForCompletion();
+                                        }
+                                    }
+                                    device_->DestroyCommandBuffer(cch);
+                                    PRIMAL_LOG_STREAM(Error, "Render")
+                                        << "[D3D12_BLACK_STAGE] deferred_copywrite submit "
+                                        << (okCopy ? "ok" : "FAILED") << std::endl;
+                                    R23BlackStageDumpTexture(device_, "deferred_copywrite",
+                                                             defOut);
+                                }
+                            }
+                            device_->DestroyBuffer(staging);
+                        }
+                    }
                 }
             }
             PRIMAL_LOG_STREAM(Error, "Render") << "[D3D12_BLACK_STAGE] end" << std::endl;

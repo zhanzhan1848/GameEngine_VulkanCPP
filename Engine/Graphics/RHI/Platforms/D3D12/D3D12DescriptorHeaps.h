@@ -474,6 +474,13 @@ public:
     u32 SamplerCapacity() const { return samplerCapacity_; }
 
     // ------------------------------------------------------------------
+    // R64：堆代数（Initialize 每次自增）——槽号跨堆重建的陈旧性判据。
+    // 纹理创建期与 pass 执行期各打一次 gen，两者不一致 = 槽号在重建后的
+    // 新堆里指向别人的描述符（deferred_out 恒零的堆重建假说判别面）。
+    // ------------------------------------------------------------------
+    u32 HeapGeneration() const { return heapGeneration_; }
+
+    // ------------------------------------------------------------------
     // 帧槽线性区状态（R21-C：set 戳记 + FRAME_TRACE 埋点。主堆/sampler
     // 堆两线性区同帧同 BeginFrame 推进，纪元恒同步——SlotEpoch 取主堆侧）
     // ------------------------------------------------------------------
@@ -547,6 +554,7 @@ private:
     // 类——与 macOS 单测同源；currentSlot_ 与护拦表保留在管理器，
     // 供 OnSubmit 与 fence 复用判定使用）。
     u32 frameSlotCount_ = 3;
+    u32 heapGeneration_ = 0;  ///< R64：Initialize 自增（堆重建判据）
     u32 currentSlot_ = 0;
     // CBV/SRV/UAV 主堆布局：[0, cbvSrvUavPersistentCapacity_) 持久 SlotPool
     // （纹理 SRV/UAV 拷贝源）；其余为帧槽线性区段（set 实例表）。
