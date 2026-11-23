@@ -418,6 +418,11 @@ jobs:
           # D3D12 上搞死中段资源；base 全关 / ddgi 仅 DDGI 族 / scmip 仅
           # SC+MIPS，写 diag_gates.json 不进门禁）
           $env:PRIMAL_F350_MINENV_DIAG = '1'
+          # R73：pixlike 判别组——R72 后唯一主矛盾=层2 deferred_out 直射零
+          # （CI 微光态 6.94dB）而用户 PIX 会话直射完整；pixlike 逐项复制
+          # 用户会话 env（摘模型/切线帧/诊断件/DDGI 族/SC/MIPS，12 帧）
+          # 一刀切分剩余嫌疑
+          $env:PRIMAL_F350_PIXLIKE_DIAG = '1'
           # R61：GBV 组——R62 实测 1060 上 900s watchdog 第一帧仍无法完成
           # （GBV 校验过慢/挂），默认关闭；runner SDK/驱动变化后改回 '1'
           $env:PRIMAL_F350_GBV_DIAG = '0'

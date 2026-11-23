@@ -141,6 +141,21 @@ if ($env:PRIMAL_F350_A3_ONLY -eq '1') {
     $minEnvGroups += @{ name = 'd3d12-minenv-a3iso'; api = 'd3d12'; gi = 1;
                         ppm = 'art2_win_d3d12_minenv_a3_f350.ppm'; minenv = 8; short = 1 }
 }
+# R73：pixlike 判别组（PRIMAL_F350_PIXLIKE_DIAG=1；写 diag_gates.json 不进门禁）。
+# R72 后唯一主矛盾=层2 deferred_out 直射零（CI mode0 微光态 composite 仅
+# 0.0003，PSNR 6.94），而用户 PIX 会话（GPU 1.wpix PNG）直射光完整。CI base
+# 组（无 DDGI 族）直射仍零 vs 用户会话直射正常——剩余差异清单极短：
+# PRIMAL_TEST_MODEL/TANGENT_FRAME/API_TRACE/DUMP_MATRIX/帧数(12 vs 400)/
+# PIX attach/交互 vs 无头会话。pixlike 逐项复制用户会话 env（R63b 最小四件
+# +BLACK_STAGE_DUMP+DEFERRED_PROBE 保留=用户同款；摘模型/切线帧/诊断件/
+# DDGI 全族/SC/MIPS；12 帧 CAPTURE_FRAME=10）。判读：pixlike 直射正常→
+# 嫌疑=被摘的 env 之一或 12 帧时长，继续二分；pixlike 仍黑→差异只剩 PIX
+# attach/交互会话/无头 swapchain 行为，转用户侧实验。
+$pixlikeGroups = @()
+if ($env:PRIMAL_F350_PIXLIKE_DIAG -eq '1') {
+    $pixlikeGroups += @{ name = 'd3d12-pixlike'; api = 'd3d12'; gi = 1;
+                         ppm = 'art2_win_d3d12_pixlike_f350.ppm'; pixlike = 1 }
+}
 
 # Asset gates (same files the r11 launchers hard-require before running).
 $assetGates = @(
@@ -153,7 +168,7 @@ $assetGates = @(
 $results = @()
 $diagResults = @()
 
-foreach ($g in ($groups + $diagGroups + $minEnvGroups)) {
+foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     $missing = @()
     foreach ($a in $assetGates) {
         if (-not (Test-Path (Join-Path $Repo $a))) { $missing += $a }
@@ -166,7 +181,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups)) {
             ppm_exists = $false; ppm_sha256 = ''; watchdog = $false;
             anchors = @(); missing_assets = $missing
         }
-        if ($g.diag -or $g.minenv) { $diagResults += $skipEntry } else { $results += $skipEntry }
+        if ($g.diag -or $g.minenv -or $g.pixlike) { $diagResults += $skipEntry } else { $results += $skipEntry }
         continue
     }
 
@@ -268,6 +283,25 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups)) {
             $env:DDGI_RAY_SAMPLE = '7'
             $env:DDGI_MEASURED_GEOMETRY = '1'
         }
+        # R73 pixlike：逐项复制用户 PIX 会话 env（R63b 最小四件中的两个诊断
+        # 件 BLACK_STAGE_DUMP/DEFERRED_PROBE 保留=用户同款；其余 canonical
+        # 件全摘）。12 帧+CAPTURE_FRAME=10（用户在 frame 5-10 抓帧）。
+        if ($g.pixlike) {
+            Remove-Item Env:PRIMAL_TEST_MODEL -ErrorAction SilentlyContinue
+            Remove-Item Env:PRIMAL_VK_TANGENT_FRAME -ErrorAction SilentlyContinue
+            Remove-Item Env:PRIMAL_D3D12_API_TRACE -ErrorAction SilentlyContinue
+            Remove-Item Env:PRIMAL_DUMP_MATRIX -ErrorAction SilentlyContinue
+            Remove-Item Env:PRIMAL_DDGI_GEOMETRY_VISIBILITY -ErrorAction SilentlyContinue
+            Remove-Item Env:DDGI_RAY_SAMPLE -ErrorAction SilentlyContinue
+            Remove-Item Env:DDGI_MEASURED_GEOMETRY -ErrorAction SilentlyContinue
+            Remove-Item Env:SPGI_DDGI_VISIBILITY -ErrorAction SilentlyContinue
+            Remove-Item Env:PRIMAL_DDGI_TRAVERSAL_AUDIT -ErrorAction SilentlyContinue
+            Remove-Item Env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL -ErrorAction SilentlyContinue
+            Remove-Item Env:PRIMAL_SC_OWNER_CARD_DIRECTORY -ErrorAction SilentlyContinue
+            Remove-Item Env:PRIMAL_VK_ALBEDO_MIPS -ErrorAction SilentlyContinue
+            $env:SPONZA_MAX_FRAMES = '12'
+            $env:SPONZA_CAPTURE_FRAME = '10'
+        }
     }
     # R29/R33/R36b 诊断组开关（diag=1 TAA_OFF，diag=2 SHADOW_RENDER_OFF，
     # diag=3 BLACK_STAGE_FRAME=50；diag=4/5 PRIMAL_LIGHTING_DEBUG=albedo/
@@ -368,7 +402,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups)) {
         ppm_sha256 = $sha; watchdog = $watchdogFired; anchors = $anchors;
         missing_assets = @()
     }
-    if ($g.diag -or $g.minenv) { $diagResults += $entry } else { $results += $entry }
+    if ($g.diag -or $g.minenv -or $g.pixlike) { $diagResults += $entry } else { $results += $entry }
 }
 
 $json = ConvertTo-Json -InputObject $results -Depth 4
