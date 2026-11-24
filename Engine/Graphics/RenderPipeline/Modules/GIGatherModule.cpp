@@ -1618,6 +1618,12 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 flatInfos[3].offset = 256;
                 flatInfos[3].range = ~0ull;
                 updateDescriptors(4, flatWrites);
+                if (inputs.frame_index == 350 && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+                    PRIMAL_LOG_STREAM(Info, "Render") << "[F350GatherFlat] set=" << descriptorSet
+                        << " origins_b19=" << flatInfos[2].buffer << " dummy=" << dummy_buffer_
+                        << " origins_is_dummy=" << (flatInfos[2].buffer == dummy_buffer_)
+                        << " volume_count=" << nvolCount << " flat_active=" << flatActive;
+                }
                 if(traversalDispatch) {for(u32 i=0;i<4;++i)flatWrites[i].dstSet=traversal_set_;remember(flatWrites,4);updateDescriptors(4,flatWrites);}
                 if (compareGather) {
                     const char* names[4] = {"flat-irradiance", "flat-volume", "near-origins", "flat-opensky"};
@@ -1944,6 +1950,16 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             const u32 localY=useWorkgroup && workgroup_requested_==32?4u:8u;
             const u32 groupsX=workgroup_experiment::Groups(gather_width_,8),groupsY=workgroup_experiment::Groups(gather_height_,localY);
             cmd->Dispatch(groupsX,groupsY,1);
+            if (inputs.frame_index == 350 && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+                PRIMAL_LOG_STREAM(Info, "Render") << "[F350Gather] bind_slot=" << bindingIdx
+                    << " ddgi_read_slot=" << ddgiReadIdx << " completion_serial=" << device_->FrameSlotCompletions().Serial(bindingIdx)
+                    << " slot_completed=" << device_->FrameSlotCompletions().CanReuse(bindingIdx,0)
+                    << " measured=" << ddgi->UsesMeasuredVisibility() << " geometry_required=" << geometry_connections_enabled_
+                    << " geometry_ready=" << connectionReady << " actual_b23_b26=" << connectionBuffers[0]
+                    << "," << connectionBuffers[1] << "," << connectionBuffers[2] << "," << connectionBuffers[3]
+                    << " dummy=" << dummy_buffer_ << " policy_b27=" << connectionCB << " query_kernel=" << useQuery
+                    << " set=" << sets[0] << " groups=" << groupsX << "x" << groupsY;
+            }
             // Only claim qualification when the existing live query check passed;
             // other modes may be valid but do not provide this receipt proof.
             const bool receiptQualified=useQuery;
