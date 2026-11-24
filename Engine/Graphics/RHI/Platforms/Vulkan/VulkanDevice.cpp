@@ -945,7 +945,9 @@ ResourceHandle VulkanDevice::createTextureViewImpl(const TextureViewDesc& desc) 
     }
 
     // 分配新 VulkanTexture slot,view 模式构造(alias src image,自创受限 VkImageView)。
-    u32 id = textureAllocator_->Allocate(*this, desc, *srcTex);
+    // Snapshot the source before inserting the view can relocate the texture pool.
+    VulkanTexture alias(*this, desc, *srcTex);
+    u32 id = textureAllocator_->Allocate(std::move(alias));
     VulkanTexture* viewTex = textureAllocator_->Get(id);
     if (!viewTex) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanDevice] Texture view free-list allocation failed" << std::endl;

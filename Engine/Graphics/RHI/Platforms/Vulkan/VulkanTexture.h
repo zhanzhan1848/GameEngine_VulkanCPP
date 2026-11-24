@@ -181,7 +181,6 @@ private:
     /// 走 InitializeAsView 路径(alias src image,创建受限 subresourceRange view)。
     bool             isView_{false};
     TextureViewDesc  viewDesc_{};
-    VulkanTexture*   viewSrc_{nullptr};
 
     VkImageLayout    currentLayout_{VK_IMAGE_LAYOUT_UNDEFINED};
     std::vector<VkImageLayout> mipLayouts_;  // GenerateMipmaps 需要 per-mip

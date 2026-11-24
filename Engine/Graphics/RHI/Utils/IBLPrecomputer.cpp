@@ -618,7 +618,7 @@ ResourceHandle IBLPrecomputer::ComputeIrradianceMap(ResourceHandle envMap, u32 o
 }
 
 ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle envMap, u32 outputSize) {
-    if (prefilterPipeline_ == handles::INVALID_PIPELINE) return handles::INVALID_RESOURCE;
+    if (!outputSize || prefilterPipeline_ == handles::INVALID_PIPELINE) return handles::INVALID_RESOURCE;
 
     u32 mipLevels = static_cast<u32>(std::floor(std::log2(outputSize))) + 1;
 
@@ -647,9 +647,12 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
 
     CommandBufferHandle cmdHandle = device_->CreateCommandBuffer(CommandQueueType::Graphics);
     RHICommandBuffer* cmd = GetCommandBuffer(cmdHandle);
-    if (!cmd) return handles::INVALID_RESOURCE;
-
-    cmd->Begin();
+    if (sampler == handles::INVALID_SAMPLER || !cmd || !cmd->Begin()) {
+        if (cmdHandle != handles::INVALID_COMMAND_BUFFER) device_->DestroyCommandBuffer(cmdHandle);
+        if (sampler != handles::INVALID_SAMPLER) device_->DestroySampler(sampler);
+        device_->DestroyTexture(outputTexture);
+        return handles::INVALID_RESOURCE;
+    }
 
     // T4.6.5 part 37 (Bug A fix): transition whole mip chain UNDEFINED→GENERAL.
     ResourceBarrier toUA{};
@@ -669,11 +672,12 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
     // T4.6.5 part 37 (Bug C fix): one Texture2DArray view per mip + single
     // dispatch with z=6 per mip. WGSL `texture_storage_2d_array` (Arrayed=1)
     // cannot accept per-face Texture2D views.
+    u32 recordedMips = 0;
     for (u32 mip = 0; mip < mipLevels; ++mip) {
         u32 mipSize = outputSize >> mip;
         if (mipSize == 0) mipSize = 1;
 
-        float roughness = (float)mip / (float)(mipLevels - 1);
+        float roughness = mipLevels > 1 ? float(mip) / float(mipLevels - 1) : 0.0f;
 
         TextureViewDesc viewDesc;
         viewDesc.texture = outputTexture;
@@ -684,6 +688,7 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
         viewDesc.firstArraySlice = 0;
         viewDesc.arraySize = 6;
         ResourceHandle mipArrayView = device_->CreateTextureView(viewDesc);
+        if (mipArrayView == handles::INVALID_RESOURCE) break;
         tempTextures.push_back(mipArrayView);
 
         BufferDesc bufDesc{
@@ -694,6 +699,7 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
             static_cast<u32>(BufferUsageFlags::Uniform)
         };
         ResourceHandle paramBuffer = device_->CreateBuffer(bufDesc);
+        if (paramBuffer == handles::INVALID_RESOURCE) break;
         tempBuffers.push_back(paramBuffer);
 
         PrefilterParams params;
@@ -708,14 +714,14 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
         params.srcResolution = (float)outputSize;
 
         void* mapped = device_->MapBuffer(paramBuffer, 0, sizeof(PrefilterParams));
-        if (mapped) {
-            memcpy(mapped, &params, sizeof(PrefilterParams));
-            device_->UnmapBuffer(paramBuffer);
-        }
+        if (!mapped) break;
+        memcpy(mapped, &params, sizeof(PrefilterParams));
+        device_->UnmapBuffer(paramBuffer);
 
         DescriptorSetDesc dsDesc;
         dsDesc.layout = prefilterDescLayout_;
         DescriptorSetHandle ds = device_->CreateDescriptorSet(dsDesc);
+        if (ds == handles::INVALID_DESCRIPTOR_SET) break;
         tempSets.push_back(ds);
 
         DescriptorImageInfo envMapInfo;
@@ -779,6 +785,7 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
         // WGSL workgroup_size(16, 16, 1); z dimension is the face index (0..5).
         u32 groups = (mipSize + 15) / 16;
         cmd->Dispatch(groups, groups, 6);
+        ++recordedMips;
     }
 
     // T4.6.5 part 37: transition whole mip chain to ShaderResource for
@@ -792,21 +799,23 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
     toSRV.queueFamily = 0xFFFFFFFF;
     cmd->InsertBarrier(&toSRV, 1);
 
-    cmd->End();
-
-    QueueSubmitInfo submitInfo;
+    QueueSubmitInfo submitInfo{};
     submitInfo.cmdBuffer = cmdHandle;
+    const bool complete = cmd->End() && recordedMips == mipLevels && device_->Submit(submitInfo);
+    if (complete) device_->WaitIdle();
 
-    device_->Submit(submitInfo);
-    device_->WaitIdle();
-
-    // Cleanup temp resources
+    device_->DestroyCommandBuffer(cmdHandle);
+    // Release descriptors and views only after the command buffer is finished or discarded.
     for (auto h : tempSets) device_->DestroyDescriptorSet(h);
     for (auto h : tempTextures) device_->DestroyTexture(h);
     for (auto h : tempBuffers) device_->DestroyBuffer(h);
     device_->DestroySampler(sampler);
-    device_->DestroyCommandBuffer(cmdHandle);
-
+    if (!complete) {
+        PRIMAL_LOG_STREAM(Error, "RHI") << "Environment prefilter failed after recording "
+                                         << recordedMips << " of " << mipLevels << " mip levels";
+        device_->DestroyTexture(outputTexture);
+        return handles::INVALID_RESOURCE;
+    }
     return outputTexture;
 }
 

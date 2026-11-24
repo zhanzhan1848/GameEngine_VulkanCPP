@@ -916,6 +916,46 @@ TestResult TestIBL_Prefilter_Constant0() { return RunIBL_Prefilter(true, 0.0f); 
 TestResult TestIBL_Prefilter_ConstantHalf() { return RunIBL_Prefilter(true, 0.5f); }
 TestResult TestIBL_Prefilter_Constant1() { return RunIBL_Prefilter(true, 1.0f); }
 
+// The prefilter creates a storage view for each output mip. Creating a view
+// can itself grow the same pool that stores its source texture.
+TestResult TestPrefilterViewsAcrossPoolGrowth() {
+    DeviceFixture fx;
+    TEST_ASSERT(fx.Init(), "Vulkan device init");
+    TextureDesc texture{};
+    texture.size = {16, 16, 1};
+    texture.type = TextureType::TextureCube;
+    texture.format = DataFormat::RGBA16_Float;
+    texture.mipLevels = 5;
+    texture.usage = TextureUsage::UnorderedAccess | TextureUsage::ShaderResource;
+    auto cube = fx.base->CreateTexture(texture);
+    TEST_ASSERT(cube != handles::INVALID_RESOURCE, "Create prefilter cube");
+
+    TextureViewDesc desc{};
+    desc.texture = cube;
+    desc.viewType = TextureType::Texture2DArray;
+    desc.format = texture.format;
+    desc.arraySize = 6;
+    desc.mipCount = 1;
+    std::vector<ResourceHandle> views;
+    constexpr u32 viewCount = 256; // The device initially reserves 128 texture slots.
+    for (u32 i = 0; i < viewCount; ++i) {
+        desc.mostDetailedMip = i % texture.mipLevels;
+        auto view = fx.base->CreateTextureView(desc);
+        if (view == handles::INVALID_RESOURCE) break;
+        views.push_back(view);
+    }
+    bool valid = views.size() == viewCount;
+    for (u32 i = 0; i < views.size(); ++i) {
+        u32 width = 0, height = 0;
+        const u32 size = texture.size.x >> (i % texture.mipLevels);
+        valid &= fx.base->GetTextureSize(views[i], width, height) && width == size && height == size;
+        fx.base->DestroyTexture(views[i]);
+    }
+    fx.base->DestroyTexture(cube);
+    TEST_ASSERT(valid, "Every prefilter mip view survives texture pool growth");
+    return TestResult::Passed;
+}
+
 void RegisterVulkanIBL_IrradPrefilter_Tests() {
     auto suite = std::make_shared<TestSuite>("VulkanIBL_IrradPrefilter_Tests");
     suite->AddTestCase(TestCase("Irradiance", TestIBL_Irradiance_Dispatch));
@@ -923,13 +963,14 @@ void RegisterVulkanIBL_IrradPrefilter_Tests() {
     suite->AddTestCase(TestCase("Prefilter_Constant_1x1_Roughness0", TestIBL_Prefilter_Constant0));
     suite->AddTestCase(TestCase("Prefilter_Constant_1x1_RoughnessHalf", TestIBL_Prefilter_ConstantHalf));
     suite->AddTestCase(TestCase("Prefilter_Constant_1x1_Roughness1", TestIBL_Prefilter_Constant1));
+    suite->AddTestCase(TestCase("PrefilterViewsAcrossPoolGrowth", TestPrefilterViewsAcrossPoolGrowth));
     TestRunner::RegisterTestSuite(suite);
 }
 
 int main() {
     RegisterVulkanIBL_IrradPrefilter_Tests();
     const TestStats stats = TestRunner::RunAllSuites();
-    return (stats.failedTests == 0 && stats.skippedTests == 0 && stats.totalTests == 5) ? 0 : 1;
+    return (stats.failedTests == 0 && stats.skippedTests == 0 && stats.totalTests == 6) ? 0 : 1;
 }
 
 #else // ENABLE_VULKAN undefined

@@ -1156,7 +1156,9 @@ ResourceHandle D3D12Device::createTextureViewImpl(const TextureViewDesc& desc) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] texture view: src unresolved" << std::endl;
         return handles::INVALID_RESOURCE;
     }
-    const u32 id = textureAllocator_.Allocate(*this, desc, *src);
+    // Keep the native resource and descriptor across texture pool growth.
+    d3d12::D3D12Texture alias(*this, desc, *src);
+    const u32 id = textureAllocator_.Allocate(std::move(alias));
     d3d12::D3D12Texture* view = textureAllocator_.Get(id);
     if (!view || !view->Initialize()) {
         PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] texture view init failed" << std::endl;

@@ -10,6 +10,8 @@
  */
 
 #include "VulkanTexture.h"
+
+#include <utility>
 #include "VulkanDevice.h"
 
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
@@ -116,13 +118,13 @@ VulkanTexture::VulkanTexture(VulkanDevice& device, const TextureViewDesc& viewDe
           src.texDesc_.memoryUsage,
           0,
           "TextureView")),
+      vkImage_(src.vkImage_),
       vkUsageFlags_(src.vkUsageFlags_),
       vkFormat_(vulkan::ToVkFormat(viewDesc.format != DataFormat::Unknown ? viewDesc.format
                                                                           : src.texDesc_.format)),
       ownsImage_(false),
       isView_(true),
       viewDesc_(viewDesc),
-      viewSrc_(&src),
       currentLayout_(src.currentLayout_),
       texDesc_(src.texDesc_)
 {
@@ -142,13 +144,14 @@ VulkanTexture::VulkanTexture(VulkanTexture&& other) noexcept
       allocation_(other.allocation_),
       mappedPtr_(other.mappedPtr_),
       warnedMapUnsupported_(other.warnedMapUnsupported_),
+      layerViews_(std::move(other.layerViews_)),
+      arrayView_(std::exchange(other.arrayView_, VK_NULL_HANDLE)),
       vkUsageFlags_(other.vkUsageFlags_),
       vkFormat_(other.vkFormat_),
       ownsImage_(other.ownsImage_),
       wrappedImage_(other.wrappedImage_),
       isView_(other.isView_),
       viewDesc_(other.viewDesc_),
-      viewSrc_(other.viewSrc_),
       currentLayout_(other.currentLayout_),
       mipLayouts_(std::move(other.mipLayouts_)),
       texDesc_(std::move(other.texDesc_)) {
@@ -159,7 +162,6 @@ VulkanTexture::VulkanTexture(VulkanTexture&& other) noexcept
     other.ownsImage_ = true;
     other.wrappedImage_ = VK_NULL_HANDLE;
     other.isView_ = false;
-    other.viewSrc_ = nullptr;
     other.currentLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
@@ -172,13 +174,14 @@ VulkanTexture& VulkanTexture::operator=(VulkanTexture&& other) noexcept {
         allocation_ = other.allocation_;
         mappedPtr_ = other.mappedPtr_;
         warnedMapUnsupported_ = other.warnedMapUnsupported_;
+        layerViews_ = std::move(other.layerViews_);
+        arrayView_ = std::exchange(other.arrayView_, VK_NULL_HANDLE);
         vkUsageFlags_ = other.vkUsageFlags_;
         vkFormat_ = other.vkFormat_;
         ownsImage_ = other.ownsImage_;
         wrappedImage_ = other.wrappedImage_;
         isView_ = other.isView_;
         viewDesc_ = other.viewDesc_;
-        viewSrc_ = other.viewSrc_;
         currentLayout_ = other.currentLayout_;
         mipLayouts_ = std::move(other.mipLayouts_);
         texDesc_ = std::move(other.texDesc_);
@@ -189,7 +192,6 @@ VulkanTexture& VulkanTexture::operator=(VulkanTexture&& other) noexcept {
         other.ownsImage_ = true;
         other.wrappedImage_ = VK_NULL_HANDLE;
         other.isView_ = false;
-        other.viewSrc_ = nullptr;
         other.currentLayout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     }
     return *this;
@@ -212,13 +214,12 @@ bool VulkanTexture::Initialize() {
     }
 
     // === Phase 5 view 模式:alias source VkImage + 创建受限 subresourceRange view ===
-    // 不拥有 VkImage(viewSrc_ 拥有),只创建+拥有 VkImageView。
+    // 不拥有 VkImage(源纹理拥有),只创建+拥有 VkImageView。
     if (isView_) {
-        if (!viewSrc_ || viewSrc_->vkImage_ == VK_NULL_HANDLE) {
+        if (vkImage_ == VK_NULL_HANDLE) {
             PRIMAL_LOG_STREAM(Error, "RHI") << "[VulkanTexture] view mode but source image is null" << std::endl;
             return false;
         }
-        vkImage_ = viewSrc_->vkImage_;  // 别名,不拥有
 
         VkImageViewCreateInfo vci{};
         vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -258,8 +259,6 @@ bool VulkanTexture::Initialize() {
             vkImage_ = VK_NULL_HANDLE;
             return false;
         }
-        // Layout 跟随 source(view 共享同一 VkImage;layout 是 image-wide)。
-        currentLayout_ = viewSrc_->currentLayout_;
         state_ = ResourceState::Ready;
         return true;
     }

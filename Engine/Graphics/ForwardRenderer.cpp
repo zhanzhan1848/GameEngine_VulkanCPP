@@ -754,8 +754,10 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
         writes.push_back(writeFrame);
         writes.push_back(writeLight);
 
+        // Descriptor writes borrow their image info until UpdateDescriptorSets returns.
+        rhi::DescriptorImageInfo shadowInfo{};
+        rhi::DescriptorImageInfo shadowCubeOrSamplerInfo{};
         if (!bypassProd) {
-            rhi::DescriptorImageInfo shadowInfo;
             shadowInfo.sampler = shadowMapSampler_;
             shadowInfo.imageView = shadowMapArray_;
             shadowInfo.imageLayout = rhi::ResourceState::ShaderResource;
@@ -768,41 +770,38 @@ bool ForwardRenderer::Initialize(rhi::RHIDeviceBase* device) {
             writeShadow.imageInfo = &shadowInfo;
             writes.push_back(writeShadow);
 
-            rhi::DescriptorImageInfo shadowCubeInfo;
-            shadowCubeInfo.sampler = shadowCubeMapSampler_;
-            shadowCubeInfo.imageView = shadowCubeMapArray_;
-            shadowCubeInfo.imageLayout = rhi::ResourceState::ShaderResource;
+            shadowCubeOrSamplerInfo.sampler = shadowCubeMapSampler_;
+            shadowCubeOrSamplerInfo.imageView = shadowCubeMapArray_;
+            shadowCubeOrSamplerInfo.imageLayout = rhi::ResourceState::ShaderResource;
 
             rhi::WriteDescriptorSet writeShadowCube;
             writeShadowCube.dstSet = globalDescriptorSets_[i];
             writeShadowCube.dstBinding = SHADOW_CUBE_MAP_BINDING;
             writeShadowCube.descriptorType = rhi::DescriptorType::CombinedImageSampler;
             writeShadowCube.descriptorCount = 1;
-            writeShadowCube.imageInfo = &shadowCubeInfo;
+            writeShadowCube.imageInfo = &shadowCubeOrSamplerInfo;
             writes.push_back(writeShadowCube);
         } else {
             // Dawn/Vulkan: write separate shadow depth texture + sampler bindings
-            rhi::DescriptorImageInfo shadowTexInfo;
-            shadowTexInfo.imageView = shadowDepthBuffer_;
-            shadowTexInfo.imageLayout = rhi::ResourceState::ShaderResource;
+            shadowInfo.imageView = shadowDepthBuffer_;
+            shadowInfo.imageLayout = rhi::ResourceState::ShaderResource;
 
             rhi::WriteDescriptorSet writeShadowTex;
             writeShadowTex.dstSet = globalDescriptorSets_[i];
             writeShadowTex.dstBinding = SHADOW_MAP_BINDING;
             writeShadowTex.descriptorType = rhi::DescriptorType::SampledDepthImage;
             writeShadowTex.descriptorCount = 1;
-            writeShadowTex.imageInfo = &shadowTexInfo;
+            writeShadowTex.imageInfo = &shadowInfo;
             writes.push_back(writeShadowTex);
 
-            rhi::DescriptorImageInfo shadowSampInfo;
-            shadowSampInfo.sampler = shadowMapSampler_;
+            shadowCubeOrSamplerInfo.sampler = shadowMapSampler_;
 
             rhi::WriteDescriptorSet writeShadowSamp;
             writeShadowSamp.dstSet = globalDescriptorSets_[i];
             writeShadowSamp.dstBinding = SHADOW_CUBE_MAP_BINDING;
             writeShadowSamp.descriptorType = rhi::DescriptorType::Sampler;
             writeShadowSamp.descriptorCount = 1;
-            writeShadowSamp.imageInfo = &shadowSampInfo;
+            writeShadowSamp.imageInfo = &shadowCubeOrSamplerInfo;
             writes.push_back(writeShadowSamp);
         }
 
