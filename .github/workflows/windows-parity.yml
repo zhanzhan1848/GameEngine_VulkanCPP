@@ -449,8 +449,25 @@ jobs:
 
       - name: Upload f350 parity evidence
         if: always()
+        id: f350_upload
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
+          name: f350-parity
+          path: |
+            ci-out/f350/*.ppm
+            ci-out/f350/*.png
+            ci-out/f350/*.json
+            ci-out/f350/*.log
+            ci-out/f350/*.md
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Retry upload f350 parity evidence
+        if: always() && steps.f350_upload.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
           name: f350-parity
           path: |
             ci-out/f350/*.ppm
@@ -575,8 +592,22 @@ jobs:
 
       - name: Upload build log (failure)
         if: failure()
+        id: build_log_upload
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
+          name: build-winparity-log
+          path: |
+            msbuild-winparity.log
+            ctest-unit.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Retry upload build log (failure)
+        if: always() && steps.build_log_upload.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          overwrite: true
           name: build-winparity-log
           path: |
             msbuild-winparity.log
