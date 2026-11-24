@@ -110,8 +110,11 @@ bool EnvironmentVisibilityModule::UploadOwnGeometry(u32 frame) {
         << " source_digest=" << experimental_source_digest_ << " bytes=" << sizes[0] << "," << sizes[1] << "," << sizes[2] << "," << sizes[3];
     return ok;
 }
+bool EnvironmentVisibilityModule::SupportsPlatform(RHIPlatform platform) {
+    return platform == RHIPlatform::Vulkan || platform == RHIPlatform::Metal || platform == RHIPlatform::D3D12;
+}
 bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle trace,ShaderHandle resolve,u32 w,u32 h,u32 targetW,u32 targetH) {
-    if(!device||(device->GetPlatform()!=RHIPlatform::Vulkan && device->GetPlatform()!=RHIPlatform::Metal)||!w||!h||!targetW||!targetH||trace==handles::INVALID_SHADER||resolve==handles::INVALID_SHADER)return false;
+    if(!device||!SupportsPlatform(device->GetPlatform())||!w||!h||!targetW||!targetH||trace==handles::INVALID_SHADER||resolve==handles::INVALID_SHADER)return false;
     if(device_)Shutdown();
     device_=device;width_=w;height_=h;target_width_=targetW;target_height_=targetH;
     const char* frameAudit=std::getenv("PRIMAL_PAIR_FRAME_AUDIT");frame_audit_enabled_=frameAudit && std::strcmp(frameAudit,"1")==0;
@@ -255,7 +258,7 @@ EnvironmentVisibilityOutputs EnvironmentVisibilityModule::AddPasses(RenderGraph&
     if(!IsInitialized()||original.depth==handles::INVALID_RESOURCE||original.normal==handles::INVALID_RESOURCE||original.orm==handles::INVALID_RESOURCE||
        !original.depth_rg.IsValid()||!original.normal_rg.IsValid()||!original.orm_rg.IsValid())return out;
     const u32 slot=original.current_buffer_index%3;
-    if(device_->GetPlatform()!=RHIPlatform::Metal && original.geometry_still_current &&
+    if(device_->GetPlatform()==RHIPlatform::Vulkan && original.geometry_still_current &&
        !experimental_sah::TryConsumeSlot(device_->FrameSlotCompletions(),slot,experimental_consumed_serials_)) {
         PRIMAL_LOG_STREAM(Error,"Render") << "[EnvironmentVisibility] experimental_sah_slot_rejected slot=" << slot;
         return out;
@@ -458,6 +461,14 @@ EnvironmentVisibilityOutputs EnvironmentVisibilityModule::AddPasses(RenderGraph&
                 const u32 w=phase?target_width_:(target_width_+1)/2,h=phase?target_height_:(target_height_+1)/2;
                 const u32 localY=useWorkgroup?4u:8u,gx=workgroup_experiment::Groups(w,8),gy=workgroup_experiment::Groups(h,localY);
                 cmd->Dispatch(gx,gy,1);
+                if (inputs.frame_index == 350 && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+                    PRIMAL_LOG_STREAM(Info, "Render") << "[F350EnvVisibility] phase=" << phase << " slot=" << slot
+                        << " valid_geometry=" << actual.policy[0] << " policy_flags=" << actual.policy[1]
+                        << " cb_mapped=" << (parameterBuffer == cb_[phase][slot]) << " raster_jitter_valid=" << jitterValid
+                        << " geometry=" << buffers[1].buffer << "," << buffers[2].buffer << ","
+                        << buffers[3].buffer << "," << buffers[4].buffer << " groups=" << gx << "x" << gy
+                        << " output=" << tex[3] << std::endl;
+                }
                 if(!phase){hybrid_receipt_.requested=hybrid_env_requested_;hybrid_receipt_.qualified=useHybrid;hybrid_receipt_.actual=useHybrid;hybrid_receipt_.dispatched=true;hybrid_receipt_.slot=slot;hybrid_receipt_.shader=useHybrid?hybrid_shader_hash_:(usePair?pair_shader_hash_:(useWorkgroup?frame_audit_workgroup_hash_:frame_audit_trace_hash_));if(useHybrid){hybrid_receipt_.field_hash=environment_hybrid::kFieldFNV;hybrid_receipt_.field_buffer=hybrid_buffers_[slot];hybrid_receipt_.frame_completion=hybridFrameSerial;hybrid_receipt_.binding=inputs.hybrid_binding;}}
                 if(!phase)workgroup_receipt_={workgroup_requested_,useWorkgroup?32u:0u,8,localY,gx,gy,w,h,slot,0,0,true};
                 if(!phase){pair_receipt_={pair_env_requested_?1u:0u,usePair?1u:0u,8,localY,gx,gy,w,h,slot,0,0,true};pair_receipt_.shader_fnv1a64=usePair?pair_shader_hash_:0;for(u32 i=0;i<4;++i)pair_receipt_.buffers[i]=buffers[i+1].buffer;if(usePair)workgroup_receipt_.shader_fnv1a64=pair_shader_hash_;if(frame_audit_enabled_){const bool cbValid=parameterBuffer==cb_[phase][slot];pair_policy0_=cbValid?actual.policy[0]:0u;pair_policy1_=cbValid?actual.policy[1]:0x80000000u;pair_receipt_.source_qualified=cbValid && pair_policy0_==1u && !(pair_policy1_&0x80000000u) && !inputs.legacy_unoccluded;pair_receipt_.shader_fnv1a64=useHybrid?hybrid_shader_hash_:(usePair?pair_shader_hash_:(useWorkgroup?frame_audit_workgroup_hash_:frame_audit_trace_hash_));}}

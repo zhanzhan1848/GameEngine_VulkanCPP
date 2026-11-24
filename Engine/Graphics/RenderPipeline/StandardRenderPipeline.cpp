@@ -1033,9 +1033,7 @@ static bool EnvironmentVisibilityTemporal() {
 
 static bool EnvironmentVisibilityRequested(rhi::RHIDeviceBase* device) {
     const char* value=std::getenv("PRIMAL_IBL_VISIBILITY");
-    return device && (device->GetPlatform()==rhi::RHIPlatform::Vulkan ||
-                      device->GetPlatform()==rhi::RHIPlatform::Metal ||
-                      device->GetPlatform()==rhi::RHIPlatform::D3D12) &&
+    return device && EnvironmentVisibilityModule::SupportsPlatform(device->GetPlatform()) &&
         !(value && std::strcmp(value,"0")==0);
 }
 
@@ -1043,7 +1041,10 @@ EnvironmentVisibilityOutputs StandardRenderPipeline::AddEnvironmentVisibility(
     rendergraph::RenderGraph& graph,nanite::GPUDrivenDrawPipeline& gpuDraw,u32 slot,rendergraph::RGResourceHandle depthRG,rendergraph::RGResourceHandle normalRG,rendergraph::RGResourceHandle ormRG) {
     EnvironmentVisibilityOutputs result{};
     if(!EnvironmentVisibilityRequested(device_) || !environment_visibility_module_ ||
-       ibl_prefilter_==rhi::handles::INVALID_RESOURCE) return result;
+       !environment_visibility_module_->IsInitialized() || ibl_prefilter_==rhi::handles::INVALID_RESOURCE) return result;
+    const bool d3d12 = device_->GetPlatform() == rhi::RHIPlatform::D3D12;
+    // The same slot owns the uploaded geometry, constants and mutable descriptor sets.
+    if (d3d12 && !device_->FrameSlotCompletions().CanReuse(slot, 0)) return result;
     EnvironmentVisibilityInputs inputs{};
     const char* visibilityMode=std::getenv("PRIMAL_IBL_VISIBILITY");
     inputs.legacy_unoccluded=visibilityMode && std::strcmp(visibilityMode,"unoccluded")==0;
@@ -1054,7 +1055,7 @@ EnvironmentVisibilityOutputs StandardRenderPipeline::AddEnvironmentVisibility(
     inputs.normal_rg=normalRG.IsValid()?normalRG:graph.ImportResource("EnvironmentVisibility_Normal",inputs.normal);
     inputs.orm_rg=ormRG.IsValid()?ormRG:graph.ImportResource("EnvironmentVisibility_ORM",inputs.orm);
     const char* sahExperiment=std::getenv("PRIMAL_EXPERIMENT_ENV_SAH");
-    const bool useExperimentalSAH=sahExperiment && std::strcmp(sahExperiment,"1")==0 && !inputs.legacy_unoccluded;
+    const bool useExperimentalSAH=!d3d12 && sahExperiment && std::strcmp(sahExperiment,"1")==0 && !inputs.legacy_unoccluded;
     if(useExperimentalSAH) {
         // Force the ordinary fallback cache to re-establish its own scene if
         // the opt-in is removed in a process that changes its environment.
@@ -1125,17 +1126,21 @@ EnvironmentVisibilityOutputs StandardRenderPipeline::AddEnvironmentVisibility(
             environment_geometry_digest_=digest;
         }
     }
-    if(device_->GetPlatform()==RHIPlatform::Metal && surface_cache_pass_) {
+    if((device_->GetPlatform()==RHIPlatform::Metal || d3d12) && surface_cache_pass_) {
         auto* sc=surface_cache_pass_.get();
         const auto view=sc->GetGeometryWitnessView(slot);
         inputs.geometry_ready &= view.ready && view.source_digest!=0;
         for(u32 i=0;i<4;++i)inputs.geometry_ready &= inputs.geometry[i]==view.buffers[i];
-        inputs.geometry_still_current=[this,sc,view,slot] {
+        inputs.geometry_still_current=[this,sc,view,slot,d3d12] {
             if(surface_cache_pass_.get()!=sc || !view.ready || !view.source_digest)return false;
             const auto now=sc->GetGeometryWitnessView(slot);
             if(!now.ready || now.slot!=view.slot || now.scene_epoch!=view.scene_epoch ||
                 now.slot_epoch!=view.slot_epoch || now.source_digest!=view.source_digest)return false;
-            for(u32 i=0;i<4;++i)if(now.buffers[i]!=view.buffers[i] || now.sizes[i]!=view.sizes[i])return false;
+            for(u32 i=0;i<4;++i) {
+                if(now.buffers[i]!=view.buffers[i] || now.sizes[i]!=view.sizes[i])return false;
+                u64 bytes=0;
+                if(d3d12 && (!device_->GetBufferByteSize(now.buffers[i],bytes) || bytes!=now.sizes[i]))return false;
+            }
             return true;
         };
     }
@@ -6201,15 +6206,23 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     ApplyConfigChanges();
 
     u32 cbIdx = bufferIndex;
+    // Render-space coordinates. The last two cover bright regions of the frozen
+    // GI-off image (sky and a sunlit surface); the first three also sample shade.
+    static constexpr u32 deferredPixels[][2] = {
+        {300, 40}, {1520, 1310}, {1964, 594}, {1200, 10}, {2160, 900}
+    };
+    constexpr u32 samplesPerMrt = std::size(deferredPixels);
+    constexpr u32 samplesPerPhase = 2 * samplesPerMrt;
+    constexpr u32 sampleStride = 512; // D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT
     // A single completed submission owns the sparse copies. Consume before this frame records.
     if (deferred_samples_ != handles::INVALID_RESOURCE) {
         device_->WaitIdle();
         if (auto* bytes = static_cast<const u8*>(device_->MapBuffer(deferred_samples_))) {
-            for (u32 i = 0; i < 12; ++i) {
-                const auto* rgba = reinterpret_cast<const u16*>(bytes + 512 * i);
+            for (u32 i = 0; i < 2 * samplesPerPhase; ++i) {
+                const auto* rgba = reinterpret_cast<const u16*>(bytes + sampleStride * i);
                 PRIMAL_LOG_STREAM(Info, "Render") << "[DeferredSamples] frame=" << frameCount_ - 1
-                    << " phase=" << (i < 6 ? "after-draw" : "before-fusion")
-                    << " mrt=" << ((i / 3) % 2) << " point=" << i % 3
+                    << " phase=" << (i < samplesPerPhase ? "after-draw" : "before-fusion")
+                    << " mrt=" << ((i / samplesPerMrt) % 2) << " point=" << i % samplesPerMrt
                     << " rgba16bits=" << rgba[0] << "," << rgba[1] << "," << rgba[2] << "," << rgba[3]
                     << std::endl;
             }
@@ -6792,7 +6805,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         if (sampleDeferred && frameCount_ == 350 && (device_->GetPlatform() == RHIPlatform::D3D12 ||
                                                      device_->GetPlatform() == RHIPlatform::Vulkan)) {
             BufferDesc desc{};
-            desc.size = 12 * 512;
+            desc.size = 2 * samplesPerPhase * sampleStride;
             desc.memoryUsage = GPUMemoryUsage::Readback;
             desc.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
             deferred_samples_ = device_->CreateBuffer(desc);
@@ -6808,19 +6821,18 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     d.mrt[1] = b.Read(deferredOut.environment_specular_rg, ResourceState::CopySource);
                 },
                 [this, cbIdx, beforeFusion](const Samples& d, RenderGraphContext& ctx) {
-                    constexpr s32 pixels[3][2] = {{300,40}, {1520,1310}, {1964,594}};
                     for (u32 mrt = 0; mrt < 2; ++mrt) {
                         auto* res = ctx.graph->GetResource(d.mrt[mrt]);
                         if (!res) continue;
                         auto tex = res->GetPhysicalHandle();
                         u32 w = 0, h = 0;
                         if (!device_->GetTextureSize(tex, w, h) || !w || !h) continue;
-                        BufferTextureCopyRegion regions[3]{};
-                        for (u32 i = 0; i < 3; ++i) {
+                        BufferTextureCopyRegion regions[samplesPerMrt]{};
+                        for (u32 i = 0; i < samplesPerMrt; ++i) {
                             auto& region = regions[i];
-                            region.bufferOffset = 512u * ((beforeFusion ? 6 : 0) + 3 * mrt + i);
+                            region.bufferOffset = sampleStride * ((beforeFusion ? samplesPerPhase : 0) + samplesPerMrt * mrt + i);
                             region.imageSubresource.layerCount = 1;
-                            region.imageOffset = {s32(w * pixels[i][0] / 2560), s32(h * pixels[i][1] / 1440), 0};
+                            region.imageOffset = {s32(w * deferredPixels[i][0] / 2560), s32(h * deferredPixels[i][1] / 1440), 0};
                             region.imageExtent = {1,1,1};
                         }
                         PRIMAL_LOG_STREAM(Info, "Render") << "[DeferredSamples] frame=" << frameCount_
@@ -6828,7 +6840,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                             << " mrt=" << mrt << " tex=" << tex << " mip=0 layer=0 pso="
                             << deferred_module_->GetPipeline() << " layout=" << deferred_module_->GetPipelineLayout()
                             << " set=" << deferred_module_->GetDescriptorSet(cbIdx) << std::endl;
-                        ctx.cmdBuffer->CopyTextureToBuffer(tex, deferred_samples_, regions, 3);
+                        ctx.cmdBuffer->CopyTextureToBuffer(tex, deferred_samples_, regions, samplesPerMrt);
                     }
                 });
         };
