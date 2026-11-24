@@ -1213,6 +1213,16 @@ void StandardRenderPipeline::ConfigureGatherGeometry(GIGatherInputs& inputs,u32 
             ddgi->GetMeasuredGeometrySource(i)!=current.buffers[i])return false;
         return true;
     };
+    if (inputs.frame_index == 350 && ddgi && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+        PRIMAL_LOG_STREAM(Info, "Render") << "[F350GI] slot=" << view.slot
+            << " source_epoch=" << view.scene_epoch << " slot_epoch=" << view.slot_epoch
+            << " digest=" << view.source_digest << " published=" << view.ready
+            << " gather_source_matches=" << inputs.geometry_still_current()
+            << " uses_measured=" << ddgi->UsesMeasuredVisibility()
+            << " origins=" << ddgi->GetRelocatedOriginsBuffer()
+            << " source_bytes=" << view.sizes[0] << "," << view.sizes[1]
+            << "," << view.sizes[2] << "," << view.sizes[3] << std::endl;
+    }
 }
 
 void StandardRenderPipeline::SetIBLResources(rhi::ResourceHandle irradiance,
@@ -6778,8 +6788,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 float(vol.ProbeCounts[0] * vol.ProbeCounts[1] * vol.ProbeCounts[2])};
         }
         auto deferredOut = deferred_module_->AddPasses(graph, deferredIn);
-        static const bool sampleDeferred = std::getenv("PRIMAL_D3D12_DEFERRED_SAMPLES") != nullptr;
-        if (sampleDeferred && frameCount_ == 350 && device_->GetPlatform() == RHIPlatform::D3D12) {
+        static const bool sampleDeferred = std::getenv("PRIMAL_DEFERRED_SAMPLES") != nullptr;
+        if (sampleDeferred && frameCount_ == 350 && (device_->GetPlatform() == RHIPlatform::D3D12 ||
+                                                     device_->GetPlatform() == RHIPlatform::Vulkan)) {
             BufferDesc desc{};
             desc.size = 12 * 512;
             desc.memoryUsage = GPUMemoryUsage::Readback;

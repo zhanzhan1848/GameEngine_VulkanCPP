@@ -134,7 +134,8 @@ SHADER_LIST = [
     # -----------------------------------------------------------------------
     # tvsrg SetShaderHandles 注入 13 件 + srp SelfLoad 同源：
     ("Forward/DeferredLighting.vert", "main"),
-    ("Forward/DeferredLighting.frag", "main"),
+    ("Forward/DeferredLighting.frag", "main", "Forward/DeferredLighting.frag",
+     ["-DPRIMAL_D3D12_DEFERRED_DIAGNOSTICS=1"]),
     ("Forward/Blit.vert", "main"),
     ("Forward/Blit.frag", "main"),
     ("ShadowFilter.comp", "main", "ShadowFilter"),

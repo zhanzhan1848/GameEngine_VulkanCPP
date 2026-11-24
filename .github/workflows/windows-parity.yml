@@ -357,6 +357,8 @@ jobs:
           exit 0
 
       - name: Four f350 capture groups (watchdogged, never fails the step)
+        env:
+          PARITY_HISTORICAL_ABLATIONS: ${{ vars.PRIMAL_PARITY_HISTORICAL_ABLATIONS }}
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force ci-out, ci-out\harness, ci-out\f350 | Out-Null
@@ -384,38 +386,15 @@ jobs:
           }
           Write-Output "[f350] exe = $exe"
           Write-Output $exe | Out-File -FilePath ci-out\exe-path.txt -Encoding utf8
-          # R29：诊断消融组（TAA_OFF 直通链，写独立 diag_gates.json 不进门禁）
-          $env:PRIMAL_F350_TAAOFF_DIAG = '1'
-          # R33：因果对分组（PRIMAL_SHADOW_RENDER_OFF 跳过阴影 GPU 渲染，
-          # 判 UAV 写全灭是否由阴影 GPU 路径插入引起）
-          $env:PRIMAL_F350_SHADOW_RENDER_OFF_DIAG = '1'
-          # R36b：时序判别组（BLACK_STAGE_FRAME=50——SPGI/blit 在 frame 50
-          # 是否有内容：中途死亡 vs 从未工作）
-          $env:PRIMAL_F350_FRAME50_DUMP_DIAG = '1'
-          # R48：deferred 采样链拆分判别（PRIMAL_LIGHTING_DEBUG=albedo →
-          # deferred_out=albedo 采样；=shadow → shadowVisibility。R46 后
-          # shadow_vis 复活而 deferred_out 未跟随的分流面）
-          $env:PRIMAL_F350_LIGHTING_ALBEDO_DIAG = '1'
-          $env:PRIMAL_F350_LIGHTING_SHADOW_DIAG = '1'
-          # R49：Load 对照（texelFetch 绕过采样器——采样器死 vs SRV 死）
-          $env:PRIMAL_F350_LIGHTING_ALBEDOLOAD_DIAG = '1'
-          $env:PRIMAL_F350_LIGHTING_SHADOWLOAD_DIAG = '1'
-          # R50：零依赖档（z=8 常数 / z=9 屏幕梯度）——fragment 是否产生过
+          # Keep the full historical ablation suite available on demand.
+          $historical = [string]::Equals($env:PARITY_HISTORICAL_ABLATIONS, '1')
+          foreach ($group in @('TAAOFF','SHADOW_RENDER_OFF','FRAME50_DUMP','LIGHTING_ALBEDO',
+              'LIGHTING_SHADOW','LIGHTING_ALBEDOLOAD','LIGHTING_SHADOWLOAD','LIGHTING_GRADIENT','MINENV')) {
+            Set-Item "Env:PRIMAL_F350_${group}_DIAG" ([int]$historical).ToString()
+          }
           $env:PRIMAL_F350_LIGHTING_CONST_DIAG = '1'
-          $env:PRIMAL_F350_LIGHTING_GRADIENT_DIAG = '1'
           $env:PRIMAL_F350_DEFERRED_SAMPLES = '1'
-          # R66：minenv 对分三组（GPU 1.wpix 最小 env 会话渲染正常 vs
-          # canonical 全集全黑——嫌疑=附加旋钮 DDGI 族/SC/ALBEDO_MIPS 在
-          # D3D12 上搞死中段资源；base 全关 / ddgi 仅 DDGI 族 / scmip 仅
-          # SC+MIPS，写 diag_gates.json 不进门禁）
-          $env:PRIMAL_F350_MINENV_DIAG = '1'
-          # R73：pixlike 判别组——R72 后唯一主矛盾=层2 deferred_out 直射零
-          # （CI 微光态 6.94dB）而用户 PIX 会话直射完整；pixlike 逐项复制
-          # 用户会话 env（摘模型/切线帧/诊断件/DDGI 族/SC/MIPS，12 帧）
-          # 一刀切分剩余嫌疑
           $env:PRIMAL_F350_PIXLIKE_DIAG = '1'
-          # R61：GBV 组——R62 实测 1060 上 900s watchdog 第一帧仍无法完成
-          # （GBV 校验过慢/挂），默认关闭；runner SDK/驱动变化后改回 '1'
           $env:PRIMAL_F350_GBV_DIAG = '0'
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350
           exit 0

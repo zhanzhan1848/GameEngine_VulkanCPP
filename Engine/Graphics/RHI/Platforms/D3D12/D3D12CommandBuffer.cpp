@@ -303,20 +303,15 @@ bool D3D12CommandBufferImpl::waitForCompletionImpl() {
 // 判据按资源真实 desc.Flags（native GetDesc，含 D3D12Buffer/D3D12Texture
 // 创建期推导），不依赖 RHI usage 声明。
 namespace {
-bool StateBitsExceedResourceFlags(const D3D12_RESOURCE_DESC& desc, u32 bits) {
-    if ((bits & kD3D12ResourceState_UnorderedAccess) != 0
-        && (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0) {
-        return true;
-    }
-    if ((bits & kD3D12ResourceState_RenderTarget) != 0
-        && (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0) {
-        return true;
-    }
-    if ((bits & (kD3D12ResourceState_DepthWrite | kD3D12ResourceState_DepthRead)) != 0
-        && (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) == 0) {
-        return true;
-    }
-    return false;
+u32 UnsupportedStateBits(D3D12_RESOURCE_FLAGS flags) {
+    u32 bits = 0;
+    if (!(flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
+        bits |= kD3D12ResourceState_UnorderedAccess;
+    if (!(flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET))
+        bits |= kD3D12ResourceState_RenderTarget;
+    if (!(flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL))
+        bits |= kD3D12ResourceState_DepthWrite | kD3D12ResourceState_DepthRead;
+    return bits;
 }
 
 // R22：被丢弃 op 的一次性留痕（key=资源指针+双侧状态位）+ 全局封顶 32——
@@ -364,16 +359,14 @@ void D3D12CommandBufferImpl::TransitionResource(const D3D12SubresourceKey& key,
                                                 ID3D12Resource* resource) {
     if (!resource || !commandList_) return;
     auto& tracker = static_cast<D3D12Device&>(device_).GetStateTracker();
-    u32 targetBits = 0;
-    if (!ToD3D12ResourceStates(target, targetBits)) return;
-    if (StateBitsExceedResourceFlags(resource->GetDesc(), targetBits)) {
+    utl::vector<D3D12ResourceBarrierOp> ops;
+    if (!tracker.TransitionWithResourceFlags(key, target, UnsupportedStateBits(resource->GetDesc().Flags), ops)) {
         ResourceState before = ResourceState::Unknown;
         tracker.QueryState(key, before);
-        ReportDroppedBarrierOp(resource, ToD3D12ResourceStatesOrCommon(before), targetBits);
+        ReportDroppedBarrierOp(resource, ToD3D12ResourceStatesOrCommon(before),
+                               ToD3D12ResourceStatesOrCommon(target));
         return;
     }
-    // Transition also records implicit promotions. Validate before changing any subresource.
-    const auto ops = tracker.Transition(key, target);
     D3D12_RESOURCE_BARRIER barriers[8];
     u32 count = 0;
     for (const D3D12ResourceBarrierOp& op : ops) {

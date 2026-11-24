@@ -13,13 +13,7 @@ Gates (both must hold for exit 0):
      (byte-identical / Infinity counts as pass).
 
 The 43.5 dB threshold is the frozen noise-floor gate from the parity rounds.
-DO NOT lower it: as of r11 the Windows Vulkan GI-on f350 measures 34.43 dB
-(gather-resolution family residual) and D3D12 produces no frames at all -
-this workflow must report those as FAIL until the engine actually reaches
-parity. Advisory bands (for humans reading the summary, not gates):
-  >= 43.5  pass (parity noise floor)
-  31.8-43.5 SDF root cause cleared; gather-resolution residual (r11 state)
-  < 31.8   different fork (missing-SDF / global brightness family)
+The same-host Vulkan comparisons are diagnostic and do not affect this gate.
 
 ASCII-only source; Python 3.8+ standard library only.
 """
@@ -109,16 +103,14 @@ def triptych(ref_path, win_path, out_path):
     w2, h2, b = read_p6(win_path)
     if (w, h) != (w2, h2):
         raise SystemExit("size mismatch %dx%d vs %dx%d" % (w, h, w2, h2))
-    n = len(a)
-    out = bytearray(n * 3)
-    for k in range(n):
-        out[k] = a[k]
-        out[n + k] = b[k]
-        d = a[k] - b[k]
-        if d < 0:
-            d = -d
-        v = d * DIFF_GAIN
-        out[2 * n + k] = 255 if v > 255 else v
+    stride = w * 3
+    out = bytearray()
+    for y in range(h):
+        start = y * stride
+        ref_row, win_row = a[start:start + stride], b[start:start + stride]
+        out.extend(ref_row)
+        out.extend(win_row)
+        out.extend(min(255, DIFF_GAIN * abs(x - z)) for x, z in zip(ref_row, win_row))
     write_png(out_path, w * 3, h, bytes(out))
 
 
@@ -226,6 +218,7 @@ def main():
             row["triptych"] = "triptych_%s.png" % name
         except SystemExit as exc:
             row["triptych"] = "error: %s" % exc
+        rows.append(row)
         print("[parity] %s: PSNR=%s SSIM=%s -> %s" %
               (name, psnr, row["ssim"], row["gate"]))
 
@@ -253,6 +246,24 @@ def main():
         lines.append("**Overall f350 gate: FAIL.**")
     else:
         lines.append("**Overall f350 gate: PASS.**")
+    lines.append("")
+    by_group = {g["group"]: g for g in gates}
+    lines.extend(["### D3D12 vs Vulkan on the Windows runner", "",
+                  "| GI | PSNR (dB) | SSIM |", "|---|---:|---:|"])
+    for mode in ("gion", "gioff"):
+        groups = [by_group[api + "-" + mode] for api in ("vulkan", "d3d12")]
+        paths = [os.path.join(ppm_dir, g["ppm"]) for g in groups]
+        label = "On" if mode == "gion" else "Off"
+        if all(g.get("ppm_exists") and os.path.isfile(path) for g, path in zip(groups, paths)):
+            dst = os.path.join(args.out, "compare_windows_%s.json" % mode)
+            proc = subprocess.run([sys.executable, compare, *paths, "--json", dst], capture_output=True)
+            if proc.returncode == 0:
+                with open(dst, encoding="utf-8") as fh:
+                    pair = json.load(fh)["pairs"][0]
+                lines.append("| %s | %.4f | %.6f |" %
+                             (label, pair["psnr_rgb_db"], pair["ssim_luma_8x8block"]))
+                continue
+        lines.append("| %s | unavailable | unavailable |" % label)
     lines.append("")
     lines.append("Triptychs (ref | windows | 8x diff heatmap) are in the "
                  "`f350-parity` artifact.")

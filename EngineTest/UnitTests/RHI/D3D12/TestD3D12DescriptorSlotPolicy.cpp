@@ -556,8 +556,21 @@ TestResult TestSamplerSharingRebuildOncePerSlotCycle() {
     return TestResult::Passed;
 }
 
+TestResult TestConstantBufferViewRange() {
+    TEST_ASSERT(ConstantBufferViewSize(544, 768, 0, ~u64(0)) == 768, "whole Deferred SceneData");
+    TEST_ASSERT(ConstantBufferViewSize(128, 256, 0, ~u64(0)) == 256, "whole Deferred ViewData");
+    TEST_ASSERT(ConstantBufferViewSize(544, 768, 512, 0) == 256, "offset plus padded tail");
+    TEST_ASSERT(ConstantBufferViewSize(1048576, 1048576, 256, 128) == 256, "ring slice");
+    TEST_ASSERT(ConstantBufferViewSize(1048576, 1048576, 256, ~u64(0)) == 65536, "D3D12 maximum CBV size");
+    TEST_ASSERT(ConstantBufferViewSize(544, 544, 512, 32) == 0, "native tail too short");
+    TEST_ASSERT(ConstantBufferViewSize(544, 768, 1, 128) == 0, "unaligned offset");
+    TEST_ASSERT(ConstantBufferViewSize(544, 768, 768, 32) == 0, "offset past logical buffer");
+    return TestResult::Passed;
+}
+
 void RegisterD3D12DescriptorSlotPolicyTests() {
     auto suite = std::make_shared<TestSuite>("D3D12DescriptorSlotPolicyTests");
+    suite->AddTestCase(TestCase("ConstantBufferViewRange", TestConstantBufferViewRange));
     suite->AddTestCase(TestCase("CapacityBoundsAndExplicitFailure", TestCapacityBoundsAndExplicitFailure));
     suite->AddTestCase(TestCase("PerFrameRecycleNotMonotonic", TestPerFrameRecycleNotMonotonic));
     suite->AddTestCase(TestCase("SlotGeometry", TestSlotGeometry));

@@ -126,6 +126,11 @@ public:
     utl::vector<D3D12ResourceBarrierOp> Transition(const D3D12SubresourceKey& key,
                                                    ResourceState target);
 
+    // Native resource flags exclude RT, DS, or UAV states. Reject the whole request
+    // before changing any mip, including changes implemented by implicit promotion.
+    bool TransitionWithResourceFlags(const D3D12SubresourceKey& key, ResourceState target,
+                                     u32 unsupportedBits, utl::vector<D3D12ResourceBarrierOp>& ops);
+
     /// 查询当前跟踪状态（诊断）。未跟踪返回 false。
     /// 注意：D3D12 中 Present 与 General 同为位值 0（COMMON 的同义词），
     /// QueryState 对两者都回报 General——这是 D3D12 语义，不是丢信息。

@@ -146,8 +146,11 @@ bool D3D12Buffer::Initialize() {
     // round-up 造 CBV 时会越过未 padding 资源边界（debug-layer 必错、GBV
     // 越界读）。Vulkan 无此约束，共享宿主按逻辑尺寸创建；故 padding 只发生在
     // 资源本体，GetBufferDesc().size/写路径边界检查仍按逻辑尺寸。
-    // READBACK/DEFAULT 不作 CBV 源，无需 padding。
-    resDesc.Width = heapType_ == D3D12_HEAP_TYPE_UPLOAD
+    // DEFAULT-heap uniform buffers also need physical padding for their final CBV.
+    const bool uniform = bufferDesc_.type == BufferType::Constant ||
+        (bufferDesc_.bindFlags & (static_cast<u32>(BufferUsageFlags::Uniform) |
+                                  static_cast<u32>(ResourceUsage::ConstantBuffer))) != 0;
+    resDesc.Width = heapType_ == D3D12_HEAP_TYPE_UPLOAD || uniform
         ? ((bufferDesc_.size + 255) & ~u64(255))
         : bufferDesc_.size;
     resDesc.Height = 1;

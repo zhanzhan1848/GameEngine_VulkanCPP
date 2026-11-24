@@ -126,6 +126,8 @@ if ($env:PRIMAL_F350_GBV_DIAG -eq '1') {
 if ($env:PRIMAL_F350_DEFERRED_SAMPLES -eq '1') {
     $diagGroups += @{ name = 'd3d12-gioff-samples'; api = 'd3d12'; gi = 0;
                       ppm = 'art2_win_d3d12_gioff_samples_f350.ppm'; diag = 11 }
+    $diagGroups += @{ name = 'vulkan-gioff-samples'; api = 'vulkan'; gi = 0;
+                      ppm = 'art2_win_vulkan_gioff_samples_f350.ppm'; diag = 11 }
 }
 $minEnvGroups = @()
 if ($env:PRIMAL_F350_MINENV_DIAG -eq '1') {
@@ -191,12 +193,12 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
 
     # --- env matrix (verbatim from the r11 launchers) ---
     foreach ($key in @(
-        'PRIMAL_VK_HANG_DIAG', 'PRIMAL_SPGI_SKIP', 'GI_ISOLATE',
+        'PRIMAL_F350_GI_BINDINGS', 'PRIMAL_VK_HANG_DIAG', 'PRIMAL_SPGI_SKIP', 'GI_ISOLATE',
         'PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL', 'RHI_TEST_PLATFORM', 'PRIMAL_LIGHTING_DEBUG',
         'TAA_OFF', 'PRIMAL_SHADOW_RENDER_OFF', 'PRIMAL_D3D12_BLACK_STAGE_FRAME',
         'PRIMAL_D3D12_GBV', 'PRIMAL_D3D12_BLACK_STAGE_DUMP', 'PRIMAL_D3D12_API_TRACE',
         'PRIMAL_D3D12_DEFERRED_PROBE', 'PRIMAL_DUMP_MATRIX', 'PRIMAL_D3D12_RTVAUDIT',
-        'PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL', 'PRIMAL_D3D12_DEFERRED_COPY_WRITE', 'PRIMAL_D3D12_DEFERRED_SAMPLES'
+        'PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL', 'PRIMAL_D3D12_DEFERRED_COPY_WRITE', 'PRIMAL_DEFERRED_SAMPLES'
     )) { Remove-Item "Env:$key" -ErrorAction SilentlyContinue }
 
     $env:PRIMAL_DDGI_GEOMETRY_VISIBILITY = '1'
@@ -212,11 +214,12 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     $env:SPONZA_CAPTURE_FRAME = '350'
     $env:PRIMAL_SPONZA_WATCHDOG_SECS = "$NoProgressSecs"
 
+    if ($g.name -in @('d3d12-gion','vulkan-gion')) { $env:PRIMAL_F350_GI_BINDINGS = '1' }
     $ppmPath = Join-Path $OutDir $g.ppm
     $env:SPONZA_CAPTURE = $ppmPath
 
     if ($g.api -eq 'd3d12') { $env:RHI_TEST_PLATFORM = 'd3d12' }
-    if ($g.diag -or $g.minenv -or $g.pixlike) {
+    if (($g.diag -and $g.diag -ne 11) -or $g.minenv -or $g.pixlike) {
         # R16：D3D12 组启用逐调用 trace——定位 init 期静默设备移除的
         # 确切 API（移除原因已实测 DXGI_ERROR_INVALID_CALL，详见
         # taskG_giud_draw_invalid_call_r16.md）
@@ -332,8 +335,8 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         $env:PRIMAL_D3D12_RTVAUDIT = '1'
         $env:PRIMAL_D3D12_DEFERRED_COPY_WRITE = '1'
     }
-    if ($g.name -eq 'd3d12-gioff-samples' -or $g.diag -eq 8) {
-        $env:PRIMAL_D3D12_DEFERRED_SAMPLES = '1'
+    if ($g.diag -eq 11 -or $g.diag -eq 8) {
+        $env:PRIMAL_DEFERRED_SAMPLES = '1'
     }
 
     $so = Join-Path $OutDir ($g.name + '.stdout.log')
@@ -400,12 +403,24 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     if (-not $contract) { Write-Warning "[f350] $($g.name) launch/capture contract failed" }
     Write-Output "[f350] $($g.name) exit=$rc ppm_exists=$ppmExists watchdog=$watchdogFired sha256=$sha"
 
+    $launchEnv = [ordered]@{}
+    foreach ($key in @('PRIMAL_TEST_MODEL','PRIMAL_VK_TANGENT_FRAME','GI_ISOLATE','DDGI_RAY_SAMPLE',
+        'DDGI_MEASURED_GEOMETRY','PRIMAL_DDGI_GEOMETRY_VISIBILITY','PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL',
+        'SPGI_DDGI_VISIBILITY','PRIMAL_SC_OWNER_CARD_DIRECTORY','PRIMAL_VK_ALBEDO_MIPS',
+        'PRIMAL_DDGI_TRAVERSAL_AUDIT','TAA_OFF','PRIMAL_SHADOW_RENDER_OFF','PRIMAL_LIGHTING_DEBUG',
+        'PRIMAL_D3D12_BLACK_STAGE_DUMP','PRIMAL_D3D12_BLACK_STAGE_FRAME','PRIMAL_DUMP_MATRIX',
+        'PRIMAL_D3D12_API_TRACE','PRIMAL_D3D12_DEFERRED_PROBE','PRIMAL_D3D12_GBV',
+        'PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL','PRIMAL_D3D12_RTVAUDIT','PRIMAL_D3D12_DEFERRED_COPY_WRITE',
+        'PRIMAL_F350_GI_BINDINGS','PRIMAL_DEFERRED_SAMPLES','SPONZA_CAPTURE_FRAME','SPONZA_MAX_FRAMES','RHI_TEST_PLATFORM')) {
+        $value = [Environment]::GetEnvironmentVariable($key)
+        if ($null -ne $value) { $launchEnv[$key] = $value }
+    }
     $entry = [pscustomobject]@{
         group = $g.name; api = $g.api; gi = $g.gi;
         exit_code = $rc; ppm = $g.ppm; ppm_exists = $ppmExists;
         ppm_sha256 = $sha; watchdog = $watchdogFired; anchors = $anchors;
         model = $expectedModel; max_frames = $maxFrames; capture_frame = $captureFrame
-        contract_ok = $contract; missing_assets = @()
+        contract_ok = $contract; launch_env = $launchEnv; missing_assets = @()
     }
     if ($g.diag -or $g.minenv -or $g.pixlike) { $diagResults += $entry } else { $results += $entry }
 }

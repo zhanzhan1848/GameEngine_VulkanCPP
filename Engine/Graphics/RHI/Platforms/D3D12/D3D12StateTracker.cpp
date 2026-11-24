@@ -70,6 +70,17 @@ bool D3D12StateTracker::Track(const D3D12SubresourceKey& key, ResourceState stat
     return true;
 }
 
+bool D3D12StateTracker::TransitionWithResourceFlags(const D3D12SubresourceKey& key,
+        ResourceState target, u32 unsupportedBits, utl::vector<D3D12ResourceBarrierOp>& ops) {
+    u32 bits = 0;
+    if (!ToD3D12ResourceStates(target, bits) || (bits & unsupportedBits) != 0) {
+        ops.clear();
+        return false;
+    }
+    ops = Transition(key, target);
+    return true;
+}
+
 utl::vector<D3D12ResourceBarrierOp> D3D12StateTracker::Transition(
         const D3D12SubresourceKey& key, ResourceState target) {
     utl::vector<D3D12ResourceBarrierOp> ops;

@@ -13,6 +13,7 @@
 #include <string>
 
 #include "D3D12Format.h"
+#include "D3D12DescriptorSlotPolicy.h"
 
 #include "Engine/Common/CoreLogStream.h"
 
@@ -1927,11 +1928,18 @@ void D3D12Device::updateDescriptorSetsImpl(u32 writeCount, const WriteDescriptor
                 switch (rowInfo.mainType) {
                     case D3D12_DESCRIPTOR_RANGE_TYPE_CBV: {
                         // CBV 尺寸须 256 倍数；BufferLocation 256 对齐（烘焙偏移）。
-                        const u64 range = bi.range ? bi.range
-                                                   : buffer->GetBufferDesc().size - bi.offset;
                         D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{};
                         cbv.BufferLocation = buffer->GetGpuAddress() + bi.offset;
-                        cbv.SizeInBytes = static_cast<UINT>((range + 255) & ~u64(255));
+                        cbv.SizeInBytes = d3d12::ConstantBufferViewSize(
+                            buffer->GetBufferDesc().size, buffer->GetNativeResource()->GetDesc().Width,
+                            bi.offset, bi.range);
+                        if (!cbv.SizeInBytes) {
+                            PRIMAL_LOG_STREAM(Error, "RHI") << "[D3D12Device] invalid CBV offset/range set="
+                                << write.dstSet << " binding=" << write.dstBinding << " offset=" << bi.offset
+                                << " range=" << bi.range << " size=" << buffer->GetBufferDesc().size << std::endl;
+                            native->CreateConstantBufferView(nullptr, dst);
+                            break;
+                        }
                         // R45：CBV BufferLocation 审计（一次性）——R44 GPU copy
                         // readback 不可信后的交付链原料打点：VA=0（R39b 曾见纹理
                         // 全 0 现象，buffer 是否同症）即 shader 读零 → early-out

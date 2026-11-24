@@ -251,12 +251,14 @@ vec3 SamplePrefilteredEnvironment(vec3 direction, float roughness) {
 
 void main() {
     outEnvironmentSpecular = vec4(0.0);
-    // These draw diagnostics must also cover sky pixels and work with unbound inputs.
+#ifdef PRIMAL_D3D12_DEFERRED_DIAGNOSTICS
+    // Only the scene constant buffer is required for the draw diagnostics.
     if (shadowParams.z == 8.0 || shadowParams.z == 9.0) {
         outColor = (shadowParams.z == 8.0) ? vec4(vec3(0.5), 1.0)
             : vec4(gl_FragCoord.xy / vec2(2560.0, 1440.0), 0.0, 1.0);
         return;
     }
+#endif
     vec4 albedoV = texture(sampler2D(albedoTex, defaultSampler), inUv);
     vec3 albedo = albedoV.rgb;
     vec3 normalEnc = texture(sampler2D(normalTex, defaultSampler), inUv).rgb;
@@ -432,9 +434,10 @@ void main() {
             ivec2 vp2 = ivec2(vec2(gl_FragCoord.xy) * (vec2(visSize) / max(vec2(scrSize), vec2(1.0))));
             diagnostic = vec3(texelFetch(shadowVisTex, clamp(vp2, ivec2(0), visSize - ivec2(1)), 0).r);
         }
-        // R50：零依赖档——z=8 纯常数、z=9 屏幕坐标梯度（gl_FragCoord 归一）。
-        // 全零 ⟹ fragment 从未产生（draw/光栅化层死，(A) 分支）；非零 ⟹
-        // fragment 活、SRV/采样器投递死（(B) 分支）。
+#ifndef PRIMAL_D3D12_DEFERRED_DIAGNOSTICS
+        if (shadowParams.z == 8.0) diagnostic = vec3(0.5);
+        if (shadowParams.z == 9.0) diagnostic = vec3(gl_FragCoord.xy / vec2(2560.0, 1440.0), 0.0);
+#endif
         if (shadowParams.z == 5.0) {
             // sun-audit P2: IBL ambient 项直出（环境镜面解耦 A/B 测量）。
             // IBL_DIFFUSE_INTENSITY=0 时 = 纯环境镜面；可见性处理与主路径

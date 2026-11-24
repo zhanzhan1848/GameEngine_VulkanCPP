@@ -947,8 +947,36 @@ TestResult TestR21BufferDecayAcrossSubmitFrames() {
     return TestResult::Passed;
 }
 
+TestResult TestUnsupportedUavDoesNotChangeState() {
+    D3D12StateTracker tracker;
+    TEST_ASSERT(tracker.RegisterResource(1, true, 2, 1, 1, ResourceState::RenderTarget), "register RT");
+    const D3D12SubresourceKey mip0{1, 0, true};
+    const D3D12SubresourceKey mip1{1, 1, true};
+    const D3D12SubresourceKey all{1, kD3D12ResourceBarrierAllSubresources, true};
+    const u32 noUav = kD3D12ResourceState_UnorderedAccess;
+    primal::utl::vector<D3D12ResourceBarrierOp> ops;
+    TEST_ASSERT(tracker.TransitionWithResourceFlags(mip0, ResourceState::ShaderResource, noUav, ops)
+                && ops.size() == 1, "RT to SRV");
+    TEST_ASSERT(!tracker.TransitionWithResourceFlags(all, ResourceState::UnorderedAccess, noUav, ops)
+                && ops.empty(), "reject UAV on an RT-only texture before issuing barriers");
+    TEST_ASSERT(tracker.TransitionWithResourceFlags(mip0, ResourceState::CopySource, noUav, ops)
+                && ops.size() == 1 && ops[0].stateBefore == kD3D12ResourceState_AllShaderResource,
+                "readback transitions from the actual SRV state");
+    ResourceState other = ResourceState::Unknown;
+    TEST_ASSERT(tracker.QueryState(mip1, other) && other == ResourceState::RenderTarget,
+                "rejected ALL request preserves other mips");
+
+    TEST_ASSERT(tracker.RegisterResource(2, false, 1, 1, 1), "register COMMON buffer");
+    const D3D12SubresourceKey buffer{2, 0, false};
+    TEST_ASSERT(!tracker.TransitionWithResourceFlags(buffer, ResourceState::UnorderedAccess, noUav, ops)
+                && tracker.QueryState(buffer, other) && other == ResourceState::General,
+                "reject unsupported implicit promotion even when it would issue zero barriers");
+    return TestResult::Passed;
+}
+
 void RegisterD3D12StateTrackerTests() {
     auto suite = std::make_shared<TestSuite>("D3D12StateTrackerTests");
+    suite->AddTestCase(TestCase("UnsupportedUavDoesNotChangeState", TestUnsupportedUavDoesNotChangeState));
     suite->AddTestCase(TestCase("StateMappingTable", TestStateMappingTable));
     suite->AddTestCase(TestCase("TransitionBasics", TestTransitionBasics));
     suite->AddTestCase(TestCase("BufferPromotion", TestBufferPromotion));

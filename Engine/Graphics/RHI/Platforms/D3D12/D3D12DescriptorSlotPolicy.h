@@ -46,6 +46,20 @@
 
 namespace primal::graphics::rhi::d3d12 {
 
+// The RHI accepts 0 or UINT64_MAX for the remaining logical buffer. Resolve the
+// range before rounding, then check the native (padded) allocation bounds.
+inline u32 ConstantBufferViewSize(u64 logicalBytes, u64 nativeBytes, u64 offset, u64 range) {
+    constexpr u64 alignment = 256;
+    constexpr u64 maxView = 65536;
+    if (offset % alignment || offset >= logicalBytes || offset >= nativeBytes) return 0;
+    const u64 remaining = logicalBytes - offset;
+    const u64 bytes = (range && range < remaining) ? range : remaining;
+    const u64 bounded = bytes < maxView ? bytes : maxView;
+    const u64 aligned = (bounded + alignment - 1) & ~(alignment - 1);
+    return aligned <= nativeBytes - offset ? static_cast<u32>(aligned) : 0;
+}
+
+
 class DescriptorFrameSlotPolicy {
 public:
     static constexpr u32 kInvalidSlot = 0xFFFFFFFFu;

@@ -28,18 +28,21 @@ struct SceneData {
     math::v2 previousJitter;    // offset 216
     float time;                 // offset 224
     float _timePad;             // offset 228
-    math::v4 viewPos;           // offset 232
-    math::m4x4 shadowMatrix0;   // offset 240
-    math::m4x4 shadowMatrix1;   // offset 304
-    math::m4x4 shadowMatrix2;   // offset 368 (P4.2: 级联 2)
-    math::m4x4 shadowMatrix3;   // offset 432 (P4.2: 级联 3)
-    // offset 496: x = shadow mode (0 = pre-filtered R8, 1 = VSM moments),
+    math::v4 viewPos;           // offset 240
+    math::m4x4 shadowMatrix0;   // offset 256
+    math::m4x4 shadowMatrix1;   // offset 320
+    math::m4x4 shadowMatrix2;   // offset 384 (P4.2: 级联 2)
+    math::m4x4 shadowMatrix3;   // offset 448 (P4.2: 级联 3)
+    // offset 512: x = shadow mode (0 = pre-filtered R8, 1 = VSM moments),
     // y = cascade 0 split distance (world units from camera), zw unused.
     math::v4 shadowParams{0.0f, 0.0f, 0.0f, 0.0f};
-    // offset 512: rgb = scene ambient color, a = intensity. 0 = 无环境抬升
+    // offset 528: rgb = scene ambient color, a = intensity. 0 = 无环境抬升
     // （与旧行为一致；接 ForwardSceneRenderer::ambient_light_ 待接线）。
     math::v4 ambientLight{0.0f, 0.0f, 0.0f, 0.0f};
 };
+static_assert(offsetof(SceneData, viewPos) == 240);
+static_assert(offsetof(SceneData, shadowParams) == 512);
+static_assert(offsetof(SceneData, ambientLight) == 528);
 static_assert(sizeof(SceneData) == 544, "SceneData must match DeferredLighting.frag (P4.2: 4 级联 544B)");
 
 // ViewData struct
