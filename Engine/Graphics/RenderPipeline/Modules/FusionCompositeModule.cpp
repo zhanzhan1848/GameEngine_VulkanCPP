@@ -885,6 +885,7 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
     fusionOutDesc.usage = TextureUsage::ShaderResource | TextureUsage::RenderTarget;
     auto fusionOutRG = graph.ImportTexture("FusionOutput", fusion_output_[cbIdx], fusionOutDesc);
 
+    outputs.indirect_rg = indirectRG;
     outputs.output_rg = fusionOutRG;
     outputs.output_tex = fusion_output_[cbIdx];
 
@@ -1035,6 +1036,12 @@ FusionOutputs FusionCompositeModule::AddPasses(rendergraph::RenderGraph& graph, 
                     roi_audit_indirect_bound_frame_[cbIdx]=inputs.frame_index;
                     roi_audit_indirect_bound_valid_[cbIdx]=true;
                 }
+            }
+            if (inputs.frame_index == 350 && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+                PRIMAL_LOG_STREAM(Info, "Render") << "[F350Fusion] slot=" << cbIdx
+                    << " black=" << inputs.black_texture << " bound_ssgi=" << params[0].resource
+                    << " bound_ddgi=" << params[1].resource << " bound_spgi=" << params[2].resource
+                    << " bound_albedo=" << params[3].resource << " bound_ssao=" << params[4].resource;
             }
             // TEMP diagnosis: what really lands in each GI texture slot.
             static int s_fusion_slots = 0;

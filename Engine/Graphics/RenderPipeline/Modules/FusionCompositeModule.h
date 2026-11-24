@@ -82,6 +82,7 @@ struct FusionInputs {
 // leave FusionOutputs uninitialized → garbage output_tex=0 resolves via FreeList
 // to slot 0 (first swapchain backbuffer) → FinalBlit samples a non-SAMPLED image.
 struct FusionOutputs {
+    rendergraph::RGResourceHandle indirect_rg{};
     rendergraph::RGResourceHandle output_rg{};
     rhi::ResourceHandle output_tex{rhi::handles::INVALID_RESOURCE};
 };

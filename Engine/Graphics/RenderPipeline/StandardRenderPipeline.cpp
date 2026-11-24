@@ -6213,6 +6213,8 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     };
     constexpr u32 samplesPerMrt = std::size(deferredPixels);
     constexpr u32 samplesPerPhase = 2 * samplesPerMrt;
+    static constexpr const char* giSampleNames[] = {"ddgi", "spgi", "ssgi", "indirect", "composite"};
+    constexpr u32 giSampleOffset = 2 * samplesPerPhase + 3 * samplesPerMrt;
     constexpr u32 sampleStride = 512; // D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT
     // A single completed submission owns the sparse copies. Consume before this frame records.
     if (deferred_samples_ != handles::INVALID_RESOURCE) {
@@ -6235,6 +6237,16 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     PRIMAL_LOG_STREAM(Info, "Render") << "[F350DeferredInput] frame=" << frameCount_ - 1
                         << " input=" << inputNames[input] << " point=" << i << " rgba8=" << u32(bgra[2]) << ","
                         << u32(bgra[1]) << "," << u32(bgra[0]) << "," << u32(bgra[3]) << std::endl;
+                }
+            }
+            for (u32 src = 0; src < std::size(giSampleNames); ++src) {
+                if (!(gi_sample_mask_ & (1u << src))) continue;
+                for (u32 i = 0; i < samplesPerMrt; ++i) {
+                    const auto* rgba = reinterpret_cast<const u16*>(bytes + sampleStride *
+                        (giSampleOffset + src * samplesPerMrt + i));
+                    PRIMAL_LOG_STREAM(Info, "Render") << "[F350GIPixel] frame=" << frameCount_ - 1
+                        << " src=" << giSampleNames[src] << " point=" << i << " rgba16bits="
+                        << rgba[0] << "," << rgba[1] << "," << rgba[2] << "," << rgba[3];
                 }
             }
             device_->UnmapBuffer(deferred_samples_);
@@ -6817,7 +6829,9 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                                                      device_->GetPlatform() == RHIPlatform::Vulkan)) {
             BufferDesc desc{};
             deferred_input_copy_mask_ = 0;
-            desc.size = (2 * samplesPerPhase + 3 * samplesPerMrt) * sampleStride;
+            gi_sample_mask_ = 0;
+            const size_t giSamples = std::getenv("PRIMAL_F350_GI_BINDINGS") ? std::size(giSampleNames) * samplesPerMrt : 0;
+            desc.size = (giSampleOffset + giSamples) * sampleStride;
             desc.memoryUsage = GPUMemoryUsage::Readback;
             desc.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
             deferred_samples_ = device_->CreateBuffer(desc);
@@ -7618,6 +7632,44 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
 
             sampleAttachments(true);
             fusionOut = fusion_module_->AddPasses(graph, fusionIn);
+            if (deferred_samples_ != handles::INVALID_RESOURCE && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+                struct GISamples { RGResourceHandle textures[5]; };
+                const GISamples sources{{fusionIn.ddgi_rg, fusionIn.spgi_rg, fusionIn.ssgi_rg,
+                                         fusionOut.indirect_rg, fusionOut.output_rg}};
+                graph.AddPass<GISamples>("FusionSourcesSamples", RGPassType::Copy, RGPassCategory::Copy,
+                    [sources](GISamples& d, RenderGraphBuilder& b) {
+                        b.SideEffect();
+                        for (u32 i = 0; i < std::size(d.textures); ++i)
+                            if (sources.textures[i].IsValid())
+                                d.textures[i] = b.Read(sources.textures[i], ResourceState::CopySource);
+                    },
+                    [this](const GISamples& d, RenderGraphContext& ctx) {
+                        for (u32 src = 0; src < std::size(d.textures); ++src) {
+                            if (!d.textures[src].IsValid()) continue;
+                            auto* res = ctx.graph->GetResource(d.textures[src]);
+                            if (!res) continue;
+                            const auto tex = res->GetPhysicalHandle();
+                            u32 w = 0, h = 0;
+                            if (!device_->GetTextureSize(tex, w, h) || !w || !h ||
+                                device_->GetTextureFormat(tex) != DataFormat::RGBA16_Float) continue;
+                            BufferTextureCopyRegion regions[samplesPerMrt]{};
+                            for (u32 i = 0; i < samplesPerMrt; ++i) {
+                                auto& region = regions[i];
+                                region.bufferOffset = sampleStride * (giSampleOffset + src * samplesPerMrt + i);
+                                region.imageSubresource.layerCount = 1;
+                                region.imageOffset = {s32(w * deferredPixels[i][0] / 2560),
+                                                      s32(h * deferredPixels[i][1] / 1440), 0};
+                                region.imageExtent = {1, 1, 1};
+                            }
+                            ctx.cmdBuffer->CopyTextureToBuffer(tex, deferred_samples_, regions, samplesPerMrt);
+                            gi_sample_mask_ |= 1u << src;
+                            PRIMAL_LOG_STREAM(Info, "Render") << "[F350GISource] src=" << giSampleNames[src]
+                                << " tex=" << tex << " size=" << w << "x" << h;
+                        }
+                        ctx.cmdBuffer->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
+                            AccessFlag::TransferWrite, AccessFlag::HostRead);
+                    });
+            }
         }
 
         // Lightmap 独立消费级（twin 站点同步，见 BuildRenderGraph 同名块：

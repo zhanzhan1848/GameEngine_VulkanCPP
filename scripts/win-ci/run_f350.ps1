@@ -124,6 +124,12 @@ if ($env:PRIMAL_F350_GBV_DIAG -eq '1') {
 # A=DDGI_RAY_SAMPLE+SPGI_DDGI_VISIBILITY（采样/可见性查询侧）；
 # B=DDGI_MEASURED_GEOMETRY+GEOMETRY_VISIBILITY+TRAVERSAL_AUDIT（几何侧）。
 if ($env:PRIMAL_F350_DEFERRED_SAMPLES -eq '1') {
+    foreach ($api in @('d3d12','vulkan')) {
+        $diagGroups += @{ name = "$api-gion-samples"; api = $api; gi = 1;
+                          ppm = "art2_win_${api}_gion_samples_f350.ppm"; diag = 13 }
+    }
+    $diagGroups += @{ name = 'vulkan-gion-mode0'; api = 'vulkan'; gi = 1;
+                      ppm = 'art2_win_vulkan_mode0_f350.ppm'; diag = 12 }
     $diagGroups += @{ name = 'd3d12-gioff-samples'; api = 'd3d12'; gi = 0;
                       ppm = 'art2_win_d3d12_gioff_samples_f350.ppm'; diag = 11 }
     $diagGroups += @{ name = 'vulkan-gioff-samples'; api = 'vulkan'; gi = 0;
@@ -219,7 +225,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     $env:SPONZA_CAPTURE = $ppmPath
 
     if ($g.api -eq 'd3d12') { $env:RHI_TEST_PLATFORM = 'd3d12' }
-    if (($g.diag -and $g.diag -ne 11) -or $g.minenv -or $g.pixlike) {
+    if (($g.diag -and $g.diag -notin @(11,12,13)) -or $g.minenv -or $g.pixlike) {
         # R16：D3D12 组启用逐调用 trace——定位 init 期静默设备移除的
         # 确切 API（移除原因已实测 DXGI_ERROR_INVALID_CALL，详见
         # taskG_giud_draw_invalid_call_r16.md）
@@ -330,6 +336,11 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         $env:PRIMAL_SPONZA_WATCHDOG_SECS = '900'
     }
 
+    if ($g.diag -eq 12) { $env:DDGI_RAY_SAMPLE = '0' }
+    if ($g.diag -in @(12,13)) {
+        $env:PRIMAL_DEFERRED_SAMPLES = '1'
+        $env:PRIMAL_F350_GI_BINDINGS = '1'
+    }
     if ($g.diag -eq 8) {
         $env:PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL = '1'
         $env:PRIMAL_D3D12_RTVAUDIT = '1'
