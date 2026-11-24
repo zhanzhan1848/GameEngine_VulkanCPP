@@ -4792,9 +4792,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         variance_fence_ticket_.Record(depth_readback_ring_.buffer(rbSlot),depthBytes,depth_buffers_[outIdx],current_frame_index,
                             variance_scene_epoch_,variance_source_digest_,variance_generation_)));
                     if(recordCopy) {
-                        if(varianceFenced)cmd->MemoryBarrier(PipelineStage::ComputeShader,PipelineStage::Transfer,AccessFlag::ShaderWrite,AccessFlag::TransferRead);
+                        // Sparse fields contain both inherited (copy) and updated (compute) texels.
+                        cmd->MemoryBarrier(PipelineStage::ComputeShader | PipelineStage::Transfer, PipelineStage::Transfer,
+                                           AccessFlag::ShaderWrite | AccessFlag::TransferWrite, AccessFlag::TransferRead);
                         cmd->CopyBuffer(depth_buffers_[outIdx],depth_readback_ring_.buffer(rbSlot),0,0,depthBytes);
-                        if(varianceFenced)cmd->MemoryBarrier(PipelineStage::Transfer,PipelineStage::Host,AccessFlag::TransferWrite,AccessFlag::HostRead);
+                        cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host, AccessFlag::TransferWrite, AccessFlag::HostRead);
                         ++depth_ring_copies_;
                     }
                     if(recordCopy && cpu_stall_audit::History() && cpu_stall_audit::state.active && rbSlot<3) {

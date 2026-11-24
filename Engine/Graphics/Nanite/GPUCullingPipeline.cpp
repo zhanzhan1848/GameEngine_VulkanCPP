@@ -924,13 +924,13 @@ bool GPUCullingPipeline::Execute(rhi::RHICommandBuffer* cmdBuffer,
         }
     }
 
-    // Add barrier to ensure CPU writes to bounds buffer are visible to GPU
-    // This is CRITICAL for preventing race conditions where GPU reads stale/incomplete bounds
+    // Publish host-written bounds and staging data. Snapshot destinations are
+    // reused across frames, after prior copies and culling shader reads.
     cmdBuffer->MemoryBarrier(
-        rhi::PipelineStage::Host,
-        rhi::PipelineStage::ComputeShader,
-        rhi::AccessFlag::HostWrite,
-        rhi::AccessFlag::ShaderRead
+        rhi::PipelineStage::Host | rhi::PipelineStage::Transfer | rhi::PipelineStage::ComputeShader,
+        rhi::PipelineStage::ComputeShader | rhi::PipelineStage::Transfer,
+        rhi::AccessFlag::HostWrite | rhi::AccessFlag::TransferWrite | rhi::AccessFlag::ShaderRead,
+        rhi::AccessFlag::ShaderRead | rhi::AccessFlag::TransferRead | rhi::AccessFlag::TransferWrite
     );
 
     // Properly upload snapshot data from staging buffers to GPU buffers

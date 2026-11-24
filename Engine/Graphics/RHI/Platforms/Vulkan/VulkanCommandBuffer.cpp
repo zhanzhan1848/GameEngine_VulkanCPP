@@ -1095,6 +1095,8 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
     // 2D_ARRAY 全层视图 + framebuffer layers 对齐;shader 内 gl_Layer 选层。
     // Metal 等价物:setRenderTargetArrayLength(desc.renderTargetArrayLength)。
     const bool layered = desc.renderTargetArrayLength > 1;
+    VkPipelineStageFlags reusedStages = 0;
+    VkAccessFlags reusedAccess = 0;
     colorRefs.reserve(colorCount);
     for (u32 i = 0; i < colorCount; ++i) {
         const auto& a = desc.colorAttachments[i];
@@ -1116,6 +1118,9 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
         // 隐式 transition 到 COLOR_ATTACHMENT_OPTIMAL(若还没在)
         if (tex->GetCurrentLayout() != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
             TransitionImageLayout(tex, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        } else {
+            reusedStages |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            reusedAccess |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
         }
 
         // Caller may leave format=Unknown (Metal backend derives from texture).
@@ -1132,7 +1137,7 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
         d.storeOp = (a.storeOp == StoreAction::Store) ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
         d.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         d.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        d.initialLayout = (a.loadOp == LoadAction::Load) ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+        d.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         d.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         attachments.push_back(d);
         colorRefs.push_back({ i, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
@@ -1159,6 +1164,9 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
         if (tex) {
             if (tex->GetCurrentLayout() != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
                 TransitionImageLayout(tex, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+            } else {
+                reusedStages |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                reusedAccess |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
             }
             // See color-attachment note: derive format from texture when caller left it Unknown.
             const DataFormat effectiveDepthFormat = (a.format != DataFormat::Unknown)
@@ -1172,7 +1180,7 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
             d.storeOp = (a.storeOp == StoreAction::Store) ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
             d.stencilLoadOp = d.loadOp;
             d.stencilStoreOp = d.storeOp;
-            d.initialLayout = (a.loadOp == LoadAction::Load) ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+            d.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             d.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             attachments.push_back(d);
             depthRef.attachment = colorCount;
@@ -1186,6 +1194,16 @@ void VulkanCommandBuffer::BeginRenderPass(const RenderPassDesc& desc) {
             // P4c-F5: depth attachment 同样走 array 视图(layered CSM 深度)。
             fbAttachments.push_back(layered ? tex->GetArrayView() : tex->GetLayerView(a.arrayLayer));
         }
+    }
+
+    // Reusing an attachment already in its rendering layout still needs a
+    // dependency on the preceding pass's attachment reads and stores.
+    if (reusedStages) {
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = reusedAccess;
+        barrier.dstAccessMask = reusedAccess;
+        vkCmdPipelineBarrier(cmdBuffer_, reusedStages, reusedStages, VK_DEPENDENCY_BY_REGION_BIT,
+                             1, &barrier, 0, nullptr, 0, nullptr);
     }
 
     VkSubpassDescription subpass{};
