@@ -42,7 +42,7 @@ u32 pack_mesh_instances(const attribute_store& store, mesh_instance_data* out, u
 // 失败写 err 返回 false。进程级缓存：同路径只读盘一次；失败结果也被缓存（不反复重试）。
 struct instance_geometry {
     std::vector<math::v3> positions;
-    std::vector<math::v3> normals;   // element_buffer 前 12B；资产无法线时为零向量
+    std::vector<math::v3> normals;   // 解码后法线；资产无法线时朝上
     std::vector<u32> indices;        // 统一扩展为 u32（pass 侧建 R32 索引缓冲）
     u32 index_count{ 0 };
 };

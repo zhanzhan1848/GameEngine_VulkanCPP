@@ -404,13 +404,15 @@ inline void test_builtin_instance_geometry() {
     std::string err;
     assert(render::load_instance_geometry("builtin:sphere", g, err));
     assert(g.positions.size() > 8 && g.index_count >= 12 && g.indices.size() == g.index_count);
-    // 球半径 0.05:包围盒半径容差内
-    f32 max_r = 0.f;
-    for (const auto& p : g.positions)
-        max_r = std::max(max_r, std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z));
-    // 创建器的球面顶点可略超名义半径(极点/细分实现细节),只断言量级正确且非退化
-    assert(max_r > 0.02f && max_r < 0.2f);
-    assert(g.positions.size() > 8 && g.index_count > 12);
+    assert(g.normals.size() == g.positions.size());
+    for (size_t i = 0; i < g.positions.size(); ++i) {
+        const auto& p = g.positions[i];
+        const auto& n = g.normals[i];
+        const f32 radius = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+        assert(std::fabs(radius - 0.05f) < 1e-5f);
+        // Quantized vertex normals must point away from the sphere center.
+        assert(std::fabs((n.x * p.x + n.y * p.y + n.z * p.z) / radius - 1.f) < 1e-3f);
+    }
 
     render::instance_geometry box;
     assert(render::load_instance_geometry("builtin:box", box, err));
