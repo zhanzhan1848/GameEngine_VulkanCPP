@@ -438,6 +438,8 @@ private:
     void DispatchCascadeUpdate(rhi::RHICommandBuffer* cmd, u32 frameIdx,
                                const rhi::ResourceHandle* writeTexs /*[4]*/,
                                const rhi::ResourceHandle* prevTexs /*[4]*/);
+    bool CreateProbeStorage();
+    void ReleaseProbeStorage();
     void CreateBuffers();
 
     bool              initialized_{ false };

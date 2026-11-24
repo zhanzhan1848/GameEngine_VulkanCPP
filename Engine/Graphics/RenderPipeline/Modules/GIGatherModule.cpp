@@ -1390,8 +1390,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             {
                 // T3.6/D1: 只保留仍以 SRV 直接绑定的近场 irr/depth/conf。
                 // far/附加 volume 的 irradiance 改为 flat 打包的 CopyBuffer
-                // 源（同 CB 内队列序先于 dispatch，无需 barrier——Vulkan 端
-                // buffer barrier 本就是 no-op，Metal 无显式 buffer 布局）。
+                // 源；下方显式同步打包复制与 gather 读取。
                 ResourceBarrier barriers[4]{};
                 int bc = 0;
                 auto irrBuf = ddgi->GetIrradianceBufferBySlot(ddgiReadIdx);
@@ -1431,11 +1430,10 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 if (bc > 0) cmd->InsertBarrier(barriers, bc);
             }
 
-            // T3.6/D1: flat 打包 copy——各 volume irradiance → flat SSBO。
-            // 编码于同一 CB、先于 dispatch（队列序即依赖）。bindingIdx 槽与
-            // 描述符一致，头部已由上方 host 写驻留。
             ResourceHandle flatOpenSkyBuf = handles::INVALID_RESOURCE;
             if (flatActive && flatBuf != handles::INVALID_RESOURCE) {
+                cmd->MemoryBarrier(PipelineStage::Host | PipelineStage::ComputeShader,
+                    PipelineStage::Transfer, AccessFlag::HostWrite | AccessFlag::ShaderWrite, AccessFlag::TransferRead);
                 for (u32 vi = 0; vi < nvolCount; ++vi) {
                     const auto& v = nvolViews[vi];
                     if (v.irradiance == handles::INVALID_RESOURCE) continue;
@@ -1457,6 +1455,22 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     cmd->CopyBuffer(v.opensky, flatOpenSkyBuf,
                                     0, 256ull + (u64)fvOffsets[vi] * 8ull,
                                     probes * 8ull);
+                }
+            }
+
+            if (flatBuf != handles::INVALID_RESOURCE || flatOpenSkyBuf != handles::INVALID_RESOURCE) {
+                cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::ComputeShader,
+                    AccessFlag::TransferWrite, AccessFlag::ShaderRead);
+                if (device_->GetPlatform() == RHIPlatform::D3D12) {
+                    for (const auto packed : {flatBuf, flatOpenSkyBuf}) {
+                        if (packed == handles::INVALID_RESOURCE) continue;
+                        ResourceBarrier ready{};
+                        ready.resource = packed;
+                        ready.beforeState = ResourceState::Unknown;
+                        ready.afterState = ResourceState::ShaderResource;
+                        ready.subresource = 0xFFFFFFFFu;
+                        cmd->InsertBarrier(&ready, 1);
+                    }
                 }
             }
 
@@ -1959,6 +1973,33 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     << "," << connectionBuffers[1] << "," << connectionBuffers[2] << "," << connectionBuffers[3]
                     << " dummy=" << dummy_buffer_ << " policy_b27=" << connectionCB << " query_kernel=" << useQuery
                     << " set=" << sets[0] << " groups=" << groupsX << "x" << groupsY;
+            }
+            if (inputs.probe_samples_recorded && inputs.probe_sample_staging != handles::INVALID_RESOURCE &&
+                nvolViews[0].IsValid() && flatBuf != handles::INVALID_RESOURCE &&
+                nvolViews[0].relocated_origins != handles::INVALID_RESOURCE && bufInfos[8].buffer != handles::INVALID_RESOURCE) {
+                using Samples = GIGatherInputs::ProbeSamples;
+                const auto counts = nvolViews[0].counts;
+                const u32 nx = u32(counts.x), ny = u32(counts.y), nz = u32(counts.z);
+                if (nx && ny && nz) {
+                    cmd->MemoryBarrier(PipelineStage::ComputeShader | PipelineStage::Transfer,
+                        PipelineStage::Transfer, AccessFlag::ShaderWrite | AccessFlag::TransferWrite, AccessFlag::TransferRead);
+                    const u32 ids[] = {0, nx / 2 + nx * (ny / 2 + ny * (nz / 2)), nx * ny * nz - 1};
+                    for (u32 i = 0; i < std::size(ids); ++i) {
+                        const u64 probe = ids[i];
+                        auto copy = [&](ResourceHandle source, u64 sourceOffset, u64 memberOffset) {
+                            cmd->CopyBuffer(source, inputs.probe_sample_staging, sourceOffset,
+                                inputs.probe_sample_offset + memberOffset + i * sizeof(math::v4), sizeof(math::v4));
+                        };
+                        copy(bufInfos[7].buffer, probe * 144, offsetof(Samples, near_sh0));
+                        copy(flatBuf, 256 + probe * 144, offsetof(Samples, packed_sh0));
+                        copy(nvolViews[0].relocated_origins, probe * 16, offsetof(Samples, origins));
+                        copy(bufInfos[8].buffer, probe * 128 * sizeof(float), offsetof(Samples, depth_means));
+                    }
+                    *inputs.probe_samples_recorded = true;
+                    PRIMAL_LOG_STREAM(Info, "Render") << "[F350DDGIInputs] read_slot=" << ddgiReadIdx
+                        << " near=" << bufInfos[7].buffer << " packed=" << flatBuf << " origins=" << nvolViews[0].relocated_origins
+                        << " depth=" << bufInfos[8].buffer << " indices=" << ids[0] << "," << ids[1] << "," << ids[2];
+                }
             }
             // Only claim qualification when the existing live query check passed;
             // other modes may be valid but do not provide this receipt proof.

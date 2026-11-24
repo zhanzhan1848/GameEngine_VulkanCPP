@@ -6215,7 +6215,10 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     constexpr u32 samplesPerPhase = 2 * samplesPerMrt;
     static constexpr const char* giSampleNames[] = {"ddgi", "spgi", "ssgi", "indirect", "composite"};
     constexpr u32 giSampleOffset = 2 * samplesPerPhase + 3 * samplesPerMrt;
+    static constexpr const char* probeSampleNames[] = {"position", "normal", "ray0_hit", "ray0_radiance", "filtered_SH0"};
+    constexpr u32 probeSampleOffset = giSampleOffset + std::size(giSampleNames) * samplesPerMrt;
     constexpr u32 sampleStride = 512; // D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT
+    constexpr u64 ddgiSampleOffset = sampleStride * probeSampleOffset + std::size(probeSampleNames) * samplesPerMrt * sizeof(math::v4);
     // A single completed submission owns the sparse copies. Consume before this frame records.
     if (deferred_samples_ != handles::INVALID_RESOURCE) {
         device_->WaitIdle();
@@ -6247,6 +6250,28 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     PRIMAL_LOG_STREAM(Info, "Render") << "[F350GIPixel] frame=" << frameCount_ - 1
                         << " src=" << giSampleNames[src] << " point=" << i << " rgba16bits="
                         << rgba[0] << "," << rgba[1] << "," << rgba[2] << "," << rgba[3];
+                }
+            }
+            for (u32 src = 0; src < std::size(probeSampleNames); ++src) {
+                if (!(probe_sample_mask_ & (1u << src))) continue;
+                for (u32 i = 0; i < samplesPerMrt; ++i) {
+                    float value[4];
+                    std::memcpy(value, bytes + sampleStride * probeSampleOffset + sizeof(value) * (src * samplesPerMrt + i), sizeof(value));
+                    PRIMAL_LOG_STREAM(Info, "Render") << "[F350ScreenProbe] frame=" << frameCount_ - 1
+                        << " source=" << probeSampleNames[src] << " point=" << i << " value="
+                        << value[0] << "," << value[1] << "," << value[2] << "," << value[3];
+                }
+            }
+            if (ddgi_probe_samples_recorded_) {
+                GIGatherInputs::ProbeSamples sample{};
+                std::memcpy(&sample, bytes + ddgiSampleOffset, sizeof(sample));
+                for (u32 i = 0; i < std::size(sample.near_sh0); ++i) {
+                    for (const auto& [name, v] : {std::pair{"near_SH0", sample.near_sh0[i]},
+                         std::pair{"packed_SH0", sample.packed_sh0[i]}, std::pair{"origin", sample.origins[i]},
+                         std::pair{"depth_means", sample.depth_means[i]}}) {
+                        PRIMAL_LOG_STREAM(Info, "Render") << "[F350DDGIProbe] point=" << i << " source=" << name
+                            << " value=" << v.x << "," << v.y << "," << v.z << "," << v.w;
+                    }
                 }
             }
             device_->UnmapBuffer(deferred_samples_);
@@ -6829,9 +6854,11 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                                                      device_->GetPlatform() == RHIPlatform::Vulkan)) {
             BufferDesc desc{};
             deferred_input_copy_mask_ = 0;
-            gi_sample_mask_ = 0;
+            gi_sample_mask_ = probe_sample_mask_ = 0;
+            ddgi_probe_samples_recorded_ = false;
             const size_t giSamples = std::getenv("PRIMAL_F350_GI_BINDINGS") ? std::size(giSampleNames) * samplesPerMrt : 0;
             desc.size = (giSampleOffset + giSamples) * sampleStride;
+            if (giSamples) desc.size = ddgiSampleOffset + sizeof(GIGatherInputs::ProbeSamples);
             desc.memoryUsage = GPUMemoryUsage::Readback;
             desc.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
             deferred_samples_ = device_->CreateBuffer(desc);
@@ -7213,6 +7240,11 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             auto gbufferNormalGI = graph.ImportResource("GBufferNormalGI", gpuDraw.GetGBufferNormal());
             auto gbufferOrmGI = graph.ImportResource("GBufferOrmGI", gpuDraw.GetGBufferORM());
             GIGatherInputs giIn;
+            if (deferred_samples_ != handles::INVALID_RESOURCE && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+                giIn.probe_sample_staging = deferred_samples_;
+                giIn.probe_sample_offset = ddgiSampleOffset;
+                giIn.probe_samples_recorded = &ddgi_probe_samples_recorded_;
+            }
             giIn.ddgi_pass = ddgi_pass_.get();
             giIn.ddgi_far_pass = (ddgi_volume_count_ > 1) ? ddgi_volumes_[1].get() : nullptr;
             // X2/A3: 远场 volume 走 Cache View 直传（槽位与模块内 ddgiReadIdx 一致）
@@ -7665,6 +7697,31 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                             gi_sample_mask_ |= 1u << src;
                             PRIMAL_LOG_STREAM(Info, "Render") << "[F350GISource] src=" << giSampleNames[src]
                                 << " tex=" << tex << " size=" << w << "x" << h;
+                        }
+                        auto* probes = screen_probe_pass_.get();
+                        if (probes && d.textures[1].IsValid() && !probes->Tier3Enabled()) {
+                            const auto view = probes->GetCompletedProbeView(frameCount_);
+                            const ResourceHandle buffers[] = {view.positions, view.normals, probes->GetHitDistanceBuffer(),
+                                probes->GetRayRadianceBuffer(frameCount_), view.filtered_sh};
+                            static_assert(std::size(buffers) == std::size(probeSampleNames));
+                            const u32 gridW = probes->GetGridWidth(), gridH = probes->GetGridHeight();
+                            const u64 slots = u64(gridW) * gridH;
+                            ctx.cmdBuffer->MemoryBarrier(PipelineStage::ComputeShader, PipelineStage::Transfer,
+                                                        AccessFlag::ShaderWrite, AccessFlag::TransferRead);
+                            for (u32 src = 0; src < std::size(buffers); ++src) {
+                                u64 bytes = 0;
+                                if (!slots || slots != probes->SlotCount() || !device_->GetBufferByteSize(buffers[src], bytes) ||
+                                    bytes % slots || bytes / slots < sizeof(math::v4)) continue;
+                                const u64 stride = bytes / slots;
+                                for (u32 i = 0; i < samplesPerMrt; ++i) {
+                                    const u32 x = gridW * deferredPixels[i][0] / 2560, y = gridH * deferredPixels[i][1] / 1440;
+                                    const u64 dest = sampleStride * probeSampleOffset + sizeof(math::v4) * (src * samplesPerMrt + i);
+                                    ctx.cmdBuffer->CopyBuffer(buffers[src], deferred_samples_, stride * (u64(y) * gridW + x), dest, sizeof(math::v4));
+                                }
+                                probe_sample_mask_ |= 1u << src;
+                                PRIMAL_LOG_STREAM(Info, "Render") << "[F350ProbeBuffer] slot=" << frameCount_ % 3
+                                    << " source=" << probeSampleNames[src] << " handle=" << buffers[src] << " bytes_per_tile=" << stride;
+                            }
                         }
                         ctx.cmdBuffer->MemoryBarrier(PipelineStage::Transfer, PipelineStage::Host,
                             AccessFlag::TransferWrite, AccessFlag::HostRead);

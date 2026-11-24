@@ -20,6 +20,7 @@
 #include <cstring>
 #include <set>
 #include <algorithm>
+#include <limits>
 #include "Engine/Common/CoreLogStream.h"
 
 namespace primal::graphics::lumen {
@@ -312,6 +313,12 @@ bool ScreenProbeGIPass::Initialize(RHIDeviceBase* device,
         ? std::min(slot_count_, std::max(SpgiPlanEnvU32("PRIMAL_SPGI_TIER3_CAP", capDefault), tiles))
         : tiles;
 
+    if (!CreateProbeStorage()) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[ScreenProbeGI] GPU probe storage initialization failed";
+        ReleaseProbeStorage();
+        device_ = nullptr;
+        return false;
+    }
     CreateDescriptorSetLayouts();
     CreatePipelines();
     CreateConstantBuffers();
@@ -345,6 +352,7 @@ bool ScreenProbeGIPass::Initialize(RHIDeviceBase* device,
 
 void ScreenProbeGIPass::Shutdown() {
     if (!initialized_) return;
+    ReleaseProbeStorage();
     for(auto& b:first_owner_buffers_) {
         if(b!=handles::INVALID_RESOURCE) device_->DestroyBuffer(b);
         b=handles::INVALID_RESOURCE;
@@ -1176,72 +1184,90 @@ static void SpgiStageMark(u32 frameIdx, const char* stage) {
     }
 }
 
+bool ScreenProbeGIPass::CreateProbeStorage() {
+    const u32 probeCount = slot_count_;
+    const u32 radianceProbes = radiance_capacity_;
+    if (!probeCount || probeCount > std::numeric_limits<u32>::max() / 4 ||
+        !radianceProbes || radianceProbes > std::numeric_limits<u32>::max() / params_.rays_per_probe)
+        return false;
+    // Both Place and trace write structured buffers. In particular, a Dynamic
+    // buffer without GPU-write usage becomes an upload-only resource on D3D12.
+    bool ready = true;
+    std::vector<u8> zeros;
+    auto makeProbeBuffer = [&](const char* name, u32 count, u32 stride, bool clear,
+                               GPUMemoryUsage memory = GPUMemoryUsage::Dynamic) {
+        BufferDesc desc{};
+        desc.type = BufferType::Structured;
+        desc.usage = desc.memoryUsage = memory;
+        desc.bindFlags = u32(ResourceUsage::UnorderedAccess) | u32(BufferUsageFlags::Storage);
+        desc.structured.elementCount = count;
+        desc.structured.elementStride = stride;
+        desc.size = u64(count) * stride;
+        desc.name = name;
+        auto buffer = device_->CreateBuffer(desc);
+        if (buffer == handles::INVALID_RESOURCE) ready = false;
+        if (!clear || buffer == handles::INVALID_RESOURCE) return buffer;
+        if (zeros.size() < desc.size) zeros.resize(desc.size);
+        if (!device_->UpdateBufferData(buffer, zeros.data(), desc.size, 0)) {
+            ready = false;
+            device_->DestroyBuffer(buffer);
+            return handles::INVALID_RESOURCE;
+        }
+        return buffer;
+    };
+    for (u32 i = 0; i < 3; ++i) {
+        probe_positions_buffer_[i] = makeProbeBuffer("SPGI positions", probeCount, sizeof(math::v4), true);
+        probe_normals_buffer_[i] = makeProbeBuffer("SPGI normals", probeCount, sizeof(math::v4), true);
+    }
+    // Finalize writes rays and Average consumes them in the same frame.
+    const u32 rayCount = radianceProbes * params_.rays_per_probe;
+    probe_radiance_buffer_ = makeProbeBuffer("SPGI ray radiance", rayCount, sizeof(math::v4), true);
+
+    hit_distance_buffer_ = makeProbeBuffer("SPGI ray hits", rayCount, sizeof(math::v4), false);
+    for (u32 i = 0; i < 3; ++i) {
+        probe_avg_radiance_[i] = makeProbeBuffer("SPGI SH", probeCount * 4, sizeof(math::v4), true);
+        probe_temporal_radiance_[i] = makeProbeBuffer("SPGI temporal SH", probeCount * 4, sizeof(math::v4), false);
+    }
+
+    // Finalize and Average write these SSBOs even when the optional trace
+    // breakdown is disabled. Discrete D3D12 reads them through a fenced copy.
+    if (device_->GetPlatform() == RHIPlatform::Vulkan || device_->GetPlatform() == RHIPlatform::D3D12) {
+        constexpr u32 traceRecords = 7 * 17 + 36 * 4 + 36 * 8 * 2 + 6 * 4 + 36 * 8 * 3;
+        const auto memory = GPUMemoryUsage::Readback;
+        trace_stats_buffer_ = makeProbeBuffer("SPGI trace stats", traceRecords, 16, true, memory);
+        fail_stats_buffer_ = makeProbeBuffer("SPGI rejection counters", 16, sizeof(u32), true, memory);
+        probe_opensky_buffer_ = makeProbeBuffer("SPGI sky visibility", probeCount, 16, true, memory);
+        if (std::getenv("PRIMAL_SPGI_SH2_CHECK"))
+            sh2_check_buffer_ = makeProbeBuffer("SPGI SH2 errors", probeCount, 16, true, memory);
+    }
+
+    return ready;
+}
+
+void ScreenProbeGIPass::ReleaseProbeStorage() {
+    auto release = [&](ResourceHandle& buffer) {
+        if (buffer != handles::INVALID_RESOURCE) device_->DestroyBuffer(buffer);
+        buffer = handles::INVALID_RESOURCE;
+    };
+    for (u32 i = 0; i < 3; ++i) {
+        release(probe_positions_buffer_[i]);
+        release(probe_normals_buffer_[i]);
+        release(probe_avg_radiance_[i]);
+        release(probe_temporal_radiance_[i]);
+    }
+    release(probe_radiance_buffer_);
+    release(hit_distance_buffer_);
+    release(trace_stats_buffer_);
+    release(fail_stats_buffer_);
+    release(sh2_check_buffer_);
+    release(probe_opensky_buffer_);
+}
+
 void ScreenProbeGIPass::CreateBuffers() {
-    u32 totalProbes = grid_width_ * grid_height_;
     // P2: tier3 lays probes out as tile*4 slots; radiance arrays are sized
     // by the compacted capacity (not the full slot grid — the 4× radiance
     // expansion is exactly what the plan rejects).
     const u32 probeCount = slot_count_;
-    const u32 radianceProbes = radiance_capacity_;
-
-    // Probe positions buffers (triple-buffered): float4 per probe
-    for (int i = 0; i < 3; ++i) {
-        BufferDesc desc{};
-        desc.size = (u64)probeCount * sizeof(float) * 4;
-        desc.type = BufferType::Structured;
-        desc.usage = GPUMemoryUsage::Dynamic;
-        desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.structured.elementCount = probeCount;
-        desc.structured.elementStride = sizeof(float) * 4;
-        probe_positions_buffer_[i] = device_->CreateBuffer(desc);
-
-        void* mapped = device_->MapBuffer(probe_positions_buffer_[i]);
-        if (mapped) {
-            memset(mapped, 0, desc.size);
-            device_->UnmapBuffer(probe_positions_buffer_[i]);
-        }
-    }
-
-    // Probe normals buffers (triple-buffered): float4 per probe
-    for (int i = 0; i < 3; ++i) {
-        BufferDesc desc{};
-        desc.size = (u64)probeCount * sizeof(float) * 4;
-        desc.type = BufferType::Structured;
-        desc.usage = GPUMemoryUsage::Dynamic;
-        desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.structured.elementCount = probeCount;
-        desc.structured.elementStride = sizeof(float) * 4;
-        probe_normals_buffer_[i] = device_->CreateBuffer(desc);
-
-        void* mapped = device_->MapBuffer(probe_normals_buffer_[i]);
-        if (mapped) {
-            memset(mapped, 0, desc.size);
-            device_->UnmapBuffer(probe_normals_buffer_[i]);
-        }
-    }
-
-    // [P1 2026-09-21 probe-repr-plan] raw ray radiance 单缓冲（原三缓冲）。
-    // 生命周期：唯一消费者 = 当帧 finalize（写）→ Average（读），同一帧 RG
-    // 内由 :2524 的 ResourceBarrier 隔离；temporal/spatial 链读 SH 域
-    // probe_temporal_radiance_[3]，历史原始射线无消费者（grep 审计见计划 §P1）。
-    // 节省 2 槽 × radianceProbes×rays×16B ≈ 88.5MB（默认档）。
-    {
-        u64 radianceSize = (u64)radianceProbes * params_.rays_per_probe * sizeof(float) * 4;
-        BufferDesc desc{};
-        desc.size = radianceSize;
-        desc.type = BufferType::Structured;
-        desc.usage = GPUMemoryUsage::Dynamic;
-        desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.structured.elementCount = radianceProbes * params_.rays_per_probe;
-        desc.structured.elementStride = sizeof(float) * 4;
-        probe_radiance_buffer_ = device_->CreateBuffer(desc);
-
-        void* mapped = device_->MapBuffer(probe_radiance_buffer_);
-        if (mapped) {
-            memset(mapped, 0, radianceSize);
-            device_->UnmapBuffer(probe_radiance_buffer_);
-        }
-    }
 
     // Process opt-in; no additional allocation on the original/default path.
     const char* firstEnv=std::getenv("PRIMAL_SPGI_ZERO_HIT_GEOMETRY");
@@ -1251,40 +1277,6 @@ void ScreenProbeGIPass::CreateBuffers() {
         BufferDesc d{};d.type=BufferType::Structured;d.usage=d.memoryUsage=GPUMemoryUsage::Dynamic;
         d.size=65536*sizeof(math::u32v4);d.structured.elementCount=65536;d.structured.elementStride=16;
         for(auto& b:first_owner_buffers_) b=device_->CreateBuffer(d);
-    }
-
-    // Hit buffer (single, GPU-only intermediate for the T5.1 hybrid split):
-    // vec4 per ray — x = hit distance, yz = HZB hit UV, w = source flag
-    // (0 miss, 1 HZB near, 2 SDF far, 3 far-cache early-out [F1]).
-    {
-        u64 hitDistSize = (u64)radianceProbes * params_.rays_per_probe * sizeof(float) * 4;
-        BufferDesc desc{};
-        desc.size = hitDistSize;
-        desc.type = BufferType::Structured;
-        desc.usage = GPUMemoryUsage::Dynamic;
-        desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.structured.elementCount = radianceProbes * params_.rays_per_probe;
-        desc.structured.elementStride = sizeof(float) * 4;
-        hit_distance_buffer_ = device_->CreateBuffer(desc);
-    }
-
-    // Per-probe SH coefficient buffers (triple-buffered, 4 float4 per probe for L0+L1)
-    for (int i = 0; i < 3; ++i) {
-        BufferDesc desc{};
-        desc.size = (u64)probeCount * 4 * sizeof(float) * 4;
-        desc.type = BufferType::Structured;
-        desc.usage = GPUMemoryUsage::Dynamic;
-        desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        desc.structured.elementCount = probeCount * 4;
-        desc.structured.elementStride = sizeof(float) * 4;
-        probe_avg_radiance_[i] = device_->CreateBuffer(desc);
-        probe_temporal_radiance_[i] = device_->CreateBuffer(desc);
-
-        void* mapped = device_->MapBuffer(probe_avg_radiance_[i]);
-        if (mapped) {
-            memset(mapped, 0, desc.size);
-            device_->UnmapBuffer(probe_avg_radiance_[i]);
-        }
     }
 
     // Average pass constant buffers (triple-buffered, 48B: probe/ray counts
@@ -1395,88 +1387,6 @@ void ScreenProbeGIPass::CreateBuffers() {
         desc.usage = TextureUsage::ShaderResource;
         dummy_texture_2d_ = device_->CreateTexture(desc);
         device_->PrimeTextureLayout(dummy_texture_2d_);  // P0-B 首帧 priming
-    }
-
-    // P1（sponza-gap-reaudit §4.1/4.2）: finalize 分支统计缓冲。仅 Vulkan/D3D12
-    // （trace split/finalize 是 flat 链；Metal 不经此路径）。host-visible 便于测试直接
-    // 读回；布局必须始终含 binding 18（shader 静态使用），atomic 写由
-    // diag_params.x 门控，默认路径只多绑约 2KB 空缓冲。
-    if (device_->GetPlatform() == RHIPlatform::Vulkan ||
-        device_->GetPlatform() == RHIPlatform::D3D12) {
-        BufferDesc desc{};
-        desc.size = 16 * (7 * 17 + 36 * 4 + 36 * 8 * 2 + 6 * 4 + 36 * 8 * 3); // stats + samples + ROIs + DDGI neighbours
-        desc.type = BufferType::Structured;
-        desc.usage = GPUMemoryUsage::Readback;
-        desc.memoryUsage = GPUMemoryUsage::Readback;
-        desc.structured.elementCount = 7 * 17 + 36 * 4 + 36 * 8 * 2 + 6 * 4 + 36 * 8 * 3;
-        desc.structured.elementStride = 16;
-        trace_stats_buffer_ = device_->CreateBuffer(desc);
-        if (trace_stats_buffer_ != handles::INVALID_RESOURCE) {
-            void* mapped = device_->MapBuffer(trace_stats_buffer_);
-            if (mapped) {
-                memset(mapped, 0, desc.size);
-                device_->UnmapBuffer(trace_stats_buffer_);
-            }
-        }
-
-        // [E0-I 2026-09-21 决策仪表] SC 产出率漏斗 + 下行失败射线计数
-        //（16×u32，恒累加无 diag 门；host-visible 供测试/排查直接读回）。
-        // [①治理] 8→16：射线级分类（found/all-reject 主导类/空 cell）。
-        BufferDesc failDesc{};
-        failDesc.size = 16 * sizeof(u32);
-        failDesc.type = BufferType::Structured;
-        failDesc.usage = GPUMemoryUsage::Readback;
-        failDesc.memoryUsage = GPUMemoryUsage::Readback;
-        failDesc.structured.elementCount = 16;
-        failDesc.structured.elementStride = sizeof(u32);
-        fail_stats_buffer_ = device_->CreateBuffer(failDesc);
-        if (fail_stats_buffer_ != handles::INVALID_RESOURCE) {
-            void* mapped = device_->MapBuffer(fail_stats_buffer_);
-            if (mapped) {
-                memset(mapped, 0, failDesc.size);
-                device_->UnmapBuffer(fail_stats_buffer_);
-            }
-        }
-
-        // [P4 2026-09-21] SH2 重建误差统计（env PRIMAL_SPGI_SH2_CHECK=1 才
-        // 分配；否则 INVALID，Average 绑 dummy 且 sh2CheckMode=0 不写）。
-        if (std::getenv("PRIMAL_SPGI_SH2_CHECK")) {
-            BufferDesc chkDesc{};
-            chkDesc.size = (u64)probeCount * 4 * sizeof(float);
-            chkDesc.type = BufferType::Structured;
-            chkDesc.usage = GPUMemoryUsage::Readback;
-            chkDesc.memoryUsage = GPUMemoryUsage::Readback;
-            chkDesc.structured.elementCount = probeCount;
-            chkDesc.structured.elementStride = 4 * sizeof(float);
-            sh2_check_buffer_ = device_->CreateBuffer(chkDesc);
-            if (sh2_check_buffer_ != handles::INVALID_RESOURCE) {
-                void* mapped = device_->MapBuffer(sh2_check_buffer_);
-                if (mapped) {
-                    memset(mapped, 0, chkDesc.size);
-                    device_->UnmapBuffer(sh2_check_buffer_);
-                }
-            }
-        }
-
-        // [②K-4 2026-09-21] 每探针天空可见性统计（miss/hit 占比，Vulkan
-        // 常配 host-visible；显式 V 的诊断与下游分类数据源）。
-        {
-            BufferDesc skyDesc{};
-            skyDesc.size = (u64)probeCount * 4 * sizeof(float);
-            skyDesc.type = BufferType::Structured;
-            skyDesc.usage = GPUMemoryUsage::Readback;
-            skyDesc.memoryUsage = GPUMemoryUsage::Readback;
-            skyDesc.structured.elementCount = probeCount;
-            skyDesc.structured.elementStride = 4 * sizeof(float);
-            probe_opensky_buffer_ = device_->CreateBuffer(skyDesc);
-            if (probe_opensky_buffer_ != handles::INVALID_RESOURCE) {
-                void* mapped = device_->MapBuffer(probe_opensky_buffer_);
-                if (mapped) {
-                    memset(mapped, 0, skyDesc.size);
-                    device_->UnmapBuffer(probe_opensky_buffer_);
-                }
-            }
-        }
     }
 
     // --- P2/P3 (Vulkan pilot): compaction maps + lightvar state ---
@@ -2036,6 +1946,16 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 b.subresource = 0xFFFFFFFF;
                 cmd->InsertBarrier(&b, 1);
             };
+            // The texture graph cannot express subpass transitions for these
+            // private buffers. D3D12 needs the state of the next actual use.
+            auto setProbeState = [&](ResourceHandle buffer, ResourceState state) {
+                if (device_->GetPlatform() != RHIPlatform::D3D12 || buffer == handles::INVALID_RESOURCE) return;
+                ResourceBarrier barrier{};
+                barrier.resource = buffer;
+                barrier.beforeState = ResourceState::Unknown;
+                barrier.afterState = state;
+                cmd->InsertBarrier(&barrier, 1);
+            };
             auto ResolveTexture = [&](RGResourceHandle handle) -> ResourceHandle {
                 auto* res = context.graph->GetResource(handle);
                 if (res) return res->GetPhysicalHandle();
@@ -2380,6 +2300,8 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 UpdateDescriptorSet(device_, place_ds_[frameIdx], params,
                                     splitIsVk ? 6 : 5);
 
+                setProbeState(probe_positions_buffer_[frameIdx], ResourceState::UnorderedAccess);
+                setProbeState(probe_normals_buffer_[frameIdx], ResourceState::UnorderedAccess);
                 cmd->BindComputePipeline(place_pipeline_);
                 const DescriptorSetHandle sets[] = { place_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, place_layout_, 0, 1, sets, 0, nullptr);
@@ -2492,7 +2414,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     ? wrc_probe_data_ : dummy_buffer_;
                 ResourceHandle wrcConsume = (wrc_available_ &&
                     wrc_consume_buffer_ != handles::INVALID_RESOURCE)
-                    ? wrc_consume_buffer_ : dummy_buffer_;
+                    ? wrc_consume_buffer_ : fail_stats_buffer_;
 
                 // P2: tier3 strides the compacted radiance layout at
                 // rays_per_probe per dense slot.
@@ -2572,6 +2494,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         };
                         UpdateDescriptorSet(device_, hzb_trace_ds_[frameIdx], hzbParams,
                                             static_cast<uint32_t>(std::size(hzbParams)));
+                        setProbeState(hit_distance_buffer_, ResourceState::UnorderedAccess);
                         cmd->BindComputePipeline(hzb_trace_pipeline_);
                         const DescriptorSetHandle sets[] = { hzb_trace_ds_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, hzb_trace_layout_, 0, 1, sets, 0, nullptr);
@@ -2665,6 +2588,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         };
                         UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfParams, 13);
                     }
+                    setProbeState(hit_distance_buffer_, ResourceState::UnorderedAccess);
                     cmd->BindComputePipeline(sdf_trace_pipeline_);
                     const DescriptorSetHandle sdfSets[] = { sdf_trace_ds_[frameIdx] };
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, sdf_trace_layout_, 0, 1, sdfSets, 0, nullptr);
@@ -2760,6 +2684,11 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             device_->GetPlatform() == RHIPlatform::Metal ? 21u : 18u);
                     }
                     EnsureStorageWritable(outputTex);
+                    setProbeState(wrcConsume, ResourceState::UnorderedAccess);
+                    setProbeState(trace_stats_buffer_, ResourceState::UnorderedAccess);
+                    setProbeState(fail_stats_buffer_, ResourceState::UnorderedAccess);
+                    setProbeState(hit_distance_buffer_, ResourceState::ShaderResource);
+                    setProbeState(probe_radiance_buffer_, ResourceState::UnorderedAccess);
                     cmd->BindComputePipeline(finalize_pipeline_);
                     const DescriptorSetHandle finSets[] = { finalize_ds_[frameIdx] };
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, finalize_layout_, 0, 1, finSets, 0, nullptr);
@@ -2812,6 +2741,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 15);
                     }
                     EnsureStorageWritable(outputTex);
+                    setProbeState(probe_radiance_buffer_, ResourceState::UnorderedAccess);
                     cmd->BindComputePipeline(trace_pipeline_);
                     const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, trace_layout_, 0, 1, sets, 0, nullptr);
@@ -2887,13 +2817,16 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         tier3_enabled_ ? slot_to_compact_buffer_ : dummy_buffer_},   // P2
                     {6, DescriptorType::StorageBuffer,
                         sh2_check_buffer_ != handles::INVALID_RESOURCE
-                            ? sh2_check_buffer_ : dummy_buffer_},                    // P4
+                            ? sh2_check_buffer_ : probe_opensky_buffer_},  // inactive u6 still needs a writable view
                     {7, DescriptorType::StorageBuffer,
                         probe_opensky_buffer_ != handles::INVALID_RESOURCE
                             ? probe_opensky_buffer_ : dummy_buffer_},                // [②K-4]
                 };
                 UpdateDescriptorSet(device_, avg_ds_[frameIdx], params, splitIsVk ? 8 : 5);
 
+                setProbeState(probe_opensky_buffer_, ResourceState::UnorderedAccess);
+                setProbeState(sh2_check_buffer_, ResourceState::UnorderedAccess);
+                setProbeState(probe_avg_radiance_[frameIdx], ResourceState::UnorderedAccess);
                 cmd->BindComputePipeline(avg_pipeline_);
                 const DescriptorSetHandle sets[] = { avg_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, avg_layout_, 0, 1, sets, 0, nullptr);
@@ -2973,6 +2906,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 };
                 UpdateDescriptorSet(device_, temporal_ds_[frameIdx], params, 8);
 
+                setProbeState(probe_temporal_radiance_[frameIdx], ResourceState::UnorderedAccess);
                 cmd->BindComputePipeline(temporal_pipeline_);
                 const DescriptorSetHandle sets[] = { temporal_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, temporal_layout_, 0, 1, sets, 0, nullptr);
@@ -3052,6 +2986,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     cmd->MemoryBarrier(PipelineStage::Host, PipelineStage::ComputeShader,
                         AccessFlag::HostWrite, AccessFlag::ShaderRead);
                 }
+                setProbeState(spatialOutput, ResourceState::UnorderedAccess);
                 cmd->BindComputePipeline(spatial_pipeline_);
                 const DescriptorSetHandle sets[] = { spatial_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, spatial_layout_, 0, 1, sets, 0, nullptr);

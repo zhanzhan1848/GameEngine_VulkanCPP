@@ -86,6 +86,7 @@ DXC = os.environ.get("D3D12_DXC", "/usr/local/bin/dxc")
 # M1 冻结清单 = M1Forward 两入口；后续阶段在此追加（如 M2 阴影、M3 后处理）。
 # ---------------------------------------------------------------------------
 SHADER_LIST = [
+    ("../../../../EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp", "main", "Tests/SCBoundGeometryWitness.comp", []),
     "Forward/M1Forward.vert",
     "Forward/M1Forward.frag",
     # D3D12 M2 F2-5: shadow depth VS (single cascade, no pixel shader) and

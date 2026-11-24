@@ -24,6 +24,13 @@ struct GIGatherInputs {
     static constexpr u32 kMaxVolumes = 4;
     lumen::DDGIVolumeView volume_views[kMaxVolumes]{};
     u32 volume_count = 0;
+    // Optional fenced capture of the production near-volume inputs, at three probe indices.
+    struct ProbeSamples {
+        math::v4 near_sh0[3], packed_sh0[3], origins[3], depth_means[3];
+    };
+    rhi::ResourceHandle probe_sample_staging = rhi::handles::INVALID_RESOURCE;
+    u64 probe_sample_offset = 0;
+    bool* probe_samples_recorded = nullptr;
 
     lumen::LumenDDGIPass* ddgi_pass = nullptr;
     lumen::LumenDDGIPass* ddgi_far_pass = nullptr;  // T4.4 far-field fallback

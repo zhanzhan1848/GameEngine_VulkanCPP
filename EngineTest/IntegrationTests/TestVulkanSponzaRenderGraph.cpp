@@ -1,3 +1,4 @@
+#include "../Utils/ProbeDiagnosticReadback.h"
 #include "Engine/Graphics/Utilities/CPUStallAudit.h"
 #include "Engine/Graphics/Lumen/SurfaceCache/BoundaryPointIndex.h"
 #include "Graphics/RHI/Core/CardSurfaceIdentity.h"
@@ -3815,6 +3816,12 @@ void TestVulkanSponzaRenderGraph::Run() {
         }
     }
     // Zero GPU work/resources unless explicitly requested. The frame is absolute native.
+    if (frameCount_ == 350 && std::getenv("PRIMAL_F350_SC_RAYS") &&
+        !RunSCBoundGeometryWitness(device_, pipeline_->GetSurfaceCachePass(), pipeline_->GetDDGIPass(),
+                                   frameCount_, "", nullptr, true)) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[F350SceneRay] failed";
+        Shutdown(); std::exit(2);
+    }
     static const char* boundWitnessPrefix=std::getenv("SC_BOUND_GEOMETRY_RAYS_PREFIX");
     if(boundWitnessPrefix && boundWitnessPrefix[0]) {
         const char* requested=std::getenv("SC_BOUND_GEOMETRY_RAYS_FRAME");
@@ -4275,6 +4282,7 @@ void TestVulkanSponzaRenderGraph::Run() {
     static u32 spgiStatFirstFrame = 0;
     static u32 spgiStatLastFrame = 0;
     constexpr u32 kSpgiStatWindow = 25;
+    primaltest::ProbeDiagnosticReadback probeReadback(device_);
     auto* spgiPassForStats = pipeline_->GetScreenProbePass();
     const u32 giDiagFrame = pipeline_->GetGIFrameIndex();
     const u32 giDiagTarget = [] {
@@ -4284,9 +4292,9 @@ void TestVulkanSponzaRenderGraph::Run() {
     const bool spgiStatsLive = std::getenv("SPGI_TRACE_DIAG") && spgiPassForStats &&
         spgiPassForStats->GetTraceStatsBuffer() != handles::INVALID_RESOURCE;
     if (spgiStatsLive && giDiagFrame == 0u) {
-        if (void* mapped = device_->MapBuffer(spgiPassForStats->GetTraceStatsBuffer())) {
+        if (void* mapped = probeReadback.Map(spgiPassForStats->GetTraceStatsBuffer())) {
             std::memset(mapped, 0, 16 * (7 * 17 + 36 * 4 + 36 * 8 * 2 + 6 * 4 + 36 * 8 * 3));
-            device_->UnmapBuffer(spgiPassForStats->GetTraceStatsBuffer());
+            probeReadback.Unmap(spgiPassForStats->GetTraceStatsBuffer(), 16 * (7 * 17 + 36 * 4 + 36 * 8 * 2 + 6 * 4 + 36 * 8 * 3));
         }
         std::memset(spgiStatAcc, 0, sizeof(spgiStatAcc));
         std::memset(spgiRoiAcc, 0, sizeof(spgiRoiAcc));
@@ -4298,7 +4306,7 @@ void TestVulkanSponzaRenderGraph::Run() {
         giDiagFrame > 0u &&
         (giDiagFrame % kSpgiStatWindow == kSpgiStatWindow - 1 ||
          giDiagFrame == giDiagTarget)) {
-        if (void* mapped = device_->MapBuffer(spgiPassForStats->GetTraceStatsBuffer())) {
+        if (void* mapped = probeReadback.Map(spgiPassForStats->GetTraceStatsBuffer())) {
             const u32* s = static_cast<const u32*>(mapped);
             for (u32 br = 0; br < 7; ++br)
                 for (u32 bk = 0; bk < 17; ++bk)
@@ -4316,7 +4324,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                     for (u32 k = 0; k < 4; ++k)
                         spgiRoiAcc[r][c][k] += roi[(r * 4 + c) * 4 + k];
             std::memset(mapped, 0, 16 * (7 * 17 + 36 * 4 + 36 * 8 * 2 + 6 * 4 + 36 * 8 * 3));
-            device_->UnmapBuffer(spgiPassForStats->GetTraceStatsBuffer());
+            probeReadback.Unmap(spgiPassForStats->GetTraceStatsBuffer(), 16 * (7 * 17 + 36 * 4 + 36 * 8 * 2 + 6 * 4 + 36 * 8 * 3));
             if (spgiStatWindows == 0) spgiStatFirstFrame = giDiagFrame;
             spgiStatLastFrame = giDiagFrame;
             ++spgiStatWindows;
@@ -4437,14 +4445,14 @@ void TestVulkanSponzaRenderGraph::Run() {
         (std::getenv("SPGI_TRACE_DIAG") || std::getenv("PRIMAL_SPGI_SC_FUNNEL")) &&
         spgiPassForStats->GetFailStatsBuffer() != handles::INVALID_RESOURCE;
     if (spgiFunnelLive && giDiagFrame == 0u) {
-        if (void* mapped = device_->MapBuffer(spgiPassForStats->GetFailStatsBuffer())) {
+        if (void* mapped = probeReadback.Map(spgiPassForStats->GetFailStatsBuffer())) {
             std::memset(mapped, 0, 16 * sizeof(u32));
-            device_->UnmapBuffer(spgiPassForStats->GetFailStatsBuffer());
+            probeReadback.Unmap(spgiPassForStats->GetFailStatsBuffer(), 16 * sizeof(u32));
         }
     }
     if (!spgiFunnelDumped && spgiFunnelLive && giDiagFrame == giDiagTarget) {
         spgiFunnelDumped = true;
-        if (void* mapped = device_->MapBuffer(spgiPassForStats->GetFailStatsBuffer())) {
+        if (void* mapped = probeReadback.Map(spgiPassForStats->GetFailStatsBuffer())) {
             const u32* f = static_cast<const u32*>(mapped);
             const char* fName[16] = {"candidates", "boundsFail", "orientFacingFail", "depthFail",
                                      "found", "downNoFallback", "downClampServed", "orientHintSoft",
@@ -4472,7 +4480,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                           << " allRejDepth=" << (100.0 * double(f[14]) / double(raysLoop)) << "%"
                           << " zeroCand=" << (100.0 * double(f[11]) / double(raysLoop)) << "%"
                           << std::endl;
-            device_->UnmapBuffer(spgiPassForStats->GetFailStatsBuffer());
+            probeReadback.Unmap(spgiPassForStats->GetFailStatsBuffer());
         }
     }
 
@@ -4484,7 +4492,7 @@ void TestVulkanSponzaRenderGraph::Run() {
         spgiPassForStats->GetSH2CheckBuffer() != handles::INVALID_RESOURCE) {
         spgiSh2Dumped = true;
         const u32 nProbes = spgiPassForStats->SlotCount();
-        if (void* mapped = device_->MapBuffer(spgiPassForStats->GetSH2CheckBuffer())) {
+        if (void* mapped = probeReadback.Map(spgiPassForStats->GetSH2CheckBuffer())) {
             const float* f = static_cast<const float*>(mapped);
             std::vector<double> errs;
             errs.reserve(nProbes);
@@ -4505,7 +4513,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                           << " P95=" << p95
                           << " max=" << errs.back() << std::endl;
             }
-            device_->UnmapBuffer(spgiPassForStats->GetSH2CheckBuffer());
+            probeReadback.Unmap(spgiPassForStats->GetSH2CheckBuffer());
         }
     }
 
@@ -4558,7 +4566,7 @@ void TestVulkanSponzaRenderGraph::Run() {
         auto* sp = pipeline_->GetScreenProbePass();
         if (sp && sp->GetTraceDiagMode() == 6u &&
             sp->GetTraceStatsBuffer() != handles::INVALID_RESOURCE) {
-            if (const auto* raw = static_cast<const float*>(device_->MapBuffer(sp->GetTraceStatsBuffer()))) {
+            if (const auto* raw = static_cast<const float*>(probeReadback.Map(sp->GetTraceStatsBuffer()))) {
                 FILE* out = fopen("/tmp/spgi_right_ray_samples.csv", "w");
                 if (FILE* neighbours = fopen("/tmp/spgi_ddgi_neighbours.csv", "w")) {
                     fprintf(neighbours, "sample_slot,ordinal,anchor_x,anchor_y,anchor_z,state,distance,mean,variance,probe_index,base_weight,visibility,radiance_lum,oct_bin\n");
@@ -4734,7 +4742,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                         std::cerr << "[SPGI_RAY_TRI_AUDIT] wrote /tmp/spgi_right_ray_triangles.csv" << std::endl;
                     }
                 }
-                device_->UnmapBuffer(sp->GetTraceStatsBuffer());
+                probeReadback.Unmap(sp->GetTraceStatsBuffer());
             }
         }
     }
@@ -4756,7 +4764,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                 const u32 rays = sp->GetParams().rays_per_probe;
                 const u32 gw = sp->GetGridWidth(), gh = sp->GetGridHeight();
                 const u64 count = (u64)gw * gh * rays;
-                if (void* m = device_->MapBuffer(sp->GetRayRadianceBuffer(dumpFrame - 1))) {
+                if (void* m = probeReadback.Map(sp->GetRayRadianceBuffer(dumpFrame - 1))) {
                     const float* f = static_cast<const float*>(m);
                     std::ofstream bin("/tmp/spgi_rays.bin", std::ios::binary);
                     bin.write(reinterpret_cast<const char*>(f), count * 4 * sizeof(float));
@@ -4780,7 +4788,7 @@ void TestVulkanSponzaRenderGraph::Run() {
                         const int lo = (int)b - 8;   // 有符号：避免 u32 下溢
                         std::cerr << "  bin" << b << " [2^" << lo << "): " << hist[b] << std::endl;
                     }
-                    device_->UnmapBuffer(sp->GetRayRadianceBuffer(dumpFrame - 1));
+                    probeReadback.Unmap(sp->GetRayRadianceBuffer(dumpFrame - 1));
                     std::cerr << "[SPGI_RAY_DUMP] raw float4 dumped to /tmp/spgi_rays.bin" << std::endl;
                 }
             }

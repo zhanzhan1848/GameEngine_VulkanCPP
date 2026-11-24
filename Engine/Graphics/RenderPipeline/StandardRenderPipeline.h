@@ -942,6 +942,8 @@ private:
     rhi::ResourceHandle deferred_samples_{rhi::handles::INVALID_RESOURCE};
     u32 deferred_input_copy_mask_{0};
     u32 gi_sample_mask_{0};
+    u32 probe_sample_mask_{0};
+    bool ddgi_probe_samples_recorded_{false};
     u64 frameCount_{0};
     bool subsystems_initialized_{false};
 
