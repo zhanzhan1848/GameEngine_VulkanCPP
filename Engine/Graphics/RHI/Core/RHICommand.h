@@ -676,6 +676,10 @@ public:
      * @param barrierCount 屏障数量
      */
     virtual void InsertBarrier(const ResourceBarrier* barriers, u32 barrierCount) = 0;
+
+    /// Declare the next use on backends with explicit buffer states.
+    /// Producer/consumer memory ordering still belongs to MemoryBarrier.
+    virtual void RequireBufferState(ResourceHandle, ResourceState) {}
     
     // === 访问器方法 ===
     

@@ -192,6 +192,7 @@ public:
                      FilterMode filter) override;
     void GenerateMipmaps(ResourceHandle texture) override;
     void InsertBarrier(const ResourceBarrier* barriers, u32 barrierCount) override;
+    void RequireBufferState(ResourceHandle buffer, ResourceState state) override;
 
 protected:
     void destroyImpl() override;

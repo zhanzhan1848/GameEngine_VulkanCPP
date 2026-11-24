@@ -1953,16 +1953,6 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 b.subresource = 0xFFFFFFFF;
                 cmd->InsertBarrier(&b, 1);
             };
-            // The texture graph cannot express subpass transitions for these
-            // private buffers. D3D12 needs the state of the next actual use.
-            auto setProbeState = [&](ResourceHandle buffer, ResourceState state) {
-                if (device_->GetPlatform() != RHIPlatform::D3D12 || buffer == handles::INVALID_RESOURCE) return;
-                ResourceBarrier barrier{};
-                barrier.resource = buffer;
-                barrier.beforeState = ResourceState::Unknown;
-                barrier.afterState = state;
-                cmd->InsertBarrier(&barrier, 1);
-            };
             auto ResolveTexture = [&](RGResourceHandle handle) -> ResourceHandle {
                 auto* res = context.graph->GetResource(handle);
                 if (res) return res->GetPhysicalHandle();
@@ -2307,8 +2297,8 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 UpdateDescriptorSet(device_, place_ds_[frameIdx], params,
                                     splitIsVk ? 6 : 5);
 
-                setProbeState(probe_positions_buffer_[frameIdx], ResourceState::UnorderedAccess);
-                setProbeState(probe_normals_buffer_[frameIdx], ResourceState::UnorderedAccess);
+                cmd->RequireBufferState(probe_positions_buffer_[frameIdx], ResourceState::UnorderedAccess);
+                cmd->RequireBufferState(probe_normals_buffer_[frameIdx], ResourceState::UnorderedAccess);
                 cmd->BindComputePipeline(place_pipeline_);
                 const DescriptorSetHandle sets[] = { place_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, place_layout_, 0, 1, sets, 0, nullptr);
@@ -2501,7 +2491,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         };
                         UpdateDescriptorSet(device_, hzb_trace_ds_[frameIdx], hzbParams,
                                             static_cast<uint32_t>(std::size(hzbParams)));
-                        setProbeState(hit_distance_buffer_, ResourceState::UnorderedAccess);
+                        cmd->RequireBufferState(hit_distance_buffer_, ResourceState::UnorderedAccess);
                         cmd->BindComputePipeline(hzb_trace_pipeline_);
                         const DescriptorSetHandle sets[] = { hzb_trace_ds_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, hzb_trace_layout_, 0, 1, sets, 0, nullptr);
@@ -2595,7 +2585,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         };
                         UpdateDescriptorSet(device_, sdf_trace_ds_[frameIdx], sdfParams, 13);
                     }
-                    setProbeState(hit_distance_buffer_, ResourceState::UnorderedAccess);
+                    cmd->RequireBufferState(hit_distance_buffer_, ResourceState::UnorderedAccess);
                     cmd->BindComputePipeline(sdf_trace_pipeline_);
                     const DescriptorSetHandle sdfSets[] = { sdf_trace_ds_[frameIdx] };
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, sdf_trace_layout_, 0, 1, sdfSets, 0, nullptr);
@@ -2691,11 +2681,11 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                             device_->GetPlatform() == RHIPlatform::Metal ? 21u : 18u);
                     }
                     EnsureStorageWritable(outputTex);
-                    setProbeState(wrcConsume, ResourceState::UnorderedAccess);
-                    setProbeState(trace_stats_buffer_, ResourceState::UnorderedAccess);
-                    setProbeState(fail_stats_buffer_, ResourceState::UnorderedAccess);
-                    setProbeState(hit_distance_buffer_, ResourceState::ShaderResource);
-                    setProbeState(probe_radiance_buffer_, ResourceState::UnorderedAccess);
+                    cmd->RequireBufferState(wrcConsume, ResourceState::UnorderedAccess);
+                    cmd->RequireBufferState(trace_stats_buffer_, ResourceState::UnorderedAccess);
+                    cmd->RequireBufferState(fail_stats_buffer_, ResourceState::UnorderedAccess);
+                    cmd->RequireBufferState(hit_distance_buffer_, ResourceState::ShaderResource);
+                    cmd->RequireBufferState(probe_radiance_buffer_, ResourceState::UnorderedAccess);
                     cmd->BindComputePipeline(finalize_pipeline_);
                     const DescriptorSetHandle finSets[] = { finalize_ds_[frameIdx] };
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, finalize_layout_, 0, 1, finSets, 0, nullptr);
@@ -2748,7 +2738,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                         UpdateDescriptorSet(device_, trace_ds_[frameIdx], params, 15);
                     }
                     EnsureStorageWritable(outputTex);
-                    setProbeState(probe_radiance_buffer_, ResourceState::UnorderedAccess);
+                    cmd->RequireBufferState(probe_radiance_buffer_, ResourceState::UnorderedAccess);
                     cmd->BindComputePipeline(trace_pipeline_);
                     const DescriptorSetHandle sets[] = { trace_ds_[frameIdx] };
                     cmd->BindDescriptorSets(PipelineBindPoint::Compute, trace_layout_, 0, 1, sets, 0, nullptr);
@@ -2831,9 +2821,9 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 };
                 UpdateDescriptorSet(device_, avg_ds_[frameIdx], params, splitIsVk ? 8 : 5);
 
-                setProbeState(probe_opensky_buffer_, ResourceState::UnorderedAccess);
-                setProbeState(sh2_check_buffer_, ResourceState::UnorderedAccess);
-                setProbeState(probe_avg_radiance_[frameIdx], ResourceState::UnorderedAccess);
+                cmd->RequireBufferState(probe_opensky_buffer_, ResourceState::UnorderedAccess);
+                cmd->RequireBufferState(sh2_check_buffer_, ResourceState::UnorderedAccess);
+                cmd->RequireBufferState(probe_avg_radiance_[frameIdx], ResourceState::UnorderedAccess);
                 cmd->BindComputePipeline(avg_pipeline_);
                 const DescriptorSetHandle sets[] = { avg_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, avg_layout_, 0, 1, sets, 0, nullptr);
@@ -2913,7 +2903,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                 };
                 UpdateDescriptorSet(device_, temporal_ds_[frameIdx], params, 8);
 
-                setProbeState(probe_temporal_radiance_[frameIdx], ResourceState::UnorderedAccess);
+                cmd->RequireBufferState(probe_temporal_radiance_[frameIdx], ResourceState::UnorderedAccess);
                 cmd->BindComputePipeline(temporal_pipeline_);
                 const DescriptorSetHandle sets[] = { temporal_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, temporal_layout_, 0, 1, sets, 0, nullptr);
@@ -2993,7 +2983,7 @@ ScreenProbeGIOutput ScreenProbeGIPass::AddPass(
                     cmd->MemoryBarrier(PipelineStage::Host, PipelineStage::ComputeShader,
                         AccessFlag::HostWrite, AccessFlag::ShaderRead);
                 }
-                setProbeState(spatialOutput, ResourceState::UnorderedAccess);
+                cmd->RequireBufferState(spatialOutput, ResourceState::UnorderedAccess);
                 cmd->BindComputePipeline(spatial_pipeline_);
                 const DescriptorSetHandle sets[] = { spatial_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, spatial_layout_, 0, 1, sets, 0, nullptr);

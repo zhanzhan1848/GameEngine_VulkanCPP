@@ -530,6 +530,15 @@ void D3D12CommandBufferImpl::InsertBarrier(const ResourceBarrier* barriers, u32 
     }
 }
 
+void D3D12CommandBufferImpl::RequireBufferState(ResourceHandle buffer, ResourceState state) {
+    if (buffer == handles::INVALID_RESOURCE || !static_cast<D3D12Device&>(device_).GetBuffer(buffer)) return;
+    ResourceBarrier barrier{};
+    barrier.resource = buffer;
+    barrier.beforeState = ResourceState::Unknown;
+    barrier.afterState = state;
+    InsertBarrier(&barrier, 1);
+}
+
 void D3D12CommandBufferImpl::MemoryBarrier(PipelineStage /*srcStageMask*/,
                                             PipelineStage /*dstStageMask*/,
                                             AccessFlag srcAccessMask,

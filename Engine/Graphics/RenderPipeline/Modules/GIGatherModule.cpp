@@ -1467,17 +1467,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             if (flatBuf != handles::INVALID_RESOURCE || flatOpenSkyBuf != handles::INVALID_RESOURCE) {
                 cmd->MemoryBarrier(PipelineStage::Transfer, PipelineStage::ComputeShader,
                     AccessFlag::TransferWrite, AccessFlag::ShaderRead);
-                if (device_->GetPlatform() == RHIPlatform::D3D12) {
-                    for (const auto packed : {flatBuf, flatOpenSkyBuf}) {
-                        if (packed == handles::INVALID_RESOURCE) continue;
-                        ResourceBarrier ready{};
-                        ready.resource = packed;
-                        ready.beforeState = ResourceState::Unknown;
-                        ready.afterState = ResourceState::ShaderResource;
-                        ready.subresource = 0xFFFFFFFFu;
-                        cmd->InsertBarrier(&ready, 1);
-                    }
-                }
+                cmd->RequireBufferState(flatBuf, ResourceState::ShaderResource);
+                cmd->RequireBufferState(flatOpenSkyBuf, ResourceState::ShaderResource);
             }
 
             // Update descriptor set

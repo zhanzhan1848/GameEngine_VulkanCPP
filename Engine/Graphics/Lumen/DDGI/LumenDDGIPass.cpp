@@ -3926,15 +3926,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // A single graph pass records several kernels. Track the actual uses
             // of its private buffers across copies, UAV writes and SRV reads.
             auto prepareBuffers = [&](ResourceState next, std::initializer_list<ResourceHandle> buffers) {
-                if (device_->GetPlatform() != RHIPlatform::D3D12) return;
-                for (const auto buffer : buffers) {
-                    if (buffer == handles::INVALID_RESOURCE) continue;
-                    ResourceBarrier barrier{};
-                    barrier.resource = buffer;
-                    barrier.beforeState = ResourceState::Unknown;
-                    barrier.afterState = next;
-                    cmd->InsertBarrier(&barrier, 1);
-                }
+                for (const auto buffer : buffers) cmd->RequireBufferState(buffer, next);
             };
             // Sparse updates must begin from the complete previous probe field.
             // The update kernels only overwrite probes in probeUpdateList; without
