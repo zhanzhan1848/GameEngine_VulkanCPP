@@ -265,6 +265,15 @@
       "returns": "object"
     },
     {
+      "verb": "bake-lightmaps",
+      "description": ".model 容器离线 lightmap 烘焙（CPU BVH 积分；带 UVLM 的 mesh 进烘焙，其余作遮挡）",
+      "params": [
+        "--in",
+        "--out"
+      ],
+      "returns": "object"
+    },
+    {
       "verb": "bake-gi",
       "description": "静态 GI 探针烘焙（需活管线场景；离线持久化通道未接，当前结构化拒绝）",
       "params": [],
