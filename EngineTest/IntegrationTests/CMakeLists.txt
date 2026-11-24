@@ -380,14 +380,16 @@ if(APPLE)
         COMMAND ${SC_BOUND_WITNESS_GLSLANG} -V -I${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen
             ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp -o ${SC_BOUND_WITNESS_SPV}
         DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp
-            ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl VERBATIM)
+            ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl
+            ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/DDGIMeasuredFirstHit.glsl VERBATIM)
     set(SC_BOUND_WITNESS_REPLACE_SPV ${CMAKE_BINARY_DIR}/Tests/SCBoundGeometryWitnessReplace.comp.spv)
     add_custom_command(OUTPUT ${SC_BOUND_WITNESS_REPLACE_SPV}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/Tests
         COMMAND ${SC_BOUND_WITNESS_GLSLANG} -V -DDDGI_GEOMETRY_REPLACE -I${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen
             ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp -o ${SC_BOUND_WITNESS_REPLACE_SPV}
         DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp
-            ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl VERBATIM)
+            ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl
+            ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/DDGIMeasuredFirstHit.glsl VERBATIM)
     add_custom_target(SCBoundGeometryWitnessShader DEPENDS ${SC_BOUND_WITNESS_SPV} ${SC_BOUND_WITNESS_REPLACE_SPV})
     add_dependencies(TestVulkanSponzaRenderGraph SCBoundGeometryWitnessShader)
     target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE SC_BOUND_GEOMETRY_WITNESS_SPV="${SC_BOUND_WITNESS_SPV}" SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV="${SC_BOUND_WITNESS_REPLACE_SPV}")
@@ -1135,14 +1137,16 @@ if(WIN32 AND ENABLE_VULKAN)
             COMMAND ${SC_BOUND_WITNESS_GLSLANG_WIN} -V -I${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen
                 ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp -o ${SC_BOUND_WITNESS_SPV_WIN}
             DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp
-                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl VERBATIM)
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/DDGIMeasuredFirstHit.glsl VERBATIM)
         set(SC_BOUND_WITNESS_REPLACE_SPV_WIN ${CMAKE_BINARY_DIR}/Tests/SCBoundGeometryWitnessReplace.comp.spv)
         add_custom_command(OUTPUT ${SC_BOUND_WITNESS_REPLACE_SPV_WIN}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/Tests
             COMMAND ${SC_BOUND_WITNESS_GLSLANG_WIN} -V -DDDGI_GEOMETRY_REPLACE -I${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen
                 ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp -o ${SC_BOUND_WITNESS_REPLACE_SPV_WIN}
             DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp
-                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl VERBATIM)
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl
+                ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/DDGIMeasuredFirstHit.glsl VERBATIM)
         add_custom_target(SCBoundGeometryWitnessShaderWin DEPENDS ${SC_BOUND_WITNESS_SPV_WIN} ${SC_BOUND_WITNESS_REPLACE_SPV_WIN})
         set(TVSRG_WIN_SC_DEFS "SC_BOUND_GEOMETRY_WITNESS_SPV=\"${SC_BOUND_WITNESS_SPV_WIN}\"" "SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV=\"${SC_BOUND_WITNESS_REPLACE_SPV_WIN}\"")
     else()

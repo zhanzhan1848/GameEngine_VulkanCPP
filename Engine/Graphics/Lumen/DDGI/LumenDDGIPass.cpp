@@ -543,9 +543,10 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
         updateListDesc.type = BufferType::Structured;
         updateListDesc.usage = GPUMemoryUsage::Dynamic;
         updateListDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-        // R20：+显式 UA 位（trace compute GPU 写目标——D3D12 reroute DEFAULT）
-        updateListDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage) |
-                                   static_cast<u32>(ResourceUsage::UnorderedAccess);
+        // The CPU selects this frame's probes. Trace, Finalize and Update
+        // only read the list. GPU-write usage makes it unmappable on D3D12.
+        updateListDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        updateListDesc.name = "DDGI CPU probe update list";
         for (u32 i = 0; i < 3; ++i) {
             probe_update_list_buffers_[i] = device_->CreateBuffer(updateListDesc);
         }
@@ -3685,16 +3686,24 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 u32* updateList = static_cast<u32*>(device_->MapBuffer(probe_update_list_buffers_[frameIdx]));
                 segment("ddgi.list_map");
                 if(cpuHistory)cpuHistory->list_ok=updateList!=nullptr;
-                if (updateList) {
-                    for (u32 i = 0; i < updateCount; ++i) {
-                        updateList[i] = priorities[i].index;
-                        if(cpuHistory)cpu_stall_audit::Selection(*cpuHistory,updateList[i]);
-                        probe_states_[priorities[i].index].last_update_frame = current_frame_index;
-                    }
-                    segment("ddgi.list_fill");
-                    device_->UnmapBuffer(probe_update_list_buffers_[frameIdx]);
-                    segment("ddgi.list_unmap");
+                if (!updateList) {
+                    volume_data_.ProbeUpdateCount = 0;
+                    PRIMAL_LOG_STREAM(Error, "Render") << "DDGI probe selection upload is unavailable";
+                    return;
                 }
+                for (u32 i = 0; i < updateCount; ++i) {
+                    updateList[i] = priorities[i].index;
+                    if(cpuHistory)cpu_stall_audit::Selection(*cpuHistory,updateList[i]);
+                    probe_states_[priorities[i].index].last_update_frame = current_frame_index;
+                }
+                if (current_frame_index == 350 && updateCount >= 4 && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+                    PRIMAL_LOG_STREAM(Info,"Render") << "[F350DDGISelect] volume=" << rg_name_prefix_
+                        << " frame=" << current_frame_index << " count=" << updateCount << " handle=" << probe_update_list_buffers_[frameIdx]
+                        << " first=" << priorities[0].index << "," << priorities[1].index << "," << priorities[2].index << "," << priorities[3].index;
+                }
+                segment("ddgi.list_fill");
+                device_->UnmapBuffer(probe_update_list_buffers_[frameIdx]);
+                segment("ddgi.list_unmap");
 
                 // 2026-09-17 P0（probe-selection-density-audit §3.3/§9-P2）：
                 // age 分布与更新率一次性实测（DDGI_AGE_STATS=1 开启；审计要求
@@ -3822,15 +3831,18 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 u32* updateList = static_cast<u32*>(device_->MapBuffer(probe_update_list_buffers_[frameIdx]));
                 segment("ddgi.list_map");
                 if(cpuHistory){cpuHistory->list_ok=updateList!=nullptr;cpuHistory->updates=updateCount;}
-                if (updateList) {
-                    for (u32 i = 0; i < updateCount; ++i) {
-                        updateList[i] = i;
-                        if(cpuHistory)cpu_stall_audit::Selection(*cpuHistory,updateList[i]);
-                    }
-                    segment("ddgi.list_fill");
-                    device_->UnmapBuffer(probe_update_list_buffers_[frameIdx]);
-                    segment("ddgi.list_unmap");
+                if (!updateList) {
+                    volume_data_.ProbeUpdateCount = 0;
+                    PRIMAL_LOG_STREAM(Error, "Render") << "DDGI initial probe selection upload is unavailable";
+                    return;
                 }
+                for (u32 i = 0; i < updateCount; ++i) {
+                    updateList[i] = i;
+                    if(cpuHistory)cpu_stall_audit::Selection(*cpuHistory,updateList[i]);
+                }
+                segment("ddgi.list_fill");
+                device_->UnmapBuffer(probe_update_list_buffers_[frameIdx]);
+                segment("ddgi.list_unmap");
             }
 
             if(farPolicy) {
@@ -3911,6 +3923,19 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 meta << "],\"validity\":\"Only update-list prefix produces observations; offsets and sizes are in capture.json; origin and scene identity are evidence to compare, not implicit certification\"}\n";
             }
 
+            // A single graph pass records several kernels. Track the actual uses
+            // of its private buffers across copies, UAV writes and SRV reads.
+            auto prepareBuffers = [&](ResourceState next, std::initializer_list<ResourceHandle> buffers) {
+                if (device_->GetPlatform() != RHIPlatform::D3D12) return;
+                for (const auto buffer : buffers) {
+                    if (buffer == handles::INVALID_RESOURCE) continue;
+                    ResourceBarrier barrier{};
+                    barrier.resource = buffer;
+                    barrier.beforeState = ResourceState::Unknown;
+                    barrier.afterState = next;
+                    cmd->InsertBarrier(&barrier, 1);
+                }
+            };
             // Sparse updates must begin from the complete previous probe field.
             // The update kernels only overwrite probes in probeUpdateList; without
             // this inheritance, untouched probes retain whatever happened to be
@@ -4122,6 +4147,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     cmd->MemoryBarrier(
                         PipelineStage::ComputeShader, PipelineStage::ComputeShader,
                         AccessFlag::ShaderWrite, AccessFlag::ShaderRead);
+                    prepareBuffers(ResourceState::UnorderedAccess,
+                                   {hit_distance_buffer_, hit_normal_buffer_, relocated_origins_});
                     const PipelineHandle tracePipeline = useFirstNativeNormal
                         ? first_native_normal_sdf_trace_pipeline_
                         : (useFirstZeroCross ? first_zero_cross_sdf_trace_pipeline_
@@ -4281,6 +4308,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                             {16, DescriptorType::SampledImage, radianceDepthTex != handles::INVALID_RESOURCE ? radianceDepthTex : prevColorTex},
                             {17, DescriptorType::StorageBuffer, relocated_origins_},   // P0: relocated origins (read)
                         };
+                        prepareBuffers(ResourceState::ShaderResource, {hit_distance_buffer_, relocated_origins_,
+                            irradiance_buffers_[histIdx], sc_card_lookup_buffer_, sc_card_data_buffer_,
+                            sc_grid_offsets_buffer_, sc_grid_cards_buffer_});
+                        // The native Finalize shader declares hit normals at u14.
+                        prepareBuffers(ResourceState::UnorderedAccess, {ray_data_buffer_, hit_normal_buffer_});
                         UpdateDescriptorSet(device_, finalize_ds_[frameIdx], finalizeParams, 18);
                         // Source attribution observes the ordinary near finalizer,
                         // not a replacement shader. Only the requested native F2/F3
@@ -4465,6 +4497,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 if (traceParamCount == 0) {
                     // Null lighting atlas or invalid binding — skip trace dispatch.
                 } else {
+                    prepareBuffers(ResourceState::ShaderResource, {irradiance_buffers_[histIdx]});
+                    prepareBuffers(ResourceState::UnorderedAccess, {ray_data_buffer_});
                     UpdateDescriptorSet(device_, trace_ds_[frameIdx], traceParams, traceParamCount);
 
                     cmd->BindComputePipeline(trace_pipeline_);
@@ -4533,6 +4567,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     {6, DescriptorType::StorageBuffer, confidence_buffer_},
                     {7, DescriptorType::StorageBuffer, opensky_buffer_},
                 };
+                prepareBuffers(ResourceState::ShaderResource, {ray_data_buffer_, irradiance_buffers_[histIdx]});
+                prepareBuffers(ResourceState::UnorderedAccess, {irradiance_buffers_[outIdx], confidence_buffer_, opensky_buffer_});
                 UpdateDescriptorSet(device_, irradiance_ds_[frameIdx], irradianceParams, 8);
 
                 const ResourceHandle producerSources[9] = {global_cb_[frameIdx], volume_cb_[frameIdx],
@@ -4611,6 +4647,8 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     {7, DescriptorType::StorageBuffer, depth_provenance_buffers_[histIdx]},
                     {8, DescriptorType::StorageBuffer, depth_provenance_buffers_[outIdx]},
                 };
+                prepareBuffers(ResourceState::ShaderResource, {ray_data_buffer_, depth_buffers_[histIdx], hit_distance_buffer_});
+                prepareBuffers(ResourceState::UnorderedAccess, {depth_buffers_[outIdx]});
                 UpdateDescriptorSet(device_, depth_ds_[frameIdx], depthParams,
                     (device_->GetPlatform() == RHIPlatform::Vulkan ||
                      device_->GetPlatform() == RHIPlatform::D3D12) ? (depth_provenance_enabled_?9u:7u) : 6u);

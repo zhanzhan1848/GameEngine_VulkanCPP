@@ -5,8 +5,10 @@ layout(set=0,binding=0,std430) readonly buffer Queries { uvec4 header; vec4 rays
 layout(set=0,binding=1,std430) writeonly buffer Results { vec4 records[]; } result;
 // The live SC buffers use the canonical production layout and closest helper.
 #include "../../../Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl"
+#include "../../../Engine/Graphics/Vulkan/shaders/Lumen/DDGIMeasuredFirstHit.glsl"
 void main(){
-    uint index=gl_GlobalInvocationID.x,count=query.header.x;
+    uint index=gl_GlobalInvocationID.x,count=query.header.x & 0x7fffffffu;
+    bool compareDDGI=(query.header.x & 0x80000000u)!=0u;
     if(index>=count)return;
     vec4 origin=query.rays[index*2u],direction=query.rays[index*2u+1u];
     float t=direction.w;uint owner=0xffffffffu,primitive=0xffffffffu;
@@ -17,4 +19,13 @@ void main(){
     result.records[base]=origin;result.records[base+1u]=direction;
     result.records[base+2u]=vec4(float(status),t,uintBitsToFloat(owner),uintBitsToFloat(primitive));
     result.records[base+3u]=vec4(uintBitsToFloat(index),uintBitsToFloat(query.header.y),uintBitsToFloat(query.header.z),uintBitsToFloat(query.header.w));
+    if(compareDDGI) {
+        float dist; uint hitOwner,hitPrimitive;
+        vec3 normal,a,e1,e2;
+        int outcome=geometryFirstHit(origin.xyz,direction.xyz,origin.w,direction.w,
+            dist,hitOwner,hitPrimitive,normal,a,e1,e2);
+        uint tail=count*4u+index*2u;
+        result.records[tail]=vec4(float(outcome),dist,uintBitsToFloat(hitOwner),uintBitsToFloat(hitPrimitive));
+        result.records[tail+1u]=vec4(normal,0.);
+    }
 }

@@ -1995,6 +1995,17 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                         copy(nvolViews[0].relocated_origins, probe * 16, offsetof(Samples, origins));
                         copy(bufInfos[8].buffer, probe * 128 * sizeof(float), offsetof(Samples, depth_means));
                     }
+                    if (inputs.update_samples_recorded && ddgi->GetLastUpdateCount() >= 4 &&
+                        ddgi->GetVolumeData().RaysPerProbe >= 4 && ddgi->GetHitDistanceBuffer() != handles::INVALID_RESOURCE) {
+                        const auto updates = ddgi->GetProbeUpdateListBuffer(inputs.frame_index);
+                        if (updates != handles::INVALID_RESOURCE) {
+                            cmd->CopyBuffer(updates, inputs.probe_sample_staging, 0,
+                                inputs.probe_sample_offset + offsetof(Samples, first_updates), sizeof(Samples::first_updates));
+                            cmd->CopyBuffer(ddgi->GetHitDistanceBuffer(), inputs.probe_sample_staging, 0,
+                                inputs.probe_sample_offset + offsetof(Samples, first_hit_distances), sizeof(math::v4));
+                            *inputs.update_samples_recorded = true;
+                        }
+                    }
                     *inputs.probe_samples_recorded = true;
                     PRIMAL_LOG_STREAM(Info, "Render") << "[F350DDGIInputs] read_slot=" << ddgiReadIdx
                         << " near=" << bufInfos[7].buffer << " packed=" << flatBuf << " origins=" << nvolViews[0].relocated_origins

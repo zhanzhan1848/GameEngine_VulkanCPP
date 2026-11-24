@@ -57,13 +57,13 @@ static bool RunSCBoundGeometryWitness(RHIDeviceBase* device,
         BufferDesc b{};b.size=size;b.type=BufferType::Structured;b.usage=b.memoryUsage=memory;
         b.bindFlags=flags;return device->CreateBuffer(b);
     };
-    const u64 outputBytes=u64(count)*64;
+    const u64 outputBytes=u64(count)*(sceneOnly ? 96 : 64);
     r.query=buffer(bytes,GPUMemoryUsage::Dynamic,u32(BufferUsageFlags::Storage));
     r.out=buffer(outputBytes,GPUMemoryUsage::Static,u32(ResourceUsage::UnorderedAccess) |
         u32(BufferUsageFlags::Storage) | u32(BufferUsageFlags::TransferSrc));
     r.readback=buffer(outputBytes,GPUMemoryUsage::Readback,u32(BufferUsageFlags::TransferDst));
     if(r.query==handles::INVALID_RESOURCE||r.out==handles::INVALID_RESOURCE||r.readback==handles::INVALID_RESOURCE)return false;
-    u32 header[4]={count,frame,view.slot,u32(view.scene_epoch)};
+    u32 header[4]={count | (sceneOnly ? 0x80000000u : 0u),frame,view.slot,u32(view.scene_epoch)};
     auto* mapped=device->MapBuffer(r.query);if(!mapped)return false;
     std::memcpy(mapped,header,16);std::memcpy(static_cast<u8*>(mapped)+16,rays.data(),rays.size()*4);device->UnmapBuffer(r.query);
     const char* conservativeSetting=std::getenv("SC_BOUND_GEOMETRY_CONSERVATIVE");
@@ -107,6 +107,19 @@ static bool RunSCBoundGeometryWitness(RHIDeviceBase* device,
             sawHit |= hit[0] == 1.f;
             if (hit[0] == 1.f && (!std::isfinite(hit[1]) || hit[1] <= 0 || hit[1] > rays[i*8+7])) return false;
             if (i+1==count && hit[0]!=0.f) return false;
+            const u8* measured = result.data() + count * 64 + i * 32;
+            float segment[2], normal[3]; u32 identity[2];
+            std::memcpy(segment, measured, sizeof(segment));
+            std::memcpy(identity, measured + 8, sizeof(identity));
+            std::memcpy(normal, measured + 16, sizeof(normal));
+            const float normalLength2 = normal[0]*normal[0] + normal[1]*normal[1] + normal[2]*normal[2];
+            const bool agrees = hit[0] == segment[0] && (hit[0] == 0.f ||
+                (std::abs(hit[1] - segment[1]) <= 0.0001f * std::max(1.f, hit[1]) &&
+                 ids[0] == identity[0] && ids[1] == identity[1] && std::abs(normalLength2 - 1.f) < 0.001f));
+            PRIMAL_LOG_STREAM(Info,"Render") << "[F350DDGIRay] index=" << i << " status=" << segment[0]
+                << " distance=" << segment[1] << " owner=" << identity[0] << " primitive=" << identity[1]
+                << " normal=" << normal[0] << "," << normal[1] << "," << normal[2] << " agrees=" << agrees;
+            if (!agrees) return false;
             PRIMAL_LOG_STREAM(Info,"Render") << "[F350SceneRay] frame=" << frame << " slot=" << view.slot
                 << " epoch=" << view.scene_epoch << " digest=" << view.source_digest << " index=" << i
                 << " status=" << hit[0] << " distance=" << hit[1] << " owner=" << ids[0] << " primitive=" << ids[1]

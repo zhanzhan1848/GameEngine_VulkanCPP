@@ -269,7 +269,7 @@ bool ScreenProbeGIPass::Initialize(RHIDeviceBase* device,
                                     const ScreenProbeParams& params) {
     if (initialized_) return true;
 
-    if (!device || params.downsample_factor == 0 ||
+    if (!device || !render_width || !render_height || params.downsample_factor == 0 ||
         params.rays_per_probe == 0 || params.rays_per_probe > 64) {
         PRIMAL_LOG_STREAM(Error, "Render")
             << "[ScreenProbeGI] Requires a device, nonzero downsample and 1..64 rays/probe" << std::endl;
@@ -282,8 +282,9 @@ bool ScreenProbeGIPass::Initialize(RHIDeviceBase* device,
     render_height_ = render_height;
 
     // Compute probe grid dimensions
-    grid_width_ = (render_width + params_.downsample_factor - 1) / params_.downsample_factor;
-    grid_height_ = (render_height + params_.downsample_factor - 1) / params_.downsample_factor;
+    grid_width_ = 1 + (render_width - 1) / params_.downsample_factor;
+    grid_height_ = 1 + (render_height - 1) / params_.downsample_factor;
+    if (u64(grid_width_) * grid_height_ > std::numeric_limits<u32>::max() / 4u) return false;
 
     // SPGI probe-distribution plan（P0-P4）: env 旋钮快照。tier3 是 Vulkan
     // pilot——Metal 旧链无 compact/lightvar 通道，强制回退棋盘两档语义。
@@ -1207,11 +1208,17 @@ bool ScreenProbeGIPass::CreateProbeStorage() {
         auto buffer = device_->CreateBuffer(desc);
         if (buffer == handles::INVALID_RESOURCE) ready = false;
         if (!clear || buffer == handles::INVALID_RESOURCE) return buffer;
-        if (zeros.size() < desc.size) zeros.resize(desc.size);
-        if (!device_->UpdateBufferData(buffer, zeros.data(), desc.size, 0)) {
-            ready = false;
-            device_->DestroyBuffer(buffer);
-            return handles::INVALID_RESOURCE;
+        // The D3D12 upload ring has bounded per-transfer capacity even
+        // when the full probe field is larger than one upload slot.
+        constexpr u64 maxChunk = 4ull * 1024 * 1024;
+        const u64 chunk = std::min(desc.size, maxChunk);
+        if (zeros.size() < chunk) zeros.resize(chunk);
+        for (u64 offset = 0; offset < desc.size; offset += chunk) {
+            if (!device_->UpdateBufferData(buffer, zeros.data(), std::min(chunk, desc.size - offset), offset)) {
+                ready = false;
+                device_->DestroyBuffer(buffer);
+                return handles::INVALID_RESOURCE;
+            }
         }
         return buffer;
     };
