@@ -605,6 +605,11 @@ bool StandardRenderPipeline::Initialize(RHIDeviceBase* device) {
 
 void StandardRenderPipeline::Shutdown() {
     if (s_instance == this) s_instance = nullptr;
+    if (deferred_samples_ != handles::INVALID_RESOURCE) {
+        device_->WaitIdle();
+        device_->DestroyBuffer(deferred_samples_);
+        deferred_samples_ = handles::INVALID_RESOURCE;
+    }
     ShutdownSubsystems();
     ShutdownLumenPasses();
 
@@ -6186,6 +6191,24 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     ApplyConfigChanges();
 
     u32 cbIdx = bufferIndex;
+    // A single completed submission owns the sparse copies. Consume before this frame records.
+    if (deferred_samples_ != handles::INVALID_RESOURCE) {
+        device_->WaitIdle();
+        if (auto* bytes = static_cast<const u8*>(device_->MapBuffer(deferred_samples_))) {
+            for (u32 i = 0; i < 12; ++i) {
+                const auto* rgba = reinterpret_cast<const u16*>(bytes + 512 * i);
+                PRIMAL_LOG_STREAM(Info, "Render") << "[DeferredSamples] frame=" << frameCount_ - 1
+                    << " phase=" << (i < 6 ? "after-draw" : "before-fusion")
+                    << " mrt=" << ((i / 3) % 2) << " point=" << i % 3
+                    << " rgba16bits=" << rgba[0] << "," << rgba[1] << "," << rgba[2] << "," << rgba[3]
+                    << std::endl;
+            }
+            device_->UnmapBuffer(deferred_samples_);
+        }
+        device_->DestroyBuffer(deferred_samples_);
+        deferred_samples_ = handles::INVALID_RESOURCE;
+    }
+
 
     // R23（D3D12 黑帧分阶段定位）：目标帧的下一帧入口做一次阶段内容 dump
     //（env 门控默认关，仅 D3D12 平台；语义见 R23BlackStageDumpTexture 注）。
@@ -6309,7 +6332,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             // 单位矩阵占位）。shadow_map_reborn 非零 → 管线/描述符/输入全活，
             // 帧期 RG-cmd dispatch 未生效（RG 提交路径问题）；恒零 →
             // D32→R32 采样链断（SRV/视图格式方向，R24 同族）。
-            {
+            if (std::getenv("PRIMAL_D3D12_DEFERRED_COPY_WRITE")) {
                 CommandBufferHandle rbch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
                 if (RHICommandBuffer* rc = GetCommandBuffer(rbch)) {
                     if (rc->Begin()) {
@@ -6372,11 +6395,14 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                                 .loadOp = rhi::LoadAction::DontCare,
                                 .storeOp = rhi::StoreAction::Store,
                                 .clearValue = { rhi::ClearValue{ math::v4{0, 0, 0, 1} } } });
+                            auto envAttachment = rp.colorAttachments[0];
+                            envAttachment.texture = deferred_module_->GetEnvironmentTexture(prevSlot);
+                            rp.colorAttachments.push_back(envAttachment);
                             rc->BeginRenderPass(rp);
                             // R60：注入 z=8 常数诊断档——全屏常数 0.5 落地
                             // ⟹ fragment 在独立 cmd 内可跑（RG 路径特有）；
                             // 仍零 ⟹ deferred draw 语义自身（PSO/vert/draw
-                            // 深挖）。z 直写 scene_cb（offset 496 布局探针）。
+                            // 深挖）。
                             deferred_module_->DebugSetDiagnosticZ(prevSlot, 8.0f);
                             deferred_module_->DebugStandaloneDraw(rc, prevSlot);
                             rc->EndRenderPass();
@@ -6389,13 +6415,6 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     }
                     device_->DestroyCommandBuffer(dch);
                     R23BlackStageDumpTexture(device_, "deferred_reborn", defOut);
-                    // R58：探针管线写 deferred_out 本体（outOverride 机制）——
-                    // 落地（角落非零）= 纹理可写+UAV 投递活，死因收窄到
-                    // deferred 管线/Draw；恒零 = deferred_out 纹理本体
-                    // （RTV/资源面）坏。与 deferred_reborn（管线重放）正交。
-                    R34UavWriteProbe(device_, gpuDrawStage.GetGBufferAlbedo(),
-                                     gpuDrawStage.GetShadowDepthRenderTarget(0, prevSlot),
-                                     defOut, "uav_probe_defout");
                     // R64：CopyBufferToTexture 上传写判别
                     //（PRIMAL_D3D12_DEFERRED_COPY_WRITE=1）——纯资源直写零
                     // 描述符参与（RTV/UAV 持久槽全绕开）：pattern 落地 =
@@ -6759,6 +6778,51 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                 float(vol.ProbeCounts[0] * vol.ProbeCounts[1] * vol.ProbeCounts[2])};
         }
         auto deferredOut = deferred_module_->AddPasses(graph, deferredIn);
+        static const bool sampleDeferred = std::getenv("PRIMAL_D3D12_DEFERRED_SAMPLES") != nullptr;
+        if (sampleDeferred && frameCount_ == 350 && device_->GetPlatform() == RHIPlatform::D3D12) {
+            BufferDesc desc{};
+            desc.size = 12 * 512;
+            desc.memoryUsage = GPUMemoryUsage::Readback;
+            desc.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+            deferred_samples_ = device_->CreateBuffer(desc);
+        }
+        auto sampleAttachments = [&](bool beforeFusion) {
+            if (deferred_samples_ == handles::INVALID_RESOURCE) return;
+            struct Samples { RGResourceHandle mrt[2]; };
+            graph.AddPass<Samples>(beforeFusion ? "DeferredSamplesBeforeFusion" : "DeferredSamplesAfterDraw",
+                RGPassType::Copy, RGPassCategory::Copy,
+                [&](Samples& d, RenderGraphBuilder& b) {
+                    b.SideEffect();
+                    d.mrt[0] = b.Read(deferredOut.deferred_output_rg, ResourceState::CopySource);
+                    d.mrt[1] = b.Read(deferredOut.environment_specular_rg, ResourceState::CopySource);
+                },
+                [this, cbIdx, beforeFusion](const Samples& d, RenderGraphContext& ctx) {
+                    constexpr s32 pixels[3][2] = {{300,40}, {1520,1310}, {1964,594}};
+                    for (u32 mrt = 0; mrt < 2; ++mrt) {
+                        auto* res = ctx.graph->GetResource(d.mrt[mrt]);
+                        if (!res) continue;
+                        auto tex = res->GetPhysicalHandle();
+                        u32 w = 0, h = 0;
+                        if (!device_->GetTextureSize(tex, w, h) || !w || !h) continue;
+                        BufferTextureCopyRegion regions[3]{};
+                        for (u32 i = 0; i < 3; ++i) {
+                            auto& region = regions[i];
+                            region.bufferOffset = 512u * ((beforeFusion ? 6 : 0) + 3 * mrt + i);
+                            region.imageSubresource.layerCount = 1;
+                            region.imageOffset = {s32(w * pixels[i][0] / 2560), s32(h * pixels[i][1] / 1440), 0};
+                            region.imageExtent = {1,1,1};
+                        }
+                        PRIMAL_LOG_STREAM(Info, "Render") << "[DeferredSamples] frame=" << frameCount_
+                            << " slot=" << cbIdx << " phase=" << (beforeFusion ? "before-fusion" : "after-draw")
+                            << " mrt=" << mrt << " tex=" << tex << " mip=0 layer=0 pso="
+                            << deferred_module_->GetPipeline() << " layout=" << deferred_module_->GetPipelineLayout()
+                            << " set=" << deferred_module_->GetDescriptorSet(cbIdx) << std::endl;
+                        ctx.cmdBuffer->CopyTextureToBuffer(tex, deferred_samples_, regions, 3);
+                    }
+                });
+        };
+        sampleAttachments(false);
+
 
         // Lightmap 互斥判定（v4 转正，twin 站点同步，见 BuildRenderGraph
         // Step 4 后同名块含根因定罪与修复说明）：lightmap 激活即互斥（用户
@@ -7502,6 +7566,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     static_cast<u32>(frameCount_));
             }
 
+            sampleAttachments(true);
             fusionOut = fusion_module_->AddPasses(graph, fusionIn);
         }
 

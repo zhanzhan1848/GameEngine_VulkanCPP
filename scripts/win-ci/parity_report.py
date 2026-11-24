@@ -122,14 +122,6 @@ def triptych(ref_path, win_path, out_path):
     write_png(out_path, w * 3, h, bytes(out))
 
 
-def psnr_band(psnr):
-    if psnr == float("inf") or psnr >= 43.5:
-        return "pass"
-    if psnr >= 31.8:
-        return "gather-resolution residual (r11 state)"
-    return "below SDF-cleared band"
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
@@ -158,7 +150,7 @@ def main():
 
     with open(args.gates, "r", encoding="utf-8-sig") as fh:
         gates = json.load(fh)
-    if len(gates) != 4:
+    if len(gates) != 4 or {g["group"] for g in gates} != set(GROUP_LABELS):
         print("[parity] FATAL expected 4 groups in %s, got %d "
               "(run_f350.ps1 writes [] when the exe is missing)"
               % (args.gates, len(gates)))
@@ -175,7 +167,7 @@ def main():
         label = GROUP_LABELS.get(name, name)
         row = {"group": name, "label": label,
                "exit": g.get("exit_code"),
-               "watchdog": g.get("watchdog", False)}
+               "watchdog": g.get("watchdog", False), "ssim": None, "mean_abs": None}
         # gi=0 (GI-off) captures are not comparable against the GI-on
         # reference (removing indirect light naturally lands ~16 dB): use
         # the Mac GI-off capture as the same-mode cross-platform reference.
@@ -223,8 +215,10 @@ def main():
         if psnr == float("inf") or psnr >= PSNR_GATE_DB:
             row["gate"] = "PASS"
         else:
-            row["gate"] = ("FAIL %.4f dB < %.1f dB - %s" %
-                           (psnr, PSNR_GATE_DB, psnr_band(psnr)))
+            row["gate"] = "FAIL %.4f dB < %.1f dB" % (psnr, PSNR_GATE_DB)
+            any_fail = True
+        if g.get("contract_ok") is False:
+            row["gate"] += " / FAIL capture contract"
             any_fail = True
         try:
             triptych(ref, ppm_path,
@@ -238,12 +232,10 @@ def main():
     lines = []
     lines.append("### Windows parity f350 vs Mac same-mode reference")
     lines.append("")
-    lines.append("Reference: `.github/ci-assets/ref_mac_vulkan_RG_f350.ppm` "
-                 "(SHA256 `%s`, verified)." % REF_SHA256)
+    lines.append("Frozen Mac Vulkan reference SHA-256: GI-on `%s`, GI-off `%s`." %
+                 (REF_SHA256, GIOFF_REF_SHA256))
     lines.append("")
-    lines.append("PSNR gate: **psnr_rgb_db >= %.1f dB** (frozen noise-floor "
-                 "gate; NOT lowered for the current 34.43 dB state)." %
-                 PSNR_GATE_DB)
+    lines.append("PSNR gate: **psnr_rgb_db >= %.1f dB**." % PSNR_GATE_DB)
     lines.append("")
     lines.append("| group | capture | exe exit | PSNR (dB) | SSIM | mean abs "
                  "| gate |")
@@ -258,10 +250,7 @@ def main():
                       ssim_s, mean_s, r["gate"]))
     lines.append("")
     if any_fail:
-        lines.append("**Overall f350 gate: FAIL.** Known r11 state: D3D12 "
-                     "produces no frames; Windows Vulkan GI-on is ~34.43 dB "
-                     "(gather-resolution residual, below the 43.5 dB gate). "
-                     "These failures are expected and must stay visible.")
+        lines.append("**Overall f350 gate: FAIL.**")
     else:
         lines.append("**Overall f350 gate: PASS.**")
     lines.append("")

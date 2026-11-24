@@ -939,6 +939,7 @@ private:
     const RenderScene* last_bound_scene_{nullptr};
 
     // Per-frame data
+    rhi::ResourceHandle deferred_samples_{rhi::handles::INVALID_RESOURCE};
     u64 frameCount_{0};
     bool subsystems_initialized_{false};
 

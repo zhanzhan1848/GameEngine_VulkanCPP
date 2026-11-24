@@ -123,6 +123,10 @@ if ($env:PRIMAL_F350_GBV_DIAG -eq '1') {
 # QUERY_KERNEL → 凶手在其余 5 旋钮。R67 续分（minenv=4/5）：
 # A=DDGI_RAY_SAMPLE+SPGI_DDGI_VISIBILITY（采样/可见性查询侧）；
 # B=DDGI_MEASURED_GEOMETRY+GEOMETRY_VISIBILITY+TRAVERSAL_AUDIT（几何侧）。
+if ($env:PRIMAL_F350_DEFERRED_SAMPLES -eq '1') {
+    $diagGroups += @{ name = 'd3d12-gioff-samples'; api = 'd3d12'; gi = 0;
+                      ppm = 'art2_win_d3d12_gioff_samples_f350.ppm'; diag = 11 }
+}
 $minEnvGroups = @()
 if ($env:PRIMAL_F350_MINENV_DIAG -eq '1') {
     $minEnvGroups += @(
@@ -154,7 +158,7 @@ if ($env:PRIMAL_F350_A3_ONLY -eq '1') {
 $pixlikeGroups = @()
 if ($env:PRIMAL_F350_PIXLIKE_DIAG -eq '1') {
     $pixlikeGroups += @{ name = 'd3d12-pixlike'; api = 'd3d12'; gi = 1;
-                         ppm = 'art2_win_d3d12_pixlike_f350.ppm'; pixlike = 1 }
+                         ppm = 'art2_win_d3d12_pixlike_f10.ppm'; pixlike = 1 }
 }
 
 # Asset gates (same files the r11 launchers hard-require before running).
@@ -186,12 +190,14 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     }
 
     # --- env matrix (verbatim from the r11 launchers) ---
-    Remove-Item Env:PRIMAL_VK_HANG_DIAG -ErrorAction SilentlyContinue
-    Remove-Item Env:PRIMAL_SPGI_SKIP -ErrorAction SilentlyContinue
-    Remove-Item Env:GI_ISOLATE -ErrorAction SilentlyContinue
-    Remove-Item Env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL -ErrorAction SilentlyContinue
-    Remove-Item Env:RHI_TEST_PLATFORM -ErrorAction SilentlyContinue
-    Remove-Item Env:PRIMAL_LIGHTING_DEBUG -ErrorAction SilentlyContinue
+    foreach ($key in @(
+        'PRIMAL_VK_HANG_DIAG', 'PRIMAL_SPGI_SKIP', 'GI_ISOLATE',
+        'PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL', 'RHI_TEST_PLATFORM', 'PRIMAL_LIGHTING_DEBUG',
+        'TAA_OFF', 'PRIMAL_SHADOW_RENDER_OFF', 'PRIMAL_D3D12_BLACK_STAGE_FRAME',
+        'PRIMAL_D3D12_GBV', 'PRIMAL_D3D12_BLACK_STAGE_DUMP', 'PRIMAL_D3D12_API_TRACE',
+        'PRIMAL_D3D12_DEFERRED_PROBE', 'PRIMAL_DUMP_MATRIX', 'PRIMAL_D3D12_RTVAUDIT',
+        'PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL', 'PRIMAL_D3D12_DEFERRED_COPY_WRITE', 'PRIMAL_D3D12_DEFERRED_SAMPLES'
+    )) { Remove-Item "Env:$key" -ErrorAction SilentlyContinue }
 
     $env:PRIMAL_DDGI_GEOMETRY_VISIBILITY = '1'
     $env:PRIMAL_TEST_MODEL = 'SponzaTangentFrames.model'
@@ -209,8 +215,8 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     $ppmPath = Join-Path $OutDir $g.ppm
     $env:SPONZA_CAPTURE = $ppmPath
 
-    if ($g.api -eq 'd3d12') {
-        $env:RHI_TEST_PLATFORM = 'd3d12'
+    if ($g.api -eq 'd3d12') { $env:RHI_TEST_PLATFORM = 'd3d12' }
+    if ($g.diag -or $g.minenv -or $g.pixlike) {
         # R16：D3D12 组启用逐调用 trace——定位 init 期静默设备移除的
         # 确切 API（移除原因已实测 DXGI_ERROR_INVALID_CALL，详见
         # taskG_giud_draw_invalid_call_r16.md）
@@ -230,7 +236,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     # R66 minenv 对分覆盖（在 canonical 设置与 gi 设置之后执行才能摘干净）。
     # minenv=1：摘掉全部附加旋钮（DDGI 族+SC+ALBEDO_MIPS——R63b 最小 env 同款）。
     # minenv=2：恢复 DDGI 族（QUERY_KERNEL 含内）。minenv=3：恢复 SC+ALBEDO_MIPS。
-    if ($g.minenv) {
+    if ($g.minenv -or $g.pixlike) {
         Remove-Item Env:PRIMAL_DDGI_GEOMETRY_VISIBILITY -ErrorAction SilentlyContinue
         Remove-Item Env:DDGI_RAY_SAMPLE -ErrorAction SilentlyContinue
         Remove-Item Env:DDGI_MEASURED_GEOMETRY -ErrorAction SilentlyContinue
@@ -283,25 +289,15 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
             $env:DDGI_RAY_SAMPLE = '7'
             $env:DDGI_MEASURED_GEOMETRY = '1'
         }
-        # R73 pixlike：逐项复制用户 PIX 会话 env（R63b 最小四件中的两个诊断
-        # 件 BLACK_STAGE_DUMP/DEFERRED_PROBE 保留=用户同款；其余 canonical
-        # 件全摘）。12 帧+CAPTURE_FRAME=10（用户在 frame 5-10 抓帧）。
-        if ($g.pixlike) {
-            Remove-Item Env:PRIMAL_TEST_MODEL -ErrorAction SilentlyContinue
-            Remove-Item Env:PRIMAL_VK_TANGENT_FRAME -ErrorAction SilentlyContinue
-            Remove-Item Env:PRIMAL_D3D12_API_TRACE -ErrorAction SilentlyContinue
-            Remove-Item Env:PRIMAL_DUMP_MATRIX -ErrorAction SilentlyContinue
-            Remove-Item Env:PRIMAL_DDGI_GEOMETRY_VISIBILITY -ErrorAction SilentlyContinue
-            Remove-Item Env:DDGI_RAY_SAMPLE -ErrorAction SilentlyContinue
-            Remove-Item Env:DDGI_MEASURED_GEOMETRY -ErrorAction SilentlyContinue
-            Remove-Item Env:SPGI_DDGI_VISIBILITY -ErrorAction SilentlyContinue
-            Remove-Item Env:PRIMAL_DDGI_TRAVERSAL_AUDIT -ErrorAction SilentlyContinue
-            Remove-Item Env:PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL -ErrorAction SilentlyContinue
-            Remove-Item Env:PRIMAL_SC_OWNER_CARD_DIRECTORY -ErrorAction SilentlyContinue
-            Remove-Item Env:PRIMAL_VK_ALBEDO_MIPS -ErrorAction SilentlyContinue
-            $env:SPONZA_MAX_FRAMES = '12'
-            $env:SPONZA_CAPTURE_FRAME = '10'
+    }
+    if ($g.pixlike) {
+        foreach ($key in @('PRIMAL_TEST_MODEL', 'PRIMAL_VK_TANGENT_FRAME',
+                           'PRIMAL_D3D12_API_TRACE', 'PRIMAL_DUMP_MATRIX')) {
+            Remove-Item "Env:$key" -ErrorAction SilentlyContinue
         }
+        $env:SPONZA_MAX_FRAMES = '12'
+        $env:SPONZA_CAPTURE_FRAME = '10'
+        $env:PRIMAL_D3D12_BLACK_STAGE_FRAME = '10'
     }
     # R29/R33/R36b 诊断组开关（diag=1 TAA_OFF，diag=2 SHADOW_RENDER_OFF，
     # diag=3 BLACK_STAGE_FRAME=50；diag=4/5 PRIMAL_LIGHTING_DEBUG=albedo/
@@ -323,21 +319,21 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         $env:SPONZA_CAPTURE_FRAME = '4'
         $env:PRIMAL_SPONZA_WATCHDOG_SECS = '900'
     }
-    else {
-        Remove-Item Env:TAA_OFF -ErrorAction SilentlyContinue
-        Remove-Item Env:PRIMAL_SHADOW_RENDER_OFF -ErrorAction SilentlyContinue
-        Remove-Item Env:PRIMAL_D3D12_BLACK_STAGE_FRAME -ErrorAction SilentlyContinue
-        Remove-Item Env:PRIMAL_LIGHTING_DEBUG -ErrorAction SilentlyContinue
-        Remove-Item Env:PRIMAL_D3D12_GBV -ErrorAction SilentlyContinue
-        $env:SPONZA_MAX_FRAMES = '400'
-        $env:SPONZA_CAPTURE_FRAME = '350'
-    }
     # R70：隔离短跑档（diag 开关之后覆盖才生效）——A3 崩机风险面缩到 4 帧
     # + 900s watchdog（GBV 组 diag=10 同款先例）。
     if ($g.short) {
         $env:SPONZA_MAX_FRAMES = '4'
         $env:SPONZA_CAPTURE_FRAME = '4'
         $env:PRIMAL_SPONZA_WATCHDOG_SECS = '900'
+    }
+
+    if ($g.diag -eq 8) {
+        $env:PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL = '1'
+        $env:PRIMAL_D3D12_RTVAUDIT = '1'
+        $env:PRIMAL_D3D12_DEFERRED_COPY_WRITE = '1'
+    }
+    if ($g.name -eq 'd3d12-gioff-samples' -or $g.diag -eq 8) {
+        $env:PRIMAL_D3D12_DEFERRED_SAMPLES = '1'
     }
 
     $so = Join-Path $OutDir ($g.name + '.stdout.log')
@@ -348,6 +344,8 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     $start = Get-Date
     $proc = Start-Process -FilePath $Exe -WorkingDirectory $Repo `
         -RedirectStandardOutput $so -RedirectStandardError $se -PassThru
+    # Retain the native handle while the process is live (Windows PowerShell 5.1).
+    $null = $proc.Handle
     $watchdogFired = $false
     while (-not $proc.HasExited) {
         Start-Sleep -Seconds 10
@@ -386,21 +384,28 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         $sha = (Get-FileHash -Algorithm SHA256 -Path $ppmPath).Hash.ToLower()
     }
 
-    $anchors = @()
-    if (Test-Path $se) {
-        $content = Get-Content $se -Raw
-        foreach ($a in @('\[Part37\] Loading HDR', 'Frame 350 captured',
-                         'SPONZA_MAX_FRAMES=400 reached', '\[WATCHDOG\]')) {
-            if ($content -match $a) { $anchors += ($a -replace '\\', '') }
-        }
-    }
+    $captureFrame = [int]$env:SPONZA_CAPTURE_FRAME
+    $maxFrames = [int]$env:SPONZA_MAX_FRAMES
+    $expectedModel = if ($env:PRIMAL_TEST_MODEL) { $env:PRIMAL_TEST_MODEL } else { 'Sponza.model' }
+    $anchors = @(Select-String -LiteralPath $se,$so -Pattern @(
+        '\[Part30.4\] model path:', '\[Part37\] Loading HDR:',
+        "Frame $captureFrame captured", "SPONZA_MAX_FRAMES=$maxFrames reached"
+    ) | ForEach-Object { $_.Line })
+    $observed = ($anchors -join "`n")
+    $contract = ($observed -match ("model=" + [regex]::Escape($expectedModel) + ",")) -and
+                ($observed -match 'Loading HDR:.*sunset\.hdr') -and
+                ($observed -match "Frame $captureFrame captured") -and
+                ($observed -match "clean exit at frame $maxFrames\b") -and
+                ($rc -eq 0) -and $ppmExists -and (-not $watchdogFired)
+    if (-not $contract) { Write-Warning "[f350] $($g.name) launch/capture contract failed" }
     Write-Output "[f350] $($g.name) exit=$rc ppm_exists=$ppmExists watchdog=$watchdogFired sha256=$sha"
 
     $entry = [pscustomobject]@{
         group = $g.name; api = $g.api; gi = $g.gi;
         exit_code = $rc; ppm = $g.ppm; ppm_exists = $ppmExists;
         ppm_sha256 = $sha; watchdog = $watchdogFired; anchors = $anchors;
-        missing_assets = @()
+        model = $expectedModel; max_frames = $maxFrames; capture_frame = $captureFrame
+        contract_ok = $contract; missing_assets = @()
     }
     if ($g.diag -or $g.minenv -or $g.pixlike) { $diagResults += $entry } else { $results += $entry }
 }

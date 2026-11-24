@@ -404,16 +404,7 @@ void DeferredLightingModule::DebugStandaloneDraw(rhi::RHICommandBuffer* cmd,
 void DeferredLightingModule::DebugSetDiagnosticZ(u32 buffer_index, float z) {
     if (buffer_index >= 3) return;
     if (void* p = device_->MapBuffer(scene_cb_[buffer_index])) {
-        // shadowParams 位于 SceneData offset 496（shadowMatrix3@432 + 64B；
-        // 与上方 static_assert(sizeof==544) 的布局注释互锁）。诊断注入只改
-        // z 字段，其余字段保持上一帧真值。
-        struct SceneDataShadowParams {
-            u8 pad[496];
-            math::v4 shadowParams;  // offset 496
-        };
-        auto* sd = static_cast<SceneDataShadowParams*>(p);
-        sd->shadowParams = math::v4{sd->shadowParams.x, sd->shadowParams.y,
-                                    z, sd->shadowParams.w};
+        static_cast<SceneData*>(p)->shadowParams.z = z;
         device_->UnmapBuffer(scene_cb_[buffer_index]);
     }
 }

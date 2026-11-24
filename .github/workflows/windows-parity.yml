@@ -37,7 +37,7 @@ name: windows-parity
 
 on:
   push:
-    branches: [dev, d3d12-windows-test-20261103]
+    branches: [dev, d3d12-windows-test-20261103, 'codex/windows-parity-gtx1060']
   pull_request:
   workflow_dispatch:
 
@@ -403,16 +403,7 @@ jobs:
           # R50：零依赖档（z=8 常数 / z=9 屏幕梯度）——fragment 是否产生过
           $env:PRIMAL_F350_LIGHTING_CONST_DIAG = '1'
           $env:PRIMAL_F350_LIGHTING_GRADIENT_DIAG = '1'
-          # R51：哨兵 Clear 判别——render pass 层活（clear 落地）而 fragment
-          # 零（draw/光栅化面）vs render pass 本身没发生（RG execute 面）。
-          # D3D12-only 平台门在模块内。
-          $env:PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL = '1'
-          # R64：RTV 通道审计（deferred 哨兵附件现场重建全新 RTV 描述符
-          # clear 标志色——持久槽描述符内容 vs 执行链 vs 资源内存三分判）
-          # + CopyBufferToTexture 纯资源直写判别（零描述符参与——内存本体
-          # 可写性一刀切）。dump 面新增 deferred_copywrite 行。
-          $env:PRIMAL_D3D12_RTVAUDIT = '1'
-          $env:PRIMAL_D3D12_DEFERRED_COPY_WRITE = '1'
+          $env:PRIMAL_F350_DEFERRED_SAMPLES = '1'
           # R66：minenv 对分三组（GPU 1.wpix 最小 env 会话渲染正常 vs
           # canonical 全集全黑——嫌疑=附加旋钮 DDGI 族/SC/ALBEDO_MIPS 在
           # D3D12 上搞死中段资源；base 全关 / ddgi 仅 DDGI 族 / scmip 仅

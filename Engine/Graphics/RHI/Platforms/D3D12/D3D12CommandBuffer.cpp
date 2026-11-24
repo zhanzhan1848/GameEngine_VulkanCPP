@@ -11,6 +11,7 @@
 #include "D3D12MipGen.h"
 #include "D3D12Pipeline.h"
 #include "D3D12Texture.h"
+#include "D3D12StateMapping.h"
 #include "D3D12Upload.h"
 
 #include "Engine/Common/CoreLogStream.h"
@@ -358,36 +359,25 @@ void ReportDroppedBarrierOp(ID3D12Resource* resource, u32 before, u32 after) {
 }
 } // namespace
 
-void D3D12CommandBufferImpl::EmitTrackerOps(const utl::vector<D3D12ResourceBarrierOp>& ops,
-                                            ID3D12Resource* resource,
-                                            const D3D12SubresourceKey& key) {
-    if (ops.empty() || !resource || !commandList_) return;
-    D3D12Device& dev = static_cast<D3D12Device&>(device_);
+void D3D12CommandBufferImpl::TransitionResource(const D3D12SubresourceKey& key,
+                                                ResourceState target,
+                                                ID3D12Resource* resource) {
+    if (!resource || !commandList_) return;
+    auto& tracker = static_cast<D3D12Device&>(device_).GetStateTracker();
+    u32 targetBits = 0;
+    if (!ToD3D12ResourceStates(target, targetBits)) return;
+    if (StateBitsExceedResourceFlags(resource->GetDesc(), targetBits)) {
+        ResourceState before = ResourceState::Unknown;
+        tracker.QueryState(key, before);
+        ReportDroppedBarrierOp(resource, ToD3D12ResourceStatesOrCommon(before), targetBits);
+        return;
+    }
+    // Transition also records implicit promotions. Validate before changing any subresource.
+    const auto ops = tracker.Transition(key, target);
     D3D12_RESOURCE_BARRIER barriers[8];
     u32 count = 0;
     for (const D3D12ResourceBarrierOp& op : ops) {
         if (op.kind == D3D12ResourceBarrierOp::Kind::Transition && count < 8) {
-            // R22：flag 门控合法性闸门（id=524 毒化守卫，见上方判据内核）。
-            // 丢弃不重发——无 UAV 视图的资源本就无 GPU 写需同步，该 barrier
-            // 无真实同步语义（300 处 CreateUnorderedAccessView 全部落在
-            // uavFlagged=1 资源，run 43910901099 实测）。
-            if (StateBitsExceedResourceFlags(resource->GetDesc(),
-                                             op.stateBefore | op.stateAfter)) {
-                ReportDroppedBarrierOp(resource, op.stateBefore, op.stateAfter);
-                // tracker 侧同步净化回 General（COMMON）：Transition 在返回
-                // op 前已把（虚构）终态记入 tracker，留着它会让后续
-                // CopyBuffer/间接路径按虚构态产出"before≠GPU 实际"的合法
-                // flag 但错位 barrier（新型毒化）。COMMON 信念 = buffer 恒走
-                // 零 op 提升面（不再发 barrier）＝与"被丢弃的 barrier 从未
-                // 发生"的 GPU/debug-layer 事实一致。逐 op 的具体子资源坐标
-                // 参与净化（纹理部分子资源场景）。
-                D3D12SubresourceKey sanitize = key;
-                if (op.subresource != kD3D12ResourceBarrierAllSubresources) {
-                    sanitize.subresource = op.subresource;
-                }
-                dev.GetStateTracker().Track(sanitize, ResourceState::General);
-                continue;
-            }
             D3D12_RESOURCE_BARRIER& b = barriers[count++];
             b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
             b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -396,21 +386,6 @@ void D3D12CommandBufferImpl::EmitTrackerOps(const utl::vector<D3D12ResourceBarri
             b.Transition.StateAfter = static_cast<D3D12_RESOURCE_STATES>(op.stateAfter);
             b.Transition.Subresource = op.subresource;
         } else if (op.kind == D3D12ResourceBarrierOp::Kind::UAV && count < 8) {
-            // R22：UAV 型 barrier 只对可能处于 UAV 态的资源有意义——无
-            // ALLOW_UNORDERED_ACCESS 的资源永远进不了 UAV（tracker 的 UAV
-            // 信念只能来自被上方闸门净化的虚构链或零 op 提升记账），该 op
-            // 是纯虚构，同样丢弃 + 净化（防 debug-layer 挑剔）。
-            if ((resource->GetDesc().Flags
-                 & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) == 0) {
-                ReportDroppedBarrierOp(resource, kD3D12ResourceState_UnorderedAccess,
-                                       kD3D12ResourceState_UnorderedAccess);
-                D3D12SubresourceKey sanitize = key;
-                if (op.subresource != kD3D12ResourceBarrierAllSubresources) {
-                    sanitize.subresource = op.subresource;
-                }
-                dev.GetStateTracker().Track(sanitize, ResourceState::General);
-                continue;
-            }
             D3D12_RESOURCE_BARRIER& b = barriers[count++];
             b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
             b.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
@@ -454,14 +429,12 @@ void ResolveViewStateKey(D3D12SubresourceKey& key, D3D12Texture* texture) {
 void D3D12CommandBufferImpl::TransitionTexture(D3D12Texture* texture, ResourceHandle handle,
                                                ResourceState target, u32 subresource) {
     if (!texture || !commandList_) return;
-    D3D12Device& dev = static_cast<D3D12Device&>(device_);
     D3D12SubresourceKey key{};
     key.resource = handle;
     key.subresource = subresource;
     key.isTexture = true;
     ResolveViewStateKey(key, texture);
-    EmitTrackerOps(dev.GetStateTracker().Transition(key, target),
-                   texture->GetNativeResource(), key);
+    TransitionResource(key, target, texture->GetNativeResource());
 }
 
 namespace {
@@ -502,8 +475,7 @@ void D3D12CommandBufferImpl::InsertBarrier(const ResourceBarrier* barriers, u32 
             key.subresource = sub;
             key.isTexture = true;
             ResolveViewStateKey(key, texture);  // R24：view 句柄重映射回源
-            EmitTrackerOps(dev.GetStateTracker().Transition(key, rb.afterState),
-                           texture->GetNativeResource(), key);
+            TransitionResource(key, rb.afterState, texture->GetNativeResource());
             continue;
         }
         // M5 F5-2/F5-4：buffer 走 tracker（M1 为 no-op——COMMON 提升覆盖
@@ -560,8 +532,7 @@ void D3D12CommandBufferImpl::InsertBarrier(const ResourceBarrier* barriers, u32 
             } else if (rb.beforeState != ResourceState::Unknown) {
                 dev.GetStateTracker().Track(key, rb.beforeState);
             }
-            EmitTrackerOps(dev.GetStateTracker().Transition(key, rb.afterState),
-                           bufHandle->GetNativeResource(), key);
+            TransitionResource(key, rb.afterState, bufHandle->GetNativeResource());
         }
     }
 }
@@ -1346,8 +1317,7 @@ void D3D12CommandBufferImpl::DrawIndirect(ResourceHandle buffer, u64 offset, u32
         key.resource = buffer;
         key.subresource = 0;
         key.isTexture = false;
-        EmitTrackerOps(dev.GetStateTracker().Transition(key, ResourceState::IndirectArgument),
-                       buf->GetNativeResource(), key);
+        TransitionResource(key, ResourceState::IndirectArgument, buf->GetNativeResource());
     }
     UpdateStats(CommandType::DrawIndirect);
     commandList_->ExecuteIndirect(sig, drawCount, buf->GetNativeResource(), offset,
@@ -1374,8 +1344,7 @@ void D3D12CommandBufferImpl::DrawIndexedIndirect(ResourceHandle buffer, u64 offs
         key.resource = buffer;
         key.subresource = 0;
         key.isTexture = false;
-        EmitTrackerOps(dev.GetStateTracker().Transition(key, ResourceState::IndirectArgument),
-                       buf->GetNativeResource(), key);
+        TransitionResource(key, ResourceState::IndirectArgument, buf->GetNativeResource());
     }
     UpdateStats(CommandType::DrawIndirect);
     commandList_->ExecuteIndirect(sig, drawCount, buf->GetNativeResource(), offset,
@@ -1411,8 +1380,7 @@ void D3D12CommandBufferImpl::DispatchIndirect(ResourceHandle buffer, u64 offset)
         key.resource = buffer;
         key.subresource = 0;
         key.isTexture = false;
-        EmitTrackerOps(dev.GetStateTracker().Transition(key, ResourceState::IndirectArgument),
-                       buf->GetNativeResource(), key);
+        TransitionResource(key, ResourceState::IndirectArgument, buf->GetNativeResource());
     }
     UpdateStats(CommandType::DispatchIndirect);
     commandList_->ExecuteIndirect(sig, 1, buf->GetNativeResource(), offset, nullptr, 0);
@@ -1511,22 +1479,18 @@ void D3D12CommandBufferImpl::CopyBuffer(ResourceHandle src, ResourceHandle dst,
         && dev.GetStateTracker().QueryState(dstKey, dstPrev)
         && dstPrev != ResourceState::General;
     if (srcExplicit) {
-        EmitTrackerOps(dev.GetStateTracker().Transition(srcKey, ResourceState::CopySource),
-                       srcBuf->GetNativeResource(), srcKey);
+        TransitionResource(srcKey, ResourceState::CopySource, srcBuf->GetNativeResource());
     }
     if (dstExplicit) {
-        EmitTrackerOps(dev.GetStateTracker().Transition(dstKey, ResourceState::CopyDest),
-                       dstBuf->GetNativeResource(), dstKey);
+        TransitionResource(dstKey, ResourceState::CopyDest, dstBuf->GetNativeResource());
     }
     commandList_->CopyBufferRegion(dstBuf->GetNativeResource(), dstOffset,
                                    srcBuf->GetNativeResource(), srcOffset, bytes);
     if (srcExplicit) {
-        EmitTrackerOps(dev.GetStateTracker().Transition(srcKey, srcPrev),
-                       srcBuf->GetNativeResource(), srcKey);
+        TransitionResource(srcKey, srcPrev, srcBuf->GetNativeResource());
     }
     if (dstExplicit) {
-        EmitTrackerOps(dev.GetStateTracker().Transition(dstKey, dstPrev),
-                       dstBuf->GetNativeResource(), dstKey);
+        TransitionResource(dstKey, dstPrev, dstBuf->GetNativeResource());
     }
     // R22-②：隐式提升记账（explicit 路径的 Transition 已把终态记回
     // tracker，不重复记）。未注册资源的 Track 被跟踪器拒绝（防御面，

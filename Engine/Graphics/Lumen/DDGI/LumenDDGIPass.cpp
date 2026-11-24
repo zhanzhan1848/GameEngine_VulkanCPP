@@ -228,19 +228,9 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
             (m != 7 || params_.rays_per_probe == 128)) {
             ray_sample_mode_ = (u32)m;
         } else {
-            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] DDGI_RAY_SAMPLE='" << env << "' invalid (0..4; Vulkan-only 5; 7 on Vulkan/D3D12 with 128 rays), keeping default" << std::endl;
+            PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] DDGI_RAY_SAMPLE='" << env << "' unsupported for this backend/configuration (mode 7 requires measured geometry support and 128 rays), keeping default" << std::endl;
         }
     }
-    PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] RaySampleMode = " << ray_sample_mode_
-              << (ray_sample_mode_ == 0 ? " (legacy uniform Fibonacci)"
-                  : ray_sample_mode_ == 1 ? " (per-frame golden-angle jitter)"
-                  : ray_sample_mode_ == 2 ? " (cosine mixture around light)"
-                  : ray_sample_mode_ == 3 ? " (fixed stratified latitude)"
-                  : ray_sample_mode_ == 4 ? " (legacy rays, depth-hole fill on Vulkan)"
-                                          : ray_sample_mode_ == 7 ? " (measured oct strata, 128 primary rays)"
-                                          : " (legacy radiance, independent oct depth rays)")
-              << std::endl;
-
     const char* measuredGeometryEnv=std::getenv("DDGI_MEASURED_GEOMETRY");
     measured_geometry_requested_=UsesMeasuredVisibility() && measuredGeometryEnv &&
         std::strcmp(measuredGeometryEnv,"1")==0;
@@ -260,6 +250,16 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
             << " falling back to mode 0" << std::endl;
         ray_sample_mode_ = 0u;
     }
+
+    PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] RaySampleMode = " << ray_sample_mode_
+              << (ray_sample_mode_ == 0 ? " (legacy uniform Fibonacci)"
+                  : ray_sample_mode_ == 1 ? " (per-frame golden-angle jitter)"
+                  : ray_sample_mode_ == 2 ? " (cosine mixture around light)"
+                  : ray_sample_mode_ == 3 ? " (fixed stratified latitude)"
+                  : ray_sample_mode_ == 4 ? " (legacy rays, depth-hole fill on Vulkan)"
+                                          : ray_sample_mode_ == 7 ? " (measured oct strata, 128 primary rays)"
+                                          : " (legacy radiance, independent oct depth rays)")
+              << std::endl;
 
     // The first-surface distance candidate is intentionally a Vulkan-only,
     // scalar-mode experiment.  Latching the exact request before descriptor
