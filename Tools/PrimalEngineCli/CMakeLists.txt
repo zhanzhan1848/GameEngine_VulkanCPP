@@ -83,9 +83,13 @@ endif()
 # snapshot does not include these one-shot verbs). No GPU or running editor.
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+    set(boundary_bake_supported 0)
+    if(TARGET ContentTools AND NOT WIN32)
+        set(boundary_bake_supported 1)
+    endif()
     add_test(NAME PrimalEngineCliSchema
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Testing/CliSchema/test_engine_schema.py
-                --engine $<TARGET_FILE:${PROJECT_NAME}>)
+                --engine $<TARGET_FILE:${PROJECT_NAME}> --boundary-bake-supported ${boundary_bake_supported})
 endif()
 
 # 运行时依赖部署：本 exe 的输出目录与两个 DLL 的输出目录在 Windows 的多配置

@@ -16,6 +16,7 @@
 #include "Graphics/RHI/Platforms/Metal/MetalPipeline.h"
 #endif
 #include <chrono>
+#include <limits>
 #include "Graphics/RenderScene.h"
 #include "Graphics/RenderPipeline/StreamingMesh.h"
 #include "Graphics/RenderGraph/RenderGraph.h"
@@ -305,6 +306,14 @@ static std::vector<u8> LoadShaderSource(const char* filename, RHIPlatform platfo
     return std::vector<u8>(source.begin(), source.end());
 }
 
+static void TransitionForSampling(RHICommandBuffer* cmd, ResourceHandle texture, ResourceState previous) {
+    ResourceBarrier barrier{};
+    barrier.resource = texture;
+    barrier.beforeState = previous;
+    barrier.afterState = ResourceState::ShaderResource;
+    cmd->InsertBarrier(&barrier, 1);
+}
+
 static void WriteTextureImmediate(RHIDeviceBase* device, ResourceHandle texture,
                                    const void* data, u64 size, u32 w, u32 h, u32 layer) {
 #if defined(ENABLE_WEBGPU) && ENABLE_WEBGPU
@@ -349,6 +358,7 @@ static void WriteTextureImmediate(RHIDeviceBase* device, ResourceHandle texture,
     region.imageOffset = {0, 0, 0};
     region.imageExtent = {w, h, 1};
     cmd->CopyBufferToTexture(staging, texture, &region, 1);
+    TransitionForSampling(cmd, texture, ResourceState::CopyDest);
     cmd->End();
 
     QueueSubmitInfo submitInfo{};
@@ -580,15 +590,23 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
         light_cb_[i] = device_->CreateBuffer(desc);
     }
 
-    // Shadow VP constant buffers (one per cascade)
+    // Each frame slot owns both cascade views and their Vulkan descriptors.
     {
         BufferDesc desc{};
         desc.type = BufferType::Constant;
         desc.usage = GPUMemoryUsage::Dynamic;
         desc.memoryUsage = GPUMemoryUsage::Dynamic;
         desc.size = sizeof(ViewData);
-        shadow_view_cb_[0] = device_->CreateBuffer(desc);
-        shadow_view_cb_[1] = device_->CreateBuffer(desc);
+        for (auto& frame : shadow_cascades_) {
+            for (auto& cascade : frame) {
+                cascade.view = device_->CreateBuffer(desc);
+                if (device_->GetPlatform() == RHIPlatform::Vulkan) {
+                    DescriptorSetDesc setDesc{};
+                    setDesc.layout = global_set_layout_;
+                    cascade.set = device_->CreateDescriptorSet(setDesc);
+                }
+            }
+        }
     }
 
     // Create triple-buffered descriptor sets
@@ -611,16 +629,6 @@ bool ForwardSceneRenderer::Initialize(RHIDeviceBase* device, u32 render_width, u
 
         desc.layout = blit_set_layout_;
         blit_ds_[i] = device_->CreateDescriptorSet(desc);
-    }
-
-    // T4.6.5 part 15.3: Vulkan-only shadow-pass descriptor sets, one per cascade.
-    // Bindings are written per-frame in Render() once shadow VP + scene CB are updated.
-    if (device_->GetPlatform() == RHIPlatform::Vulkan) {
-        for (int c = 0; c < 2; c++) {
-            DescriptorSetDesc desc{};
-            desc.layout = global_set_layout_;
-            shadow_global_ds_[c] = device_->CreateDescriptorSet(desc);
-        }
     }
 
     // Streaming mesh default material DS — created after white_texture_ and
@@ -682,16 +690,6 @@ void ForwardSceneRenderer::Shutdown() {
     if (material_graph_vs_ != handles::INVALID_SHADER) { device_->DestroyShader(material_graph_vs_); material_graph_vs_ = handles::INVALID_SHADER; }
     if (graph_material_layout_ != handles::INVALID_PIPELINE_LAYOUT) { device_->DestroyPipelineLayout(graph_material_layout_); graph_material_layout_ = handles::INVALID_PIPELINE_LAYOUT; }
     if (graph_material_set_layout_ != handles::INVALID_DESCRIPTOR_SET_LAYOUT) { device_->DestroyDescriptorSetLayout(graph_material_set_layout_); graph_material_set_layout_ = handles::INVALID_DESCRIPTOR_SET_LAYOUT; }
-    // VT mesh 路径资源
-    for (auto& ds : vt_material_ds_)
-        if (ds != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(ds);
-    vt_material_ds_.clear();
-    material_is_vt_.clear();
-    vt_registered_.clear();
-    if (vt_material_params_buf_ != handles::INVALID_RESOURCE) {
-        device_->DestroyBuffer(vt_material_params_buf_);
-        vt_material_params_buf_ = handles::INVALID_RESOURCE;
-    }
     vt_mode_ = false;
 
     // Destroy pipelines
@@ -702,6 +700,13 @@ void ForwardSceneRenderer::Shutdown() {
                     &streaming_pipeline_}) {
         if (*p != handles::INVALID_PIPELINE) { device_->DestroyPipeline(*p); *p = handles::INVALID_PIPELINE; }
     }
+    for (auto& frame : shadow_cascades_) {
+        for (auto& cascade : frame) {
+            if (cascade.set != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(cascade.set);
+            if (cascade.view != handles::INVALID_RESOURCE) device_->DestroyBuffer(cascade.view);
+            cascade = {};
+        }
+    }
     // Destroy layouts
     for (auto* l : {&gbuffer_layout_, &gbuffer_vt_layout_, &shadow_layout_, &lighting_layout_, &lighting_compute_layout_,
                     &skybox_layout_, &blit_layout_}) {
@@ -711,6 +716,10 @@ void ForwardSceneRenderer::Shutdown() {
     for (auto* d : {&global_set_layout_, &material_set_layout_, &lighting_set_layout_, &lighting_compute_set_layout_,
                     &skybox_set_layout_, &blit_set_layout_}) {
         if (*d != handles::INVALID_DESCRIPTOR_SET_LAYOUT) { device_->DestroyDescriptorSetLayout(*d); *d = handles::INVALID_DESCRIPTOR_SET_LAYOUT; }
+    }
+    for (auto& slot : frame_instances_) {
+        if (slot.buffer != handles::INVALID_RESOURCE) device_->DestroyBuffer(slot.buffer);
+        slot = {};
     }
     // Destroy textures
     for (auto& sm : shadow_map_) {
@@ -737,9 +746,6 @@ void ForwardSceneRenderer::Shutdown() {
             lighting_light_mapped_[i] = nullptr;
         }
         if (light_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(light_cb_[i]); light_cb_[i] = handles::INVALID_RESOURCE; }
-    }
-    for (int i = 0; i < 2; i++) {
-        if (shadow_view_cb_[i] != handles::INVALID_RESOURCE) { device_->DestroyBuffer(shadow_view_cb_[i]); shadow_view_cb_[i] = handles::INVALID_RESOURCE; }
     }
     // Destroy fallback textures
     if (white_texture_ != handles::INVALID_RESOURCE) { device_->DestroyTexture(white_texture_); white_texture_ = handles::INVALID_RESOURCE; }
@@ -1543,13 +1549,16 @@ void ForwardSceneRenderer::CreatePersistentResources() {
     }
 
     // Shadow maps (shared, not triple-buffered)
-    for (auto& sm : shadow_map_) {
+    const bool arrayShadows = device_->GetPlatform() == RHIPlatform::Vulkan;
+    for (int i = 0; i < (arrayShadows ? 1 : 2); ++i) {
         TextureDesc desc{};
+        desc.type = arrayShadows ? TextureType::Texture2DArray : TextureType::Texture2D;
+        desc.arraySize = arrayShadows ? 2 : 1;
         desc.size = {2048, 2048, 1};
         desc.format = DataFormat::D32_Float;
         desc.usage = TextureUsage::DepthStencil | TextureUsage::ShaderResource;
         desc.memoryUsage = GPUMemoryUsage::Static;
-        sm = device_->CreateTexture(desc);
+        shadow_map_[i] = device_->CreateTexture(desc);
     }
 
     // Triple-buffered GBuffer + lighting textures
@@ -1636,6 +1645,14 @@ bool ForwardSceneRenderer::LoadScene(const std::string& model_path) {
         return false;
     }
 
+    if (vt_mode_) {
+        BufferDesc params{};
+        params.size = u64(mesh_infos_.size()) * rhi::constants::MIN_UNIFORM_BUFFER_OFFSET_ALIGNMENT;
+        params.type = BufferType::Constant;
+        params.memoryUsage = GPUMemoryUsage::Dynamic;
+        params.name = "FSR_VTMaterialParams";
+        vt_material_params_buf_ = device_->CreateBuffer(params);
+    }
     // Create per-mesh material descriptor sets with loaded textures.
     // Textures resolve against the cooked mesh's own directory — this raw-
     // file path (stb decode) serves EngineTest-style assets, where textures
@@ -1762,6 +1779,20 @@ bool ForwardSceneRenderer::LoadScene(const std::string& model_path) {
 }
 
 void ForwardSceneRenderer::UnloadScene() {
+    // VT mesh 路径资源
+    for (const auto& sets : vt_material_ds_)
+        for (auto ds : sets) device_->DestroyDescriptorSet(ds);
+    vt_material_ds_.clear();
+    material_is_vt_.clear();
+    auto& vtSystem = vt::virtual_texture_system::instance();
+    if (vtSystem.is_initialized()) {
+        for (const auto& entry : vt_registered_) vtSystem.release_texture(entry.second);
+    }
+    vt_registered_.clear();
+    if (vt_material_params_buf_ != handles::INVALID_RESOURCE) {
+        device_->DestroyBuffer(vt_material_params_buf_);
+        vt_material_params_buf_ = handles::INVALID_RESOURCE;
+    }
     for (auto& ds : material_ds_) {
         if (ds != handles::INVALID_DESCRIPTOR_SET) device_->DestroyDescriptorSet(ds);
     }
@@ -1974,15 +2005,6 @@ void ForwardSceneRenderer::EnableVirtualTextures(const std::string& vtexAssetsDi
         cfg.feedback_slots = 3u * render_width_ * render_height_;
         sys.initialize(device_, cfg);
     }
-    // 每材质参数块(5 × vec4 = 80B),上限 256 材质
-    if (vt_material_params_buf_ == handles::INVALID_RESOURCE) {
-        BufferDesc d{};
-        d.size = 80ull * 256;
-        d.type = BufferType::Constant;
-        d.memoryUsage = GPUMemoryUsage::Dynamic;
-        d.name = "FSR_VTMaterialParams";
-        vt_material_params_buf_ = device_->CreateBuffer(d);
-    }
 }
 
 void ForwardSceneRenderer::AttachVTFeedback(RHICommandBuffer* cb, u32 frame_index,
@@ -1990,23 +2012,12 @@ void ForwardSceneRenderer::AttachVTFeedback(RHICommandBuffer* cb, u32 frame_inde
     if (!vt_mode_ || !cb) return;
     auto& sys = graphics::vt::virtual_texture_system::instance();
     if (!sys.is_initialized()) return;
-    // VT 材质 set 的 binding 6 切到本帧 feedback 槽(每帧重绑)
-    ResourceHandle fb = sys.feedback_buffer(frame_index);
-    for (auto& ds : vt_material_ds_) {
-        if (ds == handles::INVALID_DESCRIPTOR_SET) continue;
-        DescriptorBufferInfo fInfo{fb, 0, 0};
-        WriteDescriptorSet w{};
-        w.dstSet = ds; w.dstBinding = 6; w.dstArrayElement = 0;
-        w.descriptorCount = 1; w.descriptorType = DescriptorType::StorageBuffer;
-        w.bufferInfo = &fInfo;
-        device_->UpdateDescriptorSets(1, &w);
-    }
     sys.record_feedback_copy(cb, frame_index, si);
 }
 
 bool ForwardSceneRenderer::TryCreateVTMaterial(const SceneDataMeshInfo& meshInfo, u32 meshIdx,
                                                const std::string& assetBaseDir) {
-    if (!vt_mode_ || gbuffer_vt_pipeline_ == handles::INVALID_PIPELINE ||
+    if (!vt_mode_ || vt_material_params_buf_ == handles::INVALID_RESOURCE || gbuffer_vt_pipeline_ == handles::INVALID_PIPELINE ||
         material_set_vt_layout_ == handles::INVALID_DESCRIPTOR_SET_LAYOUT) {
         return false;
     }
@@ -2058,12 +2069,9 @@ bool ForwardSceneRenderer::TryCreateVTMaterial(const SceneDataMeshInfo& meshInfo
     ids[2] = paths[2].empty() ? ids[0] : (registerVtex(paths[2]) == ~0u ? ids[0] : registerVtex(paths[2]));
     // 注:registerVtex 幂等(缓存),两次调用不会重复注册
 
-    // 材质 set(7 绑定;feedback 绑定由 AttachVTFeedback 每帧切换)
+    // Each feedback slot owns an immutable material descriptor set.
     DescriptorSetDesc desc{};
     desc.layout = material_set_vt_layout_;
-    DescriptorSetHandle ds = device_->CreateDescriptorSet(desc);
-    if (ds == handles::INVALID_DESCRIPTOR_SET) return false;
-
     DescriptorImageInfo ptInfo{};
     ptInfo.imageView = sys.page_table_texture();
     ptInfo.imageLayout = ResourceState::ShaderResource;
@@ -2074,12 +2082,13 @@ bool ForwardSceneRenderer::TryCreateVTMaterial(const SceneDataMeshInfo& meshInfo
     }
     DescriptorImageInfo sampInfo{};
     sampInfo.sampler = static_cast<ResourceHandle>(default_sampler_);
-    DescriptorBufferInfo pInfo{vt_material_params_buf_, u64(meshIdx) * 80, 80};
-    DescriptorBufferInfo fInfo{sys.feedback_buffer(0), 0, 0};
+    const u64 paramsOffset = u64(meshIdx) * rhi::constants::MIN_UNIFORM_BUFFER_OFFSET_ALIGNMENT;
+    DescriptorBufferInfo pInfo{vt_material_params_buf_, paramsOffset, 80};
+    DescriptorBufferInfo fInfo{};
 
     WriteDescriptorSet w[7]{};
     for (u32 i = 0; i < 7; ++i) {
-        w[i].dstSet = ds; w[i].dstBinding = i; w[i].dstArrayElement = 0;
+        w[i].dstBinding = i; w[i].dstArrayElement = 0;
         w[i].descriptorCount = 1;
     }
     w[0].descriptorType = DescriptorType::SampledImage;   w[0].imageInfo = &ptInfo;
@@ -2089,7 +2098,6 @@ bool ForwardSceneRenderer::TryCreateVTMaterial(const SceneDataMeshInfo& meshInfo
     w[4].descriptorType = DescriptorType::Sampler;        w[4].imageInfo = &sampInfo;
     w[5].descriptorType = DescriptorType::UniformBuffer;  w[5].bufferInfo = &pInfo;
     w[6].descriptorType = DescriptorType::StorageBuffer;  w[6].bufferInfo = &fInfo;
-    device_->UpdateDescriptorSets(7, w);
 
     // 参数块(5 × vec4;与 GBufferVT.frag/VTMaterialParams 一致)
     struct P5 { float p[5][4]; } p{};
@@ -2105,17 +2113,29 @@ bool ForwardSceneRenderer::TryCreateVTMaterial(const SceneDataMeshInfo& meshInfo
     p.p[4][0] = float(ids[0]);
     p.p[4][1] = float(ids[1]);
     p.p[4][2] = float(ids[2]);
-    p.p[4][3] = 1024.0f;   // feedbackWidth(AttachVTFeedback 槽容量内)
-    if (!device_->UpdateBufferData(vt_material_params_buf_, &p, sizeof(p), u64(meshIdx) * 80)) {
-        device_->DestroyDescriptorSet(ds);
+    p.p[4][3] = static_cast<float>(render_width_);
+    if (!device_->UpdateBufferData(vt_material_params_buf_, &p, sizeof(p), paramsOffset)) {
         return false;
     }
 
+    std::vector<DescriptorSetHandle> sets;
+    sets.reserve(sys.feedback_slot_count());
+    for (u32 slot = 0; slot < sys.feedback_slot_count(); ++slot) {
+        const auto ds = device_->CreateDescriptorSet(desc);
+        if (ds == handles::INVALID_DESCRIPTOR_SET) {
+            for (auto created : sets) device_->DestroyDescriptorSet(created);
+            return false;
+        }
+        fInfo = {sys.feedback_slot_buffer(slot), 0, 0};
+        for (auto& write : w) write.dstSet = ds;
+        device_->UpdateDescriptorSets(7, w);
+        sets.push_back(ds);
+    }
     if (meshIdx >= vt_material_ds_.size()) {
-        vt_material_ds_.resize(meshIdx + 1, handles::INVALID_DESCRIPTOR_SET);
+        vt_material_ds_.resize(meshIdx + 1);
         material_is_vt_.resize(meshIdx + 1, false);
     }
-    vt_material_ds_[meshIdx] = ds;
+    vt_material_ds_[meshIdx] = std::move(sets);
     material_is_vt_[meshIdx] = true;
     return true;
 }
@@ -2536,23 +2556,13 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     for (auto& [_, meshMap] : graph_groups)
         for (auto& [_, transforms] : meshMap)
             total += (u32)transforms.size();
-    u32 required_size = total * sizeof(graphics::ForwardInstanceData);
-    if (pcg_instance_buffer_capacity_ < required_size) {
-        if (pcg_instance_buffer_ != handles::INVALID_RESOURCE) {
-            device_->DestroyBuffer(pcg_instance_buffer_);
-        }
-        BufferDesc desc{};
-        desc.size = required_size;
-        desc.type = BufferType::Vertex;
-        desc.usage = GPUMemoryUsage::Dynamic;
-        desc.memoryUsage = GPUMemoryUsage::Dynamic;
-        pcg_instance_buffer_ = device_->CreateBuffer(desc);
-        pcg_instance_buffer_capacity_ = required_size;
-    }
-
-    // Upload all grouped transforms
-    void* buf = device_->MapBuffer(pcg_instance_buffer_, 0, required_size);
+    auto& instances = frame_instances_[frame_index % 3];
+    if (instances.used + u64(total) > instances.capacity) return;
+    const u32 firstInstance = instances.used;
+    const u64 stride = sizeof(graphics::ForwardInstanceData);
+    void* buf = device_->MapBuffer(instances.buffer, firstInstance * stride, total * stride);
     if (!buf) return;
+    instances.used += total;
 
     // Compute group offsets per technique
     struct GroupRange { u32 offset; u32 count; };
@@ -2561,7 +2571,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     u32 off = 0;
     for (u32 t = 0; t < TechniqueCount; ++t) {
         for (auto& [meshIdx, instances] : technique_groups[t]) {
-            all_ranges[t][meshIdx] = {off, (u32)instances.size()};
+            all_ranges[t][meshIdx] = {firstInstance + off, (u32)instances.size()};
             for (u32 j = 0; j < instances.size(); j++) {
                 ((graphics::ForwardInstanceData*)buf)[off + j] = instances[j];
             }
@@ -2570,14 +2580,14 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
     }
     for (auto& [hash, meshMap] : graph_groups) {
         for (auto& [meshIdx, instances] : meshMap) {
-            graph_ranges[hash][meshIdx] = {off, (u32)instances.size()};
+            graph_ranges[hash][meshIdx] = {firstInstance + off, (u32)instances.size()};
             for (u32 j = 0; j < instances.size(); j++) {
                 ((graphics::ForwardInstanceData*)buf)[off + j] = instances[j];
             }
             off += (u32)instances.size();
         }
     }
-    device_->UnmapBuffer(pcg_instance_buffer_);
+    device_->UnmapBuffer(instances.buffer);
 
     // Select layout based on pass type
     auto layout = shadow_pass ? shadow_layout_ : gbuffer_layout_;
@@ -2611,10 +2621,10 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
 #ifdef __EMSCRIPTEN__
             // WASM uses standard vertex attributes (slot 0) + instance-rate
             // attributes (slot 1). Metal keeps the legacy slot-20/3 vertex-pull.
-            cmd->BindVertexBuffers(1, 1, &pcg_instance_buffer_, &inst_offset);
+            cmd->BindVertexBuffers(1, 1, &instances.buffer, &inst_offset);
 #else
             if (device_->GetPlatform() != RHIPlatform::Vulkan) {
-                cmd->BindVertexBuffers(3, 1, &pcg_instance_buffer_, &inst_offset);
+                cmd->BindVertexBuffers(3, 1, &instances.buffer, &inst_offset);
             }
 #endif
             auto matSet = (meshIdx < material_ds_.size()) ? material_ds_[meshIdx] : material_ds_[0];
@@ -2623,10 +2633,11 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
                                 meshIdx < material_is_vt_.size() && material_is_vt_[meshIdx] &&
                                 gbuffer_vt_pipeline_ != handles::INVALID_PIPELINE &&
                                 meshIdx < vt_material_ds_.size() &&
-                                vt_material_ds_[meshIdx] != handles::INVALID_DESCRIPTOR_SET;
+                                !vt_material_ds_[meshIdx].empty();
             if (meshVT) {
                 cmd->BindGraphicsPipeline(gbuffer_vt_pipeline_);
-                matSet = vt_material_ds_[meshIdx];
+                const auto& sets = vt_material_ds_[meshIdx];
+                matSet = sets[frame_index % sets.size()];
             } else if (vtPipelineBound_) {
                 // 前一 mesh 是 VT,恢复桶管线
                 cmd->BindGraphicsPipeline(GetTechniquePipeline(static_cast<ShaderTechnique>(t)));
@@ -2677,7 +2688,7 @@ void ForwardSceneRenderer::RenderDynamicInstances(RHICommandBuffer* cmd,
 
             for (auto& [meshIdx, range] : meshMap) {
                 u64 inst_offset = range.offset * sizeof(graphics::ForwardInstanceData);
-                cmd->BindVertexBuffers(3, 1, &pcg_instance_buffer_, &inst_offset);
+                cmd->BindVertexBuffers(3, 1, &instances.buffer, &inst_offset);
                 mesh_infos_[meshIdx].mesh->Draw(cmd, range.count, 0, 20);
             }
         }
@@ -2846,6 +2857,28 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
 
     u32 idx = frame_index % 3;
 
+    auto& instances = frame_instances_[idx];
+    instances.used = 0;
+    const u64 proxyCount = render_scene_ ? render_scene_->GetProxies().size() : 0;
+    // Both shadow cascades, opaque and transparent each visit at most all proxies.
+    const u64 capacity = std::max<u64>(1, 4 * proxyCount);
+    if (capacity > instances.capacity) {
+        BufferDesc desc{};
+        desc.size = capacity * sizeof(graphics::ForwardInstanceData);
+        desc.type = BufferType::Vertex;
+        if (device_->GetPlatform() == RHIPlatform::Vulkan)
+            desc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        desc.memoryUsage = GPUMemoryUsage::Dynamic;
+        const auto replacement = device_->CreateBuffer(desc);
+        if (replacement == handles::INVALID_RESOURCE) {
+            PRIMAL_LOG_STREAM(Error, "Render") << "Failed to allocate forward instance buffer" << std::endl;
+            return;
+        }
+        if (instances.buffer != handles::INVALID_RESOURCE) device_->DestroyBuffer(instances.buffer);
+        instances.buffer = replacement;
+        instances.capacity = capacity;
+    }
+
     // Lazily recreate the blit pipeline if the caller changed target format
     // (e.g., headless creates RGBA16F, editor's MTKView backbuffer is BGRA8).
     if (backbuffer_format != blit_target_format_) {
@@ -2952,12 +2985,12 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         UpdateDesc(device_, global_ds_[idx], params, 2);
     }
 
-    // T4.6.5 part 15.2: Vulkan wires pcg_instance_buffer_ as SSBO at binding 2 of
+    // T4.6.5 part 15.2: Vulkan wires instances.buffer as SSBO at binding 2 of
     // global_ds_. Metal path uses BindVertexBuffers(3, 1, ...) at vertex stage —
     // see RenderDynamicInstances (cpp:1621) — which has no equivalent on Vulkan.
     if (device_->GetPlatform() == RHIPlatform::Vulkan &&
-        pcg_instance_buffer_ != handles::INVALID_RESOURCE) {
-        DescData instParam = {2, DescriptorType::StorageBuffer, pcg_instance_buffer_};
+        instances.buffer != handles::INVALID_RESOURCE) {
+        DescData instParam = {2, DescriptorType::StorageBuffer, instances.buffer};
         UpdateDesc(device_, global_ds_[idx], &instParam, 1);
     }
     // Fill the GPU light array with ALL scene lights (multi-light lighting).
@@ -3026,22 +3059,22 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         svd.viewProjection = cached_shadow_vp_[c];
         svd.invViewProjection = Inverse(svd.viewProjection);
         svd.previousViewProjection = svd.viewProjection;
-        auto* mapped = static_cast<ViewData*>(device_->MapBuffer(shadow_view_cb_[c]));
-        if (mapped) { *mapped = svd; device_->UnmapBuffer(shadow_view_cb_[c]); }
+        auto* mapped = static_cast<ViewData*>(device_->MapBuffer(shadow_cascades_[idx][c].view));
+        if (mapped) { *mapped = svd; device_->UnmapBuffer(shadow_cascades_[idx][c].view); }
     }
 
-    // T4.6.5 part 15.3: write shadow_global_ds_[c] bindings per-frame on Vulkan.
-    // Binding 0 = shadow_view_cb_[c] (cascade-specific VP); 1+2 mirror global_ds_.
+    // T4.6.5 part 15.3: write shadow_cascades_[idx][c].set bindings per-frame on Vulkan.
+    // Binding 0 = shadow_cascades_[idx][c].view (cascade-specific VP); 1+2 mirror global_ds_.
     if (device_->GetPlatform() == RHIPlatform::Vulkan) {
         for (int c = 0; c < 2; c++) {
             DescData params[] = {
-                {0, DescriptorType::UniformBuffer, shadow_view_cb_[c]},
+                {0, DescriptorType::UniformBuffer, shadow_cascades_[idx][c].view},
                 {1, DescriptorType::UniformBuffer, scene_cb_[idx]},
             };
-            UpdateDesc(device_, shadow_global_ds_[c], params, 2);
-            if (pcg_instance_buffer_ != handles::INVALID_RESOURCE) {
-                DescData instParam = {2, DescriptorType::StorageBuffer, pcg_instance_buffer_};
-                UpdateDesc(device_, shadow_global_ds_[c], &instParam, 1);
+            UpdateDesc(device_, shadow_cascades_[idx][c].set, params, 2);
+            if (instances.buffer != handles::INVALID_RESOURCE) {
+                DescData instParam = {2, DescriptorType::StorageBuffer, instances.buffer};
+                UpdateDesc(device_, shadow_cascades_[idx][c].set, &instParam, 1);
             }
         }
     }
@@ -3064,17 +3097,17 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->BindGraphicsPipeline(shadow_pipeline_);
         cmd->SetViewport({{0, 0}, {2048.0f, 2048.0f}, 0, 1});
         cmd->SetScissor({{0, 0}, {2048, 2048}});
-        // T4.6.5 part 15.3: Vulkan uses shadow_global_ds_[0] (binding 0 pre-set to
-        // shadow_view_cb_[0]). Metal keeps global_ds_[idx] + BindVertexBuffers override.
+        // T4.6.5 part 15.3: Vulkan uses shadow_cascades_[idx][0].set (binding 0 pre-set to
+        // shadow_cascades_[idx][0].view). Metal keeps global_ds_[idx] + BindVertexBuffers override.
         const DescriptorSetHandle globalSets[] = {
-            (device_->GetPlatform() == RHIPlatform::Vulkan) ? shadow_global_ds_[0] : global_ds_[idx]
+            (device_->GetPlatform() == RHIPlatform::Vulkan) ? shadow_cascades_[idx][0].set : global_ds_[idx]
         };
         cmd->BindDescriptorSets(PipelineBindPoint::Graphics, shadow_layout_, 0, 1, globalSets, 0, nullptr);
 
         // Metal-only: override vertex slot 0 with dedicated shadow VP CB for this cascade.
         if (device_->GetPlatform() != RHIPlatform::Vulkan) {
             u64 zeroOffset = 0;
-            cmd->BindVertexBuffers(0, 1, &shadow_view_cb_[0], &zeroOffset);
+            cmd->BindVertexBuffers(0, 1, &shadow_cascades_[idx][0].view, &zeroOffset);
         }
 
         RenderDynamicInstances(cmd, cached_shadow_vp_[0], idx, true);
@@ -3085,7 +3118,9 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
     // Pass 2: Shadow cascade 1
     {
         RenderPassDesc rpDesc{};
-        rpDesc.depthAttachment.texture = shadow_map_[1];
+        const bool arrayShadows = device_->GetPlatform() == RHIPlatform::Vulkan;
+        rpDesc.depthAttachment.texture = arrayShadows ? shadow_map_[0] : shadow_map_[1];
+        rpDesc.depthAttachment.arrayLayer = arrayShadows ? 1 : 0;
         rpDesc.depthAttachment.loadOp = LoadAction::Clear;
         rpDesc.depthAttachment.storeOp = StoreAction::Store;
         rpDesc.depthAttachment.clearValue = ClearValue{math::v4{1.0f, 0.f, 0.f, 1.f}};
@@ -3095,14 +3130,14 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         cmd->SetViewport({{0, 0}, {2048.0f, 2048.0f}, 0, 1});
         cmd->SetScissor({{0, 0}, {2048, 2048}});
         const DescriptorSetHandle globalSets[] = {
-            (device_->GetPlatform() == RHIPlatform::Vulkan) ? shadow_global_ds_[1] : global_ds_[idx]
+            (device_->GetPlatform() == RHIPlatform::Vulkan) ? shadow_cascades_[idx][1].set : global_ds_[idx]
         };
         cmd->BindDescriptorSets(PipelineBindPoint::Graphics, shadow_layout_, 0, 1, globalSets, 0, nullptr);
 
         // Metal-only: override vertex slot 0 with dedicated shadow VP CB for this cascade.
         if (device_->GetPlatform() != RHIPlatform::Vulkan) {
             u64 zeroOffset = 0;
-            cmd->BindVertexBuffers(0, 1, &shadow_view_cb_[1], &zeroOffset);
+            cmd->BindVertexBuffers(0, 1, &shadow_cascades_[idx][1].view, &zeroOffset);
         }
 
         RenderDynamicInstances(cmd, cached_shadow_vp_[1], idx, true);
@@ -3195,7 +3230,7 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
                             dl.viewProjections[1] = cached_shadow_vp_[1];
                             dl.viewProjections[2] = cached_shadow_vp_[0];
                             dl.viewProjections[3] = cached_shadow_vp_[1];
-                            dl.splits = {0.1f, 50.0f, 200.0f, 1000.0f};
+                            dl.splits = {30.0f, (std::numeric_limits<float>::max)(), 0.0f, 0.0f};
                             dl.directionAndIntensity = {rl.direction.x, rl.direction.y, rl.direction.z, rl.intensity};
                             dl.colorAndShadow = {rl.color.x, rl.color.y, rl.color.z, 1.0f};
                         }
@@ -3240,6 +3275,10 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
         // SHADER_READ_ONLY. After Dispatch, transition back to ShaderResource
         // so Pass 4b (Forward Transparency render pass) or Pass 5 (Blit
         // sample) can read it.
+        for (auto tex : {gbuffer_albedo_[idx], gbuffer_normal_[idx], gbuffer_orm_[idx], gbuffer_velocity_[idx]})
+            TransitionForSampling(cmd, tex, ResourceState::RenderTarget);
+        TransitionForSampling(cmd, shadow_map_[0], ResourceState::DepthStencil);
+
         ResourceBarrier toUA{};
         toUA.resource = lighting_output_[idx];
         toUA.beforeState = ResourceState::ShaderResource;
@@ -3392,6 +3431,8 @@ void ForwardSceneRenderer::Render(RHICommandBuffer* cmd,
 
     // Pass 5: Blit to backbuffer
     {
+        if (device_->GetPlatform() == RHIPlatform::Vulkan)
+            TransitionForSampling(cmd, lighting_output_[idx], ResourceState::RenderTarget);
         DescData params[] = {
             {0, DescriptorType::SampledImage, lighting_output_[idx]},
             {1, DescriptorType::Sampler, static_cast<ResourceHandle>(default_sampler_)},

@@ -121,19 +121,39 @@ static bool instance_geometry_from_content(id::id_type geometry_id, instance_geo
         return false;
     }
 
+    // Position records are three packed floats on disk, while math::v3 may be 16-byte aligned.
+    using PackedPosition = f32[3];
+    if (asset.position_buffer.size() / sizeof(PackedPosition) < asset.num_vertices) {
+        err = "incomplete mesh position buffer";
+        return false;
+    }
     out.positions.resize(asset.num_vertices);
-    std::memcpy(out.positions.data(), asset.position_buffer.data(),
-                (size_t)asset.num_vertices * sizeof(math::v3));   // packed float3
-
-    // 法线：element_buffer 每顶点前 12B（无法线资产 → 零向量，shader 光照退化为平面感）
-    out.normals.assign(asset.num_vertices, math::v3{ 0.f, 1.f, 0.f });
-    if (!asset.element_buffer.empty() && asset.element_buffer.size() / asset.num_vertices >= 12) {
-        const u32 elem_stride = (u32)(asset.element_buffer.size() / asset.num_vertices);
-        for (u32 v = 0; v < asset.num_vertices; ++v)
-            std::memcpy(&out.normals[v], asset.element_buffer.data() + (size_t)v * elem_stride,
-                        sizeof(math::v3));
+    for (u32 v = 0; v < asset.num_vertices; ++v) {
+        PackedPosition xyz;
+        std::memcpy(xyz, asset.position_buffer.data() + size_t(v) * sizeof(xyz), sizeof(xyz));
+        out.positions[v] = math::v3{xyz[0], xyz[1], xyz[2]};
     }
 
+    // Both static and skeletal elements pack normal XY as u16 and store the Z sign in byte 3.
+    out.normals.assign(asset.num_vertices, math::v3{0.f, 1.f, 0.f});
+    constexpr u32 hasNormal = 0x01, isSkeletal = 0x08;
+    if (asset.elements_type & hasNormal) {
+        const size_t stride = asset.element_buffer.size() / asset.num_vertices;
+        const size_t offset = (asset.elements_type & isSkeletal) ? 12 : 4;
+        if (stride < offset + 2 * sizeof(u16)) {
+            err = "incomplete mesh normal buffer";
+            return false;
+        }
+        for (u32 v = 0; v < asset.num_vertices; ++v) {
+            const auto* element = asset.element_buffer.data() + size_t(v) * stride;
+            u16 xy[2];
+            std::memcpy(xy, element + offset, sizeof(xy));
+            const f32 nx = xy[0] * (2.f / 65535.f) - 1.f;
+            const f32 ny = xy[1] * (2.f / 65535.f) - 1.f;
+            const f32 nz = std::sqrt(std::max(0.f, 1.f - nx * nx - ny * ny));
+            out.normals[v] = math::v3{nx, ny, (element[3] & 0x02) ? nz : -nz};
+        }
+    }
     // 索引统一扩为 u32
     out.indices.resize(asset.num_indices);
     if (asset.index_size == 2) {

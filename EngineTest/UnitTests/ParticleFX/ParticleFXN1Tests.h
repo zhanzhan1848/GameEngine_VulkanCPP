@@ -4,6 +4,7 @@
 // 覆盖：JSON 解析与行号报错、编译期校验失败路径、内置模块行为、形状分布界、
 //       暴露参数绑定、SpawnRate/Burst 节奏、热重载、确定性、schema 反射。
 
+#include <filesystem>
 #include "Engine/ParticleFX/core/EmitterProgram.h"
 #include "Engine/ParticleFX/core/PfxJson.h"
 #include "Engine/ParticleFX/core/PfxSystem.h"
@@ -399,7 +400,7 @@ inline void test_schema_json() {
 inline void test_asset_file_load() {
     std::cout << "Testing emitter asset file load..." << std::endl;
 
-    const char* path = "/tmp/pfx_test_asset.pfx_emitter";
+    const char* path = "pfx_test_asset.pfx_emitter";
     FILE* f = std::fopen(path, "wb");
     assert(f != nullptr);
     const char* text = R"({"name":"file_asset","capacity":64,"stages":{
@@ -413,7 +414,7 @@ inline void test_asset_file_load() {
     assert(prog.name == "file_asset");
 
     err.clear();
-    assert(!load_emitter_asset("/tmp/pfx_nonexistent.pfx_emitter", prog, err));
+    assert(!load_emitter_asset("pfx_nonexistent.pfx_emitter", prog, err));
     assert(err.find("cannot open") != std::string::npos);
     std::remove(path);
 
@@ -432,9 +433,9 @@ inline void test_convert_legacy_presets() {
     const u32 legacy_count = (u32)particles::preset_system::get()->get_all_preset_names().size();
     assert(legacy_count == 8);   // 门禁：内置 8 预设
 
-    std::system("mkdir -p /tmp/pfx_converted && rm -f /tmp/pfx_converted/*.pfx_emitter");
+    std::filesystem::create_directory("pfx_converted");
     std::string err;
-    const u32 n = pfx::convert::convert_all_builtins("/tmp/pfx_converted", err);
+    const u32 n = pfx::convert::convert_all_builtins("pfx_converted", err);
     assert(n == 8);              // 全部转换成功
     assert(err.empty());
 
@@ -442,7 +443,7 @@ inline void test_convert_legacy_presets() {
     for (const std::string& name : particles::preset_system::get()->get_all_preset_names()) {
         emitter_program prog;
         std::string load_err;
-        const std::string path = "/tmp/pfx_converted/" + name + ".pfx_emitter";
+        const std::string path = "pfx_converted/" + name + ".pfx_emitter";
         assert(load_emitter_asset(path.c_str(), prog, load_err));
         assert(prog.stages[0].size() >= 1);   // 至少一个 spawn 模块
     }

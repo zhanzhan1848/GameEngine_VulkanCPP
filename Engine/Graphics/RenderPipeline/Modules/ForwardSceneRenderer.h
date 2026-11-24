@@ -68,7 +68,7 @@ public:
     /// AttachVTFeedback 在帧末挂接(调用方 submit 前),系统 update 由
     /// 帧驱动方调用 virtual_texture_system::instance().update(frame)。
     void EnableVirtualTextures(const std::string& vtexAssetsDir);
-    /// 帧末调用:把 VT 材质 set 的 feedback 绑定切到本帧槽并记录回读拷贝,
+    /// 帧末调用:记录本帧 feedback 槽的回读拷贝,
     /// 同时把 ring fence 挂到 si(调用方随后 submit si)。
     void AttachVTFeedback(rhi::RHICommandBuffer* cb, u32 frame_index, rhi::QueueSubmitInfo& si);
     bool IsVirtualTextureEnabled() const { return vt_mode_; }
@@ -331,7 +331,7 @@ private:
     std::string vt_assets_dir_;
     rhi::ResourceHandle vt_material_params_buf_{rhi::handles::INVALID_RESOURCE};
     std::vector<bool> material_is_vt_;
-    std::vector<rhi::DescriptorSetHandle> vt_material_ds_;
+    std::vector<std::vector<rhi::DescriptorSetHandle>> vt_material_ds_;
     std::unordered_map<std::string, u32> vt_registered_;   // vtex 路径 → vtId
     // 尝试为 mesh 创建 VT 材质(三槽 .vtex 齐备才成功;失败走常规)
     bool TryCreateVTMaterial(const SceneDataMeshInfo& meshInfo, u32 meshIdx,
@@ -347,11 +347,11 @@ private:
     rhi::DescriptorSetHandle global_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET};
-    // T4.6.5 part 15.3: Vulkan-only shadow-pass descriptor sets. Replaces Metal's
-    // BindVertexBuffers(0, 1, &shadow_view_cb_[c], ...) per-vertex slot override.
-    // One per cascade: binding 0 = shadow_view_cb_[c], bindings 1+2 mirror global_ds_.
-    rhi::DescriptorSetHandle shadow_global_ds_[2]{
-        rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET};
+    struct ShadowCascade {
+        rhi::ResourceHandle view = rhi::handles::INVALID_RESOURCE;
+        rhi::DescriptorSetHandle set = rhi::handles::INVALID_DESCRIPTOR_SET;
+    };
+    ShadowCascade shadow_cascades_[3][2];
     rhi::DescriptorSetHandle lighting_ds_[3]{
         rhi::handles::INVALID_DESCRIPTOR_SET, rhi::handles::INVALID_DESCRIPTOR_SET,
         rhi::handles::INVALID_DESCRIPTOR_SET};
@@ -412,10 +412,6 @@ private:
     // tests vs BGRA8 for Avalonia MTKView), the blit pipeline is recreated lazily.
     rhi::DataFormat blit_target_format_{rhi::DataFormat::BGRA8_UNorm};
 
-    // Shadow VP constant buffers (one per cascade, avoids shared-memory timing issue)
-    rhi::ResourceHandle shadow_view_cb_[2]{rhi::handles::INVALID_RESOURCE,
-                                            rhi::handles::INVALID_RESOURCE};
-
     // Samplers
     rhi::SamplerHandle default_sampler_{rhi::handles::INVALID_SAMPLER};
     rhi::SamplerHandle brdf_sampler_{rhi::handles::INVALID_SAMPLER};
@@ -445,8 +441,12 @@ private:
     // PCG instances (CPU-side) — removed, now uses Entity→RenderScene path
 
     // Instance buffer for instanced rendering (used by RenderDynamicInstances)
-    rhi::ResourceHandle pcg_instance_buffer_{rhi::handles::INVALID_RESOURCE};
-    u32 pcg_instance_buffer_capacity_{0};
+    struct FrameInstances {
+        rhi::ResourceHandle buffer{rhi::handles::INVALID_RESOURCE};
+        u64 capacity{};
+        u32 used{};
+    };
+    FrameInstances frame_instances_[3];
 
     // mesh_id_to_index_: maps RenderMesh::GetEntityId() → mesh_infos_ array index
     std::unordered_map<id::id_type, u32> mesh_id_to_index_;

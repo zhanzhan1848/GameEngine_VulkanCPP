@@ -47,7 +47,13 @@ using namespace Engine::Test;
 
 namespace {
 
-const char* kPrebakedDir = "/tmp/sponza_vt";
+// Keep the existing prebaked fixture location on Unix.
+const auto kVTTempDir =
+#ifdef _WIN32
+    std::filesystem::temp_directory_path();
+#else
+    std::filesystem::path("/tmp");
+#endif
 
 // 测试内烘焙子集(每张 ~1-3s)
 bool BakeSubset(const std::string& outDir) {
@@ -102,7 +108,10 @@ struct DeviceFixture {
         base = rhi::CreateRHIDevice(desc);
         return base != nullptr;
     }
-    ~DeviceFixture() { if (base) base->Shutdown(); }
+    ~DeviceFixture() {
+        vt::virtual_texture_system::instance().shutdown();
+        rhi::DestroyRHIDevice(base);
+    }
 };
 
 } // anonymous namespace
@@ -112,7 +121,7 @@ TestResult TestSponzaVT_Integration() {
     TEST_ASSERT(fx.Init(), "Vulkan device init");
 
     // vtex 资产:预烘焙目录优先
-    std::string vtexDir = kPrebakedDir;
+    std::string vtexDir = (kVTTempDir / "sponza_vt").string();
     {
         std::error_code ec;
         size_t n = 0;
@@ -120,7 +129,7 @@ TestResult TestSponzaVT_Integration() {
             for (auto& e : std::filesystem::directory_iterator(vtexDir, ec))
                 if (e.path().extension() == ".vtex") ++n;
         if (n < 10) {
-            vtexDir = "/tmp/sponza_vt_subset";
+            vtexDir = (kVTTempDir / "sponza_vt_subset").string();
             std::cout << "[SponzaVT] 预烘焙目录不可用,测试内烘焙子集 → " << vtexDir << std::endl;
             TEST_ASSERT(BakeSubset(vtexDir), "bake subset");
         } else {
@@ -224,12 +233,11 @@ TestResult TestSponzaVT_Integration() {
         rhi::CommandBufferHandle cmd = fx.base->CreateCommandBuffer(rhi::CommandQueueType::Graphics);
         rhi::RHICommandBuffer* cb = rhi::GetCommandBuffer(cmd);
         TEST_ASSERT(cb && cb->Reset() && cb->Begin(), "begin frame");
-        pipeline.RenderWithCommandBuffer(scene, view, output, outDesc, cb, 0, cmd,
+        pipeline.RenderWithCommandBuffer(scene, view, output, outDesc, cb, frame % 3, cmd,
                                           rhi::handles::INVALID_SYNC);
         rhi::QueueSubmitInfo si{};
         si.cmdBuffer = cmd;
-        si.signalFence = sys.feedback_fence_handle(frame);
-        sys.record_feedback(cb, frame);
+        fr->AttachVTFeedback(cb, frame, si);
         TEST_ASSERT(cb->End(), "end frame");
         TEST_ASSERT(fx.base->Submit(si), "submit frame");
         TEST_ASSERT(sys.wait_feedback(frame, 5000), "feedback fence");
@@ -265,6 +273,7 @@ TestResult TestSponzaVT_Integration() {
         cb->WaitForCompletion();
         fx.base->DestroyCommandBuffer(cmd);
         const u8* m = static_cast<const u8*>(fx.base->MapBuffer(rbBuf, 0, 0));
+        TEST_ASSERT(m, "map output readback");
         u64 nonzero = 0;
         for (u64 i = 0; i < rb.size; ++i) if (m[i]) ++nonzero;
         fx.base->UnmapBuffer(rbBuf);
@@ -285,7 +294,6 @@ TestResult TestSponzaVT_Integration() {
 
     fx.base->DestroyTexture(output);
     pipeline.Shutdown();
-    sys.shutdown();
     return TestResult::Passed;
 }
 

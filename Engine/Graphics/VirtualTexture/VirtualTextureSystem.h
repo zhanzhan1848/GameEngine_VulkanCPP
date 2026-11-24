@@ -148,6 +148,8 @@ public:
 
     /// 本帧采样 pass 用的 feedback SSBO(绑定到 set,采样函数写入)
     ResourceHandle feedback_buffer(u32 frame_index);
+    u32 feedback_slot_count() const { return static_cast<u32>(feedback_.size()); }
+    ResourceHandle feedback_slot_buffer(u32 slot) const { return feedback_[slot].buffer; }
 
     /// 某帧 feedback ring fence(调用方 submit 时作 signalFence)
     SyncHandle feedback_fence_handle(u32 frame_index) const {

@@ -47,8 +47,8 @@ inline void test_mesh_load_and_cdf() {
 
     mesh_geometry m;
     std::string err;
-    write_test_obj("/tmp/pfx_mesh_test_square.obj", 1);
-    assert(m.load_obj("/tmp/pfx_mesh_test_square.obj", err));
+    write_test_obj("pfx_mesh_test_square.obj", 1);
+    assert(m.load_obj("pfx_mesh_test_square.obj", err));
     assert(m.triangle_count() == 2);
     assert(m.positions.size() == 6);
 
@@ -71,19 +71,19 @@ inline void test_mesh_load_and_cdf() {
 
     // 退化路径：无面 / 文件不存在
     {
-        FILE* f = std::fopen("/tmp/pfx_mesh_test_noface.obj", "wb");
+        FILE* f = std::fopen("pfx_mesh_test_noface.obj", "wb");
         assert(f);
         std::fputs("v 0 0 0\nv 1 0 0\nv 0 1 0\n", f);
         std::fclose(f);
     }
     mesh_geometry bad;
     // 无面 OBJ：tinyobj 不产出 shape → "no geometry"；有 shape 无三角形 → "no triangles"
-    assert(!bad.load_obj("/tmp/pfx_mesh_test_noface.obj", err));
+    assert(!bad.load_obj("pfx_mesh_test_noface.obj", err));
     assert(err.find("no geometry") != std::string::npos || err.find("no triangles") != std::string::npos);
-    assert(!bad.load_obj("/tmp/pfx_mesh_test_missing.obj", err) && !err.empty());
+    assert(!bad.load_obj("pfx_mesh_test_missing.obj", err) && !err.empty());
 
-    std::remove("/tmp/pfx_mesh_test_square.obj");
-    std::remove("/tmp/pfx_mesh_test_noface.obj");
+    std::remove("pfx_mesh_test_square.obj");
+    std::remove("pfx_mesh_test_noface.obj");
     std::cout << "  PASS: mesh_geometry load + CDF" << std::endl;
 }
 
@@ -129,7 +129,7 @@ inline void test_mesh_surface_scatter_modes() {
     std::cout << "Testing mesh_surface scatter modes (area/triangle/vertex)..." << std::endl;
 
     assert(initialize(system_config{ 8, 200000 }));
-    const char* path = write_test_obj("/tmp/pfx_mesh_test_square.obj", 0);
+    const char* path = write_test_obj("pfx_mesh_test_square.obj", 0);
     constexpr u32 N = 100000;
 
     {
@@ -181,7 +181,7 @@ inline void test_mesh_density_weighted_and_bias() {
     std::cout << "Testing density_weighted channels + bias polarization..." << std::endl;
 
     assert(initialize(system_config{ 8, 200000 }));
-    const char* path = write_test_obj("/tmp/pfx_mesh_test_square.obj", 1);
+    const char* path = write_test_obj("pfx_mesh_test_square.obj", 1);
     constexpr u32 N = 100000;
 
     {
@@ -215,7 +215,7 @@ inline void test_mesh_density_weighted_and_bias() {
     }
     {
         // 权重通道缺席（mode 0 OBJ 无顶点色）→ density_weighted 退化为面积均匀
-        const char* plain = write_test_obj("/tmp/pfx_mesh_test_plain.obj", 0);
+        const char* plain = write_test_obj("pfx_mesh_test_plain.obj", 0);
         pfx_emitter* em = spawn_mesh_particles(plain, "density_weighted", "vertex_color_r", "0", false, N);
         const math::v4* pos = em->store().v4_channel(attr::position);
         u32 count_a = 0;
@@ -235,7 +235,7 @@ inline void test_mesh_normal_contract() {
     std::cout << "Testing mesh_surface last_normal contract..." << std::endl;
 
     assert(initialize(system_config{ 8, 200000 }));
-    const char* path = write_test_obj("/tmp/pfx_mesh_test_square.obj", 0);
+    const char* path = write_test_obj("pfx_mesh_test_square.obj", 0);
     // 两三角形绕向一致 → 面法线同为 +z；AddVelocity(shape_normal) 速度应恒 (0,0,2)
     pfx_emitter* em = spawn_mesh_particles(path, "area_uniform", "none", "0", true, 50000);
     const math::v4* vel = em->store().v4_channel(attr::velocity);
@@ -261,7 +261,7 @@ inline void test_mesh_compile_errors() {
           "requires a 'mesh'" },
         // 路径不存在
         { R"({"stages":{"init":[{"module":"ShapeLocation","shape":"mesh_surface",
-                                   "mesh":"/tmp/pfx_mesh_test_missing.obj"}]}})",
+                                   "mesh":"pfx_mesh_test_missing.obj"}]}})",
           "load failed" },
         // mesh_volume 缺 mesh
         { R"({"stages":{"init":[{"module":"ShapeLocation","shape":"mesh_volume"}]}})",
@@ -271,7 +271,7 @@ inline void test_mesh_compile_errors() {
                                    "scatter":"whatever"}]}})",
           "unknown value" },
     };
-    write_test_obj("/tmp/pfx_mesh_test_square.obj", 0);
+    write_test_obj("pfx_mesh_test_square.obj", 0);
     for (const auto& c : cases) {
         emitter_program prog;
         std::string err;
@@ -286,15 +286,15 @@ inline void test_mesh_compile_errors() {
 
     // 同路径两次引用 → 表内去重（一个 mesh_entry）
     const char* dup = R"({"stages":{"init":[
-        {"module":"ShapeLocation","shape":"mesh_surface","mesh":"/tmp/pfx_mesh_test_square.obj"},
-        {"module":"ShapeLocation","shape":"mesh_surface","mesh":"/tmp/pfx_mesh_test_square.obj"}]}})";
+        {"module":"ShapeLocation","shape":"mesh_surface","mesh":"pfx_mesh_test_square.obj"},
+        {"module":"ShapeLocation","shape":"mesh_surface","mesh":"pfx_mesh_test_square.obj"}]}})";
     emitter_program prog;
     std::string err;
     assert(compile_emitter_from_text(dup, std::strlen(dup), prog, err));
     assert(prog.meshes.size() == 1);
     assert(prog.mesh_views.size() == 1);
 
-    std::remove("/tmp/pfx_mesh_test_square.obj");
+    std::remove("pfx_mesh_test_square.obj");
     std::cout << "  PASS: mesh compile error paths" << std::endl;
 }
 
@@ -404,13 +404,15 @@ inline void test_builtin_instance_geometry() {
     std::string err;
     assert(render::load_instance_geometry("builtin:sphere", g, err));
     assert(g.positions.size() > 8 && g.index_count >= 12 && g.indices.size() == g.index_count);
-    // 球半径 0.05:包围盒半径容差内
-    f32 max_r = 0.f;
-    for (const auto& p : g.positions)
-        max_r = std::max(max_r, std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z));
-    // 创建器的球面顶点可略超名义半径(极点/细分实现细节),只断言量级正确且非退化
-    assert(max_r > 0.02f && max_r < 0.2f);
-    assert(g.positions.size() > 8 && g.index_count > 12);
+    assert(g.normals.size() == g.positions.size());
+    for (size_t i = 0; i < g.positions.size(); ++i) {
+        const auto& p = g.positions[i];
+        const auto& n = g.normals[i];
+        const f32 radius = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z);
+        assert(std::fabs(radius - 0.05f) < 1e-5f);
+        // Quantized vertex normals must point away from the sphere center.
+        assert(std::fabs((n.x * p.x + n.y * p.y + n.z * p.z) / radius - 1.f) < 1e-3f);
+    }
 
     render::instance_geometry box;
     assert(render::load_instance_geometry("builtin:box", box, err));

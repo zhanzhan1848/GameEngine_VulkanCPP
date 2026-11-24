@@ -362,30 +362,30 @@ jobs:
           Invoke-Expression "ctest --test-dir build -C Release --output-on-failure --timeout 600 --no-tests=error $exclude"
 
       - name: 离线 CLI 冒烟（primal-engine 平台矩阵守卫）
-        shell: powershell
+        shell: python
         run: |
-          # CLI/Agent 接口（Docs/CLI_Agent_Interface_Plan.md §9 风险 #6）：平台矩阵
-          # 按"各自可用子集"放开——Windows 当前没有 InitializeEngine 导出，因此：
-          #   schema      必须可用（纯 JSON，不初始化引擎）
-          #   render      必须以 exit 4 + NOT_SUPPORTED 显式拒绝（而不是假成功/崩溃）
-          # 本步骤同时守住 primal-engine 的 MSVC 编译与 DLL 部署（POST_BUILD copy）。
-          $exe = "Windows/Release/primal-engine.exe"
-          if (-not (Test-Path $exe)) { Write-Host "::error::primal-engine.exe 未产出（目标是否被编译？）"; exit 1 }
+          import json
+          import subprocess
+          import tempfile
+          from pathlib import Path
 
-          $lastLine = (& $exe schema 2>$null | Select-Object -Last 1)
-          $schema = $lastLine | ConvertFrom-Json
-          if (-not $schema.ok) { Write-Host "::error::schema verb 失败: $lastLine"; exit 1 }
-          $verbs = @($schema.data.commands | ForEach-Object { $_.verb })
-          if ($verbs -notcontains "render") { Write-Host "::error::offline schema 缺 render: $verbs"; exit 1 }
-          if ($verbs -notcontains "cook-mesh") { Write-Host "::error::offline schema 缺 cook-mesh: $verbs"; exit 1 }
-          Write-Host "offline schema OK: $verbs"
+          exe = Path("Windows/Release/primal-engine.exe").resolve(strict=True)
 
-          & $exe render --out ci_smoke.png 2>$null
-          if ($LASTEXITCODE -ne 4) {
-            Write-Host "::error::render 应以 exit 4 (NOT_SUPPORTED) 拒绝，实际 exit $LASTEXITCODE"
-            exit 1
-          }
-          Write-Host "render 正确拒绝（Windows 平台矩阵，符合 §9 风险 #6 预期）"
+          def invoke(*args):
+              result = subprocess.run([str(exe), *args], capture_output=True, timeout=30)
+              print(f"{args[0]} exited with {result.returncode}")
+              return result.returncode, json.loads(result.stdout.decode("utf-8"))
+
+          code, schema = invoke("schema")
+          assert code == 0 and schema["ok"], schema
+          verbs = {item["verb"] for item in schema["data"]["commands"]}
+          assert {"render", "cook-mesh"} <= verbs, verbs
+
+          with tempfile.TemporaryDirectory() as temp:
+              output = Path(temp) / "ci_smoke.png"
+              code, reply = invoke("render", "--out", str(output))
+              assert code == 4 and reply["ok"] is False and reply["error"]["code"] == "NOT_SUPPORTED", reply
+              assert not output.exists(), output
 
       - name: 上传编译错误制品（失败时）
         # 供 compile-error-report job 聚合跨平台报告
@@ -1011,7 +1011,8 @@ jobs:
 
       - name: primal selftest（框架自测）
         run: |
-          dotnet run --project PrimalCli -c Debug --no-build -- selftest | tee selftest.log
+          set -o pipefail
+          dotnet run --project PrimalCli -c Debug --no-build -- selftest 2>&1 | tee selftest.log
           grep -q "all passed" selftest.log
 
       - name: xUnit Cli 测试（含 schema 快照门禁）

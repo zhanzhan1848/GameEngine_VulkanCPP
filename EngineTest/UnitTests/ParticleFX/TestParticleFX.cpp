@@ -1,3 +1,9 @@
+// These inline tests use assert for both setup and verification in Release CI.
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+#include <chrono>
+#include <filesystem>
 #include "ParticleFXN1Tests.h"
 #include "ParticleFXN2Tests.h"
 #include "ParticleFXN3Tests.h"
@@ -11,6 +17,12 @@
 #include "ParticleFXTests.h"
 
 int main() {
+    namespace fs = std::filesystem;
+    const auto original = fs::current_path();
+    const auto directory = fs::temp_directory_path() / ("primal-pfx-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    if (!fs::create_directory(directory)) return 1;
+    fs::current_path(directory);
     primal::pfx::test::run_all_tests();      // N0
     primal::pfx::test::run_all_n1_tests();   // N1
     primal::pfx::test::run_all_mesh_location_tests();   // ShapeLocation mesh 发射源
@@ -22,5 +34,7 @@ int main() {
     primal::pfx::test::run_all_n6_tests();   // N6
     primal::pfx::test::run_all_parity_tests(); // Niagara/POP 对齐批次
     primal::pfx::test::run_all_editor_preview_tests(); // 编辑器私有预览渲染隔离
+    fs::current_path(original);
+    fs::remove_all(directory);
     return 0;
 }
