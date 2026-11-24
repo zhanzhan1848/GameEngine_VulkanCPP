@@ -3850,6 +3850,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                     static SamplerHandle s_cf_sampler = handles::INVALID_SAMPLER;
                     if (s_cf_sampler == handles::INVALID_SAMPLER) {
                         SamplerDesc sd{};
+                        sd.comparisonFunc = ComparisonFunc::Never;
                         sd.minFilter = FilterMode::Linear;
                         sd.magFilter = FilterMode::Linear;
                         sd.addressU = TextureAddressMode::Clamp;

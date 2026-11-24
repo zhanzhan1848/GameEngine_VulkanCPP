@@ -462,6 +462,7 @@ bool GPUDrivenDrawPipeline::CreateResources() {
 
     // 🎨 NEW: Create texture sampler
     rhi::SamplerDesc samplerDesc{};
+    samplerDesc.comparisonFunc = rhi::ComparisonFunc::Never;
     samplerDesc.minFilter = rhi::FilterMode::Linear;
     samplerDesc.magFilter = rhi::FilterMode::Linear;
     samplerDesc.mipFilter = rhi::FilterMode::Linear;
@@ -621,6 +622,7 @@ bool GPUDrivenDrawPipeline::EnsureEditorCopyPipeline() {
     }
 
     rhi::SamplerDesc samp{};
+    samp.comparisonFunc = rhi::ComparisonFunc::Never;
     samp.minFilter = rhi::FilterMode::Linear;
     samp.magFilter = rhi::FilterMode::Linear;
     samp.mipFilter = rhi::FilterMode::Point;

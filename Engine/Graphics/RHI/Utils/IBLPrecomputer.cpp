@@ -358,6 +358,7 @@ ResourceHandle IBLPrecomputer::ComputeEnvironmentCube(ResourceHandle equirectMap
     if (outputTexture == handles::INVALID_RESOURCE) return handles::INVALID_RESOURCE;
 
     SamplerDesc samplerDesc;
+    samplerDesc.comparisonFunc = ComparisonFunc::Never;
     samplerDesc.minFilter = FilterMode::Linear;
     samplerDesc.magFilter = FilterMode::Linear;
     samplerDesc.addressU = TextureAddressMode::Clamp;
@@ -454,6 +455,7 @@ ResourceHandle IBLPrecomputer::ComputeIrradianceMap(ResourceHandle envMap, u32 o
 
     // 2. Create Sampler
     SamplerDesc samplerDesc;
+    samplerDesc.comparisonFunc = ComparisonFunc::Never;
     samplerDesc.minFilter = FilterMode::Linear;
     samplerDesc.magFilter = FilterMode::Linear;
     samplerDesc.addressU = TextureAddressMode::Clamp;
@@ -634,6 +636,7 @@ ResourceHandle IBLPrecomputer::ComputePrefilteredEnvironmentMap(ResourceHandle e
     if (outputTexture == handles::INVALID_RESOURCE) return handles::INVALID_RESOURCE;
 
     SamplerDesc samplerDesc;
+    samplerDesc.comparisonFunc = ComparisonFunc::Never;
     samplerDesc.minFilter = FilterMode::Linear;
     samplerDesc.magFilter = FilterMode::Linear;
     samplerDesc.mipFilter = FilterMode::Linear;
