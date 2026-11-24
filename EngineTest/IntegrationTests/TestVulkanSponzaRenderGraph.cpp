@@ -1304,6 +1304,9 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         if (end != e && std::isfinite(parsed))
             floorAlbedoScale = std::clamp(parsed, 0.1f, 1.5f);
     }
+    // The same diffuse image is referenced by many meshes. Share its GPU mip
+    // chain and array layer, keeping the reference-only floor transform in the key.
+    std::unordered_map<std::string, ResourceHandle> diffuseByPath[2];
     u32 scaledFloorMeshes = 0;
     for (u32 i = 0; i < meshCount; ++i) {
         auto& meshInfo = sceneMeshes_[i];
@@ -1319,16 +1322,23 @@ bool TestVulkanSponzaRenderGraph::LoadSponzaScene() {
         if (decAlbedo[i].valid) {
             std::string lowerDiffuse = meshInfo.diffuseTexturePath;
             for (auto& ch : lowerDiffuse) ch = (char)tolower((unsigned char)ch);
-            if (floorAlbedoScale != 1.0f &&
-                lowerDiffuse.find("sponza_floor_diffuse") != std::string::npos) {
+            const bool scaleFloor = floorAlbedoScale != 1.0f &&
+                lowerDiffuse.find("sponza_floor_diffuse") != std::string::npos;
+            if (scaleFloor) {
                 const size_t pixelCount = (size_t)decAlbedo[i].width * decAlbedo[i].height;
                 primal::graphics::rhi::card_surface_identity::ScaleTextureRgb(
                     decAlbedo[i].data, pixelCount, floorAlbedoScale);
                 ++scaledFloorMeshes;
             }
-            diffuseTex = CreateTextureFromData(
-                device_, decAlbedo[i].width, decAlbedo[i].height,
-                decAlbedo[i].data, DataFormat::RGBA8_sRGB);
+            auto& cache = diffuseByPath[scaleFloor];
+            const auto& path = meshInfo.diffuseTexturePath;
+            if (auto existing = cache.find(path); existing != cache.end()) {
+                diffuseTex = existing->second;
+            } else {
+                diffuseTex = CreateTextureFromData(device_, decAlbedo[i].width, decAlbedo[i].height,
+                    decAlbedo[i].data, DataFormat::RGBA8_sRGB);
+                if (diffuseTex != handles::INVALID_RESOURCE) cache.emplace(path, diffuseTex);
+            }
         }
         if (diffuseTex == handles::INVALID_RESOURCE) { diffuseTex = fallbackDiffuse_; texFailed++; }
         else texLoaded++;

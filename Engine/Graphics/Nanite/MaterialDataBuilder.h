@@ -14,7 +14,7 @@ namespace primal::graphics::rhi {
 
 namespace primal::graphics::nanite {
 
-enum class TextureArrayChannel { Generic, Albedo };
+enum class TextureArrayChannel { Generic, Albedo, Normal, ORM };
 
 // 🎨 Texture array build context
 struct TextureArrayBuildContext {

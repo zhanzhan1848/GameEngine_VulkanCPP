@@ -201,14 +201,14 @@ bool MaterialDataBuilder::BuildTextureArrays(
     }
 
     if (!ctx.uniqueNormal.empty()) {
-        if (!CreateTextureArray(device, nullptr, ctx.uniqueNormal, "NormalTextureArray", outNormalArray)) {
+        if (!CreateTextureArray(device, nullptr, ctx.uniqueNormal, "NormalTextureArray", outNormalArray, TextureArrayChannel::Normal)) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Failed to create normal texture array" << std::endl;
             success = false;
         }
     }
 
     if (!ctx.uniqueORM.empty()) {
-        if (!CreateTextureArray(device, nullptr, ctx.uniqueORM, "ORMTextureArray", outORMArray)) {
+        if (!CreateTextureArray(device, nullptr, ctx.uniqueORM, "ORMTextureArray", outORMArray, TextureArrayChannel::ORM)) {
             PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Failed to create ORM texture array" << std::endl;
             success = false;
         }
@@ -507,13 +507,10 @@ void MaterialDataBuilder::BuildTextureMapping(
               << ", normal=" << static_cast<u32>(canonical_normal_fmt)
               << ", orm=" << static_cast<u32>(canonical_orm_fmt) << std::endl;
 
-    // 1b. Create placeholder textures USING the canonical format. The placeholder
-    //     becomes layer 0 of each array; if its format doesn't match the array's
-    //     canonical format, BlitTexture will skip it, leaving layer 0
-    //     uninitialized — and any material that falls back to placeholder
-    //     (defaults to idx 0) would sample undefined memory.
-    CreatePlaceholderTextures(ctx, device, canonical_albedo_fmt,
-                              canonical_normal_fmt, canonical_orm_fmt);
+    // D3D12 uploads uncompressed defaults directly to array layer zero.
+    if (device->GetPlatform() != rhi::RHIPlatform::D3D12) {
+        CreatePlaceholderTextures(ctx, device, canonical_albedo_fmt, canonical_normal_fmt, canonical_orm_fmt);
+    }
 
     // 1c. Register placeholders as layer 0.
     ctx.albedoToIndex[ctx.placeholderAlbedo] = 0;
@@ -821,13 +818,16 @@ bool MaterialDataBuilder::CreateTextureArray(
         }
     }
 
-    if (firstValidTex == rhi::handles::INVALID_RESOURCE) {
+    const bool reserveDefaultLayer = device->GetPlatform() == rhi::RHIPlatform::D3D12 &&
+        channel != TextureArrayChannel::Generic && sources.front() == rhi::handles::INVALID_RESOURCE;
+    if (firstValidTex == rhi::handles::INVALID_RESOURCE && !reserveDefaultLayer) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] No valid textures for " << name << std::endl;
         return false;
     }
 
     // Infer size from first valid texture.
-    math::u32v2 size = GetTextureSize(device, firstValidTex);
+    math::u32v2 size = firstValidTex != rhi::handles::INVALID_RESOURCE
+        ? GetTextureSize(device, firstValidTex) : math::u32v2{1, 1};
 
     // Pick the format used by the MAJORITY of sources. The first source may be
     // a placeholder with a different format (sRGB vs UNorm), and WebGPU
@@ -842,7 +842,8 @@ bool MaterialDataBuilder::CreateTextureArray(
         u32 fmt = static_cast<u32>(GetTextureFormat(device, tex));
         formatHistogram[fmt]++;
     }
-    u32 bestFormat = 0;
+    u32 bestFormat = static_cast<u32>(channel == TextureArrayChannel::Albedo
+        ? rhi::DataFormat::RGBA8_sRGB : rhi::DataFormat::RGBA8_UNorm);
     u32 bestCount = 0;
     for (const auto& [fmt, count] : formatHistogram) {
         if (count > bestCount) {
@@ -864,7 +865,7 @@ bool MaterialDataBuilder::CreateTextureArray(
     arrayDesc.format = format;
     arrayDesc.size = {size.x, size.y, 1};
     arrayDesc.arraySize = static_cast<u32>(sources.size());
-    arrayDesc.mipLevels = 1;  // TODO: Support mipmaps
+    arrayDesc.mipLevels = 1;
     arrayDesc.usage = rhi::TextureUsage::ShaderResource | rhi::TextureUsage::CopyDest;
     arrayDesc.memoryUsage = rhi::GPUMemoryUsage::Static;
 
@@ -882,12 +883,41 @@ bool MaterialDataBuilder::CreateTextureArray(
 #else
     (void)channel;
 #endif
+    const char* albedoMips = std::getenv("PRIMAL_VK_ALBEDO_MIPS");
+    if (device->GetPlatform() == rhi::RHIPlatform::D3D12 && channel == TextureArrayChannel::Albedo &&
+        format == rhi::DataFormat::RGBA8_sRGB && albedoMips && std::strcmp(albedoMips, "1") == 0) {
+        u32 levels = 1;
+        for (u32 n = std::max(size.x, size.y); n > 1; n >>= 1) ++levels;
+        for (auto source : sources) {
+            if (source != rhi::handles::INVALID_RESOURCE)
+                levels = std::min(levels, std::max(1u, device->GetTextureCopyMipCount(source)));
+        }
+        arrayDesc.mipLevels = levels;
+    }
     outArray = device->CreateTexture(arrayDesc);
     if (outArray == rhi::handles::INVALID_RESOURCE) {
         PRIMAL_LOG_STREAM(Error, "Render") << "[MaterialDataBuilder] Failed to create texture array '" << name << "'" << std::endl;
         return false;
     }
 
+    if (reserveDefaultLayer && (format == rhi::DataFormat::RGBA8_sRGB || format == rhi::DataFormat::RGBA8_UNorm)) {
+        // Match the byte representation of the existing reference placeholders.
+        const u32 pixel = channel == TextureArrayChannel::Normal ? 0xFF8080FFu :
+                          channel == TextureArrayChannel::ORM ? 0xFF0080FFu : 0xFFFFFFFFu;
+        std::vector<u32> constant(size_t(size.x) * size.y, pixel);
+        for (u32 mip = 0; mip < arrayDesc.mipLevels; ++mip) {
+            rhi::TextureRegionUpdate region{};
+            region.mipLevel = mip;
+            region.width = std::max(1u, size.x >> mip);
+            region.height = std::max(1u, size.y >> mip);
+            if (!device->UpdateTextureRegion(outArray, constant.data(),
+                    u64(region.width) * region.height * sizeof(pixel), region)) {
+                device->DestroyTexture(outArray);
+                outArray = rhi::handles::INVALID_RESOURCE;
+                return false;
+            }
+        }
+    }
     // Acquire our own command buffer if none was provided.
     // The caller (BuildTextureArrays) passes nullptr because it runs at scene-load
     // time outside any render loop; without a cmd buffer, the array is allocated
@@ -906,6 +936,7 @@ bool MaterialDataBuilder::CreateTextureArray(
         activeCmd->Begin();
     }
 
+    std::vector<rhi::TextureBlitRegion> regions(arrayDesc.mipLevels);
     u32 copiedLayers = 0;
     u32 skippedLayers = 0;
     for (size_t layer = 0; layer < sources.size(); ++layer) {
@@ -934,27 +965,19 @@ bool MaterialDataBuilder::CreateTextureArray(
             continue;
         }
 
-        // Setup blit region
-        rhi::TextureBlitRegion region{};
-        region.srcSubresource = {0, 0, 1};      // mip 0, layer 0
-        region.dstSubresource = {0, static_cast<u32>(layer), 1};  // mip 0, target layer
-        region.srcOffsets[0] = {0, 0, 0};
-        region.srcOffsets[1] = {static_cast<s32>(size.x), static_cast<s32>(size.y), 1};
-        region.dstOffsets[0] = {0, 0, 0};
-        region.dstOffsets[1] = {static_cast<s32>(size.x), static_cast<s32>(size.y), 1};
-
-        activeCmd->BlitTexture(
-            sources[layer],
-            outArray,
-            &region,
-            1,
-            rhi::FilterMode::Linear
-        );
+        for (u32 mip = 0; mip < arrayDesc.mipLevels; ++mip) {
+            auto& region = regions[mip];
+            region.srcSubresource = {mip, 0, 1};
+            region.dstSubresource = {mip, static_cast<u32>(layer), 1};
+            region.srcOffsets[1] = {s32(std::max(1u, size.x >> mip)), s32(std::max(1u, size.y >> mip)), 1};
+            region.dstOffsets[1] = region.srcOffsets[1];
+        }
+        activeCmd->BlitTexture(sources[layer], outArray, regions.data(), arrayDesc.mipLevels, rhi::FilterMode::Linear);
         ++copiedLayers;
     }
 
     PRIMAL_LOG_STREAM(Info, "Render") << "[MaterialDataBuilder] '" << name << "' copied " << copiedLayers
-              << " layers, skipped " << skippedLayers << std::endl;
+              << " layers, mips=" << arrayDesc.mipLevels << " skipped " << skippedLayers << std::endl;
 
     // If we owned the command buffer, submit and wait now.
     if (ownedCmdHandle != rhi::handles::INVALID_RESOURCE) {

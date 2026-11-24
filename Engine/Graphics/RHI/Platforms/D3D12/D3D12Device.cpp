@@ -947,6 +947,13 @@ bool D3D12Device::GetTextureSize(ResourceHandle texture, u32& width, u32& height
     return true;
 }
 
+u32 D3D12Device::GetTextureCopyMipCount(ResourceHandle texture) {
+    auto* tex = GetTexture(texture);
+    // BlitTexture addresses the native resource starting at mip zero.
+    if (!tex || tex->viewMode_ || tex->GetTextureDesc().type != TextureType::Texture2D) return 0;
+    return tex->GetTextureDesc().mipLevels;
+}
+
 DataFormat D3D12Device::GetTextureFormat(ResourceHandle texture) {
     d3d12::D3D12Texture* tex = GetTexture(texture);
     return tex ? tex->GetTextureDesc().format : DataFormat::Unknown;

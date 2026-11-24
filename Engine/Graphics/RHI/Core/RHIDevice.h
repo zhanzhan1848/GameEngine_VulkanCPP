@@ -224,6 +224,8 @@ public:
     // [PassDebugView 排查] 查询纹理尺寸（编辑器材质数组 blit 需要源尺寸裁剪）。
     // 默认 false = 平台未实现；仅内部 C++ 使用，不进 C ABI。
     virtual bool GetTextureSize(ResourceHandle texture, u32& width, u32& height) { (void)texture; (void)width; (void)height; return false; }
+    /// Mip levels directly copyable from a 2D source starting at mip zero. Zero if unknown.
+    virtual u32 GetTextureCopyMipCount(ResourceHandle) { return 0; }
     // Optional diagnostic query; unsupported backends return Unknown.
     virtual DataFormat GetTextureFormat(ResourceHandle texture) { (void)texture; return DataFormat::Unknown; }
     virtual RHISwapChain* CreateSwapChain(const SwapChainDesc& desc) = 0;

@@ -115,6 +115,7 @@ public:
 
     // F0-11 公共契约：诊断查询（M1 资源层接通）
     bool GetTextureSize(ResourceHandle texture, u32& width, u32& height) override;
+    u32 GetTextureCopyMipCount(ResourceHandle texture) override;
     DataFormat GetTextureFormat(ResourceHandle texture) override;
     bool GetBufferByteSize(ResourceHandle buffer, u64& bytes) override;
 

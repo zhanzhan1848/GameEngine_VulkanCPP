@@ -160,7 +160,7 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         if (success && !texCtx.uniqueNormal.empty()) {
             if (!MaterialDataBuilder::CreateTextureArray(
                 device, cmdBuffer, texCtx.uniqueNormal,
-                "NormalTextureArray", normalTextureArray_
+                "NormalTextureArray", normalTextureArray_, TextureArrayChannel::Normal
             )) {
                 PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: Failed to create normal texture array" << std::endl;
                 success = false;
@@ -170,7 +170,7 @@ jobsystem::JobHandle GPUMaterialRegistry::BuildAsync(rhi::RHIDeviceBase* device)
         if (success && !texCtx.uniqueORM.empty()) {
             if (!MaterialDataBuilder::CreateTextureArray(
                 device, cmdBuffer, texCtx.uniqueORM,
-                "ORMTextureArray", ormTextureArray_
+                "ORMTextureArray", ormTextureArray_, TextureArrayChannel::ORM
             )) {
                 PRIMAL_LOG_STREAM(Error, "Render") << "[GPUMaterialRegistry] ERROR: Failed to create ORM texture array" << std::endl;
                 success = false;
