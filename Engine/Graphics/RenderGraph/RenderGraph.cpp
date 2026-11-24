@@ -118,17 +118,17 @@ void RenderGraph::CleanupPool() {
 // Read/Write declarations from every alias land on the same resource state,
 // so producer/consumer edges and barriers stay visible.
 RGResourceHandle RenderGraph::ResolveImportIdentity(const std::string& name, rhi::ResourceHandle resource) {
-    auto it = importedPhysical_.find(static_cast<u32>(resource));
+    auto it = importedPhysical_.find(resource);
     if (it == importedPhysical_.end()) {
         return kInvalidRGResourceHandle;
     }
     if (std::getenv("PRIMAL_RG_STRICT_IMPORT")) {
         static thread_local std::unordered_set<std::string> traced;
-        std::string key = name + "#" + std::to_string(static_cast<u32>(resource));
+        std::string key = name + "#" + std::to_string(resource);
         if (traced.insert(std::move(key)).second) {
             PRIMAL_LOG_STREAM(Info, "RG")
                 << "[RG] Import alias '" << name << "' merged onto identity "
-                << it->second.index << " for rhi resource " << static_cast<u32>(resource)
+                << it->second.index << " for rhi resource " << resource
                 << std::endl;
         }
     }
@@ -143,7 +143,7 @@ RGResourceHandle RenderGraph::ImportResource(const std::string& name, rhi::Resou
         return existing;
     }
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
-    importedPhysical_.emplace(static_cast<u32>(resource), handle);
+    importedPhysical_.emplace(resource, handle);
     auto rgResource = std::make_unique<RenderGraphResource>(name, handle, RGResourceType::Unknown);
     rgResource->SetImportedResource(resource);
     rgResource->SetInitialState(initialState);
@@ -163,7 +163,7 @@ RGResourceHandle RenderGraph::ImportTexture(const std::string& name, rhi::Resour
         return existing;
     }
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
-    importedPhysical_.emplace(static_cast<u32>(resource), handle);
+    importedPhysical_.emplace(resource, handle);
     auto rgResource = std::make_unique<RenderGraphTexture>(name, handle, desc);
     rgResource->SetImportedResource(resource);
     rgResource->AddFlag(RGResourceFlags::Imported);
@@ -184,7 +184,7 @@ RGResourceHandle RenderGraph::ImportBuffer(const std::string& name, rhi::Resourc
         return existing;
     }
     RGResourceHandle handle = {static_cast<u32>(resources_.size() + 1), 0};
-    importedPhysical_.emplace(static_cast<u32>(resource), handle);
+    importedPhysical_.emplace(resource, handle);
     auto rgResource = std::make_unique<RenderGraphBuffer>(name, handle, desc);
     rgResource->SetImportedResource(resource);
     rgResource->AddFlag(RGResourceFlags::Imported);

@@ -387,8 +387,25 @@ Engine::Test::TestResult TestTimestampPolicy() {
     return passed?Engine::Test::TestResult::Passed:Engine::Test::TestResult::Failed;
 }
 
+Engine::Test::TestResult TestFullWidthImportIdentity() {
+    MockRHIDevice device;
+    RenderGraph graph(device);
+    constexpr ResourceHandle slot = 17;
+    constexpr ResourceHandle texture = (ResourceHandle{1} << 32) | slot;
+    constexpr ResourceHandle replacement = (ResourceHandle{2} << 32) | slot;
+    const auto bufferRG = graph.ImportBuffer("Constants", slot, BufferDesc{});
+    const auto textureRG = graph.ImportTexture("Lighting", texture, TextureDesc{});
+    const auto aliasRG = graph.ImportResource("LightingForFusion", texture);
+    const auto newRG = graph.ImportTexture("Replacement", replacement, TextureDesc{});
+    const bool correct = textureRG.index != bufferRG.index && aliasRG.index == textureRG.index &&
+        newRG.index != textureRG.index && newRG.index != bufferRG.index &&
+        graph.GetResource(textureRG)->GetPhysicalHandle() == texture;
+    return correct ? Engine::Test::TestResult::Passed : Engine::Test::TestResult::Failed;
+}
+
 int main() {
     std::vector<Engine::Test::TestCase> tests = {
+        {"FullWidthImportIdentity", TestFullWidthImportIdentity, "Buffer and texture pool slots have distinct physical identities"},
         {"BasicGraphBuild", TestBasicGraphBuild, "Tests basic render graph construction and execution"},
         {"ResourceDependency", TestResourceDependency, "Tests resource dependency between passes"},
         {"PassCulling", TestPassCulling, "Tests pass culling logic"},

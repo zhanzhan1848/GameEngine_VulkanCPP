@@ -885,12 +885,14 @@ double D3D12Device::getTimestampPeriodImpl() const { return timestampPeriodNs_; 
 // Per-type lookup
 // ============================================================================
 
+// Texture handles carry the allocator generation. Buffers use the raw pool index.
+// InsertBarrier receives a single ResourceHandle and must resolve exactly one type.
 d3d12::D3D12Texture* D3D12Device::GetTexture(ResourceHandle handle) {
-    if (handle == handles::INVALID_RESOURCE) return nullptr;
-    return textureAllocator_.Get(static_cast<u32>(handle));
+    if (handle == handles::INVALID_RESOURCE || (handle >> 32) == 0) return nullptr;
+    return textureAllocator_.GetChecked(handle);
 }
 d3d12::D3D12Buffer* D3D12Device::GetBuffer(ResourceHandle handle) {
-    if (handle == handles::INVALID_RESOURCE) return nullptr;
+    if ((handle >> 32) != 0) return nullptr;
     return bufferAllocator_.Get(static_cast<u32>(handle));
 }
 d3d12::D3D12Shader* D3D12Device::GetShader(ShaderHandle handle) {
@@ -1000,17 +1002,19 @@ ResourceHandle D3D12Device::WrapSwapChainBuffer(RHISwapChain& /*owner*/,
     // tracker 注册：Present 初始态（D3D12 位值 = COMMON；渲染前经
     // BeginRenderPass 显式转 RENDER_TARGET）。R16-A：注册失败显式告警
     // （仅同 (id,texture) 双注册会失败——同号 buffer 共存自 R16-A 起合法）。
-    if (!stateTracker_.RegisterResource(ResourceHandle(id), true, desc.mipLevels,
+    const ResourceHandle handle = textureAllocator_.MakeHandle(id);
+    tex->SetHandle(handle);
+    if (!stateTracker_.RegisterResource(handle, true, desc.mipLevels,
                                          desc.arraySize, 1, ResourceState::Present)) {
         PRIMAL_LOG_STREAM(Error, "RHI")
             << "[D3D12Device] tracker register rejected (double-register) "
                "backbuffer wrap id=" << id << std::endl;
     }
-    return ResourceHandle(id);
+    return handle;
 }
 
 void D3D12Device::UnwrapSwapChainBuffer(ResourceHandle handle) {
-    if (handle == handles::INVALID_RESOURCE) return;
+    if (!GetTexture(handle)) return;
     if (FrameTraceEnabled()) {  // R21-C：同 WrapSwapChainBuffer（resize 事件侧）
         PRIMAL_LOG_STREAM(Info, "RHI.D3D12")
             << "[D3D12FrameTrace] backbuffer unwrap: id=" << u32(handle)
@@ -1115,7 +1119,9 @@ ResourceHandle D3D12Device::createTextureImpl(const TextureDesc& desc) {
         desc.type == TextureType::Texture3D ? 1u
         : desc.type == TextureType::TextureCube ? 6u
                                                 : desc.arraySize;
-    if (!stateTracker_.RegisterResource(ResourceHandle(id), true, desc.mipLevels,
+    const ResourceHandle handle = textureAllocator_.MakeHandle(id);
+    texture->SetHandle(handle);
+    if (!stateTracker_.RegisterResource(handle, true, desc.mipLevels,
                                         trackedArrayLayers,
                                         stored->PlaneCount(),
                                         ResourceState::General)) {
@@ -1123,7 +1129,7 @@ ResourceHandle D3D12Device::createTextureImpl(const TextureDesc& desc) {
             << "[D3D12Device] tracker register rejected (double-register) "
                "texture id=" << id << " name='" << desc.name << "'" << std::endl;
     }
-    return ResourceHandle(id);
+    return handle;
 }
 
 void D3D12Device::destroyTextureImpl(ResourceHandle handle) {
@@ -1151,7 +1157,9 @@ ResourceHandle D3D12Device::createTextureViewImpl(const TextureViewDesc& desc) {
         return handles::INVALID_RESOURCE;
     }
     // view 不重复注册 tracker（状态与源纹理共享同一物理资源）。
-    return ResourceHandle(id);
+    const ResourceHandle handle = textureAllocator_.MakeHandle(id);
+    view->SetHandle(handle);
+    return handle;
 }
 
 // ============================================================================

@@ -145,7 +145,7 @@ private:
     // scheduler). Enforcement: alias imports are now MERGED onto the first
     // identity (P0-B), so all declarations share one resource state; enable
     // a per-frame trace with PRIMAL_RG_STRICT_IMPORT=1.
-    std::unordered_map<u32, RGResourceHandle> importedPhysical_;
+    std::unordered_map<rhi::ResourceHandle, RGResourceHandle> importedPhysical_;
     // Returns the existing identity for this physical resource this frame,
     // or an invalid handle when this is the first import.
     RGResourceHandle ResolveImportIdentity(const std::string& name, rhi::ResourceHandle resource);
