@@ -1011,7 +1011,8 @@ jobs:
 
       - name: primal selftest（框架自测）
         run: |
-          dotnet run --project PrimalCli -c Debug --no-build -- selftest | tee selftest.log
+          set -o pipefail
+          dotnet run --project PrimalCli -c Debug --no-build -- selftest 2>&1 | tee selftest.log
           grep -q "all passed" selftest.log
 
       - name: xUnit Cli 测试（含 schema 快照门禁）

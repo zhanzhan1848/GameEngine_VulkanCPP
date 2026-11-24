@@ -12,12 +12,12 @@
     imported AFTER the SDK's element declaration, so our value
     takes precedence.
   -->
-  <PropertyGroup Condition="'$(OS)' != 'Windows_NT' AND '$(_PrimalEditorAvaloniaWrapDone)' != 'true'">
+  <PropertyGroup Condition="$([MSBuild]::IsOSPlatform('OSX')) AND '$(_PrimalEditorAvaloniaWrapDone)' != 'true'">
     <_PrimalEditorAvaloniaWrapDone>true</_PrimalEditorAvaloniaWrapDone>
     <BuildDependsOn>$(BuildDependsOn);_PrimalEditorAvaloniaWrap</BuildDependsOn>
   </PropertyGroup>
 
-  <Target Name="_PrimalEditorAvaloniaWrap" Condition="'$(OS)' != 'Windows_NT' AND Exists('$(BaseOutputPath)/$(Configuration)/PrimalEditor_Avalonia')">
+  <Target Name="_PrimalEditorAvaloniaWrap" Condition="$([MSBuild]::IsOSPlatform('OSX')) AND Exists('$(BaseOutputPath)/$(Configuration)/PrimalEditor_Avalonia')">
     <Exec Command="bash &quot;$(MSBuildThisFileDirectory)build/build_app.sh&quot; &quot;$(Configuration)&quot;" IgnoreExitCode="true" />
   </Target>
 </Project>
