@@ -438,14 +438,7 @@ public:
 
     // T8.9b diagnostic: probes refreshed by the latest trace dispatch, so
     // CPU-side ray-buffer reads can skip stale/unwritten slots.
-    void SetMeasuredGeometrySource(rhi::ResourceHandle top, rhi::ResourceHandle bottom,
-                                   rhi::ResourceHandle triangles, rhi::ResourceHandle instances, bool ownerDirectoryReady=false,
-                                   u64 sceneEpoch=0, u64 sourceDigest=0) {
-        measured_owner_directory_ready_=ownerDirectoryReady;
-        measured_geometry_epoch_=sceneEpoch; measured_geometry_digest_=sourceDigest;
-        measured_geometry_[0]=top; measured_geometry_[1]=bottom;
-        measured_geometry_[2]=triangles; measured_geometry_[3]=instances;
-    }
+    void SetMeasuredGeometrySource(const SurfaceCachePass& source, u32 frame);
     rhi::ResourceHandle GetMeasuredGeometrySource(u32 i) const {
         return i<4?measured_geometry_[i]:rhi::handles::INVALID_RESOURCE;
     }
@@ -836,6 +829,9 @@ private:
     // the unchanged N/5N/9N regions and are never bound in the default path.
     bool query_source_audit_enabled_{false};
     bool material_projection_enabled_{false}; // Vulkan evidence experiment, allocation-latched.
+    bool HasCurrentMeasuredGeometry(u32 frame) const;
+    const SurfaceCachePass* measured_source_{nullptr};
+    u32 measured_frame_{~u32(0)};
     bool measured_geometry_requested_{false};
     u64 measured_geometry_epoch_{0}, measured_geometry_digest_{0}; // CPU publication identity for diagnostics.
     bool measured_owner_directory_ready_{false};

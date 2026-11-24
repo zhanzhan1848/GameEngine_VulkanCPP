@@ -1215,6 +1215,10 @@ bool SurfaceCachePass::UploadGeometryScene(u32 frame)
         const bool retryHybrid=slot.ready && hybrid_certified_ && hybrid_owner_id_ && !hybrid_bindings_[frame].ready && device_->FrameSlotCompletions().CanReuse(frame,0);
         if(!retryHybrid)return slot.ready;
     }
+    // Do not overwrite a native upload heap still read by the previous frame.
+    // Keep the previous epoch intact so the next completed slot can retry.
+    if (device_->GetPlatform() == RHIPlatform::D3D12 &&
+        !device_->FrameSlotCompletions().CanReuse(frame, 0)) return false;
     const void* data[4]={geometry_scene_.top.data(),geometry_scene_.bottom.data(),
         geometry_scene_.triangles.data(),geometry_scene_.instances.data()};
     const u64 size[4]={geometry_scene_.top.size()*sizeof(ray_geometry::Node),geometry_scene_.bottom.size()*sizeof(ray_geometry::Node),

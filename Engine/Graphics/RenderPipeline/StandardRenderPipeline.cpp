@@ -4587,14 +4587,10 @@ void StandardRenderPipeline::BuildRenderGraph(ResourceHandle backBuffer, u32 cbI
         if (surface_cache_pass_ && ddgi_pass_->UsesMeasuredVisibility()) {
             const u32 slot=static_cast<u32>(frameCount_)%3u;
             surface_cache_pass_->PrepareGeometryConsumer(slot);
-            const auto geometryWitness=surface_cache_pass_->GetGeometryWitnessView(slot);
-            for (u32 vi=0;vi<ddgi_volume_count_;++vi) if(ddgi_volumes_[vi])
-                ddgi_volumes_[vi]->SetMeasuredGeometrySource(
-                    surface_cache_pass_->GetGeometryFirstHitBuffer(slot,0),surface_cache_pass_->GetGeometryFirstHitBuffer(slot,1),
-                    surface_cache_pass_->GetGeometryFirstHitBuffer(slot,2),surface_cache_pass_->GetGeometryFirstHitBuffer(slot,3),
-                    surface_cache_pass_->GetCardGenerator().HasOwnerCardDirectory(),
-                    geometryWitness.ready ? geometryWitness.scene_epoch : 0,
-                    geometryWitness.ready ? geometryWitness.source_digest : 0);
+            for (u32 vi = 0; vi < ddgi_volume_count_; ++vi) {
+                if (ddgi_volumes_[vi])
+                    ddgi_volumes_[vi]->SetMeasuredGeometrySource(*surface_cache_pass_, static_cast<u32>(frameCount_));
+            }
         }
         ddgiOut = ddgi_pass_->AddPass(graph, prevColor, camData,
                                        static_cast<u32>(frameCount_), scLightingRG);
@@ -7178,14 +7174,10 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             if (surface_cache_pass_ && ddgi_pass_->UsesMeasuredVisibility()) {
             const u32 slot=static_cast<u32>(frameCount_)%3u;
             surface_cache_pass_->PrepareGeometryConsumer(slot);
-            const auto geometryWitness=surface_cache_pass_->GetGeometryWitnessView(slot);
-            for (u32 vi=0;vi<ddgi_volume_count_;++vi) if(ddgi_volumes_[vi])
-                ddgi_volumes_[vi]->SetMeasuredGeometrySource(
-                    surface_cache_pass_->GetGeometryFirstHitBuffer(slot,0),surface_cache_pass_->GetGeometryFirstHitBuffer(slot,1),
-                    surface_cache_pass_->GetGeometryFirstHitBuffer(slot,2),surface_cache_pass_->GetGeometryFirstHitBuffer(slot,3),
-                    surface_cache_pass_->GetCardGenerator().HasOwnerCardDirectory(),
-                    geometryWitness.ready ? geometryWitness.scene_epoch : 0,
-                    geometryWitness.ready ? geometryWitness.source_digest : 0);
+            for (u32 vi = 0; vi < ddgi_volume_count_; ++vi) {
+                if (ddgi_volumes_[vi])
+                    ddgi_volumes_[vi]->SetMeasuredGeometrySource(*surface_cache_pass_, static_cast<u32>(frameCount_));
+            }
         }
         if(VarianceFenceRequested(device_)) {
             const auto varianceWitness=surface_cache_pass_?surface_cache_pass_->GetGeometryWitnessView(cbIdx):lumen::SurfaceCachePass::GeometryWitnessView{};

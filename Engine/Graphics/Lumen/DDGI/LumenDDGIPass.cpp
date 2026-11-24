@@ -208,15 +208,14 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
         // 编译期 kernel 形状/buffer 尺寸耦合（mode 5 的 128 深度尾射线与
         // gather 特判不适用于 7）。mode 5 仍 Vulkan-only（GIGatherModule
         // 的 mode5 特判与 distance 尾射线 buffer 加宽未镜像）。
-        // R72：D3D12 从 measuredModeAllowed 移除——r5w2 只考虑了 shader
-        // 编译面（.cso 镜像存在），没考虑 measured BVH 数据链是 Vulkan/
-        // Metal-only（first_cache_ BVH epoch/SWRT 替换链 D3D12 未实现）。
-        // 实证（run108-111）：D3D12 mode7+measured 渲染全黑（canonical
-        // 847b7f79）且整机崩溃重启（run109 两连死+用户确认）；mode7 无
-        // measured 则 dummy binding19 全探针 skip 精确归零（R69 回落门）。
-        // D3D12 measured 链实现前 mode7 保持 Vulkan-only。
+        // The D3D12 measured kernels need the SC BVH published for the
+        // current fenced slot. Keep the rollout explicit until the full path
+        // has been validated on the target GPU.
+        const char* nativeMeasured = std::getenv("PRIMAL_D3D12_MEASURED_GEOMETRY");
         const bool measuredModeAllowed =
             device_->GetPlatform() == RHIPlatform::Vulkan ||
+            (device_->GetPlatform() == RHIPlatform::D3D12 && nativeMeasured &&
+             std::strcmp(nativeMeasured, "1") == 0) ||
             (device_->GetPlatform() == RHIPlatform::Metal &&
              std::getenv("PRIMAL_METAL_MEASURED_GEOMETRY") &&
              std::strcmp(std::getenv("PRIMAL_METAL_MEASURED_GEOMETRY"), "1") == 0 &&
@@ -501,6 +500,12 @@ bool LumenDDGIPass::Initialize(RHIDeviceBase* device, const DDGIRuntimeParams& p
 
     // Create compute pipelines + descriptor sets
     CreatePipelines();
+    if (device_->GetPlatform() == RHIPlatform::D3D12 && measured_geometry_requested_ &&
+        (sdf_trace_pipeline_ == handles::INVALID_PIPELINE || finalize_pipeline_ == handles::INVALID_PIPELINE ||
+         depth_pipeline_ == handles::INVALID_PIPELINE || irradiance_pipeline_ == handles::INVALID_PIPELINE)) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[LumenDDGI] D3D12 measured update pipeline unavailable";
+        return false;
+    }
     if (depth_provenance_enabled_ && depth_pipeline_==handles::INVALID_PIPELINE) {
         PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_DEPTH_PROVENANCE] shader/pipeline unavailable" << std::endl;
         return false;
@@ -1053,12 +1058,47 @@ bool LumenDDGIPass::FlushSHProducerAudit(u32 absoluteFrame) {
     return sh_producer_audit_ && sh_producer_audit_->Flush(absoluteFrame);
 }
 
+void LumenDDGIPass::SetMeasuredGeometrySource(const SurfaceCachePass& source, u32 frame) {
+    const auto view = source.GetGeometryWitnessView(frame);
+    measured_source_ = &source;
+    measured_frame_ = frame;
+    measured_geometry_epoch_ = view.ready ? view.scene_epoch : 0;
+    measured_geometry_digest_ = view.ready ? view.source_digest : 0;
+    measured_owner_directory_ready_ = source.GetCardGenerator().HasOwnerCardDirectory();
+    for (u32 i = 0; i < 4; ++i)
+        measured_geometry_[i] = view.ready ? view.buffers[i] : handles::INVALID_RESOURCE;
+}
+
+bool LumenDDGIPass::HasCurrentMeasuredGeometry(u32 frame) const {
+    if (!measured_source_ || measured_frame_ != frame || !measured_geometry_epoch_ ||
+        !measured_geometry_digest_ || !device_->FrameSlotCompletions().CanReuse(frame % 3u, 0))
+        return false;
+
+    const auto view = measured_source_->GetGeometryWitnessView(frame);
+    if (!view.ready || view.scene_epoch != measured_geometry_epoch_ ||
+        view.slot_epoch != measured_geometry_epoch_ || view.source_digest != measured_geometry_digest_)
+        return false;
+
+    const u64 strides[]{sizeof(ray_geometry::Node), sizeof(ray_geometry::Node),
+                        sizeof(ray_geometry::Triangle), sizeof(ray_geometry::Instance)};
+    for (u32 i = 0; i < 4; ++i) {
+        u64 bytes = 0;
+        if (view.buffers[i] != measured_geometry_[i] ||
+            !device_->GetBufferByteSize(view.buffers[i], bytes) || bytes != view.sizes[i] ||
+            bytes < strides[i] || bytes > std::numeric_limits<u32>::max())
+            return false;
+    }
+    return true;
+}
+
 void LumenDDGIPass::Shutdown() {
     // A rejected opt-in can leave the device/pipeline members alive while
     // Initialize() is unwinding before initialized_ is set.  Keep the
     // candidate cleanup reachable for that partial-lifecycle case too.
     if (!initialized_ && !device_) return;
     initialized_ = false;
+    measured_source_ = nullptr;
+    measured_frame_ = ~u32(0);
     sh_producer_audit_.reset();
     if(field_reset_template_!=handles::INVALID_RESOURCE) device_->DestroyBuffer(field_reset_template_);
     field_reset_template_=handles::INVALID_RESOURCE;
@@ -1611,7 +1651,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         finalizeBindings[10].readonly = true;
         finalizeBindings[11].readonly = true;
         finalizeBindings[12].readonly = true;
-        finalizeBindings[14].readonly = true;
+        // The DXIL finalizer declares (and the measured variant writes) u14.
+        finalizeBindings[14].readonly = device_->GetPlatform() != RHIPlatform::D3D12;
         finalizeBindings[17].readonly = true;
         DescriptorSetLayoutDesc layoutDesc{18, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
@@ -1684,7 +1725,8 @@ void LumenDDGIPass::CreateDescriptorSetLayouts() {
         finalizeBindings[7].readonly = true;
         finalizeBindings[8].readonly = true;
         finalizeBindings[10].readonly = true;
-        finalizeBindings[14].readonly = true;
+        // The DXIL finalizer declares (and the measured variant writes) u14.
+        finalizeBindings[14].readonly = device_->GetPlatform() != RHIPlatform::D3D12;
         finalizeBindings[15].readonly = true;  // relocated origins (buffer 12)
         DescriptorSetLayoutDesc layoutDesc{16, finalizeBindings};
         finalize_set_layout_ = device_->CreateDescriptorSetLayout(layoutDesc);
@@ -3114,6 +3156,31 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 }
             }
 
+            const bool nativeMeasured = device_->GetPlatform() == RHIPlatform::D3D12 && measured_geometry_requested_;
+            if (nativeMeasured) {
+                // Validate the producer slot at recording time. The unified trace
+                // kernel and dummy descriptors cannot consume measured geometry.
+                auto covers = [this](ResourceHandle h, u64 bytes) {
+                    u64 available = 0;
+                    return bytes && device_->GetBufferByteSize(h, available) && available >= bytes;
+                };
+                const u64 probes = probeCountTotal;
+                const u64 rays = probes * params_.rays_per_probe;
+                if (!sdfAvailable || !HasCurrentMeasuredGeometry(current_frame_index) ||
+                    !covers(probe_update_list_buffers_[frameIdx], probes * sizeof(u32)) ||
+                    !covers(relocated_origins_, probes * sizeof(math::v4)) ||
+                    !covers(hit_distance_buffer_, rays * sizeof(float)) ||
+                    !covers(hit_normal_buffer_, rays * sizeof(math::v4)) ||
+                    !covers(ray_data_buffer_, rays * sizeof(math::v4)) ||
+                    sdf_trace_ds_[frameIdx] == handles::INVALID_DESCRIPTOR_SET ||
+                    finalize_ds_[frameIdx] == handles::INVALID_DESCRIPTOR_SET ||
+                    depth_ds_[frameIdx] == handles::INVALID_DESCRIPTOR_SET ||
+                    irradiance_ds_[frameIdx] == handles::INVALID_DESCRIPTOR_SET) {
+                    volume_data_.ProbeUpdateCount = 0;
+                    return;
+                }
+            }
+
             FarUpdatePolicy::Plan farPlan;
             if(farPolicy) {
                 bool ready=camera_data.gi_content_ready && sdfAvailable && dynamic_mode_ &&
@@ -3535,6 +3602,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     volume_data_ = vd;
                     volumeUploaded=true;
                 }
+            }
+
+            if (nativeMeasured && !volumeUploaded) {
+                volume_data_.ProbeUpdateCount = 0;
+                return;
             }
 
             // ================================================================
