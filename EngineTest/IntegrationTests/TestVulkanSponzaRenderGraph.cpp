@@ -2917,9 +2917,10 @@ void TestVulkanSponzaRenderGraph::Run() {
     if(farSwitchFrame && varianceSwitchFrame) {
         PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_VARIANCE_SCENE_SWITCH] conflicting scene switch controls" << std::endl;std::exit(2);
     }
-    if(varianceSwitchFrame) {
-        const char* enabled=std::getenv("PRIMAL_DDGI_VARIANCE_FENCED");
-        if(!enabled || std::strcmp(enabled,"1")!=0) {PRIMAL_LOG_STREAM(Error,"Render") << "[DDGI_VARIANCE_SCENE_SWITCH] requires fenced candidate" << std::endl;std::exit(2);}
+    if (varianceSwitchFrame && primal::graphics::lumen::GetVarianceReadbackMode() ==
+                                   primal::graphics::lumen::VarianceReadbackMode::Legacy) {
+        PRIMAL_LOG_STREAM(Error, "Render") << "[DDGI_VARIANCE_SCENE_SWITCH] requires a fenced variance source";
+        std::exit(2);
     }
     if (const char* switchFrame=varianceSwitchFrame?varianceSwitchFrame:farSwitchFrame) {
         // The test keeps the original proxies/transforms/materials and leaf set.

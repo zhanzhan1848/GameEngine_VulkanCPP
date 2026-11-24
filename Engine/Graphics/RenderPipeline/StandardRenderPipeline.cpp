@@ -6107,8 +6107,8 @@ static void ReportGraphPassTimes(RenderGraph& graph) {
 }
 
 static bool VarianceFenceRequested(const rhi::RHIDeviceBase* device) {
-    static const bool requested=[] {const char* value=std::getenv("PRIMAL_DDGI_VARIANCE_FENCED");return value && std::strcmp(value,"1")==0;}();
-    return requested && device && device->GetPlatform()==rhi::RHIPlatform::Vulkan;
+    return device && device->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+        lumen::GetVarianceReadbackMode() != lumen::VarianceReadbackMode::Legacy;
 }
 u64 StandardRenderPipeline::BeginVarianceFenceFrame(u32 slot,rhi::CommandBufferHandle command,rhi::SyncHandle fence,u64 nativeFrame) {
     if(!VarianceFenceRequested(device_) || variance_submission_ticket_>=~u64(0)-1)return 0;

@@ -199,6 +199,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
 
     # --- env matrix (verbatim from the r11 launchers) ---
     foreach ($key in @(
+        'PRIMAL_DDGI_VARIANCE_FENCED', 'DDGI_VARIANCE_FENCE_AUDIT',
         'PRIMAL_F350_SC_RAYS', 'PRIMAL_F350_GI_BINDINGS', 'PRIMAL_VK_HANG_DIAG', 'PRIMAL_SPGI_SKIP', 'GI_ISOLATE',
         'PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL', 'RHI_TEST_PLATFORM', 'PRIMAL_LIGHTING_DEBUG',
         'TAA_OFF', 'PRIMAL_SHADOW_RENDER_OFF', 'PRIMAL_D3D12_BLACK_STAGE_FRAME',
@@ -220,6 +221,11 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     $env:SPONZA_CAPTURE_FRAME = '350'
     $env:PRIMAL_SPONZA_WATCHDOG_SECS = "$NoProgressSecs"
 
+    $verifyProbeSource = $g.name -in @('vulkan-gion', 'vulkan-gion-samples')
+    if ($verifyProbeSource) {
+        $env:PRIMAL_DDGI_VARIANCE_FENCED = 'source-frame'
+        $env:DDGI_VARIANCE_FENCE_AUDIT = '1'
+    }
     if ($g.name -in @('d3d12-gion','vulkan-gion')) { $env:PRIMAL_F350_GI_BINDINGS = '1' }
     $ppmPath = Join-Path $OutDir $g.ppm
     $env:SPONZA_CAPTURE = $ppmPath
@@ -403,6 +409,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     $maxFrames = [int]$env:SPONZA_MAX_FRAMES
     $expectedModel = if ($env:PRIMAL_TEST_MODEL) { $env:PRIMAL_TEST_MODEL } else { 'Sponza.model' }
     $anchors = @(Select-String -LiteralPath $se,$so -Pattern @(
+        '\[DDGI_VARIANCE_FENCE_AUDIT\] frame=399 volume=Near', 'Probe variance source fence failed',
         '\[Part30.4\] model path:', '\[Part37\] Loading HDR:',
         "Frame $captureFrame captured", "SPONZA_MAX_FRAMES=$maxFrames reached"
     ) | ForEach-Object { $_.Line })
@@ -412,6 +419,10 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
                 ($observed -match "Frame $captureFrame captured") -and
                 ($observed -match "clean exit at frame $maxFrames\b") -and
                 ($rc -eq 0) -and $ppmExists -and (-not $watchdogFired)
+    if ($verifyProbeSource) {
+        $contract = $contract -and ($observed -match 'frame=399 volume=Near[^\r\n]*accepted_frame=true[^\r\n]*source_frame=397 source_native=397') -and
+                    ($observed -notmatch 'Probe variance source fence failed')
+    }
     if (-not $contract) { Write-Warning "[f350] $($g.name) launch/capture contract failed" }
     Write-Output "[f350] $($g.name) exit=$rc ppm_exists=$ppmExists watchdog=$watchdogFired sha256=$sha"
 
@@ -419,7 +430,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     foreach ($key in @('PRIMAL_TEST_MODEL','PRIMAL_VK_TANGENT_FRAME','GI_ISOLATE','DDGI_RAY_SAMPLE',
         'DDGI_MEASURED_GEOMETRY','PRIMAL_DDGI_GEOMETRY_VISIBILITY','PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL',
         'SPGI_DDGI_VISIBILITY','PRIMAL_SC_OWNER_CARD_DIRECTORY','PRIMAL_VK_ALBEDO_MIPS',
-        'PRIMAL_DDGI_TRAVERSAL_AUDIT','TAA_OFF','PRIMAL_SHADOW_RENDER_OFF','PRIMAL_LIGHTING_DEBUG',
+        'PRIMAL_DDGI_VARIANCE_FENCED','DDGI_VARIANCE_FENCE_AUDIT','PRIMAL_DDGI_TRAVERSAL_AUDIT','TAA_OFF','PRIMAL_SHADOW_RENDER_OFF','PRIMAL_LIGHTING_DEBUG',
         'PRIMAL_D3D12_BLACK_STAGE_DUMP','PRIMAL_D3D12_BLACK_STAGE_FRAME','PRIMAL_DUMP_MATRIX',
         'PRIMAL_D3D12_API_TRACE','PRIMAL_D3D12_DEFERRED_PROBE','PRIMAL_D3D12_GBV',
         'PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL','PRIMAL_D3D12_RTVAUDIT','PRIMAL_D3D12_DEFERRED_COPY_WRITE',

@@ -1,9 +1,24 @@
 #pragma once
 #include "Graphics/RHI/Core/FrameSlotCompletion.h"
 #include <array>
+#include <cstdlib>
+#include <cstring>
 #include <cstdint>
 #include <limits>
 namespace primal::graphics::lumen {
+enum class VarianceReadbackMode { Legacy, CompletedSlot, SourceFrame };
+
+inline VarianceReadbackMode GetVarianceReadbackMode() {
+    static const auto mode = [] {
+        const char* value = std::getenv("PRIMAL_DDGI_VARIANCE_FENCED");
+        if (value && std::strcmp(value, "source-frame") == 0) return VarianceReadbackMode::SourceFrame;
+        if (value && std::strcmp(value, "1") == 0) return VarianceReadbackMode::CompletedSlot;
+        return VarianceReadbackMode::Legacy;
+    }();
+    return mode;
+}
+
+
 // Epoch zero means no independently known scene. A missing digest with an
 // unchanged known epoch suspends reads but retains last confirmed CPU values.
 enum class VarianceIdentityAction { Ready, Suspend, Invalidate };
@@ -50,6 +65,21 @@ public:
         if(e.context.epoch!=epoch_||e.context.slot!=current_.slot||e.context.fence!=current_.fence||
            e.context.serial>=current_.serial||e.buffer!=buffer||e.bytes!=bytes||!bytes)return nullptr;
         return &e;
+    }
+    // This authenticates the submitted writer. The caller must wait its fence
+    // and validate the actual buffer, extent and scene before mapping.
+    const Entry* TakeSubmittedTwoFramesAgo(const rhi::FrameSlotCompletion& completion, uint64_t volumeFrame) {
+        if (!Active() || current_.frame < 2 || volumeFrame < 2) return nullptr;
+        for (auto& entry : slots_) {
+            const auto& writer = entry.context;
+            if (!entry.submitted || entry.consumed || writer.epoch != epoch_ ||
+                writer.slot == current_.slot || writer.fence == current_.fence ||
+                writer.serial != completion.Serial(writer.slot) || writer.frame != current_.frame - 2 ||
+                entry.source_frame != volumeFrame - 2) continue;
+            entry.consumed = true;
+            return &entry;
+        }
+        return nullptr;
     }
     bool Record(uint64_t buffer,uint64_t bytes,uint64_t source,uint64_t sourceFrame,uint64_t sceneEpoch=0,uint64_t sourceDigest=0,uint64_t generation=0){
         if(!Active()||buffer==Invalid||source==Invalid||!bytes)return false;auto& e=slots_[current_.slot];

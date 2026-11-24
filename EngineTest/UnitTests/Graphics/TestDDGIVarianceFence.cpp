@@ -49,4 +49,25 @@ int main(){int tests=0,fail=0;auto check=[&](bool ok,const char* label){++tests;
     ReconcileVarianceScene(identity,tickets,confirmed,p,6,0);
     check(!identity.Available() && !confirmed && p[0].max_depth_variance==0.f,"epoch transition invalidates even without digest");
  }
+ {
+    FrameSlotCompletion completion;
+    VarianceFenceTicket tickets;
+    completion.Publish(0);
+    check(tickets.Begin(completion,0,40,50,100,1) && tickets.Record(60,64,70,10) &&
+          tickets.Commit(0,40,50,100,1,true), "record source with independent native and volume clocks");
+    completion.Invalidate(); completion.Publish(1);
+    check(tickets.Begin(completion,1,41,51,101,2) && !tickets.TakeSubmittedTwoFramesAgo(completion, 12),
+          "reject submitted source at wrong native age");
+    completion.Invalidate(); completion.Publish(2);
+    check(tickets.Begin(completion,2,42,52,102,3) && !tickets.TakeSubmittedTwoFramesAgo(completion, 13),
+          "reject source at wrong volume age");
+    auto recycled = completion;
+    recycled.Publish(0);
+    check(!tickets.TakeSubmittedTwoFramesAgo(recycled, 12), "reject source after its native fence was recycled");
+    auto* writer=tickets.TakeSubmittedTwoFramesAgo(completion, 12);
+    check(writer && writer->context.fence==50 && writer->context.slot==0 && writer->buffer==60 &&
+          writer->bytes==64 && !tickets.TakeSubmittedTwoFramesAgo(completion, 12), "return exact submitted writer once");
+    tickets.Reset();
+    check(!tickets.TakeSubmittedTwoFramesAgo(completion, 12), "discard two-frame source on reset");
+ }
  std::printf("%d/%d checks passed\n",tests-fail,tests);return fail?1:0;}

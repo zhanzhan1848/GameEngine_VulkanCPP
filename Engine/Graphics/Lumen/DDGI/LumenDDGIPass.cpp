@@ -2586,8 +2586,8 @@ void LumenDDGIPass::PublishFarUpdateAudit(RHICommandBuffer* cmd,u32 slot) {
 }
 
 static bool VarianceFenceEnabled(const rhi::RHIDeviceBase* device) {
-    static const bool requested=[] {const char* value=std::getenv("PRIMAL_DDGI_VARIANCE_FENCED");return value && std::strcmp(value,"1")==0;}();
-    return requested && device && device->GetPlatform()==rhi::RHIPlatform::Vulkan;
+    return device && device->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+        GetVarianceReadbackMode() != VarianceReadbackMode::Legacy;
 }
 static bool VarianceFenceAuditEnabled() {
     static const bool enabled=[] {const char* v=std::getenv("DDGI_VARIANCE_FENCE_AUDIT");return v && std::strcmp(v,"1")==0;}();
@@ -3651,14 +3651,29 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 probe_states_.size() == probeCountTotal && probe_update_list_buffers_[frameIdx] != handles::INVALID_RESOURCE;
             if(varianceFenced && VarianceFenceAuditEnabled() && !varianceScheduled)++variance_audit_.skip_counts[5];
             if (varianceScheduled) {
-                const u32 rbSlot = varianceFenced ? variance_fence_ticket_.Slot() : depth_readback_ring_.slot_for_frame(camera_data.frame_index - 2u);
+                const bool exactAge = varianceFenced && GetVarianceReadbackMode() == VarianceReadbackMode::SourceFrame;
+                u32 rbSlot = varianceFenced ? variance_fence_ticket_.Slot() : depth_readback_ring_.slot_for_frame(camera_data.frame_index - 2u);
                 const VarianceFenceTicket::Entry* certified=nullptr;
                 bool sourceMismatch=false;
                 if(varianceFenced && ringReady && rbSlot<3) {
-                    certified=variance_fence_ticket_.Take(depth_readback_ring_.buffer(rbSlot),(u64)probeCountTotal*128u*sizeof(float));
+                    const u64 byteCount = u64(probeCountTotal) * 128u * sizeof(float);
+                    if (exactAge) {
+                        certified = variance_fence_ticket_.TakeSubmittedTwoFramesAgo(device_->FrameSlotCompletions(), current_frame_index);
+                        if (certified) {
+                            rbSlot = certified->context.slot;
+                            if (certified->buffer != depth_readback_ring_.buffer(rbSlot) || certified->bytes != byteCount)
+                                certified = nullptr;
+                        }
+                    } else {
+                        certified = variance_fence_ticket_.Take(depth_readback_ring_.buffer(rbSlot), byteCount);
+                    }
                     if(certified && (certified->scene_epoch!=variance_scene_epoch_ || certified->source_digest!=variance_source_digest_ ||
                         certified->source_generation!=variance_generation_ || certified->source_frame>u64(~u32(0)) ||
                         certified->source!=depth_buffers_[DDGISlotsForFrame(u32(certified->source_frame)).writeIndex])){sourceMismatch=true;certified=nullptr;}
+                }
+                if (exactAge && certified && !device_->WaitForSync(certified->context.fence, 1000)) {
+                    PRIMAL_LOG_STREAM(Error, "Render") << "[DDGI] Probe variance source fence failed at frame " << current_frame_index;
+                    certified = nullptr;
                 }
                 if(cpuHistory) {cpuHistory->variance_skip=varianceFenced?(!ringReady?6:rbSlot>=3?1:sourceMismatch?3:certified?0:2):0;
                     if(certified){cpuHistory->variance_source_frame=u32(certified->source_frame);cpuHistory->variance_source_native=certified->context.frame;cpuHistory->variance_source_ticket=certified->context.ticket;cpuHistory->variance_completed_serial=device_->FrameSlotCompletions().Serial(rbSlot);}
