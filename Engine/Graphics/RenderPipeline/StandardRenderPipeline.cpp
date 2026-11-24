@@ -6226,6 +6226,17 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     << " rgba16bits=" << rgba[0] << "," << rgba[1] << "," << rgba[2] << "," << rgba[3]
                     << std::endl;
             }
+            static constexpr const char* inputNames[] = {"albedo", "normal", "orm"};
+            for (u32 input = 0; input < std::size(inputNames); ++input) {
+                if (!(deferred_input_copy_mask_ & (1u << input))) continue;
+                for (u32 i = 0; i < samplesPerMrt; ++i) {
+                    const u32 entry = 2 * samplesPerPhase + input * samplesPerMrt + i;
+                    const u8* bgra = bytes + sampleStride * entry;
+                    PRIMAL_LOG_STREAM(Info, "Render") << "[F350DeferredInput] frame=" << frameCount_ - 1
+                        << " input=" << inputNames[input] << " point=" << i << " rgba8=" << u32(bgra[2]) << ","
+                        << u32(bgra[1]) << "," << u32(bgra[0]) << "," << u32(bgra[3]) << std::endl;
+                }
+            }
             device_->UnmapBuffer(deferred_samples_);
         }
         device_->DestroyBuffer(deferred_samples_);
@@ -6805,41 +6816,57 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         if (sampleDeferred && frameCount_ == 350 && (device_->GetPlatform() == RHIPlatform::D3D12 ||
                                                      device_->GetPlatform() == RHIPlatform::Vulkan)) {
             BufferDesc desc{};
-            desc.size = 2 * samplesPerPhase * sampleStride;
+            deferred_input_copy_mask_ = 0;
+            desc.size = (2 * samplesPerPhase + 3 * samplesPerMrt) * sampleStride;
             desc.memoryUsage = GPUMemoryUsage::Readback;
             desc.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
             deferred_samples_ = device_->CreateBuffer(desc);
         }
         auto sampleAttachments = [&](bool beforeFusion) {
             if (deferred_samples_ == handles::INVALID_RESOURCE) return;
-            struct Samples { RGResourceHandle mrt[2]; };
+            struct Samples { RGResourceHandle textures[5]; };
             graph.AddPass<Samples>(beforeFusion ? "DeferredSamplesBeforeFusion" : "DeferredSamplesAfterDraw",
                 RGPassType::Copy, RGPassCategory::Copy,
                 [&](Samples& d, RenderGraphBuilder& b) {
                     b.SideEffect();
-                    d.mrt[0] = b.Read(deferredOut.deferred_output_rg, ResourceState::CopySource);
-                    d.mrt[1] = b.Read(deferredOut.environment_specular_rg, ResourceState::CopySource);
+                    d.textures[0] = b.Read(deferredOut.deferred_output_rg, ResourceState::CopySource);
+                    d.textures[1] = b.Read(deferredOut.environment_specular_rg, ResourceState::CopySource);
+                    if (!beforeFusion) {
+                        d.textures[2] = b.Read(gbufferAlbedoDL, ResourceState::CopySource);
+                        d.textures[3] = b.Read(gbufferNormalDL, ResourceState::CopySource);
+                        d.textures[4] = b.Read(gbufferORMDL, ResourceState::CopySource);
+                    }
                 },
                 [this, cbIdx, beforeFusion](const Samples& d, RenderGraphContext& ctx) {
-                    for (u32 mrt = 0; mrt < 2; ++mrt) {
-                        auto* res = ctx.graph->GetResource(d.mrt[mrt]);
+                    for (u32 index = 0; index < (beforeFusion ? 2u : 5u); ++index) {
+                        auto* res = ctx.graph->GetResource(d.textures[index]);
                         if (!res) continue;
                         auto tex = res->GetPhysicalHandle();
                         u32 w = 0, h = 0;
                         if (!device_->GetTextureSize(tex, w, h) || !w || !h) continue;
+                        const bool input = index >= 2;
+                        if (input && device_->GetTextureFormat(tex) != DataFormat::BGRA8_UNorm) continue;
+                        const u32 base = input ? 2 * samplesPerPhase + (index - 2) * samplesPerMrt
+                                               : (beforeFusion ? samplesPerPhase : 0) + index * samplesPerMrt;
                         BufferTextureCopyRegion regions[samplesPerMrt]{};
                         for (u32 i = 0; i < samplesPerMrt; ++i) {
                             auto& region = regions[i];
-                            region.bufferOffset = sampleStride * ((beforeFusion ? samplesPerPhase : 0) + samplesPerMrt * mrt + i);
+                            region.bufferOffset = sampleStride * (base + i);
                             region.imageSubresource.layerCount = 1;
                             region.imageOffset = {s32(w * deferredPixels[i][0] / 2560), s32(h * deferredPixels[i][1] / 1440), 0};
                             region.imageExtent = {1,1,1};
                         }
-                        PRIMAL_LOG_STREAM(Info, "Render") << "[DeferredSamples] frame=" << frameCount_
-                            << " slot=" << cbIdx << " phase=" << (beforeFusion ? "before-fusion" : "after-draw")
-                            << " mrt=" << mrt << " tex=" << tex << " mip=0 layer=0 pso="
-                            << deferred_module_->GetPipeline() << " layout=" << deferred_module_->GetPipelineLayout()
-                            << " set=" << deferred_module_->GetDescriptorSet(cbIdx) << std::endl;
+                        if (input) {
+                            deferred_input_copy_mask_ |= 1u << (index - 2);
+                            PRIMAL_LOG_STREAM(Info, "Render") << "[F350DeferredInput] frame=" << frameCount_
+                                << " slot=" << cbIdx << " binding=" << index << " tex=" << tex << " mip=0 layer=0";
+                        } else {
+                            PRIMAL_LOG_STREAM(Info, "Render") << "[DeferredSamples] frame=" << frameCount_
+                                << " slot=" << cbIdx << " phase=" << (beforeFusion ? "before-fusion" : "after-draw")
+                                << " mrt=" << index << " tex=" << tex << " mip=0 layer=0 pso="
+                                << deferred_module_->GetPipeline() << " layout=" << deferred_module_->GetPipelineLayout()
+                                << " set=" << deferred_module_->GetDescriptorSet(cbIdx) << std::endl;
+                        }
                         ctx.cmdBuffer->CopyTextureToBuffer(tex, deferred_samples_, regions, samplesPerMrt);
                     }
                 });

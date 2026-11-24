@@ -940,6 +940,7 @@ private:
 
     // Per-frame data
     rhi::ResourceHandle deferred_samples_{rhi::handles::INVALID_RESOURCE};
+    u32 deferred_input_copy_mask_{0};
     u64 frameCount_{0};
     bool subsystems_initialized_{false};
 
