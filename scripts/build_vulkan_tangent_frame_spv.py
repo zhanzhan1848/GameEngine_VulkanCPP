@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEST = ROOT / 'Engine/Graphics/Vulkan/shaders/Nanite'
 CASES = (
-    (ROOT / 'Engine/Graphics/Dawn/shaders/Nanite/GPUDrivenDraw.wgsl', 'GPUDrivenDraw.spv',
+    (DEST / 'GPUDrivenDraw.wgsl', 'GPUDrivenDraw.spv',
      'GPUDrivenDrawTangentFrame.wgsl', 'GPUDrivenDrawTangentFrame.spv',
      '8e4c1f2bc6939d7cd62c6aad7c5a44cf65a06f60657946e5ab1de647454a826d'),
     (DEST / 'GPUDrivenDrawAlbedoMips.wgsl', 'GPUDrivenDrawAlbedoMips.frag.spv',

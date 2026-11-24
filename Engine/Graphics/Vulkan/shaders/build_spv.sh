@@ -119,6 +119,9 @@ freshness_candidates_for_spv() {
     fi
 
     case "$rel" in
+        Nanite/GPUDrivenDraw.spv)
+            printf '%s\n' "$DEST_DIR/Nanite/GPUDrivenDraw.wgsl"
+            ;;
         */GPUDrivenDrawAlbedoMips.frag.spv)
             printf '%s\n' "$DEST_DIR/Nanite/GPUDrivenDrawAlbedoMips.wgsl"
             ;;
@@ -393,6 +396,7 @@ echo "==> Nanite WGSL (naga) ===="
 mkdir -p "$DEST_DIR/Nanite"
 for s in "${NANITE_SHADERS[@]}"; do
     src="$ENGINE_DAWN_DIR/Nanite/$s.wgsl"
+    if [ "$s" = GPUDrivenDraw ]; then src="$DEST_DIR/Nanite/$s.wgsl"; fi
     if [ ! -f "$src" ]; then
         echo "MISS  Nanite/$s.wgsl (skipped)"
         continue

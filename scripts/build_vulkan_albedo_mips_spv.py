@@ -2,7 +2,10 @@
 """Vulkan-only albedo gradient sampling; other channels and canonical WGSL stay literal."""
 from pathlib import Path
 import argparse,subprocess,tempfile,json,hashlib
-R=Path(__file__).resolve().parents[1];base=R/'Engine/Graphics/Dawn/shaders/Nanite/GPUDrivenDraw.wgsl';D=R/'Engine/Graphics/Vulkan/shaders/Nanite';generated=D/'GPUDrivenDrawAlbedoMips.wgsl';output=D/'GPUDrivenDrawAlbedoMips.frag.spv'
+D = Path(__file__).resolve().parents[1] / 'Engine/Graphics/Vulkan/shaders/Nanite'
+base = D / 'GPUDrivenDraw.wgsl'
+generated = D / 'GPUDrivenDrawAlbedoMips.wgsl'
+output = D / 'GPUDrivenDrawAlbedoMips.frag.spv'
 def derive():
  s=base.read_text();old='    let scaled_uv = fract(in.uv * mat.uv_scale);'
  assert s.count(old)==1
