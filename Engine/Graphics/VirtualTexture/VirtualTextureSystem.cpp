@@ -511,10 +511,8 @@ void virtual_texture_system::record_feedback_copy(RHICommandBuffer* cb, u32 fram
                                                   QueueSubmitInfo& si) {
     if (!cb || !device_) return;
     const u32 slot = frame_index % feedback_.size();
-    cb->CopyBuffer(feedback_[slot].buffer, readback_ring_.buffer(slot), 0, 0,
-                   u64(cfg_.feedback_slots) * sizeof(u32));
+    record_feedback(cb, frame_index);
     readback_ring_.attach_fence(si, slot);
-    feedback_[slot].submitted = true;
 }
 
 void virtual_texture_system::prefetch_page(u32 vt_id, u32 mip, u32 px, u32 py) {
@@ -561,6 +559,8 @@ void virtual_texture_system::prefetch_rect(u32 vt_id, float cx, float cy, float 
 void virtual_texture_system::record_feedback(RHICommandBuffer* cb, u32 frame_index) {
     if (!cb || !device_) return;
     const u32 slot = frame_index % feedback_.size();
+    cb->MemoryBarrier(PipelineStage::FragmentShader | PipelineStage::ComputeShader,
+                      PipelineStage::Transfer, AccessFlag::ShaderWrite, AccessFlag::TransferRead);
     cb->CopyBuffer(feedback_[slot].buffer, readback_ring_.buffer(slot), 0, 0,
                    u64(cfg_.feedback_slots) * sizeof(u32));
     feedback_[slot].submitted = true;

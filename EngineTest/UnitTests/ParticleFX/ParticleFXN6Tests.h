@@ -33,9 +33,9 @@ inline void test_geometry_cache_roundtrip() {
     assert(cache.add_frame(frame1, 3) == 1);
 
     std::string err;
-    assert(cache.save("/tmp/pfx_test.pcache", err));
+    assert(cache.save("pfx_test.pcache", err));
     interop::geometry_cache loaded;
-    assert(loaded.load("/tmp/pfx_test.pcache", err));
+    assert(loaded.load("pfx_test.pcache", err));
     assert(loaded.frame_count() == 2 && loaded.point_count() == 3);
 
     // 采样：t=0 → 帧0；t=0.5s @2fps → 帧1；越界取末端（loop=false）
@@ -47,7 +47,7 @@ inline void test_geometry_cache_roundtrip() {
     assert(loaded.sample(99.f, 2.f, false, pts, 3) == 3);
     // 容量不足 → 负的需求值
     assert(loaded.sample(0.f, 2.f, false, nullptr, 0) == -3);
-    std::remove("/tmp/pfx_test.pcache");
+    std::remove("pfx_test.pcache");
 
     std::cout << "  PASS: GeometryCache round-trip" << std::endl;
 }

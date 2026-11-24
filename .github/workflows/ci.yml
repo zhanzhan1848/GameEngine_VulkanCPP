@@ -386,6 +386,7 @@ jobs:
             exit 1
           }
           Write-Host "render 正确拒绝（Windows 平台矩阵，符合 §9 风险 #6 预期）"
+          exit 0  # The expected native exit code was checked above.
 
       - name: 上传编译错误制品（失败时）
         # 供 compile-error-report job 聚合跨平台报告

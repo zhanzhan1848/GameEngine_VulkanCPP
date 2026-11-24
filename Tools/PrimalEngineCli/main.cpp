@@ -36,6 +36,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <filesystem>
 
@@ -3020,10 +3021,10 @@ int Run(int argc, char** argv)
 } // namespace
 
 #if defined(_WIN32)
-int wmain(int, wchar_t**)
+int wmain(int argc, wchar_t** argv)
 {
-    // Windows 当前没有可用 verb（EngineDLL MSVC 分支未导出 InitializeEngine，
-    // 见 VerbEngineInfo/VerbRender 的说明），先给出结构化错误而非假运行。
+    // Schema is independent of the Windows engine and asset tooling.
+    if (argc >= 2 && std::wstring_view(argv[1]) == L"schema") return VerbSchema();
     PrintError("NOT_SUPPORTED", "primal-engine 的离线 verbs 暂不支持 Windows",
                "使用 macOS/Linux 运行离线 verbs");
     return kExitEngine;

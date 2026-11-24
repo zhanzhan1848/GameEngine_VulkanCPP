@@ -52,9 +52,9 @@ inline void test_field_grid_sample_and_roundtrip() {
 
     // .pgrid 往返
     std::string err;
-    assert(grid.write_pgrid("/tmp/pfx_test.pgrid", err));
+    assert(grid.write_pgrid("pfx_test.pgrid", err));
     volume_grid grid2;
-    assert(grid2.read_pgrid("/tmp/pfx_test.pgrid", err));
+    assert(grid2.read_pgrid("pfx_test.pgrid", err));
     assert(grid2.get_kind() == volume_grid::kind::scalar);
     assert(std::fabs(grid2.sample_scalar(math::v3{ 0.f, 2.f, 0.f }) - 2.f) < 1e-6f);
     assert(grid2.sample_scalar(math::v3{ 99.f, 0.f, 0.f }) == 100.f);
@@ -65,7 +65,7 @@ inline void test_field_grid_sample_and_roundtrip() {
     const math::v3 v = vf.sample_vector(math::v3{ 0.f, 0.f, 0.f });
     assert(std::fabs(v.y - 1.f) < 1e-6f);
 
-    std::remove("/tmp/pfx_test.pgrid");
+    std::remove("pfx_test.pgrid");
     std::cout << "  PASS: volume_grid sample + pgrid round-trip" << std::endl;
 }
 
@@ -174,17 +174,17 @@ inline void test_advect_and_sdf_collision() {
         for (u32 y = 0; y < 16; ++y)
             for (u32 x = 0; x < 16; ++x) sdf.set_scalar(x, y, z, (f32)(y) * 0.125f - 1.f);
     std::string err;
-    assert(sdf.write_pgrid("/tmp/pfx_floor.pgrid", err));
+    assert(sdf.write_pgrid("pfx_floor.pgrid", err));
 
     volume_grid wind;
     assert(wind.init_vector(4, 4, 4, math::v3{ -1.f, -1.f, -1.f }, 1.f, math::v3{ 2.f, 0.f, 0.f }));
-    assert(wind.write_pgrid("/tmp/pfx_wind.pgrid", err));
+    assert(wind.write_pgrid("pfx_wind.pgrid", err));
 
     assert(initialize(system_config{ 4, 4096 }));
     const emitter_id id = make_emitter_from_text(
         R"json({"capacity":16,
-            "fields":[{"name":"floor","file":"/tmp/pfx_floor.pgrid"},
-                      {"name":"wind","file":"/tmp/pfx_wind.pgrid"}],
+            "fields":[{"name":"floor","file":"pfx_floor.pgrid"},
+                      {"name":"wind","file":"pfx_wind.pgrid"}],
             "stages":{
             "spawn":[{"module":"SpawnBurst","count":1,"period":1000}],
             "init":[{"module":"SetLifetime","min":10,"max":10}],

@@ -187,17 +187,22 @@ public:
     RenderPassHandle createRenderPassImpl(const RenderPassDesc&) { return (RenderPassHandle)9001; }
     void destroyRenderPassImpl(RenderPassHandle) {}
 
-    // Mock Buffer Storage
-    std::vector<uint8_t> mockBufferMemory;
+    // The renderer retains mapped pointers while allocating subsequent buffers.
+    std::unordered_map<ResourceHandle, std::vector<uint8_t>> buffers;
+    ResourceHandle nextBuffer = 1001;
 
-    ResourceHandle createBufferImpl(const BufferDesc& desc) { 
-        if (mockBufferMemory.size() < desc.size) {
-            mockBufferMemory.resize(desc.size);
-        }
-        return (ResourceHandle)1001; 
+    ResourceHandle createBufferImpl(const BufferDesc& desc) {
+        const auto handle = nextBuffer++;
+        buffers[handle].resize(desc.size);
+        return handle;
     }
-    void destroyBufferImpl(ResourceHandle) {}
-    void* mapBufferImpl(ResourceHandle, u64 offset, u64) { return mockBufferMemory.data() + offset; }
+    void destroyBufferImpl(ResourceHandle handle) { buffers.erase(handle); }
+    void* mapBufferImpl(ResourceHandle handle, u64 offset, u64 size) {
+        const auto it = buffers.find(handle);
+        if (it == buffers.end() || offset >= it->second.size() || size > it->second.size() - offset)
+            return nullptr;
+        return it->second.data() + offset;
+    }
     void unmapBufferImpl(ResourceHandle) {}
 
     ResourceHandle createTextureImpl(const TextureDesc&) { return (ResourceHandle)2002; }
