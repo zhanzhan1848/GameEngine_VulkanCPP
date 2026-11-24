@@ -1971,12 +1971,17 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     << " dummy=" << dummy_buffer_ << " policy_b27=" << connectionCB << " query_kernel=" << useQuery
                     << " set=" << sets[0] << " groups=" << groupsX << "x" << groupsY;
             }
-            if (inputs.probe_samples_recorded && inputs.probe_sample_staging != handles::INVALID_RESOURCE &&
+            if (inputs.probe_sample_mask && inputs.probe_sample_staging != handles::INVALID_RESOURCE &&
                 nvolViews[0].IsValid() && flatBuf != handles::INVALID_RESOURCE &&
                 nvolViews[0].relocated_origins != handles::INVALID_RESOURCE && bufInfos[8].buffer != handles::INVALID_RESOURCE) {
                 using Samples = GIGatherInputs::ProbeSamples;
                 const auto counts = nvolViews[0].counts;
                 const u32 nx = u32(counts.x), ny = u32(counts.y), nz = u32(counts.z);
+                const u32 rays = ddgi->GetParams().rays_per_probe;
+                const auto rayData = ddgi->GetRayDataBuffer();
+                u64 rayBytes = 0;
+                const bool sampleRays = rays && device_->GetBufferByteSize(rayData, rayBytes) &&
+                    u64(nx) * ny * nz * rays <= rayBytes / sizeof(math::v4);
                 if (nx && ny && nz) {
                     cmd->MemoryBarrier(PipelineStage::ComputeShader | PipelineStage::Transfer,
                         PipelineStage::Transfer, AccessFlag::ShaderWrite | AccessFlag::TransferWrite, AccessFlag::TransferRead);
@@ -1987,12 +1992,21 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                             cmd->CopyBuffer(source, inputs.probe_sample_staging, sourceOffset,
                                 inputs.probe_sample_offset + memberOffset + i * sizeof(math::v4), sizeof(math::v4));
                         };
+                        // Finalize indexes radiance by absolute probe, while TraceSDF
+                        // indexes hit distances by update-list row. Reuse the SH sample IDs.
+                        const u32 lanes[] = {0, rays / 2, rays - 1};
+                        for (u32 lane = 0; sampleRays && lane < std::size(lanes); ++lane) {
+                            cmd->CopyBuffer(rayData, inputs.probe_sample_staging,
+                                (probe * rays + lanes[lane]) * sizeof(math::v4),
+                                inputs.probe_sample_offset + offsetof(Samples, finalized_ray) +
+                                    (i * std::size(lanes) + lane) * sizeof(math::v4), sizeof(math::v4));
+                        }
                         copy(bufInfos[7].buffer, probe * 144, offsetof(Samples, near_sh0));
                         copy(flatBuf, 256 + probe * 144, offsetof(Samples, packed_sh0));
                         copy(nvolViews[0].relocated_origins, probe * 16, offsetof(Samples, origins));
                         copy(bufInfos[8].buffer, probe * 128 * sizeof(float), offsetof(Samples, depth_means));
                     }
-                    if (inputs.update_samples_recorded && ddgi->GetLastUpdateCount() >= 4 &&
+                    if (ddgi->GetLastUpdateCount() >= 4 &&
                         ddgi->GetVolumeData().RaysPerProbe >= 4 && ddgi->GetHitDistanceBuffer() != handles::INVALID_RESOURCE) {
                         const auto updates = ddgi->GetProbeUpdateListBuffer(inputs.frame_index);
                         if (updates != handles::INVALID_RESOURCE) {
@@ -2000,13 +2014,18 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                                 inputs.probe_sample_offset + offsetof(Samples, first_updates), sizeof(Samples::first_updates));
                             cmd->CopyBuffer(ddgi->GetHitDistanceBuffer(), inputs.probe_sample_staging, 0,
                                 inputs.probe_sample_offset + offsetof(Samples, first_hit_distances), sizeof(math::v4));
-                            *inputs.update_samples_recorded = true;
+                            *inputs.probe_sample_mask |= GIGatherInputs::UpdateListSamples;
                         }
                     }
-                    *inputs.probe_samples_recorded = true;
+                    if (sampleRays) *inputs.probe_sample_mask |= GIGatherInputs::FinalizedRays;
+                    *inputs.probe_sample_mask |= GIGatherInputs::VolumeSamples;
                     PRIMAL_LOG_STREAM(Info, "Render") << "[F350DDGIInputs] read_slot=" << ddgiReadIdx
                         << " near=" << bufInfos[7].buffer << " packed=" << flatBuf << " origins=" << nvolViews[0].relocated_origins
-                        << " depth=" << bufInfos[8].buffer << " indices=" << ids[0] << "," << ids[1] << "," << ids[2];
+                        << " depth=" << bufInfos[8].buffer << " indices=" << ids[0] << "," << ids[1] << "," << ids[2]
+                        << " cpu_last_selected=" << ddgi->GetProbeLastUpdateFrame(ids[0]) << ","
+                        << ddgi->GetProbeLastUpdateFrame(ids[1]) << "," << ddgi->GetProbeLastUpdateFrame(ids[2])
+                        << " rays_per_probe=" << rays
+                        << " update_budget=" << ddgi->GetParams().max_probes_per_frame;
                 }
             }
             // Only claim qualification when the existing live query check passed;

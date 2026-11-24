@@ -87,6 +87,7 @@ DXC = os.environ.get("D3D12_DXC", "/usr/local/bin/dxc")
 # ---------------------------------------------------------------------------
 SHADER_LIST = [
     ("../../../../EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp", "main", "Tests/SCBoundGeometryWitness.comp", []),
+    ("../../../../EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp", "main", "Tests/SCBoundSurfaceWitness.comp", ["-DSC_BOUND_SURFACE=1"]),
     "Forward/M1Forward.vert",
     "Forward/M1Forward.frag",
     # D3D12 M2 F2-5: shadow depth VS (single cascade, no pixel shader) and
@@ -595,7 +596,10 @@ def inline_includes(src_path):
             for line in f:
                 m = re.match(r'^#include\s*"([^"]+)"', line)
                 if m:
-                    process(os.path.join(base, m.group(1)))
+                    include = os.path.join(base, m.group(1))
+                    if not os.path.isfile(include):
+                        include = os.path.join(os.path.dirname(path), m.group(1))
+                    process(include)
                 else:
                     out_lines.append(line)
 

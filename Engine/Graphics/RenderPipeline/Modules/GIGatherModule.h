@@ -29,11 +29,12 @@ struct GIGatherInputs {
         math::v4 near_sh0[3], packed_sh0[3], origins[3], depth_means[3];
         u32 first_updates[4];
         math::v4 first_hit_distances;
+        math::v4 finalized_ray[3][3];
     };
     rhi::ResourceHandle probe_sample_staging = rhi::handles::INVALID_RESOURCE;
     u64 probe_sample_offset = 0;
-    bool* probe_samples_recorded = nullptr;
-    bool* update_samples_recorded = nullptr;
+    enum ProbeSampleBits : u32 { VolumeSamples = 1, UpdateListSamples = 2, FinalizedRays = 4 };
+    u32* probe_sample_mask = nullptr;
 
     lumen::LumenDDGIPass* ddgi_pass = nullptr;
     lumen::LumenDDGIPass* ddgi_far_pass = nullptr;  // T4.4 far-field fallback

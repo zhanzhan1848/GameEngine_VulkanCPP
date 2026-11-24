@@ -6262,10 +6262,10 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                         << value[0] << "," << value[1] << "," << value[2] << "," << value[3];
                 }
             }
-            if (ddgi_probe_samples_recorded_) {
+            if (ddgi_sample_mask_ & GIGatherInputs::VolumeSamples) {
                 GIGatherInputs::ProbeSamples sample{};
                 std::memcpy(&sample, bytes + ddgiSampleOffset, sizeof(sample));
-                if (ddgi_update_samples_recorded_) {
+                if (ddgi_sample_mask_ & GIGatherInputs::UpdateListSamples) {
                     const auto& ids = sample.first_updates;
                     const auto& h = sample.first_hit_distances;
                     PRIMAL_LOG_STREAM(Info,"Render") << "[F350DDGIUpdateList] frame=" << frameCount_ - 1
@@ -6273,6 +6273,13 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                         << " first_probe_hits=" << h.x << "," << h.y << "," << h.z << "," << h.w;
                 }
                 for (u32 i = 0; i < std::size(sample.near_sh0); ++i) {
+                    const bool hasRays = (ddgi_sample_mask_ & GIGatherInputs::FinalizedRays) != 0;
+                    for (u32 lane = 0; hasRays && lane < std::size(sample.finalized_ray[i]); ++lane) {
+                        const auto& value = sample.finalized_ray[i][lane];
+                        PRIMAL_LOG_STREAM(Info, "Render") << "[F350DDGIFinalize] point=" << i
+                            << " lane_sample=" << lane << " radiance_distance=" << value.x << ","
+                            << value.y << "," << value.z << "," << value.w;
+                    }
                     for (const auto& [name, v] : {std::pair{"near_SH0", sample.near_sh0[i]},
                          std::pair{"packed_SH0", sample.packed_sh0[i]}, std::pair{"origin", sample.origins[i]},
                          std::pair{"depth_means", sample.depth_means[i]}}) {
@@ -6862,7 +6869,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             BufferDesc desc{};
             deferred_input_copy_mask_ = 0;
             gi_sample_mask_ = probe_sample_mask_ = 0;
-            ddgi_probe_samples_recorded_ = ddgi_update_samples_recorded_ = false;
+            ddgi_sample_mask_ = 0;
             const size_t giSamples = std::getenv("PRIMAL_F350_GI_BINDINGS") ? std::size(giSampleNames) * samplesPerMrt : 0;
             desc.size = (giSampleOffset + giSamples) * sampleStride;
             if (giSamples) desc.size = ddgiSampleOffset + sizeof(GIGatherInputs::ProbeSamples);
@@ -7250,8 +7257,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
             if (deferred_samples_ != handles::INVALID_RESOURCE && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
                 giIn.probe_sample_staging = deferred_samples_;
                 giIn.probe_sample_offset = ddgiSampleOffset;
-                giIn.probe_samples_recorded = &ddgi_probe_samples_recorded_;
-                giIn.update_samples_recorded = &ddgi_update_samples_recorded_;
+                giIn.probe_sample_mask = &ddgi_sample_mask_;
             }
             giIn.ddgi_pass = ddgi_pass_.get();
             giIn.ddgi_far_pass = (ddgi_volume_count_ > 1) ? ddgi_volumes_[1].get() : nullptr;

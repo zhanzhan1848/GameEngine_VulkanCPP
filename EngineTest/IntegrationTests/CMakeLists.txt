@@ -16,6 +16,18 @@ set(COMMON_HEADERS
     "MacKeyboard.h"
 )
 
+# Optional frame-350 scene query using the production measured owner-card predicate.
+function(build_sc_surface_witness glslang output)
+    set(lumen_dir "${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen")
+    set(shader "${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp")
+    add_custom_command(OUTPUT "${output}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/Tests"
+        COMMAND "${glslang}" -V -DSC_BOUND_SURFACE=1 "-I${lumen_dir}" "${shader}" -o "${output}"
+        DEPENDS "${shader}" "${lumen_dir}/GeometryFirstHit.glsl" "${lumen_dir}/DDGIMeasuredFirstHit.glsl"
+            "${lumen_dir}/SurfaceCacheData.glsl" "${lumen_dir}/ShaderLib/MathLib.glsl"
+            "${lumen_dir}/DDGIMeasuredOwnerCandidate.glsl" VERBATIM)
+endfunction()
+
 # 辅助函数：配置测试目标
 if(PRIMAL_ISOLATED_OUTPUTS AND APPLE)
     set(PRIMAL_INTEGRATION_OUTPUT_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
@@ -390,7 +402,9 @@ if(APPLE)
         DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp
             ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl
             ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/DDGIMeasuredFirstHit.glsl VERBATIM)
-    add_custom_target(SCBoundGeometryWitnessShader DEPENDS ${SC_BOUND_WITNESS_SPV} ${SC_BOUND_WITNESS_REPLACE_SPV})
+    set(sc_surface_spv "${CMAKE_BINARY_DIR}/Tests/SCBoundSurfaceWitness.comp.spv")
+    build_sc_surface_witness("${SC_BOUND_WITNESS_GLSLANG}" "${sc_surface_spv}")
+    add_custom_target(SCBoundGeometryWitnessShader DEPENDS ${SC_BOUND_WITNESS_SPV} ${SC_BOUND_WITNESS_REPLACE_SPV} "${sc_surface_spv}")
     add_dependencies(TestVulkanSponzaRenderGraph SCBoundGeometryWitnessShader)
     target_compile_definitions(TestVulkanSponzaRenderGraph PRIVATE SC_BOUND_GEOMETRY_WITNESS_SPV="${SC_BOUND_WITNESS_SPV}" SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV="${SC_BOUND_WITNESS_REPLACE_SPV}")
     else()
@@ -1147,7 +1161,9 @@ if(WIN32 AND ENABLE_VULKAN)
             DEPENDS ${CMAKE_SOURCE_DIR}/EngineTest/shaders/Vulkan/SCBoundGeometryWitness.comp
                 ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/GeometryFirstHit.glsl
                 ${CMAKE_SOURCE_DIR}/Engine/Graphics/Vulkan/shaders/Lumen/DDGIMeasuredFirstHit.glsl VERBATIM)
-        add_custom_target(SCBoundGeometryWitnessShaderWin DEPENDS ${SC_BOUND_WITNESS_SPV_WIN} ${SC_BOUND_WITNESS_REPLACE_SPV_WIN})
+        set(sc_surface_spv "${CMAKE_BINARY_DIR}/Tests/SCBoundSurfaceWitness.comp.spv")
+        build_sc_surface_witness("${SC_BOUND_WITNESS_GLSLANG_WIN}" "${sc_surface_spv}")
+        add_custom_target(SCBoundGeometryWitnessShaderWin DEPENDS ${SC_BOUND_WITNESS_SPV_WIN} ${SC_BOUND_WITNESS_REPLACE_SPV_WIN} "${sc_surface_spv}")
         set(TVSRG_WIN_SC_DEFS "SC_BOUND_GEOMETRY_WITNESS_SPV=\"${SC_BOUND_WITNESS_SPV_WIN}\"" "SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV=\"${SC_BOUND_WITNESS_REPLACE_SPV_WIN}\"")
     else()
         message(STATUS "glslangValidator not found - SCBoundGeometryWitness diagnostic shaders skipped on Windows (macros defined empty)")

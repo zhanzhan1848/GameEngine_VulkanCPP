@@ -1215,6 +1215,8 @@ bool ScreenProbeGIPass::CreateProbeStorage() {
         if (zeros.size() < chunk) zeros.resize(chunk);
         for (u64 offset = 0; offset < desc.size; offset += chunk) {
             if (!device_->UpdateBufferData(buffer, zeros.data(), std::min(chunk, desc.size - offset), offset)) {
+                PRIMAL_LOG_STREAM(Error, "Render") << "[ScreenProbeGI] Failed to initialize " << name
+                    << " at byte " << offset << " of " << desc.size;
                 ready = false;
                 device_->DestroyBuffer(buffer);
                 return handles::INVALID_RESOURCE;
@@ -1240,7 +1242,10 @@ bool ScreenProbeGIPass::CreateProbeStorage() {
     // breakdown is disabled. Discrete D3D12 reads them through a fenced copy.
     if (device_->GetPlatform() == RHIPlatform::Vulkan || device_->GetPlatform() == RHIPlatform::D3D12) {
         constexpr u32 traceRecords = 7 * 17 + 36 * 4 + 36 * 8 * 2 + 6 * 4 + 36 * 8 * 3;
-        const auto memory = GPUMemoryUsage::Readback;
+        // D3D12 writes these counters on the GPU and copies them to a separate
+        // readback buffer for the CPU. Readback resources reject UpdateData.
+        const auto memory = device_->GetPlatform() == RHIPlatform::D3D12
+            ? GPUMemoryUsage::Static : GPUMemoryUsage::Readback;
         trace_stats_buffer_ = makeProbeBuffer("SPGI trace stats", traceRecords, 16, true, memory);
         fail_stats_buffer_ = makeProbeBuffer("SPGI rejection counters", 16, sizeof(u32), true, memory);
         probe_opensky_buffer_ = makeProbeBuffer("SPGI sky visibility", probeCount, 16, true, memory);

@@ -57,7 +57,13 @@ static bool RunSCBoundGeometryWitness(RHIDeviceBase* device,
         BufferDesc b{};b.size=size;b.type=BufferType::Structured;b.usage=b.memoryUsage=memory;
         b.bindFlags=flags;return device->CreateBuffer(b);
     };
-    const u64 outputBytes=u64(count)*(sceneOnly ? 96 : 64);
+    const char* conservativeSetting=std::getenv("SC_BOUND_GEOMETRY_CONSERVATIVE");
+    const bool conservative=conservativeSetting && std::strcmp(conservativeSetting,"1")==0;
+    if (d3d12 && conservative) return false;
+    const bool includeSurface = sceneOnly && !conservative && sc->GetCardGenerator().HasOwnerCardDirectory();
+    if (sceneOnly && !includeSurface)
+        PRIMAL_LOG_STREAM(Info,"Render") << "[F350SCMeasuredSurface] unavailable: owner directory or shader variant";
+    const u64 outputBytes=u64(count)*(includeSurface ? 128 : sceneOnly ? 96 : 64);
     r.query=buffer(bytes,GPUMemoryUsage::Dynamic,u32(BufferUsageFlags::Storage));
     r.out=buffer(outputBytes,GPUMemoryUsage::Static,u32(ResourceUsage::UnorderedAccess) |
         u32(BufferUsageFlags::Storage) | u32(BufferUsageFlags::TransferSrc));
@@ -66,24 +72,63 @@ static bool RunSCBoundGeometryWitness(RHIDeviceBase* device,
     u32 header[4]={count | (sceneOnly ? 0x80000000u : 0u),frame,view.slot,u32(view.scene_epoch)};
     auto* mapped=device->MapBuffer(r.query);if(!mapped)return false;
     std::memcpy(mapped,header,16);std::memcpy(static_cast<u8*>(mapped)+16,rays.data(),rays.size()*4);device->UnmapBuffer(r.query);
-    const char* conservativeSetting=std::getenv("SC_BOUND_GEOMETRY_CONSERVATIVE");
-    const bool conservative=conservativeSetting && std::strcmp(conservativeSetting,"1")==0;
-    if (d3d12 && conservative) return false;
-    const char* shaderPath = d3d12 ? "EngineTest/shaders/d3d12/Tests/SCBoundGeometryWitness.comp.cso" :
-        (conservative ? SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV : SC_BOUND_GEOMETRY_WITNESS_SPV);
-    auto spv=LoadSpvBytes(shaderPath);if(spv.empty())return false;
+    std::string shaderPath = d3d12 ? "EngineTest/shaders/d3d12/Tests/SCBoundGeometryWitness.comp.cso"
+        : conservative ? SC_BOUND_GEOMETRY_WITNESS_REPLACE_SPV : SC_BOUND_GEOMETRY_WITNESS_SPV;
+    if (includeSurface) {
+        shaderPath = d3d12 ? "EngineTest/shaders/d3d12/Tests/SCBoundSurfaceWitness.comp.cso"
+            : (std::filesystem::path(shaderPath).parent_path() / "SCBoundSurfaceWitness.comp.spv").string();
+    }
+    auto spv=LoadSpvBytes(shaderPath.c_str());if(spv.empty())return false;
     r.shader=device->CreateShader(spv.data(),spv.size(),ShaderStage::Compute,"main");if(r.shader==handles::INVALID_SHADER)return false;
-    DescriptorSetLayoutBinding bindings[6]{};const u32 locations[6]={0,1,13,14,15,16};
-    for(u32 i=0;i<6;++i){bindings[i]={locations[i],DescriptorType::StorageBuffer,1,ShaderStage::Compute,nullptr};bindings[i].readonly=i!=1;}
-    r.sl=device->CreateDescriptorSetLayout({6,bindings});if(r.sl==handles::INVALID_DESCRIPTOR_SET_LAYOUT)return false;
+
+    constexpr u32 locations[] = {0,1,13,14,15,16,2,3,4,5};
+    const u32 bindingCount = includeSurface ? 10u : 6u;
+    DescriptorSetLayoutBinding bindings[10]{};
+    for (u32 i=0; i<bindingCount; ++i) {
+        bindings[i] = {locations[i], i<8 ? DescriptorType::StorageBuffer : DescriptorType::SampledImage,
+                       1, ShaderStage::Compute, nullptr};
+        bindings[i].readonly = i != 1;
+    }
+    r.sl=device->CreateDescriptorSetLayout({bindingCount,bindings});if(r.sl==handles::INVALID_DESCRIPTOR_SET_LAYOUT)return false;
     r.pl=device->CreatePipelineLayout({1,&r.sl});if(r.pl==handles::INVALID_PIPELINE_LAYOUT)return false;
     r.set=device->CreateDescriptorSet({r.sl});if(r.set==handles::INVALID_DESCRIPTOR_SET)return false;
-    DescriptorBufferInfo infos[6]={{r.query,0,bytes},{r.out,0,outputBytes}};
+    DescriptorBufferInfo infos[8]={{r.query,0,bytes},{r.out,0,outputBytes}};
     for(u32 i=0;i<4;++i)infos[i+2]={view.buffers[i],0,view.sizes[i]};
-    WriteDescriptorSet writes[6]{};for(u32 i=0;i<6;++i)writes[i]={r.set,locations[i],0,1,DescriptorType::StorageBuffer,nullptr,&infos[i]};device->UpdateDescriptorSets(6,writes);
+    DescriptorImageInfo images[2]{};
+    const auto cache = sc->GetCacheView(frame);
+    if (includeSurface) {
+        if (!cache.card_count || !cache.lookup_count ||
+            cache.depth_atlas == handles::INVALID_RESOURCE || cache.lighting_atlas == handles::INVALID_RESOURCE) return false;
+        using namespace primal::graphics::lumen;
+        infos[6]={cache.card_data,0,u64(cache.card_count)*sizeof(SurfaceCacheCard)};
+        infos[7]={cache.card_lookup,0,u64(cache.lookup_count)*sizeof(SurfaceCacheCardLookup)};
+        for (u32 i=6; i<8; ++i) {
+            u64 available=0;
+            if (!device->GetBufferByteSize(infos[i].buffer,available) || infos[i].range>available) return false;
+        }
+        images[0]={handles::INVALID_SAMPLER,cache.depth_atlas,ResourceState::ShaderResource};
+        images[1]={handles::INVALID_SAMPLER,cache.lighting_atlas,ResourceState::ShaderResource};
+    }
+    WriteDescriptorSet writes[10]{};
+    for (u32 i=0; i<bindingCount; ++i)
+        writes[i]={r.set,locations[i],0,1,bindings[i].descriptorType,i<8 ? nullptr : &images[i-8],
+                   i<8 ? &infos[i] : nullptr};
+    device->UpdateDescriptorSets(bindingCount,writes);
     ComputePipelineDesc pd{};pd.computeShader=r.shader;pd.layout=r.pl;r.pipe=device->CreateComputePipeline(pd);if(r.pipe==handles::INVALID_PIPELINE)return false;
     r.cmd=device->CreateCommandBuffer(CommandQueueType::Graphics);auto* cmd=primal::graphics::rhi::GetCommandBuffer(r.cmd);if(!cmd||!cmd->Begin())return false;
     cmd->MemoryBarrier(PipelineStage::Host|PipelineStage::ComputeShader,PipelineStage::ComputeShader,AccessFlag::HostWrite|AccessFlag::ShaderWrite,AccessFlag::ShaderRead);
+    if (d3d12 && includeSurface) {
+        cmd->RequireBufferState(cache.card_data, ResourceState::ShaderResource);
+        cmd->RequireBufferState(cache.card_lookup, ResourceState::ShaderResource);
+        ResourceBarrier readable[2]{};
+        for (u32 i=0; i<2; ++i) {
+            readable[i].resource = i ? cache.lighting_atlas : cache.depth_atlas;
+            readable[i].beforeState = ResourceState::Unknown;
+            readable[i].afterState = ResourceState::ShaderResource;
+            readable[i].subresource = 0xffffffffu;
+        }
+        cmd->InsertBarrier(readable,2);
+    }
     if (d3d12) {
         ResourceBarrier output{};
         output.resource=r.out;output.beforeState=ResourceState::Unknown;output.afterState=ResourceState::UnorderedAccess;
@@ -120,6 +165,21 @@ static bool RunSCBoundGeometryWitness(RHIDeviceBase* device,
                 << " distance=" << segment[1] << " owner=" << identity[0] << " primitive=" << identity[1]
                 << " normal=" << normal[0] << "," << normal[1] << "," << normal[2] << " agrees=" << agrees;
             if (!agrees) return false;
+            if (includeSurface) {
+                // A rejected surface has a valid geometric distance but no verified radiance.
+                const u8* surface = result.data() + count*96 + i*32;
+                float light[3]; u32 card, proof[4];
+                std::memcpy(light,surface,sizeof(light));
+                std::memcpy(&card,surface+12,sizeof(card));
+                std::memcpy(proof,surface+16,sizeof(proof));
+                if (proof[3]!=i || proof[0]>16 || proof[1]>proof[0] ||
+                    (proof[1] ? card>=cache.card_count : card!=0xffffffffu) ||
+                    !std::isfinite(light[0]) || !std::isfinite(light[1]) || !std::isfinite(light[2])) return false;
+                PRIMAL_LOG_STREAM(Info,"Render") << "[F350SCMeasuredSurface] index=" << i
+                    << " candidates=" << proof[0] << " accepted=" << proof[1] << " reject=" << proof[2]
+                    << " card=" << card << " radiance=" << light[0] << "," << light[1] << "," << light[2]
+                    << " lighting=" << cache.lighting_atlas << " depth=" << cache.depth_atlas;
+            }
             PRIMAL_LOG_STREAM(Info,"Render") << "[F350SceneRay] frame=" << frame << " slot=" << view.slot
                 << " epoch=" << view.scene_epoch << " digest=" << view.source_digest << " index=" << i
                 << " status=" << hit[0] << " distance=" << hit[1] << " owner=" << ids[0] << " primitive=" << ids[1]

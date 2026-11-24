@@ -943,8 +943,7 @@ private:
     u32 deferred_input_copy_mask_{0};
     u32 gi_sample_mask_{0};
     u32 probe_sample_mask_{0};
-    bool ddgi_probe_samples_recorded_{false};
-    bool ddgi_update_samples_recorded_{false};
+    u32 ddgi_sample_mask_{};
     u64 frameCount_{0};
     bool subsystems_initialized_{false};
 

@@ -1,5 +1,14 @@
 #version 450 core
 #extension GL_GOOGLE_include_directive : require
+#ifdef SC_BOUND_SURFACE
+#extension GL_EXT_samplerless_texture_functions : require
+#include "../../../Engine/Graphics/Vulkan/shaders/Lumen/SurfaceCacheData.glsl"
+layout(set=0,binding=2,std430) readonly buffer CardData { SurfaceCacheCard data[]; } cards;
+layout(set=0,binding=3,std430) readonly buffer LookupData { SurfaceCacheCardLookup data[]; } lookup;
+layout(set=0,binding=4) uniform texture2D depth_atlas;
+layout(set=0,binding=5) uniform texture2D lighting_atlas;
+#include "../../../Engine/Graphics/Vulkan/shaders/Lumen/DDGIMeasuredOwnerCandidate.glsl"
+#endif
 layout(local_size_x=8,local_size_y=1,local_size_z=1) in;
 layout(set=0,binding=0,std430) readonly buffer Queries { uvec4 header; vec4 rays[]; } query;
 layout(set=0,binding=1,std430) writeonly buffer Results { vec4 records[]; } result;
@@ -27,5 +36,31 @@ void main(){
         uint tail=count*4u+index*2u;
         result.records[tail]=vec4(float(outcome),dist,uintBitsToFloat(hitOwner),uintBitsToFloat(hitPrimitive));
         result.records[tail+1u]=vec4(normal,0.);
+#ifdef SC_BOUND_SURFACE
+        // The production owner directory maps an instance to at most 16
+        // inspected owner cards. Read the same card ranges and the live atlases.
+        uint bestCard=0xffffffffu, seen=0u, accepted=0u, deepestReject=0u;
+        float bestKey=1e30;
+        vec3 light=vec3(0);
+        if(outcome==1 && hitOwner<uint(lookup.data.length())) {
+            uint first=lookup.data[hitOwner]._pad0, end=lookup.data[hitOwner]._pad1;
+            if(first<=end && end<=uint(cards.data.length())) {
+                for(uint ci=first; ci<end && seen<16u; ++ci) {
+                    SurfaceCacheCard card=cards.data[ci];
+                    if(card.mesh_instance_id!=hitOwner) continue;
+                    ++seen;
+                    vec3 candidate; float key; uint reject;
+                    if(ddgiMeasuredOwnerCandidate(card,hitOwner,true,origin.xyz+dist*direction.xyz,
+                            normal,direction.xyz,candidate,key,reject)) {
+                        ++accepted;
+                        if(key<bestKey) { bestKey=key; bestCard=ci; light=candidate; }
+                    } else deepestReject=max(deepestReject,reject);
+                }
+            }
+        }
+        uint surface=count*6u+index*2u;
+        result.records[surface]=vec4(light,uintBitsToFloat(bestCard));
+        result.records[surface+1u]=uintBitsToFloat(uvec4(seen,accepted,deepestReject,index));
+#endif
     }
 }
