@@ -624,7 +624,9 @@ void CardGenerator::RebuildCardAllocation() {
         // Sort by AABB volume descending
         std::vector<size_t> indices(lookups_.size());
         for (size_t i = 0; i < indices.size(); ++i) indices[i] = i;
-        std::sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
+        // Capped grid cells retain the first cards. Equal volumes must keep
+        // their scene order across standard libraries.
+        std::stable_sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
             auto& la = lookups_[a], lb = lookups_[b];
             float va = (la.aabb_max.x - la.aabb_min.x) *
                        (la.aabb_max.y - la.aabb_min.y) *
