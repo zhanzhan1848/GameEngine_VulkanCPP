@@ -36,6 +36,7 @@
 #include <utility>
 #include <vector>
 #include <algorithm>
+#include <bit>
 #include <limits>
 #include "Engine/Common/CoreLogStream.h"
 #if defined(ENABLE_VULKAN) && ENABLE_VULKAN
@@ -49,6 +50,58 @@ namespace primal::graphics::lumen {
 using namespace rhi;
 using namespace rendergraph;
 namespace rhimath = primal::graphics::rhi::math;
+
+// Compute writes require a native UAV. The D3D12 DEFAULT heap cannot be
+// mapped, so seed new buffers before any shader can read or partially update them.
+static ResourceHandle CreateSurfaceWriteBuffer(RHIDeviceBase* device, BufferDesc desc,
+                                               u32 initialWord, RHICommandBuffer* recording = nullptr) {
+    desc.bindFlags |= u32(BufferUsageFlags::Storage) | u32(ResourceUsage::UnorderedAccess) |
+                      u32(BufferUsageFlags::TransferSrc) | u32(BufferUsageFlags::TransferDst);
+    const auto buffer = device->CreateBuffer(desc);
+    if (buffer == handles::INVALID_RESOURCE) return buffer;
+    if (device->GetPlatform() != RHIPlatform::D3D12) {
+        if (auto* words = static_cast<u32*>(device->MapBuffer(buffer, 0, desc.size))) {
+            std::fill_n(words, desc.size / sizeof(u32), initialWord);
+            device->UnmapBuffer(buffer);
+            return buffer;
+        }
+    } else {
+        // Repeat the same seed page for large ray-hit buffers. Lazy allocations
+        // are copied on the consuming command list, ahead of their first dispatch.
+        const u64 pageBytes = std::min<u64>(desc.size, 1024u * 1024u);
+        if (recording) {
+            BufferDesc source{};
+            source.size = pageBytes;
+            source.memoryUsage = source.usage = GPUMemoryUsage::Dynamic;
+            source.bindFlags = u32(BufferUsageFlags::TransferSrc);
+            const auto staging = device->CreateBuffer(source);
+            if (staging != handles::INVALID_RESOURCE) {
+                auto* page = static_cast<u32*>(device->MapBuffer(staging, 0, pageBytes));
+                if (page) {
+                    std::fill_n(page, pageBytes / sizeof(u32), initialWord);
+                    device->UnmapBuffer(staging);
+                    for (u64 offset = 0; offset < desc.size; offset += pageBytes)
+                        recording->CopyBuffer(staging, buffer, 0, offset, std::min(pageBytes, desc.size - offset));
+                }
+                device->DestroyBuffer(staging);
+                if (page) return buffer;
+            }
+        } else {
+            // Startup has no open rendering command list. Use the device upload path.
+            std::vector<u32> page(pageBytes / sizeof(u32), initialWord);
+            u64 offset = 0;
+            while (offset < desc.size) {
+                const u64 bytes = std::min(pageBytes, desc.size - offset);
+                if (!device->UpdateBufferData(buffer, page.data(), bytes, offset)) break;
+                offset += bytes;
+            }
+            if (offset == desc.size) return buffer;
+        }
+    }
+    PRIMAL_LOG_STREAM(Error, "Render") << "Could not initialize Surface Cache buffer " << desc.name;
+    device->DestroyBuffer(buffer);
+    return handles::INVALID_RESOURCE;
+}
 
 // Exact opt-in, diagnostic-only reproduction of the former surface policy.
 static bool LegacySurfacePolicy() {
@@ -750,6 +803,7 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
 
     // Create triple-buffered constant buffers
     CreateConstantBuffers();
+    if (shadow_visibility_buffer_ == handles::INVALID_RESOURCE) return false;
     if (((device_->GetPlatform() == RHIPlatform::Vulkan ||
          device_->GetPlatform() == RHIPlatform::D3D12) &&
         !LegacySurfacePolicy() || MetalQualifiedSurface(device_->GetPlatform())) && atlas_reset_cb_ == handles::INVALID_RESOURCE) {
@@ -776,6 +830,7 @@ bool SurfaceCachePass::Initialize(RHIDeviceBase* device, const LumenConfig& conf
 
     // [SC per-mesh P4] 射线 lookup 分类统计缓冲。
     CreateRayLookupStats();
+    if (ray_lookup_stats_buffer_ == handles::INVALID_RESOURCE) return false;
 
     initialized_ = true;
 
@@ -1127,12 +1182,8 @@ void SurfaceCachePass::CreateConstantBuffers() {
         visDesc.memoryUsage = GPUMemoryUsage::Dynamic;
         visDesc.structured.elementCount = atlas_size_ * atlas_size_;
         visDesc.structured.elementStride = sizeof(float);
-        shadow_visibility_buffer_ = device_->CreateBuffer(visDesc);
-        auto* vis = static_cast<float*>(device_->MapBuffer(shadow_visibility_buffer_));
-        if (vis) {
-            for (u64 i = 0; i < (u64)atlas_size_ * atlas_size_; ++i) vis[i] = 1.0f;
-            device_->UnmapBuffer(shadow_visibility_buffer_);
-        }
+        visDesc.name = "SurfaceCache.ShadowVisibility";
+        shadow_visibility_buffer_ = CreateSurfaceWriteBuffer(device_, visDesc, std::bit_cast<u32>(1.f));
     }
 }
 
@@ -1440,13 +1491,8 @@ void SurfaceCachePass::CreateRayLookupStats()
     sbDesc.memoryUsage = rhi::GPUMemoryUsage::Dynamic;
     sbDesc.structured.elementCount = words;
     sbDesc.structured.elementStride = sizeof(uint32_t);
-    ray_lookup_stats_buffer_ = device_->CreateBuffer(sbDesc);
-    if (ray_lookup_stats_buffer_ != handles::INVALID_RESOURCE) {
-        if (auto* z = static_cast<uint32_t*>(device_->MapBuffer(ray_lookup_stats_buffer_))) {
-            memset(z, 0, words * sizeof(uint32_t));
-            device_->UnmapBuffer(ray_lookup_stats_buffer_);
-        }
-    }
+    sbDesc.name = "SurfaceCache.RayLookupStats";
+    ray_lookup_stats_buffer_ = CreateSurfaceWriteBuffer(device_, sbDesc, 0u);
 }
 
 void SurfaceCachePass::CreateDescriptorSetLayouts() {
@@ -4188,6 +4234,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         };
                         UpdateDescriptorSet(device_, shadow_set_[frameIdx], shadowParams, 13);
 
+                        cmd->RequireBufferState(shadow_visibility_buffer_, ResourceState::UnorderedAccess);
                         cmd->BindComputePipeline(shadow_pipeline_);
                         const DescriptorSetHandle shSets[] = { shadow_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, shadow_layout_, 0, 1, shSets, 0, nullptr);
@@ -4229,6 +4276,7 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
             // [F3-V4] sc_lighting 门控：false = 跳过 dispatch（lighting atlas
             // 保持上帧内容）。GI_ALL_OFF 的 direct-only A/B 语义由此生效。
             if (GIDebug().sc_lighting) {
+                cmd->RequireBufferState(shadow_visibility_buffer_, ResourceState::ShaderResource);
                 const bool isVk = device_->GetPlatform() == rhi::RHIPlatform::Vulkan ||
                                   device_->GetPlatform() == rhi::RHIPlatform::D3D12;
                 // feedbackIdx = 2 frames ago — the lighting atlas from 2
@@ -4641,18 +4689,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         rayHitsDesc.type = BufferType::Structured;
                         rayHitsDesc.usage = GPUMemoryUsage::Dynamic;
                         rayHitsDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-                        ray_hits_buffer_ = device_->CreateBuffer(rayHitsDesc);
+                        rayHitsDesc.name = "SurfaceCache.RayHits";
+                        ray_hits_buffer_ = CreateSurfaceWriteBuffer(device_, rayHitsDesc, 0u, cmd);
                         ray_hits_capacity_ = kTotalHits;
-                        // Hits start zeroed: with the B validity contract the
-                        // contents are never read before a trace writes them,
-                        // but a deterministic initial state keeps readback
-                        // diagnostics honest.
-                        if (ray_hits_buffer_ != handles::INVALID_RESOURCE) {
-                            if (void* z = device_->MapBuffer(ray_hits_buffer_, 0, rayHitsDesc.size)) {
-                                std::memset(z, 0, rayHitsDesc.size);
-                                device_->UnmapBuffer(ray_hits_buffer_);
-                            }
-                        }
                     }
 
                     if(geometry_first_requested_ && (ray_triangle_buffer_==handles::INVALID_RESOURCE || ray_triangle_capacity_!=kTotalHits)) {
@@ -4660,12 +4699,9 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         BufferDesc desc{}; desc.size=kTotalHits*sizeof(u32); desc.type=BufferType::Structured;
                         desc.memoryUsage=desc.usage=GPUMemoryUsage::Dynamic;
                         desc.structured.elementCount=u32(kTotalHits); desc.structured.elementStride=sizeof(u32);
-                        ray_triangle_buffer_=device_->CreateBuffer(desc); ray_triangle_capacity_=kTotalHits;
-                        if(ray_triangle_buffer_!=handles::INVALID_RESOURCE) {
-                            if(void* dst=device_->MapBuffer(ray_triangle_buffer_)) {
-                                std::memset(dst,255,desc.size); device_->UnmapBuffer(ray_triangle_buffer_);
-                            } else kTilesEff=0;
-                        } else kTilesEff=0;
+                        desc.name = "SurfaceCache.RayTriangles";
+                        ray_triangle_buffer_=CreateSurfaceWriteBuffer(device_,desc,~0u,cmd); ray_triangle_capacity_=kTotalHits;
+                        if(ray_triangle_buffer_==handles::INVALID_RESOURCE) kTilesEff=0;
                     }
 
                     // B (plan §三.B): per-tile validity bitmask. Config
@@ -4693,13 +4729,10 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         tvDesc.type = BufferType::Raw;
                         tvDesc.usage = GPUMemoryUsage::Dynamic;
                         tvDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-                        indirect_tile_valid_buffer_ = device_->CreateBuffer(tvDesc);
+                        tvDesc.name = "SurfaceCache.TileValidity";
+                        indirect_tile_valid_buffer_ = CreateSurfaceWriteBuffer(device_, tvDesc, 0u, cmd);
                         indirect_tile_config_sig_ = tileSig;
                         if (indirect_tile_valid_buffer_ != handles::INVALID_RESOURCE) {
-                            if (void* z = device_->MapBuffer(indirect_tile_valid_buffer_, 0, tvDesc.size)) {
-                                std::memset(z, 0, tvDesc.size);
-                                device_->UnmapBuffer(indirect_tile_valid_buffer_);
-                            }
                             static u64 lastResetSig = 0;
                             if (lastResetSig != tileSig) {
                                 lastResetSig = tileSig;
@@ -4710,6 +4743,10 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         }
                     }
                     }
+
+                    if (ray_hits_buffer_ == handles::INVALID_RESOURCE ||
+                        indirect_tile_valid_buffer_ == handles::INVALID_RESOURCE ||
+                        (geometry_first_requested_ && ray_triangle_buffer_ == handles::INVALID_RESOURCE)) return;
 
                     // Triple-buffered exact owner lookup. Rebuild on atlas allocation
                     // epoch, not merely card count: same-count relocation changes ownership.
@@ -4861,6 +4898,8 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         if(geometry_first_requested_) ip[17]={17,DescriptorType::StorageBuffer,ray_triangle_buffer_!=handles::INVALID_RESOURCE?ray_triangle_buffer_:ownerBuffer};
                         UpdateDescriptorSet(device_, indirect_trace_set_[frameIdx], ip, geometry_first_requested_?18u:13u);
                         cmd->MemoryBarrier(PipelineStage::Host,PipelineStage::ComputeShader,AccessFlag::HostWrite,AccessFlag::ShaderRead);
+                        cmd->RequireBufferState(ray_hits_buffer_, ResourceState::UnorderedAccess);
+                        if (geometry_first_requested_) cmd->RequireBufferState(ray_triangle_buffer_, ResourceState::UnorderedAccess);
                         cmd->BindComputePipeline(indirect_trace_pipeline_);
                         const DescriptorSetHandle isets[] = { indirect_trace_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_trace_layout_, 0, 1, isets, 0, nullptr);
@@ -5194,6 +5233,10 @@ SurfaceCacheOutput SurfaceCachePass::AddPass(
                         }
                         if(!boundary_consumer_requested_){
                         UpdateDescriptorSet(device_, indirect_resolve_set_[frameIdx], rp2, isVk?(geometry_first_requested_?21u:18u):16u);
+                        cmd->RequireBufferState(ray_hits_buffer_, ResourceState::ShaderResource);
+                        if (geometry_first_requested_) cmd->RequireBufferState(ray_triangle_buffer_, ResourceState::ShaderResource);
+                        cmd->RequireBufferState(indirect_tile_valid_buffer_, ResourceState::UnorderedAccess);
+                        cmd->RequireBufferState(ray_lookup_stats_buffer_, ResourceState::UnorderedAccess);
                         cmd->BindComputePipeline(indirect_resolve_pipeline_);
                         const DescriptorSetHandle rsets[] = { indirect_resolve_set_[frameIdx] };
                         cmd->BindDescriptorSets(PipelineBindPoint::Compute, indirect_resolve_layout_, 0, 1, rsets, 0, nullptr);
