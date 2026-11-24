@@ -713,7 +713,9 @@ bool GIGatherModule::Initialize(RHIDeviceBase* device, ShaderHandle shader,
     dummyDesc.usage = GPUMemoryUsage::Dynamic;
     dummyDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
     dummy_buffer_ = device->CreateBuffer(dummyDesc);
-    if(geometry_connections_enabled_ && dummy_buffer_==handles::INVALID_RESOURCE) {
+    const u32 zeros[16]{};
+    if (dummy_buffer_ == handles::INVALID_RESOURCE ||
+        !device->UpdateBufferData(dummy_buffer_, zeros, sizeof(zeros), 0)) {
         Shutdown();pipeline_=handles::INVALID_PIPELINE;return false;
     }
 
@@ -1157,7 +1159,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 for (u32 vi = 0; vi < GIGatherInputs::kMaxVolumes; ++vi)
                     if (nvolViews[vi].IsValid()) nvolCount = vi + 1;
             }
-            const bool flatActive = nvolCount >= 1;
+            bool flatActive = nvolCount >= 1;
             // 路径选择一次性日志（SDFViz 先例）。
             static bool loggedGatherPath = false;
             if (!loggedGatherPath) {
@@ -1208,12 +1210,13 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                     }
                 }
                 flatBuf = flat_irr_buffer_[bindingIdx];
+                flatActive = flatBuf != handles::INVALID_RESOURCE;
                 // 头部（host 写，立即驻留；后续 CopyBuffer 只写 [256, ...)）。
                 // R20：Map 命中（Metal/Vulkan/Dawn 宿主可见堆）逐字节同旧路；
                 // D3D12 改道 DEFAULT 后 Map 失效 → UpdateBufferData（staging
                 // 环拷贝；帧内排队到下一 Begin，头内容跨帧稳定仅计数变化时
                 // 有一帧延迟）。
-                {
+                if (flatActive) {
                     u32 hdrTemp[4] = {fvTotalProbes, nvolCount, 0, 0};
                     if (auto* hdr = static_cast<u32*>(device_->MapBuffer(flatBuf))) {
                         hdr[0] = hdrTemp[0];
@@ -1312,7 +1315,10 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
 
             // GI 根治 Phase 3.2: openSky 分类开关（PRIMAL_GI_OPENSKY=0 回滚），
             // 供 FlatVolumeCB.meta.y 与下方 flat 装配共用。
-            bool openskyActive = flatActive;
+            bool openskyActive = flatActive && flat_opensky_buffer_[bindingIdx] != handles::INVALID_RESOURCE &&
+                std::all_of(nvolViews, nvolViews + nvolCount, [](const auto& v) {
+                    return !v.IsValid() || v.opensky != handles::INVALID_RESOURCE;
+                });
             if (const char* e = std::getenv("PRIMAL_GI_OPENSKY")) {
                 if (e[0] == '0') openskyActive = false;
             }
@@ -1445,11 +1451,11 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 }
             }
             // GI 根治 Phase 3.2: flat openSky 装配（volume 顺序与 irr 一致）。
-            if (openskyActive && flat_opensky_buffer_[bindingIdx] != handles::INVALID_RESOURCE) {
+            if (openskyActive) {
                 flatOpenSkyBuf = flat_opensky_buffer_[bindingIdx];
                 for (u32 vi = 0; vi < nvolCount; ++vi) {
                     const auto& v = nvolViews[vi];
-                    if (v.opensky == handles::INVALID_RESOURCE) { openskyActive = false; break; }
+                    if (!v.IsValid()) continue;
                     const u64 probes = (u64)v.counts.x * (u64)v.counts.y * (u64)v.counts.z;
                     if (probes == 0) continue;
                     cmd->CopyBuffer(v.opensky, flatOpenSkyBuf,
@@ -1587,7 +1593,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 flatWrites[0].bufferInfo = &flatInfos[0];
                 flatInfos[0].buffer = (flatActive && flatBuf != handles::INVALID_RESOURCE)
                     ? flatBuf : dummy_buffer_;
-                flatInfos[0].offset = 256;   // 跳过头部 → 纯探针数组
+                flatInfos[0].offset = flatActive ? 256u : 0u;  // Only packed arrays have a header.
                 flatInfos[0].range = ~0ull;
                 flatWrites[1].dstSet = descriptorSet;
                 flatWrites[1].dstBinding = 18;
@@ -1629,7 +1635,7 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
                 // 与 flatIrradiance 同款：offset 256 跳过头部（shader 侧索引
                 // 即纯探针数组）。offset 0 会让 shader 读到头部整型位模式的
                 // ≈0 浮点，分类静默失效。
-                flatInfos[3].offset = 256;
+                flatInfos[3].offset = openskyActive ? 256u : 0u;
                 flatInfos[3].range = ~0ull;
                 updateDescriptors(4, flatWrites);
                 if (inputs.frame_index == 350 && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
