@@ -6456,6 +6456,92 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
     }
 
+    // 2026-11-25: per-probe ray radiance, after depth was ruled out (all 882
+    // probes' mean hit distance agree to 0.02%). This separates "same hits,
+    // different radiance" from "some rays read nothing": per-probe mean of the
+    // 128 ray radiances + how many rays are exactly black, plus the first 16
+    // rays of the band (probes 113-120) that drives the SH divergence.
+    // PRIMAL_F350_DDGI_RAYS=1; consumed one frame after capture.
+    static const bool ddgiRaysDump = std::getenv("PRIMAL_F350_DDGI_RAYS") != nullptr;
+    if (ddgiRaysDump && frameCount_ == 351) {
+        if (auto* nearVolume = GetDDGIVolume(0)) {
+            const auto rays = nearVolume->GetRayDataBuffer();
+            u64 bytes = 0;
+            if (rays != handles::INVALID_RESOURCE &&
+                device_->GetBufferByteSize(rays, bytes) && bytes) {
+                BufferDesc bd{};
+                bd.size = bytes;
+                bd.type = BufferType::Raw;
+                bd.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+                bd.memoryUsage = GPUMemoryUsage::Readback;
+                bd.name = "F350_DDGI_Rays";
+                const auto stage = device_->CreateBuffer(bd);
+                if (stage != handles::INVALID_RESOURCE) {
+                    const auto ch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                    if (ch != handles::INVALID_COMMAND_BUFFER) {
+                        if (auto* c2 = GetCommandBuffer(ch)) {
+                            c2->Begin();
+                            c2->CopyBuffer(rays, stage, 0, 0, bytes);
+                            c2->End();
+                            c2->Submit();
+                            c2->WaitForCompletion();
+                            if (auto* p = static_cast<const u8*>(device_->MapBuffer(stage))) {
+                                u64 digest = 1469598103934665603ull;
+                                for (u64 i = 0; i < bytes; ++i) {
+                                    digest ^= p[i];
+                                    digest *= 1099511628211ull;
+                                }
+                                constexpr u64 kRayVec4 = 16ull;
+                                constexpr u64 kRaysPerProbe = 128ull;
+                                const u64 probes = bytes / (kRayVec4 * kRaysPerProbe);
+                                std::string means, zeros;
+                                for (u64 i = 0; i < probes; ++i) {
+                                    double sum = 0.0;
+                                    u32 black = 0;
+                                    for (u64 r = 0; r < kRaysPerProbe; ++r) {
+                                        const float* v = reinterpret_cast<const float*>(
+                                            p + (i * kRaysPerProbe + r) * kRayVec4);
+                                        const double l = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+                                        sum += l;
+                                        if (!(l > 0.0f)) ++black;
+                                    }
+                                    char c[24];
+                                    std::snprintf(c, sizeof(c), "%s%.5f", i ? "," : "", sum / kRaysPerProbe);
+                                    means += c;
+                                    std::snprintf(c, sizeof(c), "%s%u", i ? "," : "", black);
+                                    zeros += c;
+                                }
+                                PRIMAL_LOG_STREAM(Info, "Render")
+                                    << "[F350DDGI_RAYS] frame=" << frameCount_ - 1
+                                    << " probes=" << probes << " bytes=" << bytes
+                                    << " digest=0x" << std::hex << digest << std::dec
+                                    << " mean=" << means << " zeros=" << zeros << std::endl;
+                                for (u64 probe = 113; probe <= 120 && probe < probes; ++probe) {
+                                    std::string head;
+                                    for (u64 r = 0; r < 16; ++r) {
+                                        const float* v = reinterpret_cast<const float*>(
+                                            p + (probe * kRaysPerProbe + r) * kRayVec4);
+                                        const double l = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+                                        const double d = v[3];
+                                        char c[40];
+                                        std::snprintf(c, sizeof(c), "%s%.4f/%.2f", r ? "," : "", l, d);
+                                        head += c;
+                                    }
+                                    PRIMAL_LOG_STREAM(Info, "Render")
+                                        << "[F350DDGI_RAY16] probe=" << probe
+                                        << " radiance/distance=" << head << std::endl;
+                                }
+                                device_->UnmapBuffer(stage);
+                            }
+                        }
+                        device_->DestroyCommandBuffer(ch);
+                    }
+                    device_->DestroyBuffer(stage);
+                }
+            }
+        }
+    }
+
     // A single completed submission owns the sparse copies. Consume before this frame records.
     if (deferred_samples_ != handles::INVALID_RESOURCE) {
         device_->WaitIdle();
