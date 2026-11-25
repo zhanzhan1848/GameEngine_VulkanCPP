@@ -860,7 +860,7 @@ async function createWasm() {
   
       // Only cache full string reads (when maxBytesToRead is omitted).
       // We use `== null` here since its shorter than `=== undefined`
-      var useCache = maxBytesToRead == null && ptr >= 1024 && ptr < 17886693;
+      var useCache = maxBytesToRead == null && ptr >= 1024 && ptr < 17886789;
       if (useCache) {
         var rtn = UTF8ToString_cache[ptr];
         if (rtn != null) {
