@@ -6228,6 +6228,103 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     constexpr u32 probeSampleOffset = giSampleOffset + std::size(giSampleNames) * samplesPerMrt;
     constexpr u32 sampleStride = 512; // D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT
     constexpr u64 ddgiSampleOffset = sampleStride * probeSampleOffset + std::size(probeSampleNames) * samplesPerMrt * sizeof(math::v4);
+    // 2026-11-25: Surface Cache lighting-atlas parity digest. DDGI Finalize and
+    // SPGI TraceFinalize both sample this atlas, so an atlas difference explains
+    // a matching offset in both GI paths (the vault shows ~10-12% in each).
+    // LUMEN_COMPARE has no D3D12 capture bridge, so this uses the same one-shot
+    // texture->readback path as the other F350 dumps and works on both backends.
+    // PRIMAL_F350_SC_ATLAS=1; consumed one frame after capture (GPU completed).
+    static const bool scAtlasDump = std::getenv("PRIMAL_F350_SC_ATLAS") != nullptr;
+    if (scAtlasDump && frameCount_ == 351 && surface_cache_pass_ &&
+        surface_cache_pass_->IsInitialized()) {
+        const auto atlas = surface_cache_pass_->GetLightingAtlas(u32(frameCount_ - 1));
+        u32 aw = 0, ah = 0;
+        if (atlas != handles::INVALID_RESOURCE &&
+            device_->GetTextureSize(atlas, aw, ah) && aw && ah) {
+            // SurfaceCachePass allocates the lighting atlas as RGBA16F (8 B/texel;
+            // its witness sizes[] lists texels*8 for the lighting/albedo atlases).
+            const u64 bytes = u64(aw) * u64(ah) * 8ull;
+            BufferDesc bd{};
+            bd.size = bytes;
+            bd.type = BufferType::Raw;
+            bd.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+            bd.memoryUsage = GPUMemoryUsage::Readback;
+            bd.name = "F350_SC_LightingAtlas";
+            const auto stage = device_->CreateBuffer(bd);
+            if (stage != handles::INVALID_RESOURCE) {
+                const auto ch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                if (ch != handles::INVALID_COMMAND_BUFFER) {
+                    if (auto* c2 = GetCommandBuffer(ch)) {
+                        c2->Begin();
+                        BufferTextureCopyRegion region{};
+                        region.bufferOffset = 0;
+                        region.imageSubresource.layerCount = 1;
+                        region.imageOffset = {};
+                        region.imageExtent = {aw, ah, 1u};
+                        c2->CopyTextureToBuffer(atlas, stage, &region, 1);
+                        c2->End();
+                        c2->Submit();
+                        c2->WaitForCompletion();
+                        if (auto* p = static_cast<const u8*>(device_->MapBuffer(stage))) {
+                            auto half = [](u16 h) {
+                                u32 sign = (h & 0x8000u) << 16;
+                                u32 expo = (h & 0x7C00u) >> 10;
+                                u32 man = h & 0x03FFu;
+                                u32 bits;
+                                if (expo == 0) bits = sign;
+                                else if (expo == 31) bits = sign | 0x7F800000u | (man << 13);
+                                else bits = sign | ((expo - 15u + 127u) << 23) | (man << 13);
+                                float f; std::memcpy(&f, &bits, 4); return f;
+                            };
+                            u64 digest = 1469598103934665603ull;
+                            for (u64 i = 0; i < bytes; ++i) {
+                                digest ^= p[i];
+                                digest *= 1099511628211ull;
+                            }
+                            // 16x16 grid of per-tile mean luma (half-decoded, RGBA16F).
+                            constexpr u32 kGrid = 16;
+                            double sums[kGrid * kGrid]{};
+                            u32 counts[kGrid * kGrid]{};
+                            double total = 0.0;
+                            for (u32 y = 0; y < ah; ++y) {
+                                const u32 ty = std::min(kGrid - 1u, u32(u64(y) * kGrid / ah));
+                                for (u32 x = 0; x < aw; ++x) {
+                                    const u32 tx = std::min(kGrid - 1u, u32(u64(x) * kGrid / aw));
+                                    const u16* t = reinterpret_cast<const u16*>(
+                                        p + (u64(y) * u64(aw) + u64(x)) * 8ull);
+                                    const double l = 0.2126 * half(t[0]) + 0.7152 * half(t[1]) +
+                                                     0.0722 * half(t[2]);
+                                    sums[ty * kGrid + tx] += l;
+                                    ++counts[ty * kGrid + tx];
+                                    total += l;
+                                }
+                            }
+                            std::string cells;
+                            for (u32 i = 0; i < kGrid * kGrid; ++i) {
+                                char cell[20];
+                                std::snprintf(cell, sizeof(cell), "%s%.3f", i ? "," : "",
+                                              counts[i] ? sums[i] / counts[i] : 0.0);
+                                cells += cell;
+                            }
+                            const double mean = (aw && ah) ? total / (double(aw) * double(ah)) : 0.0;
+                            PRIMAL_LOG_STREAM(Info, "Render")
+                                << "[F350SCAtlas] frame=" << frameCount_ - 1
+                                << " size=" << aw << "x" << ah
+                                << " bytes=" << bytes
+                                << " mean_luma=" << mean
+                                << " digest=0x" << std::hex << digest << std::dec
+                                << " grid16=" << cells
+                                << std::endl;
+                            device_->UnmapBuffer(stage);
+                        }
+                    }
+                    device_->DestroyCommandBuffer(ch);
+                }
+                device_->DestroyBuffer(stage);
+            }
+        }
+    }
+
     // A single completed submission owns the sparse copies. Consume before this frame records.
     if (deferred_samples_ != handles::INVALID_RESOURCE) {
         device_->WaitIdle();
