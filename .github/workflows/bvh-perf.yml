@@ -21,9 +21,9 @@ on:
         required: false
         default: 'test/bvh-perf'
       groups:
-        description: '测量组（逗号分隔：gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper）'
+        description: '测量组（逗号分隔：gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper,dyn-gi-lbvh,dyn-gi-hlbvh）'
         required: false
-        default: 'gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper'
+        default: 'gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper,dyn-gi-lbvh,dyn-gi-hlbvh'
       frames:
         description: '每组帧数'
         required: false
@@ -176,7 +176,7 @@ jobs:
         run: |
           $exe = (Get-Content ci-out/exe-path.txt -Raw).Trim()
           $groups = '${{ inputs.groups }}'
-          if (-not $groups) { $groups = 'gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper' }
+          if (-not $groups) { $groups = 'gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper,dyn-gi-lbvh,dyn-gi-hlbvh' }
           $frames = '${{ inputs.frames }}'
           if (-not $frames) { $frames = '420' }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/perf/run_bvh_perf.ps1 `
