@@ -210,7 +210,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         'PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL', 'RHI_TEST_PLATFORM', 'PRIMAL_LIGHTING_DEBUG',
         'TAA_OFF', 'PRIMAL_SHADOW_RENDER_OFF', 'PRIMAL_D3D12_BLACK_STAGE_FRAME',
         'PRIMAL_F350_SC_ATLAS', 'PRIMAL_F350_DDGI_SH', 'PRIMAL_F350_DDGI_DEPTH',
-        'PRIMAL_F350_DDGI_RAYS',
+        'PRIMAL_F350_DDGI_RAYS', 'DDGI_ANALYTIC_NO_HISTORY',
         'PRIMAL_D3D12_GBV', 'PRIMAL_D3D12_BLACK_STAGE_DUMP', 'PRIMAL_D3D12_API_TRACE',
         'PRIMAL_D3D12_DEFERRED_PROBE', 'PRIMAL_DUMP_MATRIX', 'PRIMAL_D3D12_RTVAUDIT',
         'PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL', 'PRIMAL_D3D12_DEFERRED_COPY_WRITE', 'PRIMAL_DEFERRED_SAMPLES'
@@ -371,6 +371,13 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         $env:PRIMAL_F350_DDGI_SH = '1'
         $env:PRIMAL_F350_DDGI_DEPTH = '1'
         $env:PRIMAL_F350_DDGI_RAYS = '1'
+        # 2026-11-26: cut the probe->probe history bounce. Per-ray distances and
+        # the SC lighting atlas already match, yet a band of probes carries
+        # 30-53% less radiance on D3D12 with identical black-ray counts -- the
+        # signature of the documented multi-stable SC<->probe feedback picking a
+        # different branch. With the feedback removed both backends must agree if
+        # that is the cause; it also isolates the remaining direct-atlas term.
+        $env:DDGI_ANALYTIC_NO_HISTORY = '1'
     }
     if ($g.diag -eq 13) { $env:PRIMAL_F350_SC_RAYS = '1' }
     if ($g.diag -in @(12,13)) {
