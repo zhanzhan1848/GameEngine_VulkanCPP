@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """d3d12_reflection_contract.py — D3D12 M1 F1-7 绑定反射契约核对.
 
-对主链（glslang→SPIR-V→spirv-cross→HLSL→dxc，见 scripts/build_d3d12_shaders.py）
+对 Vulkan 参考链（glslang→SPIR-V→spirv-cross→HLSL→dxc）
 的每个 shader 自动核对三级绑定事实，全部一致才 exit 0；任一失配 exit 1：
 
   1. spirv-cross --reflect（SPIR-V 权威）：set/binding/类型/块尺寸 与
@@ -18,7 +18,7 @@ dxc -E main 编译成功三方）；同 shader 内无两个不同 RHI 绑定映�
 (space, 寄存器字母, 寄存器号)。
 
 用法: python3 scripts/d3d12_reflection_contract.py [--keep-temp]
-工具路径环境变量同 build_d3d12_shaders.py（D3D12_GLSLANG/D3D12_SPIRV_CROSS/D3D12_DXC）。
+原生 HLSL 的全清单对照见 compare_d3d12_shaders.py。参考链工具路径环境变量（D3D12_GLSLANG/D3D12_SPIRV_CROSS/D3D12_DXC）。
 """
 import argparse
 import json

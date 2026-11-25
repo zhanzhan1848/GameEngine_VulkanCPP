@@ -415,13 +415,9 @@ EngineTest/assets/*
 # Vulkan devices via ShaderRegistry. Re-include the .spv files explicitly.
 !Engine/Graphics/Vulkan/shaders/**
 
-# D3D12 shader mirrors are BUILD PRODUCTS, not sources:
-#   GLSL --glslangValidator--> SPIR-V --spirv-cross--> .hlsl --dxc--> .cso
-# plus manifest.json (source/artifact SHA list for the freshness gate).
-# Regenerate with `python3 scripts/build_d3d12_shaders.py`, or the CMake target
-# `D3D12ShaderMirrors` (guarded by ENABLE_D3D12 + toolchain detection).
-# Hand-written HLSL lives in scripts/d3d12_handmade/ and IS tracked.
-# shaders.bin is a separate hand-made asset and stays tracked.
+!Engine/Graphics/RHI/Platforms/D3D12/Shaders/Debug/
+
+# D3D12 compiled shaders, manifest, and legacy generated HLSL copies.
 EngineTest/shaders/d3d12/**/*.hlsl
 EngineTest/shaders/d3d12/**/*.cso
 EngineTest/shaders/d3d12/manifest.json
@@ -511,6 +507,7 @@ scripts/test_*.py
 scripts/audit_*.py
 scripts/analyze_*.py
 scripts/compare_*.py
+!scripts/compare_d3d12_shaders.py
 scripts/certify_*.py
 scripts/make_*.py
 !scripts/make_ddgi_strict_spirv.py

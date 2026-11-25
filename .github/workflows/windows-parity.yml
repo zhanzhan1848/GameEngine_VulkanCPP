@@ -6,7 +6,7 @@
 #   1. configure + full build (MSVC / VS2022 / x64 / Release,
 #      -DENABLE_D3D12=ON -DENABLE_VULKAN=ON)
 #   2. D3D12 shader mirrors: generate with scripts/build_d3d12_shaders.py
-#      (tools via D3D12_GLSLANG / D3D12_SPIRV_CROSS / D3D12_DXC), then the
+#      (DXC via D3D12_DXC or PATH), then the
 #      CRLF-insensitive --check freshness gate. Mirrors are NOT tracked in
 #      git since 751b467d, so the toolchain is a hard requirement on a
 #      clean workspace (same degrade semantics as ci.yml windows-d3d12 when
@@ -143,11 +143,7 @@ jobs:
           $cmake = Get-Command cmake -ErrorAction SilentlyContinue
           Check ($null -ne $cmake) "cmake on PATH ($($cmake.Source))"
           # Shader toolchain: env override first, then PATH.
-          $glslang = if ($env:D3D12_GLSLANG) { $env:D3D12_GLSLANG } elseif (Get-Command glslangValidator -ErrorAction SilentlyContinue) { (Get-Command glslangValidator).Source }
-          $cross  = if ($env:D3D12_SPIRV_CROSS) { $env:D3D12_SPIRV_CROSS } elseif (Get-Command spirv-cross -ErrorAction SilentlyContinue) { (Get-Command spirv-cross).Source }
           $dxc    = if ($env:D3D12_DXC) { $env:D3D12_DXC } elseif (Get-Command dxc -ErrorAction SilentlyContinue) { (Get-Command dxc).Source }
-          Check ([bool]$glslang) "glslangValidator ($glslang)"
-          Check ([bool]$cross) "spirv-cross ($cross)"
           Check ([bool]$dxc) "dxc ($dxc)"
           Check ([bool]($env:PRIMAL_CI_ASSET_DIR -or $env:PRIMAL_CI_ASSET_SOURCE)) "PRIMAL_CI_ASSET_DIR or PRIMAL_CI_ASSET_SOURCE (versioned asset source)"
           Check ([bool]$env:PRIMAL_CI_THIRD_PARTY_DIR) "PRIMAL_CI_THIRD_PARTY_DIR (vendored third_party: VHACD\ only - collision module needs it; FBX SDK is the system Autodesk install))"
@@ -273,23 +269,20 @@ jobs:
           $mirror = 'EngineTest/shaders/d3d12/Forward/M1Forward.frag.cso'
           $python = (Get-Command python -ErrorAction SilentlyContinue).Source
           if (-not $python) { $python = (Get-Command python3 -ErrorAction SilentlyContinue).Source }
-          $glslang = if ($env:D3D12_GLSLANG) { $env:D3D12_GLSLANG } elseif (Get-Command glslangValidator -ErrorAction SilentlyContinue) { (Get-Command glslangValidator).Source }
-          $cross   = if ($env:D3D12_SPIRV_CROSS) { $env:D3D12_SPIRV_CROSS } elseif (Get-Command spirv-cross -ErrorAction SilentlyContinue) { (Get-Command spirv-cross).Source }
           $dxc     = if ($env:D3D12_DXC) { $env:D3D12_DXC } elseif (Get-Command dxc -ErrorAction SilentlyContinue) { (Get-Command dxc).Source }
-          if ($python -and $glslang -and $cross -and $dxc) {
-            $env:D3D12_GLSLANG = $glslang
-            $env:D3D12_SPIRV_CROSS = $cross
+          if ($python -and $dxc) {
             $env:D3D12_DXC = $dxc
-            Write-Output "[shaders] tools: $glslang | $cross | $dxc"
+            Write-Output "[shaders] tools: $dxc"
             & $python scripts/build_d3d12_shaders.py
             if ($LASTEXITCODE -ne 0) { Write-Output '::error::build_d3d12_shaders.py failed'; exit $LASTEXITCODE }
             & $python scripts/build_d3d12_shaders.py --check
             if ($LASTEXITCODE -ne 0) { Write-Output '::error::D3D12 shader freshness gate failed'; exit $LASTEXITCODE }
             Write-Output '[shaders] mirrors regenerated and freshness gate passed'
-          } elseif (Test-Path $mirror) {
-            Write-Output '::warning::shader toolchain incomplete; reusing mirrors already present in the workspace (stale risk - freshness gate skipped)'
+          } elseif ($python -and (Test-Path $mirror)) {
+            & $python scripts/build_d3d12_shaders.py --check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
-            Write-Output '::error::shader mirrors are not tracked in git and the toolchain (glslangValidator/spirv-cross/dxc) is unavailable. See RUNNER_SETUP_WINDOWS.md.'
+            Write-Output '::error::shader mirrors are not tracked in git and the toolchain (dxc) is unavailable. See RUNNER_SETUP_WINDOWS.md.'
             exit 1
           }
           exit 0

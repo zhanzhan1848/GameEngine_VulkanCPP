@@ -14,7 +14,7 @@ namespace primal::graphics::rhi::d3d12 {
 D3D12Shader::D3D12Shader(D3D12Device& device, const void* data, size_t size,
                          ShaderStage stage, const char* /*entryPoint*/)
     : device_(device), stage_(stage) {
-    // entryPoint 恒 main（文件头契约——主链把 DXIL 入口统一重命名为 main）。
+    // DXC selected the entry when compiling this stage.
     if (data && size > 0) {
         dxil_.resize(size);
         std::memcpy(dxil_.data(), data, size);

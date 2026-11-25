@@ -1431,8 +1431,7 @@ static std::vector<u8> SelfLoadShaderSource(const char* file, rhi::RHIPlatform p
     if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
         // Vulkan: SPIR-V from the engine shader tree. D3D12: DXIL .cso
         // mirroring the same relative path (build_d3d12_shaders.py layout);
-        // spirv-cross rewrites every entry point to "main" so the cso is
-        // consumed with the same one-file-per-stage shape as the spv.
+        // DXC bakes each HLSL entry into a separate file.
         // R13: 镜像映射（基座换替 + .spv→.cso）中央化到 ShaderRegistry::
         // ResolveShaderPath(platform, relPath)，本处不再内联拼 d3d12 路径。
         const char* suffix = (stage == ShaderStage::Vertex) ? ".vert.spv"
@@ -1497,8 +1496,7 @@ void StandardRenderPipeline::SelfLoadPipelineShaders() {
         // FusionIndirect=fusion_indirect 等）——十测 Windows 上 sc_card_radiance/
         // sc_probe_irradiance 自加载建计算管线时报 "No entrypoint found named
         // `main`"（72 条）。入口名随装配表逐行传入。
-        // D3D12: cso 由 spirv-cross 包装，入口恒为 "main"（D3D12Shader 忽略
-        // entryPoint 参数并按 main 消费）；Vulkan spv 保持功能入口名。
+        // D3D12 入口已编入 .cso；Vulkan 按功能名选择模块中的入口。
         const char* entry = metal ? metalEntry
                         : (platform == rhi::RHIPlatform::D3D12) ? "main" : vulkanEntry;
         out = device_->CreateShader(bytes.data(), bytes.size(), stage, entry);

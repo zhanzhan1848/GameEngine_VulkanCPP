@@ -1,0 +1,1335 @@
+// Half-resolution diffuse/specular gather. The flat buffers are raw SRVs in the RHI.
+#include "ProbeSH.hlsli"
+
+#ifdef DDGI_GATHER_CACHELESS_32
+#define GROUP_HEIGHT 4
+#else
+#define GROUP_HEIGHT 8
+#endif
+
+#include "RawBufferDimensions.hlsli"
+#include "../Common/TextureDimensions.hlsli"
+
+// --------------------------------------------------------------------------------
+// Bindings (flat 0..12)
+// --------------------------------------------------------------------------------
+Texture2D<float4> gbuffer_depth : register(t0, space0);
+Texture2D<float4> gbuffer_normal : register(t1, space0);
+RWTexture2D<float4> output_tex : register(u2, space0);
+Texture2D<float4> history_tex : register(t3, space0); // unused (temporal disabled)
+
+cbuffer ViewCB : register(b4, space0)
+{
+    float4 viewRows[4];  // invViewProj as 4 vec4 rows (column-major matrix)
+};
+cbuffer ProbeOriginSpacing : register(b5, space0)
+{
+    float4 probeOriginSpacing;  // xyz=origin, w=spacing
+};
+cbuffer ProbeCounts : register(b6, space0)
+{
+    float4 probeCounts;  // xyz=counts, w=unused
+    // Binding 6 begins at GIGatherCB offset 80. The camera is at offset 96,
+    // not immediately after invViewProj (offset 64 holds the probe origin).
+    // Using that origin as the camera incorrectly suppressed diffuse GI via
+    // NdotV/Fresnel and also pointed the reflection lobe in the wrong direction.
+    float4 cameraPos;
+    float4 debugVis;         // x = probe_vis 模式 (0=Off,1=IrradianceAtlas,
+                           //      2=DepthAtlas,3=Confidence)
+};
+
+ByteAddressBuffer staticSkySH : register(t7, space0);
+ByteAddressBuffer staticSkyFactor : register(t8, space0);
+
+struct GPUStaticProbeData {
+    float4  gridOrigin;     // xyz origin, w spacing
+    uint3 gridCounts;
+    float _pad0;
+    float4  skySH[9];
+};
+
+cbuffer StaticProbeCB : register(b9, space0)
+{
+    GPUStaticProbeData staticProbe;
+};
+
+ByteAddressBuffer confidenceBuffer : register(t10, space0);
+ByteAddressBuffer irradianceBuffer : register(t11, space0);
+ByteAddressBuffer ddgiDepthBuffer : register(t12, space0);
+Texture2D<float4> gbuffer_orm : register(t13, space0);
+RWTexture2D<float4> spec_output_tex : register(u14, space0);
+// T3.6/D1: 15/16（far 双槽）与 17 array[4]（descriptor indexing）删除。
+// flat 路径：17 = 单 SSBO，所有 volume 的 9-vec4/probe 探针数据顺序拼接
+//（描述符绑 offset 256 跳过头部，此处即纯探针数组）；18 = FlatVolumeCB
+//（origin/spacing + counts/probeOffset ×4 + meta.x=count）。
+ByteAddressBuffer flatIrradiance : register(t17, space0);
+cbuffer FlatVolumeCB : register(b18, space0)
+{
+    float4 fvOriginSpacing[4];   // xyz = origin, w = spacing（0 = 未用槽）
+    float4 fvCountsOffset[4];    // xyz = counts, w = flat SSBO probe 偏移
+    float4 fvMeta;               // x = 有效 volume 数（0 = 防御 dim ambient）
+                               // y = openSky 分类开关（GI 根治 Phase 3.2；
+                               //     PRIMAL_GI_OPENSKY=0 时 CPU 置 0 关闭）
+                               // z = openSky V2 开关（能量所有权 Phase 4a；
+                               //     PRIMAL_GI_OPENSKY_V2=0 → CPU 置 0，
+                               //     sER=1 = 旧整探针分类）
+                               // w = 无可见性低频旁路混合比；-1 保留后端默认。
+};
+// 2026-09-17 P0（probe-selection-density-audit §5.1 末段）：近场 volume 的
+// 重定位后有效起点（DDGITraceSDF 本帧/近期 trace 时发布，w = 1.0 有效）。
+// 八面体深度图记录自该物理起点，可见性比较的 distToProbe 必须同起点测量；
+// 插值权重仍沿逻辑格（tw[p]），此改动只替换距离测量的锚点。w=0（该 probe
+// 尚未被 trace 过）回退逻辑格点——与旧行为一致。
+ByteAddressBuffer nearRelocatedOrigins : register(t19, space0);
+// GI 能量根治方案 Phase 3.2: flat openSky 统计（float/probe，volume 顺序与
+// flatIrradiance 一致）。DDGIUpdateIrradiance 写入（逃逸占比 EMA）。
+ByteAddressBuffer flatProbeOpenSky : register(t20, space0);
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+// Auxiliary receiver/source records.  Binding 21 is absent from the regular
+// production descriptor layout; the source shader is selected only for the
+// opt-in Vulkan diagnostic dispatch.
+RWByteAddressBuffer glossySourceAudit : register(u21, space0);
+// Independent material source records.  Binding 22 exists only in the
+// auxiliary source layout; the regular 19-entry production layout is
+// unchanged.  Two vec4s are written per output pixel.
+RWByteAddressBuffer glossyMaterialAudit : register(u22, space0);
+#endif
+
+#ifdef DDGI_TRAVERSAL_AUDIT
+cbuffer TraversalSelection : register(b28, space0)
+{ uint4 auditDims; uint4 auditConfig; uint4 auditROI[8]; };
+RWByteAddressBuffer auditRecords : register(u29, space0);
+static uint auditTop=0u,auditBottom=0u,auditInstances=0u,auditTriangles=0u,auditFlags=0u;
+void auditInc(inout uint value) { if(value==0xffffffffu) auditFlags|=1u; else ++value; }
+uint auditIndex(uint2 pixel) {
+    if(auditDims.z!=0u && auditDims.w!=0u) {
+        uint2 cell=((pixel*2u+1u)*auditDims.zw)/(auditDims.xy*2u);
+        if(all(((cell) < (auditDims.zw)))) {
+            uint2 center=((cell*2u+1u)*auditDims.xy)/(auditDims.zw*2u);
+            if(all(((center) == (pixel))))return cell.y*auditDims.z+cell.x;
+        }
+    }
+    for(uint i=0u;i<min(auditConfig.z,8u);++i) if(all(((auditROI[i].xy) == (pixel))))return auditROI[i].z;
+    return 0xffffffffu;
+}
+#endif
+#ifdef DDGI_GEOMETRY_CONNECTIONS
+ByteAddressBuffer geometryTop : register(t23, space0);
+ByteAddressBuffer geometryBottom : register(t24, space0);
+ByteAddressBuffer geometryTriangles : register(t25, space0);
+ByteAddressBuffer geometryInstances : register(t26, space0);
+#include "GeometryFirstHit.hlsli"
+#ifdef DDGI_GEOMETRY_PAIR
+#include "GatherGeometryPair.hlsli"
+#endif
+cbuffer ConnectionPolicy : register(b27, space0)
+{ uint4 connectionPolicy; float4 connectionJitter; };
+// Exact sampled full-resolution texel center, with the actual raster clip
+// jitter removed. The interpolation/moment path keeps its legacy receiver;
+// geometry must not reuse its 0.05*spacing shading-normal bias.
+bool connectionSurfacePoint(int2 pixel,out float3 p) {
+    int2 size=textureDimensions(gbuffer_depth, 0);
+    if(any(((pixel) < ((int2)(0))))||any(((pixel) >= (size))))return false;
+    float z=gbuffer_depth.Load(int3(pixel, 0)).r;
+    if(isnan(z)||isinf(z)||z<0.||z>=.999999)return false;
+    float2 uv=((float2)(pixel)+.5)/(float2)(size);
+    float2 ndc=float2(2.*uv.x-1., 1.-2.*uv.y)-connectionJitter.xy;
+    float4x4 invVP=float4x4(viewRows[0],viewRows[1],viewRows[2],viewRows[3]);
+    float4 h=mul(float4(ndc, z, 1.), invVP);
+    if(any(isnan(h))||any(isinf(h))||abs(h.w)<1e-8)return false;
+    p=h.xyz/h.w;return !any(isnan(p))&&!any(isinf(p));
+}
+bool connectionSurfaceOrigin(int2 pixel,out float3 origin) {
+    if(connectionPolicy.x!=1u || any(isnan(connectionJitter.xy))||any(isinf(connectionJitter.xy)))return false;
+    float3 p;if(!connectionSurfacePoint(pixel,p))return false;
+    float3 v=cameraPos.xyz-p;
+    if(any(isnan(v))||any(isinf(v))||dot(v,v)<1e-10)return false;
+    float3 a,b,c,d;
+    bool ax=connectionSurfacePoint(pixel-int2(1, 0),a),bx=connectionSurfacePoint(pixel+int2(1, 0),b);
+    bool cy=connectionSurfacePoint(pixel-int2(0, 1),c),dy=connectionSurfacePoint(pixel+int2(0, 1),d);
+    if((!ax&&!bx)||(!cy&&!dy))return false;
+    float3 dx=(ax&&(!bx||distance(a,p)<distance(b,p)))?p-a:b-p;
+    float3 ddy=(cy&&(!dy||distance(c,p)<distance(d,p)))?p-c:d-p;
+    float limit=max(.02,length(v)*.02);
+    if(length(dx)>limit||length(ddy)>limit)return false;
+    float3 crossN=cross(dx,ddy);float scale=max(abs(crossN.x),max(abs(crossN.y),abs(crossN.z)));
+    if(any(isnan(crossN))||any(isinf(crossN))||scale<1e-16)return false;
+    float3 ng=normalize(crossN/scale);if(dot(ng,v)<0.)ng=-ng;
+    origin=p+ng*.002;
+    return !any(isnan(origin))&&!any(isinf(origin));
+}
+// Return 1 only for a proven clear open segment; 0 unknown, -1 blocked.
+// Geometry is an additional rejection gate. A clear segment cannot turn
+// unknown or occluded depth moments into light.
+int qualifiedProbeConnection(float3 receiver,float3 probe) {
+    if(connectionPolicy.x!=1u || any(isnan(receiver)) || any(isinf(receiver)) ||
+       any(isnan(probe)) || any(isinf(probe))) return 0;
+    float3 delta=probe-receiver;float distance=length(delta);
+    if(isnan(distance)||isinf(distance))return 0;
+    if(distance<=2e-5)return 0;
+    if((byteSize(geometryTop) / 48u)==0||(byteSize(geometryBottom) / 48u)==0||
+       (byteSize(geometryTriangles) / 48u)==0||(byteSize(geometryInstances) / 64u)==0)return 0;
+    float t;uint owner,primitive;
+#ifdef DDGI_GEOMETRY_REPLACE
+    // Extend only this experimental query by 20 µm on each end. If the
+    // displacement cannot be represented at this world scale, it is unknown.
+    const float endpointEpsilon=2e-5;
+    // Independently bound float32 spacing to <= 2 µm (10% of epsilon).
+    // Integer exponent checks cannot be reassociated into the requested shift.
+    // Coordinates with exponent >= 132 have ULP >= 2^-18 m (> 2 µm).
+    const uint3 maxEndpointExponent=(uint3)(132u<<23u);
+    if(any(((asuint(receiver)&(uint3)(0x7f800000u)) >= (maxEndpointExponent))) ||
+       any(((asuint(probe)&(uint3)(0x7f800000u)) >= (maxEndpointExponent)))) return 0;
+    if(distance<=2.0*endpointEpsilon)return 0;
+    float3 direction=delta/distance;
+    float3 start=receiver-direction*endpointEpsilon;
+    float3 end=probe+direction*endpointEpsilon;
+    float farT=distance+2.0*endpointEpsilon;
+    float3 startShift=receiver-start;
+    float3 endShift=end-probe;
+    float startMove=dot(startShift,direction);
+    float endMove=dot(endShift,direction);
+    float startSide=length(startShift-startMove*direction);
+    float endSide=length(endShift-endMove*direction);
+    float farExtension=farT-distance;
+    if(any(isnan(direction))||any(isinf(direction)) ||
+       any(isnan(start))||any(isinf(start)) || any(isnan(end))||any(isinf(end)) ||
+       isnan(farT)||isinf(farT) || isnan(farExtension)||isinf(farExtension) ||
+       farExtension<endpointEpsilon*1.8 || farExtension>endpointEpsilon*2.2 ||
+       isnan(startSide)||isinf(startSide)||isnan(endSide)||isinf(endSide) ||
+       startSide>endpointEpsilon*0.1 || endSide>endpointEpsilon*0.1 ||
+       isnan(startMove)||isinf(startMove)||isnan(endMove)||isinf(endMove) ||
+       startMove<endpointEpsilon*0.9 || startMove>endpointEpsilon*1.1 ||
+       endMove<endpointEpsilon*0.9 || endMove>endpointEpsilon*1.1) return 0;
+    int hit=geometryFirstHit(start,direction,0.,farT,t,owner,primitive);
+    if(hit<0)return 0;
+    if(hit>0) {
+        float originalT=t-endpointEpsilon;
+        return (!isnan(originalT)&&!isinf(originalT)&&
+                originalT>endpointEpsilon&&originalT<distance-endpointEpsilon)?-1:0;
+    }
+#else
+    int hit=geometryFirstHit(receiver,delta/distance,0.,distance,t,owner,primitive);
+    if(hit<0)return 0;
+    // Endpoints are not evidence of clear space. Keep endpoint-only hits
+    // unknown instead of silently ignoring a thin opaque cloth/surface.
+    if(hit>0)return (!isnan(t)&&!isinf(t)&&t>2e-5&&t<distance-2e-5)?-1:0;
+#endif
+    return 1;
+}
+
+#ifdef DDGI_GEOMETRY_PAIR
+bool preparePairRay(float3 receiver,float3 probe,out float3 start,out float3 direction,out float farT,out float distance) {
+ start = direction = 0; farT = distance = 0;
+ if(connectionPolicy.x!=1u || any(isnan(receiver))||any(isinf(receiver))||any(isnan(probe))||any(isinf(probe)))return false;
+ float3 delta=probe-receiver;distance=length(delta);if(isnan(distance)||isinf(distance)||distance<=2e-5)return false;
+ if((byteSize(geometryTop) / 48u)==0||(byteSize(geometryBottom) / 48u)==0||(byteSize(geometryTriangles) / 48u)==0||(byteSize(geometryInstances) / 64u)==0)return false;
+ const float eps=2e-5;const uint3 maxEndpointExponent=(uint3)(132u<<23u);
+ if(any(((asuint(receiver)&(uint3)(0x7f800000u)) >= (maxEndpointExponent)))||any(((asuint(probe)&(uint3)(0x7f800000u)) >= (maxEndpointExponent))))return false;
+ if(distance<=2.0*eps)return false;direction=delta/distance;start=receiver-direction*eps;float3 end=probe+direction*eps;farT=distance+2.0*eps;
+ float3 startShift=receiver-start,endShift=end-probe;float startMove=dot(startShift,direction),endMove=dot(endShift,direction);
+ float startSide=length(startShift-startMove*direction),endSide=length(endShift-endMove*direction),farExtension=farT-distance;
+ if(any(isnan(direction))||any(isinf(direction))||any(isnan(start))||any(isinf(start))||any(isnan(end))||any(isinf(end))||
+ isnan(farT)||isinf(farT)||isnan(farExtension)||isinf(farExtension)||farExtension<eps*1.8||farExtension>eps*2.2||
+ isnan(startSide)||isinf(startSide)||isnan(endSide)||isinf(endSide)||startSide>eps*0.1||endSide>eps*0.1||
+ isnan(startMove)||isinf(startMove)||isnan(endMove)||isinf(endMove)||startMove<eps*0.9||startMove>eps*1.1||endMove<eps*0.9||endMove>eps*1.1)return false;
+ return true;
+}
+int2 qualifiedProbeConnectionPair(float3 receiver,float3 probe0,float3 probe1) {
+ float3 starts[2],dirs[2];float fars[2],distances[2];
+ bool a=preparePairRay(receiver,probe0,starts[0],dirs[0],fars[0],distances[0]);
+ bool b=preparePairRay(receiver,probe1,starts[1],dirs[1],fars[1],distances[1]);
+ if(!a||!b)return int2(qualifiedProbeConnection(receiver,probe0), qualifiedProbeConnection(receiver,probe1));
+ PairTraceResult pair;if(!geometryFirstHitPair(starts,dirs,fars,pair))return int2(qualifiedProbeConnection(receiver,probe0), qualifiedProbeConnection(receiver,probe1));
+ int2 status=(int2)(0);for(uint r=0u;r<2u;++r){if(pair.status[r]<0)status[r]=0;else if(pair.status[r]==0)status[r]=1;else {float t=pair.hitT[r]-2e-5;status[r]=(!isnan(t)&&!isinf(t)&&t>2e-5&&t<distances[r]-2e-5)?-1:0;}}return status;
+}
+#endif
+#endif
+
+// --------------------------------------------------------------------------------
+// Constants
+// --------------------------------------------------------------------------------
+#define TG_PROBE_COUNT 8
+#define SH_COEFF_COUNT 9
+#define TILE_SIZE 8
+#define DEPTH_RES 8
+#define DEPTH_TEXELS 64
+#define DEPTH_FLOATS_PER_PROBE 128u
+
+// DDGIVolumeData stores RADIANCE SH (mcWeight = 4π/N, no cosine projection), so
+// the plain SH9 evaluation below reconstructs directional mean radiance L̄(N).
+// Screen consumers need cosine-weighted irradiance E(N) = π·L̄ for the isotropic
+// term — this constant supplies the missing factor at the diffuse output only.
+//
+// PAIRED CHANGE (keep both in sync): the probe trace chain shades hits with
+// ddgi_light_color, which the CPU divides by π in the same commit. That keeps
+// the SC↔probe feedback loop's absolute drive unchanged, so only the screen-end
+// scale is corrected.
+//
+// [F6 2026-09-20 能量不对称修复] 下方"NEVER apply this factor inside
+// SurfaceCacheLightEval"已作废（化石警告）：其前提是已被取代的 CPU /π 平衡
+// 方案。2026-09-10 起 SurfaceCacheLightEval.comp::gatherProbeIrradiance 默认
+// ×π（PRIMAL_SC_GATHER_PI，radiance-SH 的正确 L→E 换算；两腿 π 一致，实测
+// 回路固定点 ×~1.7-2.1 有界、DC gain ~0.53 <1——见该文件 2026-09-10 十 注）。
+// 两侧约束等价且互补：本端 = 屏幕端 diffuse 输出恰一次 ×π；SC 端 = 卡片
+// 入射恰一次 ×π。改任何一端的 π 必须两腿同步（见 SurfaceCacheLightEval
+// 回滚警示），否则 SC↔probe 回路增益单腿漂移。
+static const float PROBE_SH_RAD_TO_IRRAD = 3.14159265;
+
+// --------------------------------------------------------------------------------
+// Shared memory (threadgroup)
+// --------------------------------------------------------------------------------
+#ifndef DDGI_GATHER_CACHELESS
+struct TGProbe {
+    float3 sh[SH_COEFF_COUNT];
+};
+groupshared TGProbe tg_probes[TG_PROBE_COUNT];
+groupshared float tg_depth_map[TG_PROBE_COUNT * DEPTH_FLOATS_PER_PROBE];
+groupshared uint3 tg_cellMin;
+groupshared bool tg_cellFound;
+groupshared uint tg_probe_idx[TG_PROBE_COUNT];
+groupshared uint tg_probe_depth_base[TG_PROBE_COUNT];
+groupshared float tg_skyFactor[TG_PROBE_COUNT];
+groupshared float3 tg_indirect[TILE_SIZE * TILE_SIZE];
+groupshared float tg_pixelDepth[TILE_SIZE * TILE_SIZE];
+#endif
+
+// --------------------------------------------------------------------------------
+// Helpers (ported from DDGIGIGather.metal)
+// --------------------------------------------------------------------------------
+float2 gatherOctEncode(float3 d) {
+    float l1norm = abs(d.x) + abs(d.y) + abs(d.z);
+    float2 uv = d.xy / l1norm;
+    if (d.z < 0.0) {
+        uv = (1.0 - abs(uv.yx)) * lerp((float2)(-1.0), (float2)(1.0), ((uv.xy) >= ((float2)(0.0))));
+    }
+    return uv * 0.5 + 0.5;
+}
+
+#ifndef DDGI_GATHER_CACHELESS
+float2 sampleOctDepthTG(int probeOffset, float3 dir) {
+    float2 uv = gatherOctEncode(dir);
+    int2 texel = int2(clamp(uint(uv.x * float(DEPTH_RES)), 0u, uint(DEPTH_RES - 1)), clamp(uint(uv.y * float(DEPTH_RES)), 0u, uint(DEPTH_RES - 1)));
+    int idx = texel.y * DEPTH_RES + texel.x;
+    int base = probeOffset;
+    return float2(tg_depth_map[base + idx], tg_depth_map[base + int(DEPTH_TEXELS) + idx]);
+}
+
+#endif
+// N-volume selection cannot use the tile-shared depth cache because each
+// pixel may select a different volume/cell.  Volume 0 is the canonical near
+// volume and its depth atlas is bound at binding 12, so sample it directly to
+// retain DDGI visibility and normal weighting on the descriptor-indexed path.
+float2 sampleNearProbeDepth(uint probeIdx, float3 dir) {
+    float2 uv = gatherOctEncode(dir);
+    uint2 texel = uint2(clamp(uint(uv.x * float(DEPTH_RES)), 0u, uint(DEPTH_RES - 1)), clamp(uint(uv.y * float(DEPTH_RES)), 0u, uint(DEPTH_RES - 1)));
+    uint octIdx = texel.y * uint(DEPTH_RES) + texel.x;
+    uint base = probeIdx * DEPTH_FLOATS_PER_PROBE;
+    return float2(ddgiDepthBuffer.Load<float>((base + octIdx) * 4u), ddgiDepthBuffer.Load<float>((base + uint(DEPTH_TEXELS) + octIdx) * 4u));
+}
+
+// Scene-specific diagnostic oracle: debugVis.y/z = centered patch half extents,
+// w = horizontal plane Y. Only extra-only fixed-mode0 bins may be tested.
+// This is NOT a generic per-bin validity gate; an independent mesh certificate
+// is required. Legacy scalar-hit cells and unmeasured/escape depths are excluded.
+bool certifiedFloorBlock(float3 probe, float3 receiver, float3 dir, float distance, float2 mv) {
+    if (debugVis.y<=0.0 || debugVis.z<=0.0) return false;
+    float2 uv=gatherOctEncode(dir);
+    uint2 cell=(uint2)(clamp(uv*8.0,(float2)(0.0),(float2)(7.0)));
+    uint bin=cell.y*8u+cell.x;
+    uint radianceMask=bin<32u?0x80c06327u:0x00386cccu;
+    if ((radianceMask & (1u<<(bin%32u)))!=0u) return false;
+    float plane=debugVis.w;
+    if (probe.y>=plane-0.10 || receiver.y<=plane+0.01) return false;
+    if (mv.x<=0.0 || mv.y<=0.0 || mv.x+2.0*sqrt(mv.y)>=distance-0.15) return false;
+    float t=(plane-probe.y)/(receiver.y-probe.y);
+    float3 crossing=lerp(probe,receiver,t);
+    return t>0.0 && t<1.0 && abs(crossing.x)<debugVis.y && abs(crossing.z)<debugVis.z;
+}
+
+// Mode7 depth is measured world distance; -1/0 denotes UNKNOWN, not open.
+float measuredConnectionVisibility(float distance, float2 mv) {
+    if (any(isnan(mv)) || any(isinf(mv)) || mv.x < 0.0 || mv.y < 0.0 ||
+        isnan(distance) || isinf(distance)) return 0.0;
+    float beyond = max(distance - mv.x, 0.0);
+    if (beyond == 0.0) return 1.0;
+    return mv.y / (mv.y + beyond * beyond); // zero-variance blocker is zero
+}
+
+#ifndef DDGI_GATHER_CACHELESS
+float3 evalSH9Shared(int probeIdx, float3 d) {
+    float3 sh[9];
+    for (int i = 0; i < 9; ++i) sh[i] = tg_probes[probeIdx].sh[i];
+    return evalSH9(sh, d);
+}
+
+#endif
+float3 shDot9Float4(float4 sh[9], float3 d) {
+    float3 sh3[9];
+    for (int i = 0; i < 9; ++i) sh3[i] = sh[i].xyz;
+    return evalSH9(sh3, d);
+}
+
+float visibilityWeight(float distToProbe, float mean, float variance, float spacing) {
+    float dist = max(distToProbe - mean, 0.0);
+    if (variance < 0.0001) return 1.0;
+    float cheb = variance / (variance + dist * dist);
+    return clamp(max(cheb * 2.0, 0.2), 0.0, 1.0);
+}
+
+// Probe-position spheres (ProbeVisMode 4, SPGI_PROBE_VIS=4): DDA the near
+// grid along the camera ray and ray-sphere test each probe center
+// (r = 0.4×spacing). Colour = SH L0 luminance heat ramp; probes whose
+// octahedral depth map reads ≈0 toward all sampled directions (sitting inside
+// geometry, tracing nothing but wall interior) get the red burial tint.
+// Scene occlusion is intentionally OFF — seeing probes through walls is the
+// diagnostic point. Bounded at 96 DDA cells.
+float3 visProbePositions(float2 uv) {
+    float4x4 invVP = float4x4(viewRows[0], viewRows[1], viewRows[2], viewRows[3]);
+    float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    float4 farH = mul(float4(ndc, 0.999, 1.0), invVP);
+    float3 ro = cameraPos.xyz;
+    float3 rd = farH.xyz / farH.w - ro;
+    float rdLen = length(rd);
+    if (rdLen < 1e-5) return float3(0.03, 0.03, 0.035);
+    rd /= rdLen;
+
+    float3 vorg = probeOriginSpacing.xyz;
+    float sp = max(probeOriginSpacing.w, 0.01);
+    float3 counts = (float3)(probeCounts.xyz);
+    float rad = 0.4 * sp;  // 0.4×spacing: ~40% solid-angle coverage per shell so
+                           // the lattice reads at hallway distances (0.2 was too
+                           // sparse — most rays slipped between spheres)
+
+    // Bounding slab over all probe spheres
+    float3 bmin = vorg - (float3)(rad);
+    float3 bmax = vorg + (counts - 1.0) * sp + (float3)(rad);
+    float3 inv = 1.0 / rd;
+    float3 t0s = (bmin - ro) * inv;
+    float3 t1s = (bmax - ro) * inv;
+    float3 tsm = min(t0s, t1s), tbg = max(t0s, t1s);
+    float tEnter = max(max(tsm.x, tsm.y), tsm.z);
+    float tExit = min(min(min(tbg.x, tbg.y), tbg.z), rdLen);
+    if (tExit < max(tEnter, 0.0)) return float3(0.03, 0.03, 0.035);
+    float t = max(tEnter, 0.0) + 1e-4;
+
+    // Amanatides & Woo over the probe lattice (cell = probe index)
+    int3 cell = clamp((int3)(floor((ro + rd * t - vorg) / sp)), (int3)(0), (int3)(counts) - (int3)(1));
+    int3 stp = (int3)(sign(rd));
+    float3 tDelta = abs(inv) * sp;
+    float3 nextB = vorg + ((float3)(cell) + max((float3)(stp), 0.0)) * sp;
+    float3 tMax = (nextB - ro) * inv;
+    for (int a = 0; a < 3; ++a)
+        if (stp[a] == 0) tMax[a] = 1e30;
+
+    float bestT = -1.0;
+    int3 bestCell = (int3)(0);
+    for (int it = 0; it < 96; ++it) {
+        if (any(((cell) < ((int3)(0)))) || any((((float3)(cell)) >= (counts)))) break;
+        float3 center = vorg + (float3)(cell) * sp;
+        float3 oc = ro - center;
+        float b = dot(oc, rd);
+        float c = dot(oc, oc) - rad * rad;
+        float disc = b * b - c;
+        if (disc > 0.0) {
+            float th = -b - sqrt(disc);
+            if (th > 0.0 && th <= tExit && (bestT < 0.0 || th < bestT)) {
+                bestT = th;
+                bestCell = cell;
+            }
+        }
+        if (tMax.x < tMax.y) {
+            if (tMax.x < tMax.z) { t = tMax.x; cell.x += stp.x; tMax.x += tDelta.x; }
+            else                 { t = tMax.z; cell.z += stp.z; tMax.z += tDelta.z; }
+        } else {
+            if (tMax.y < tMax.z) { t = tMax.y; cell.y += stp.y; tMax.y += tDelta.y; }
+            else                 { t = tMax.z; cell.z += stp.z; tMax.z += tDelta.z; }
+        }
+        if (t > tExit || (bestT > 0.0 && t > bestT)) break;
+    }
+    if (bestT < 0.0) {
+        // Canary backplate: dim magenta wash proves the mode-4 path reached the
+        // shader (fusion suppresses ~1.0-level debug colors via
+        // max(ddgiBase, spgiTarget) — a flat change here is still visible).
+        return float3(0.10, 0.02, 0.10);
+    }
+
+    uint pIdx = uint(bestCell.x) + uint(bestCell.y) * uint(counts.x)
+              + uint(bestCell.z) * uint(counts.x) * uint(counts.y);
+    float3 L0 = irradianceBuffer.Load<float4>((pIdx * 9u) * 16u).xyz;
+    float lum = dot(L0, float3(0.2126, 0.7152, 0.0722));
+
+    // Burial probe: 4 octahedral taps — a probe inside solid geometry records
+    // ≈0 mean depth toward every direction.
+    float3 tapDirs[4] = {float3(1, 0, 0), float3(-1, 0, 0), float3(0, 0, 1), float3(0, 0, -1)};
+    float meanD = 0.0;
+    for (int k = 0; k < 4; ++k) meanD += sampleNearProbeDepth(pIdx, tapDirs[k]).x;
+    meanD *= 0.25;
+    bool buried = meanD < 0.25 * sp;
+
+    float e = clamp(log2(1.0 + lum) / 6.0, 0.0, 1.0);
+    float3 heat = lerp(float3(0.02, 0.08, 0.20), float3(0.10, 0.85, 0.35), e);
+    heat = lerp(heat, float3(1.0, 0.95, 0.45), smoothstep(0.55, 1.0, e));
+    if (buried) heat = lerp(heat, float3(1.0, 0.12, 0.08), 0.85);
+
+    float3 n = (ro + rd * bestT - (vorg + (float3)(bestCell) * sp)) / rad;
+    float shade = 0.35 + 0.65 * max(dot(n, normalize(float3(0.4, 0.8, 0.3))), 0.0);
+    // ×6 punch-through: fusion computes indirect = albedo × (0.7·ddgi mixed
+    // against SPGI by max()) × ao — at ~1.0 the spheres ghost. At ~6 they
+    // survive as saturated (still hue-distinct) markers on tone-mapped output.
+    return heat * shade * 6.0;
+}
+
+// --------------------------------------------------------------------------------
+// Main
+// --------------------------------------------------------------------------------
+[numthreads(8, GROUP_HEIGHT, 1)]
+void main(uint3 threadID : SV_DispatchThreadID, uint3 localID : SV_GroupThreadID) {
+#ifdef DDGI_INSTANCE_PAYLOAD_CACHE
+    geometryPayloadReset();
+#endif
+    const bool measuredVisibility = cameraPos.w == 7.0;
+    uint2 tid = threadID.xy;
+    uint2 tidInGroup = localID.xy;
+    uint2 groupSize = uint3(8, GROUP_HEIGHT, 1).xy;
+
+    int2 outSize = imageDimensions(output_tex);
+    uint width = uint(outSize.x);
+    uint height = uint(outSize.y);
+    uint localIdx = tidInGroup.y * groupSize.x + tidInGroup.x;
+
+    // Phase 0: cooperative loading setup
+    bool inBounds = (tid.x < width && tid.y < height);
+#ifdef DDGI_TRAVERSAL_AUDIT
+    uint auditRecordIndex=inBounds?auditIndex(tid):0xffffffffu;
+    bool auditSelected=auditRecordIndex<auditConfig.w && auditConfig.w<=1024u &&
+        auditRecordIndex <= ((byteSize(auditRecords) / 4u)/144u) && (byteSize(auditRecords) / 4u)/144u>auditRecordIndex;
+    uint auditBase=auditRecordIndex*144u;
+    if(auditSelected) {
+        for(uint i=0u;i<144u;++i)auditRecords.Store<uint>((auditBase+i) * 4u, 0xffffffffu);
+        auditRecords.Store<uint>((auditBase) * 4u, 0x44544741u); auditRecords.Store<uint>((auditBase+1u) * 4u, auditConfig.x);
+        auditRecords.Store<uint>((auditBase+2u) * 4u, auditConfig.y);auditRecords.Store<uint>((auditBase+3u) * 4u, auditRecordIndex);
+        auditRecords.Store<uint>((auditBase+4u) * 4u, tid.x);auditRecords.Store<uint>((auditBase+5u) * 4u, tid.y);
+        auditRecords.Store<uint>((auditBase+6u) * 4u, (connectionPolicy.x==1u && connectionPolicy.y==auditConfig.x &&
+            connectionPolicy.z==auditConfig.y && all(((auditDims.xy) == (uint2(width, height)))))?1u:2u);
+        auditRecords.Store<uint>((auditBase+7u) * 4u, 0u);
+    }
+#endif
+    float depth = 0.0;
+    float2 uv = (float2)(0.0);
+    float3 worldPos = (float3)(0.0);
+    float3 normal = float3(0.0, 1.0, 0.0);
+    float3 gp = (float3)(0.0);
+    bool isActive = false;
+#ifdef DDGI_GEOMETRY_CONNECTIONS
+    float3 physicalConnectionOrigin=(float3)(0.0);
+    bool physicalConnectionValid=false;
+#endif
+
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+    // These are populated from the same production fetch/weight variables.
+    // Zero values deliberately mark unsupported/invalid fields for the strict
+    // reader instead of inventing a replacement ray or probe.
+    bool auditRecordValid = true;
+    int2 auditDepthTexel = (int2)(-1);
+    int2 auditNormalTexel = (int2)(-1);
+    float auditSelectedVolumePlus2 = 1.0; // sel=-1; near=2, far=3, ...
+    float3 auditR = (float3)(0.0);
+    float auditNoV = 0.0;
+    float auditVisibilityConfidence = 0.0;
+    float auditLowFrequencyBlend = 0.0;
+    int2 auditFullOrmTexel = (int2)(-1);
+    float auditOrmRoughness = 0.0;
+    float4 auditOrmSample = (float4)(0.0);
+    float auditW[8];
+    float auditLowW[8];
+    uint auditProbeIds[8];
+    for (int auditInit = 0; auditInit < 8; ++auditInit) {
+        auditW[auditInit] = 0.0;
+        auditLowW[auditInit] = 0.0;
+        auditProbeIds[auditInit] = 0u;
+    }
+#endif
+
+    if (inBounds) {
+        uv = ((float2)(tid) + 0.5) / float2(width, height);
+        // GBuffer is full-res, GIGather output is half-res. Use UV-based texelFetch
+        // with full-res dimensions to sample the correct GBuffer pixel.
+        int2 fullResSize = textureDimensions(gbuffer_depth, 0);
+        int2 fullTexel = (int2)((float2)(fullResSize) * uv);
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+        auditDepthTexel = fullTexel;
+#endif
+        depth = gbuffer_depth.Load(int3(fullTexel, 0)).r;
+#ifdef DDGI_TRAVERSAL_AUDIT
+        if(auditSelected) {
+            // Separate invocation routing from policy validity and query count.
+            auditRecords.Store<uint>((auditBase+8u) * 4u, isnan(depth)||isinf(depth)?6u:depth>=1.0?0u:!measuredVisibility?1u:2u);
+            auditRecords.Store<uint>((auditBase+9u) * 4u, 0xffffffffu);
+        }
+#endif
+#ifdef DDGI_GEOMETRY_CONNECTIONS
+        if(measuredVisibility)physicalConnectionValid=connectionSurfaceOrigin(fullTexel,physicalConnectionOrigin);
+#endif
+
+        if (depth < 1.0) {
+            // Reconstruct invViewProj from 4 vec4 rows (column-major)
+            float4x4 invVP = float4x4(viewRows[0], viewRows[1], viewRows[2], viewRows[3]);
+            float2 ndc = float2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+            float4 worldPosH = mul(float4(ndc, depth, 1.0), invVP);
+            worldPos = worldPosH.xyz / worldPosH.w;
+
+            int2 fullNormSize = textureDimensions(gbuffer_normal, 0);
+            int2 fullNormTexel = (int2)((float2)(fullNormSize) * uv);
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+            auditNormalTexel = fullNormTexel;
+#endif
+            float3 n = gbuffer_normal.Load(int3(fullNormTexel, 0)).xyz;
+            n = normalize(n * 2.0 - 1.0);
+            // GLSL has no isnormal() on vec3; check components
+            if (!isnan(n.x) && !isnan(n.y) && !isnan(n.z))
+                normal = n;
+
+            float3 origin = probeOriginSpacing.xyz;
+            float spacing = probeOriginSpacing.w;
+            gp = (worldPos - origin) / spacing;
+
+            float3 gridMax = float3(probeCounts.x - 1.0, probeCounts.y - 1.0, probeCounts.z - 1.0);
+            isActive = all(((gp) >= ((float3)(0.0)))) && all(((gp) <= (gridMax)));
+        }
+    }
+
+#ifndef DDGI_GATHER_CACHELESS
+    // Determine grid cell from first isActive thread
+    if (localIdx == 0u) {
+        tg_cellFound = false;
+        tg_cellMin = (uint3)(0u);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (localIdx < 8u && isActive && !tg_cellFound) {
+        tg_cellMin = (uint3)(clamp(floor(gp), (float3)(0.0),
+                                float3(probeCounts.x - 1.0, probeCounts.y - 1.0, probeCounts.z - 1.0)));
+        tg_cellFound = true;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    uint3 counts = (uint3)(probeCounts.xyz);
+
+    // Phase 0a: compute probe indices + depth offsets
+    if (localIdx < 8u) {
+        uint cx = (localIdx & 1u) != 0u ? min(tg_cellMin.x + 1u, counts.x - 1u) : tg_cellMin.x;
+        uint cy = (localIdx & 2u) != 0u ? min(tg_cellMin.y + 1u, counts.y - 1u) : tg_cellMin.y;
+        uint cz = (localIdx & 4u) != 0u ? min(tg_cellMin.z + 1u, counts.z - 1u) : tg_cellMin.z;
+        uint pIdx = cx + cy * counts.x + cz * counts.x * counts.y;
+        tg_probe_idx[localIdx] = pIdx;
+        tg_probe_depth_base[localIdx] = pIdx * DEPTH_FLOATS_PER_PROBE;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // Phase 0b: cooperative irradiance load (72 float3 = 72 vec4 slots, 9 per probe × 8 probes)
+    {
+        uint probe = localIdx / 9u;
+        uint shIdx = localIdx % 9u;
+        if (probe < TG_PROBE_COUNT) {
+            uint pIdx = tg_probe_idx[probe];
+            tg_probes[probe].sh[shIdx] = irradianceBuffer.Load<float4>((pIdx * 9u + shIdx) * 16u).xyz;
+        }
+    }
+    // Second load: threads 0-7 load [63..71] — but 63/9=7,sh0 already loaded by thread 63.
+    // Metal loads 64..71 which is probe 7 sh 1-8. Thread 63 (64-1) loads probe 7 sh 0.
+    // GLSL: threads 0-7 load probe 7 sh 1-8 (indices 64..71 → probe 64/9=7, sh 64%9=1..8)
+    if (localIdx < 8u) {
+        uint idx = 64u + localIdx;
+        uint probe = idx / 9u;
+        uint shIdx = idx % 9u;
+        if (probe < uint(TG_PROBE_COUNT) && shIdx < uint(SH_COEFF_COUNT)) {
+            uint pIdx = tg_probe_idx[probe];
+            tg_probes[probe].sh[shIdx] = irradianceBuffer.Load<float4>((pIdx * 9u + shIdx) * 16u).xyz;
+        }
+        tg_skyFactor[localIdx] = staticSkyFactor.Load<float>((tg_probe_idx[localIdx]) * 4u);
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // Phase 0c: cooperative depth load (1024 floats / 64 threads = 16 per thread)
+    for (uint j = 0u; j < 16u; ++j) {
+        uint linearIdx = localIdx * 16u + j;
+        uint probe = linearIdx / DEPTH_FLOATS_PER_PROBE;
+        uint offsetInProbe = linearIdx % DEPTH_FLOATS_PER_PROBE;
+        float val = ddgiDepthBuffer.Load<float>((tg_probe_depth_base[probe] + offsetInProbe) * 4u);
+        tg_depth_map[probe * DEPTH_FLOATS_PER_PROBE + offsetInProbe] = val;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+#else
+    uint3 counts = (uint3)(probeCounts.xyz);
+#endif
+    // Phase 1: per-pixel output. 三条互斥路由:
+    //   (A) probe_vis 调试可视化(T6.3 sub-A)—— debugVis.x > 0.5;
+    //   (B) flat-buffer 多 volume gather(T3.6/D1)—— fvMeta.x > 0.5
+    //       (sel==0 近场数学 / sel>0 远场数学;两槽 legacy 已删除)。
+    if (inBounds && debugVis.x > 0.5) {
+#ifdef DDGI_TRAVERSAL_AUDIT
+        if(auditSelected && measuredVisibility && !isnan(depth) && !isinf(depth) && depth<1.0)
+            auditRecords.Store<uint>((auditBase+8u) * 4u, 5u);
+#endif
+        // ====================================================================
+        // (A) probe 调试可视化 — GIDebug().probe_vis 数据面(T6.3 sub-A)。
+        // 输出替换 gather 结果:近场网格内按模式可视化;网格外 mode 1 用远场
+        // volume 的 L0;其余 dim 背板。spec 输出清零(调试模式无光泽意义)。
+        // ====================================================================
+        int visMode = int(debugVis.x + 0.5);  // 1/2/3/4
+        float3 vis = float3(0.03, 0.03, 0.035);
+        if (visMode == 4) {
+            // ProbePositions (M8/T8.3): probe 格点球体位置可视化 —— 绿→黄 =
+            // L0 能量, 红染 = 埋没(全向平均深度≈0)。穿墙可见, 用于定位
+            // 3m 网格下埋进拱廊墙体的 probe。
+            vis = visProbePositions(uv);
+        } else if (depth < 1.0) {
+            uint3 countsV = (uint3)(probeCounts.xyz);
+            if (isActive) {
+                uint3 b0 = clamp((uint3)(floor(gp)), (uint3)(0u), countsV - 1u);
+                uint3 b1 = min(b0 + 1u, countsV - 1u);
+                float3 fracGp = frac(gp);
+                float fx = fracGp.x, fy = fracGp.y, fz = fracGp.z;
+                float tw[8];
+                tw[0] = (1.0 - fx) * (1.0 - fy) * (1.0 - fz);
+                tw[1] = fx           * (1.0 - fy) * (1.0 - fz);
+                tw[2] = (1.0 - fx) * fy           * (1.0 - fz);
+                tw[3] = fx           * fy           * (1.0 - fz);
+                tw[4] = (1.0 - fx) * (1.0 - fy) * fz;
+                tw[5] = fx           * (1.0 - fy) * fz;
+                tw[6] = (1.0 - fx) * fy           * fz;
+                tw[7] = fx           * fy           * fz;
+                uint3 pc[8];
+                pc[0] = uint3(b0.x, b0.y, b0.z); pc[1] = uint3(b1.x, b0.y, b0.z);
+                pc[2] = uint3(b0.x, b1.y, b0.z); pc[3] = uint3(b1.x, b1.y, b0.z);
+                pc[4] = uint3(b0.x, b0.y, b1.z); pc[5] = uint3(b1.x, b0.y, b1.z);
+                pc[6] = uint3(b0.x, b1.y, b1.z); pc[7] = uint3(b1.x, b1.y, b1.z);
+                if (visMode == 1) {
+                    // IrradianceAtlas: 8 probe 三线性加权的 SH L0(band-0 均值)。
+                    float3 sh0 = (float3)(0.0);
+                    float wsum = 0.0;
+                    for (int p = 0; p < 8; ++p) {
+                        if (tw[p] < 0.01) continue;
+                        uint pIdx = pc[p].x + pc[p].y * countsV.x + pc[p].z * countsV.x * countsV.y;
+                        sh0 += irradianceBuffer.Load<float4>((pIdx * 9u) * 16u).xyz * tw[p];
+                        wsum += tw[p];
+                    }
+                    if (wsum > 0.0) sh0 /= wsum;
+                    vis = sh0 * 0.28209479;  // SH_C0 → 方向平均辐亮度
+                } else if (visMode == 2) {
+                    // DepthAtlas: 最近 probe 的 octahedral 平均深度(沿法线方向
+                    // 采样 8x8 深度图 mean 通道)。/25 = 可视化曝光。
+                    uint3 np = clamp((uint3)(floor(gp + 0.5)), (uint3)(0u), countsV - 1u);
+                    uint pIdx = np.x + np.y * countsV.x + np.z * countsV.x * countsV.y;
+                    float2 ouv = gatherOctEncode(normal);
+                    int2 texel = int2(clamp(uint(ouv.x * float(DEPTH_RES)), 0u, uint(DEPTH_RES - 1)), clamp(uint(ouv.y * float(DEPTH_RES)), 0u, uint(DEPTH_RES - 1)));
+                    float meanDepth = ddgiDepthBuffer.Load<float>((pIdx * DEPTH_FLOATS_PER_PROBE
+                                                      + uint(texel.y * DEPTH_RES + texel.x)) * 4u);
+                    vis = (float3)(clamp(meanDepth / 25.0, 0.0, 1.0));
+                } else {
+                    // Confidence: 8 probe 三线性加权的 confidence 灰度。
+                    float conf = 0.0;
+                    float wsum = 0.0;
+                    for (int p = 0; p < 8; ++p) {
+                        if (tw[p] < 0.01) continue;
+                        uint pIdx = pc[p].x + pc[p].y * countsV.x + pc[p].z * countsV.x * countsV.y;
+                        // 4 floats/probe (rayHitRatio, ?, ?, convergence);
+                        // slot 3 is the same convergence DDGIUpdateIrradiance
+                        // publishes and the SC bootstrap gates on.
+                        conf += confidenceBuffer.Load<float>((pIdx * 4u + 3u) * 4u) * tw[p];
+                        wsum += tw[p];
+                    }
+                    vis = (float3)(clamp(conf / max(wsum, 1e-4), 0.0, 1.0));
+                }
+            } else if (visMode == 1 && fvMeta.x > 1.5 && fvOriginSpacing[1].w > 0.0) {
+                // 近场网格外、far volume（flat vols[1]）内:L0 三线性(与 gather
+                // 远场同几何)。T3.6/D1: 读 flat SSBO 而非已删除的 far 双槽。
+                float3 fgp = (worldPos - fvOriginSpacing[1].xyz) / fvOriginSpacing[1].w;
+                float3 fcounts = fvCountsOffset[1].xyz;
+                uint foff = uint(fvCountsOffset[1].w);
+                float3 fgridMax = fcounts - 1.0;
+                if (all(((fgp) >= ((float3)(0.0)))) && all(((fgp) <= (fgridMax)))) {
+                    uint3 fb0 = clamp((uint3)(floor(fgp)), (uint3)(0u), (uint3)(fcounts) - 1u);
+                    uint3 fb1 = min(fb0 + 1u, (uint3)(fcounts) - 1u);
+                    float3 ffrac = frac(fgp);
+                    float ffx = ffrac.x, ffy = ffrac.y, ffz = ffrac.z;
+                    float ftw[8];
+                    ftw[0] = (1.0 - ffx) * (1.0 - ffy) * (1.0 - ffz);
+                    ftw[1] = ffx           * (1.0 - ffy) * (1.0 - ffz);
+                    ftw[2] = (1.0 - ffx) * ffy           * (1.0 - ffz);
+                    ftw[3] = ffx           * ffy           * (1.0 - ffz);
+                    ftw[4] = (1.0 - ffx) * (1.0 - ffy) * ffz;
+                    ftw[5] = ffx           * (1.0 - ffy) * ffz;
+                    ftw[6] = (1.0 - ffx) * ffy           * ffz;
+                    ftw[7] = ffx           * ffy           * ffz;
+                    uint3 fpc[8];
+                    fpc[0] = uint3(fb0.x, fb0.y, fb0.z); fpc[1] = uint3(fb1.x, fb0.y, fb0.z);
+                    fpc[2] = uint3(fb0.x, fb1.y, fb0.z); fpc[3] = uint3(fb1.x, fb1.y, fb0.z);
+                    fpc[4] = uint3(fb0.x, fb0.y, fb1.z); fpc[5] = uint3(fb1.x, fb0.y, fb1.z);
+                    fpc[6] = uint3(fb0.x, fb1.y, fb1.z); fpc[7] = uint3(fb1.x, fb1.y, fb1.z);
+                    float3 sh0 = (float3)(0.0);
+                    float wsum = 0.0;
+                    for (int p = 0; p < 8; ++p) {
+                        if (ftw[p] < 0.01) continue;
+                        uint pIdx = fpc[p].x + fpc[p].y * uint(fcounts.x)
+                                  + fpc[p].z * uint(fcounts.x) * uint(fcounts.y);
+                        sh0 += flatIrradiance.Load<float4>(((foff + pIdx) * 9u) * 16u).xyz * ftw[p];
+                        wsum += ftw[p];
+                    }
+                    if (wsum > 0.0) sh0 /= wsum;
+                    vis = sh0 * 0.28209479;
+                }
+            }
+        }
+        output_tex[(int2)(tid)] = float4(vis, 1.0);
+        spec_output_tex[(int2)(tid)] = (float4)(0.0);
+    } else if (fvMeta.x > 0.5) {
+        // ====================================================================
+        // (B) flat-buffer 多 volume gather（T3.6/D1，取代 descriptor-indexing
+        // N-volume 与 legacy 两槽双路径）。逐像素选择"包含该点且 spacing 最细"
+        // 的 volume（平局取低索引 → near=volume 0 优先），经 probeOffset 索引
+        // 单一 flat SSBO。selected == 0 时与原近场路径同数学（含 R lobe spec
+        // 输出 + 深度图可见性/法线加权）；否则与原远场路径同数学（spec 清零）。
+        // 天空/网外像素与原路径相同的 dim ambient。
+        // ====================================================================
+        if (inBounds && depth < 1.0) {
+            int sel = -1;
+            float selSpacing = 0.0;
+            int nvolCount = int(fvMeta.x);
+            for (int v = 0; v < nvolCount; ++v) {
+                if (fvOriginSpacing[v].w <= 0.0) continue;  // spacing=0 = 未用槽
+                float3 gpv = (worldPos - fvOriginSpacing[v].xyz) / fvOriginSpacing[v].w;
+                float3 gridMax = fvCountsOffset[v].xyz - 1.0;
+                if (all(((gpv) >= ((float3)(0.0)))) && all(((gpv) <= (gridMax)))) {
+                    if (sel < 0 || fvOriginSpacing[v].w < selSpacing) {
+                        sel = v;
+                        selSpacing = fvOriginSpacing[v].w;
+                    }
+                }
+            }
+#ifdef DDGI_TRAVERSAL_AUDIT
+            if(auditSelected) {
+                auditRecords.Store<uint>((auditBase+9u) * 4u, sel>=0?uint(sel):0xffffffffu);
+                if(measuredVisibility && sel>=0) auditRecords.Store<uint>((auditBase+8u) * 4u, sel==0?4u:3u);
+            }
+#endif
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+            // Preserve the actual volume choice, including the invalid -1
+            // case encoded as +1.  No CPU or shader-side fallback is applied.
+            auditSelectedVolumePlus2 = float(sel + 2);
+#endif
+            if (sel >= 0 && (!measuredVisibility || sel == 0)) {
+                // Far has no bound measured depth/origin inputs: mode7 is unsupported.
+                uint volOff = uint(fvCountsOffset[sel].w);
+                float3 gpn = (worldPos - fvOriginSpacing[sel].xyz) / fvOriginSpacing[sel].w;
+                uint3 ncounts = (uint3)(fvCountsOffset[sel].xyz);
+                uint3 b0 = clamp((uint3)(floor(gpn)), (uint3)(0u), ncounts - 1u);
+                uint3 b1 = min(b0 + 1u, ncounts - 1u);
+                float3 fracGp = frac(gpn);
+                float fx = fracGp.x, fy = fracGp.y, fz = fracGp.z;
+
+                float tw[8];
+                tw[0] = (1.0 - fx) * (1.0 - fy) * (1.0 - fz);
+                tw[1] = fx           * (1.0 - fy) * (1.0 - fz);
+                tw[2] = (1.0 - fx) * fy           * (1.0 - fz);
+                tw[3] = fx           * fy           * (1.0 - fz);
+                tw[4] = (1.0 - fx) * (1.0 - fy) * fz;
+                tw[5] = fx           * (1.0 - fy) * fz;
+                tw[6] = (1.0 - fx) * fy           * fz;
+                tw[7] = fx           * fy           * fz;
+
+                uint3 pc[8];
+                pc[0] = uint3(b0.x, b0.y, b0.z); pc[1] = uint3(b1.x, b0.y, b0.z);
+                pc[2] = uint3(b0.x, b1.y, b0.z); pc[3] = uint3(b1.x, b1.y, b0.z);
+                pc[4] = uint3(b0.x, b0.y, b1.z); pc[5] = uint3(b1.x, b0.y, b1.z);
+                pc[6] = uint3(b0.x, b1.y, b1.z); pc[7] = uint3(b1.x, b1.y, b1.z);
+
+                // Phase 1b: SH 重建常量/轴积预计算移除——评基单源
+                // EvalLib.glsl（函数内自算轴积，逐字同序）。
+                float3 V = normalize(cameraPos.xyz - worldPos);
+                float NdotV = clamp(dot(normal, V), 0.05, 1.0);
+                // sel==0(近场)时与 legacy 相同的 R lobe 输入。
+                float3 R = reflect(-V, normal);
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                if (sel == 0) {
+                    auditR = R;
+                    auditNoV = NdotV;
+                }
+#endif
+
+                float3 result = (float3)(0.0);
+                float totalW = 0.0;
+                float3 lowFrequencyGI = (float3)(0.0);
+                float lowFrequencyW = 0.0;
+                float confidenceBaseW = 0.0;
+                float3 reflResult = (float3)(0.0);
+                float3 bestIrr = (float3)(0.0);
+                float3 bestRefl = (float3)(0.0);
+                float bestBaseWeight = -1.0;
+                float3 biasedPos = worldPos + normal * selSpacing * 0.05;
+
+                // GI 能量根治方案 Phase 3.2: 天空可见性分类（R7 根修）。
+                // 像素 openSky = 邻域三线性（同 tw 权重）的探针逃逸占比；
+                // sky-dominant 探针对封闭像素的贡献按一致度衰减——露天能量
+                // 不再隔墙渗透。PRIMAL_GI_OPENSKY=0 时 CPU 置 fvMeta.y=0
+                // （回滚开关），shader 完全跳过分类读。
+                const bool classifyEnable = fvMeta.y > 0.5;
+                // Phase 4a（openSky V2）: fvMeta.z>0.5 = E_geo/E_sky 拆分消费。
+                const bool openSkyV2 = fvMeta.z > 0.5;
+                float pixOpen = 0.0;
+                float pixOpenW = 0.0;
+                if (classifyEnable) {
+                    for (int q = 0; q < 8; ++q) {
+                        if (tw[q] < 0.01) continue;
+                        uint qIdx = pc[q].x + pc[q].y * ncounts.x + pc[q].z * ncounts.x * ncounts.y;
+                        pixOpen += flatProbeOpenSky.Load<float>(((volOff + qIdx) * 2u) * 4u) * tw[q];
+                        pixOpenW += tw[q];
+                    }
+                    if (pixOpenW > 0.0) pixOpen /= pixOpenW;
+                }
+
+#ifdef DDGI_GEOMETRY_PAIR
+                // Reproduce only the original checks that precede the query.
+                // No ineligible probe may acquire a speculative geometry trace.
+                int pairStatus[8];bool pairEligible[8];float3 pairProbe[8];
+                for(int j=0;j<8;++j){pairStatus[j]=0;pairEligible[j]=false;
+                    if(!measuredVisibility || sel!=0 || !physicalConnectionValid || !(tw[j]>0.0))continue;
+                    uint idx=pc[j].x+pc[j].y*ncounts.x+pc[j].z*ncounts.x*ncounts.y;
+                    if(idx>=(byteSize(nearRelocatedOrigins) / 16u) || idx>=(byteSize(ddgiDepthBuffer) / 4u)/uint(DEPTH_FLOATS_PER_PROBE) || volOff+idx>=(byteSize(flatIrradiance) / 16u)/9u)continue;
+                    bool validSH=true;for(int k=0;k<9;++k){float3 sh=flatIrradiance.Load<float4>(((volOff+idx)*9u+uint(k)) * 16u).xyz;validSH=validSH&&!any(isnan(sh))&&!any(isinf(sh));}
+                    if(!validSH)continue;
+                    float4 relocated=nearRelocatedOrigins.Load<float4>((idx) * 16u);
+                    if(!(relocated.w>0.25)||any(isnan(relocated))||any(isinf(relocated)))continue;
+                    float3 delta=relocated.xyz-biasedPos;float dist=length(delta);
+                    float3 toProbe=!(dist>1e-5)?normal:delta/max(dist,1e-5);
+                    float2 moments=sampleNearProbeDepth(idx,-toProbe);
+                    if(any(isnan(moments))||any(isinf(moments))||!all(((moments) >= ((float2)(0.0)))))continue;
+                    pairEligible[j]=true;pairProbe[j]=relocated.xyz;
+                }
+                for(int j=0;j<8;j+=2){
+                    if(pairEligible[j]&&pairEligible[j+1]) {int2 v=qualifiedProbeConnectionPair(physicalConnectionOrigin,pairProbe[j],pairProbe[j+1]);pairStatus[j]=v.x;pairStatus[j+1]=v.y;}
+                    else {if(pairEligible[j])pairStatus[j]=qualifiedProbeConnection(physicalConnectionOrigin,pairProbe[j]);if(pairEligible[j+1])pairStatus[j+1]=qualifiedProbeConnection(physicalConnectionOrigin,pairProbe[j+1]);}
+                }
+#endif
+                for (int p = 0; p < 8; ++p) {
+#ifdef DDGI_GEOMETRY_CONNECTIONS
+                    if(measuredVisibility ? !(tw[p]>0.0) : tw[p]<.01) {
+#ifdef DDGI_TRAVERSAL_AUDIT
+                        if(auditSelected)auditRecords.Store<uint>((auditBase+16u+uint(p)*16u+2u) * 4u, 6u);
+#endif
+                        continue;
+                    }
+#else
+                    if (tw[p] < 0.01) continue;
+#endif
+                    uint pIdx = pc[p].x + pc[p].y * ncounts.x + pc[p].z * ncounts.x * ncounts.y;
+                    if (measuredVisibility && (pIdx >= (byteSize(nearRelocatedOrigins) / 16u) ||
+                        pIdx >= (byteSize(ddgiDepthBuffer) / 4u) / uint(DEPTH_FLOATS_PER_PROBE) ||
+                        volOff + pIdx >= (byteSize(flatIrradiance) / 16u) / 9u)) {
+#ifdef DDGI_TRAVERSAL_AUDIT
+                        if(auditSelected)auditRecords.Store<uint>((auditBase+16u+uint(p)*16u+2u) * 4u, 7u);
+#endif
+                        continue;
+                    }
+                    float3 sh[9];
+                    // T3.6/D1: flat SSBO 索引——volume 偏移 + volume 内探针索引。
+                    for (int i = 0; i < 9; ++i)
+                        sh[i] = flatIrradiance.Load<float4>(((volOff + pIdx) * 9u + uint(i)) * 16u).xyz;
+                    if (measuredVisibility) {
+                        bool finiteSH = true;
+                        for (int i=0;i<9;++i) finiteSH = finiteSH && !any(isnan(sh[i])) && !any(isinf(sh[i]));
+                        if (!finiteSH) {
+#ifdef DDGI_TRAVERSAL_AUDIT
+                            if(auditSelected)auditRecords.Store<uint>((auditBase+16u+uint(p)*16u+2u) * 4u, 8u);
+#endif
+                            continue;
+                        }
+                    }
+                    // Must exactly match DDGIUpdateIrradiance's real-SH basis.
+                    // The previous Vulkan N-volume path swapped coefficients
+                    // 6/7 and omitted four signs, cancelling directional GI.
+                    // Phase 1b: 展开单源 EvalLib——cos-lobe 因子内置，返回
+                    // E(n)/π（调用端 ×π 得 E，PROBE_SH_RAD_TO_IRRAD 不变）。
+                    float3 irr = evalProbeIrradianceSH9(sh, normal);
+
+                    float w = tw[p];
+                    float lowGate = 1.0;
+                    // Phase 3.2: 探针露天度 × 像素封闭度 → 一致度衰减
+                    //（最多压到 0.15，保留环境地板；露天像素 enclosed≈0
+                    // 完全不受影响）。复用现有权重管线，无新增 trace。
+                    // Phase 4a（V2）: 衰减只作用于探针贡献的**天空分量**——
+                    //   atten = mix(1, classify, sER)，sER = 探针天空能量占比
+                    //   （flat openSky 第二分量）。几何主导探针（sER≈0）携带
+                    //   的地面/建筑反弹不再被整探针压暗（审计 §2.5）；天空
+                    //   主导探针（sER≈1）在封闭像素处仍压到 0.15。
+                    //   V2 关闭（PRIMAL_GI_OPENSKY_V2=0）：sER=1 → atten=
+                    //   classify = 旧整探针衰减（逐位回滚）。
+                    float atten = 1.0;
+                    if (classifyEnable) {
+                        float pOpen = flatProbeOpenSky.Load<float>(((volOff + pIdx) * 2u) * 4u);
+                        float skyness = smoothstep(0.15, 0.45, pOpen);
+                        float enclosed = 1.0 - smoothstep(0.05, 0.25, pixOpen);
+                        const float classify = 1.0 - skyness * enclosed * 0.85;
+                        atten = openSkyV2
+                            ? lerp(1.0, classify,
+                                  flatProbeOpenSky.Load<float>(((volOff + pIdx) * 2u + 1u) * 4u))
+                            : classify;
+                    }
+                    w *= atten;
+                    // Buried-probe gate for the low-frequency average (near
+                    // volume only). A probe inside the wall records near-zero
+                    // octahedral mean depth toward every direction; at raw
+                    // trilinear weight its black SH diluted lit texels through
+                    // the 55% low-frequency blend (the patchy dark bands next
+                    // to walls/columns). The continuous ramp keeps the
+                    // anti-black-cell role on thin geometry intact.
+                    float burial = 1.0;
+                    // Only the near volume currently exposes a depth atlas.
+                    // Restore the visibility/normal terms used by the original
+                    // Metal/Dawn gather so irradiance cannot leak through walls
+                    // as probe-sized white cells.
+                    if (sel == 0) {
+                        float3 probePos = fvOriginSpacing[sel].xyz
+                                      + (float3)(pc[p]) * selSpacing;
+                        // P0 坐标契约（w 分类：1.0 本格 / 0.5 借格 / 0 未 trace）：
+                        // 八面体深度图记录自重定位后的物理起点，distToProbe 必须
+                        // 同起点测量；借格探针的 SH 描述借来格环境，不按原格位的
+                        // 独立完整测量对待——可见性通过后仍打半权（§5.3-4）。
+                        // DDGI_LEGACY_CONSUMERS=1（编译期变体）：跳过锚点替换
+                        // 与借格半权，回到旧原格点行为（归因 A/B）。
+                        float originState = 0.0;
+#ifndef DDGI_LEGACY_CONSUMERS
+                        if (nearRelocatedOrigins.Load<float4>((pIdx) * 16u).w > 0.25 &&
+                            (!measuredVisibility || (!any(isnan(nearRelocatedOrigins.Load<float4>((pIdx) * 16u))) &&
+                                                      !any(isinf(nearRelocatedOrigins.Load<float4>((pIdx) * 16u)))))) {
+                            probePos = nearRelocatedOrigins.Load<float4>((pIdx) * 16u).xyz;
+                            originState = nearRelocatedOrigins.Load<float4>((pIdx) * 16u).w;
+                        }
+#endif
+                        float3 toProbeVec = probePos - biasedPos;
+                        float distToProbe = length(toProbeVec);
+                        float3 toProbe = measuredVisibility && !(distToProbe > 1e-5)
+                            ? normal : toProbeVec / max(distToProbe, 1e-5);
+                        // Keep the visibility test continuous.  A zero normal
+                        // term rejects all eight probes near thin/two-sided
+                        // geometry and produces probe-sized unlit cells.
+                        float normalWeight = lerp(
+                            0.2, 1.0,
+                            clamp((dot(normal, toProbe) + 0.5) / 0.7, 0.0, 1.0));
+                        float3 fromProbe = -toProbe;
+                        float2 depthMV = sampleNearProbeDepth(pIdx, fromProbe);
+                        float insidePenalty = 1.0;
+                        if (depthMV.x < selSpacing * 0.2) {
+                            insidePenalty = lerp(
+                                0.2, 1.0,
+                                smoothstep(0.0, 0.2, depthMV.x / selSpacing));
+                            burial = lerp(
+                                0.1, 1.0,
+                                smoothstep(0.0, 0.2, depthMV.x / selSpacing));
+                        }
+                        // T8.10: bounded rejection — visibility floors raised
+                        // (cheby 0.2→0.45, normal 0.2→0.5). Full rejection ate
+                        // real cross-nave lobes on hall-facing receivers (+1.2
+                        // A/B with a healthy field); leak safety stays via the
+                        // gates plus the 55% low-frequency mix.
+                        float nwSoft = max(normalWeight, 0.40); // T8.10c leak tighten
+                        float vw;
+                        if (measuredVisibility) {
+                            vw = originState > 0.25
+                                ? measuredConnectionVisibility(distToProbe, depthMV) : 0.0;
+                            if (vw == 0.0) lowGate = 0.0;
+                        } else {
+                            vw = visibilityWeight(distToProbe, depthMV.x, depthMV.y, selSpacing);
+                            vw = max(vw, 0.38); // legacy bounded rejection
+                        }
+                        if (certifiedFloorBlock(probePos,biasedPos,fromProbe,distToProbe,depthMV)) {
+                            vw=0.0;
+                            lowGate=0.0;
+                        }
+#ifndef DDGI_LEGACY_CONSUMERS
+                        // 借格半权：其 SH 不是原格位的独立测量（审计 §5.3-4）。
+                        vw *= lerp(0.5, 1.0, step(0.75, originState));
+#endif
+#ifdef DDGI_GEOMETRY_CONNECTIONS
+#ifdef DDGI_GEOMETRY_REPLACE
+                        if (measuredVisibility) {
+                            // A geometry OPEN result may replace low moments only
+                            // for a finite, measured source and valid receiver.
+                            bool sourceQualified = !any(isnan(depthMV)) && !any(isinf(depthMV)) &&
+                                all(((depthMV) >= ((float2)(0.0)))) && originState > 0.25;
+#ifdef DDGI_TRAVERSAL_AUDIT
+                            int auditResult=0;
+                            auditTop=0u;auditBottom=0u;auditInstances=0u;auditTriangles=0u;auditFlags=0u;
+                            bool callQualified=sourceQualified && physicalConnectionValid;
+                            if(callQualified) auditResult=qualifiedProbeConnection(physicalConnectionOrigin,probePos);
+                            if(auditSelected) {
+                                uint q=auditBase+16u+uint(p)*16u;
+                                auditRecords.Store<uint>((q) * 4u, pIdx);auditRecords.Store<uint>((q+1u) * 4u, callQualified?(auditResult==1?1u:0u):0xffffffffu);
+                                auditRecords.Store<uint>((q+2u) * 4u, !sourceQualified?1u:!physicalConnectionValid?2u:auditResult==1?4u:auditResult<0?5u:3u);
+                                auditRecords.Store<uint>((q+3u) * 4u, auditTop);auditRecords.Store<uint>((q+4u) * 4u, auditBottom);
+                                auditRecords.Store<uint>((q+5u) * 4u, auditInstances);auditRecords.Store<uint>((q+6u) * 4u, auditTriangles);auditRecords.Store<uint>((q+7u) * 4u, auditFlags);
+                                auditRecords.Store<uint>((q+8u) * 4u, asuint(physicalConnectionOrigin.x));auditRecords.Store<uint>((q+9u) * 4u, asuint(physicalConnectionOrigin.y));auditRecords.Store<uint>((q+10u) * 4u, asuint(physicalConnectionOrigin.z));
+                                auditRecords.Store<uint>((q+11u) * 4u, asuint(probePos.x));auditRecords.Store<uint>((q+12u) * 4u, asuint(probePos.y));auditRecords.Store<uint>((q+13u) * 4u, asuint(probePos.z));
+                                if (callQualified) {
+                                    uint offset = (auditBase + 7u) * 4u;
+                                    auditRecords.Store(offset, auditRecords.Load(offset) + 1u);
+                                }
+                            }
+                            bool clearConnection=callQualified && auditResult==1;
+#else
+#ifdef DDGI_GEOMETRY_PAIR
+                            bool clearConnection = sourceQualified && physicalConnectionValid && pairEligible[p] && pairStatus[p]==1;
+#else
+                            bool clearConnection = sourceQualified && physicalConnectionValid &&
+                                qualifiedProbeConnection(physicalConnectionOrigin,probePos)==1;
+#endif
+#endif
+                            vw = clearConnection ? lerp(0.5,1.0,step(0.75,originState)) : 0.0;
+                            lowGate = clearConnection ? 1.0 : 0.0;
+                        }
+#else
+                        if (measuredVisibility && (!physicalConnectionValid || qualifiedProbeConnection(physicalConnectionOrigin,probePos)!=1)) {
+                            // Do not substitute an unoccluded source, glossy,
+                            // low-frequency or best-probe fallback.
+                            vw=0.0;lowGate=0.0;
+                        }
+#endif
+#endif
+                        w *= nwSoft * vw * insidePenalty;
+                    }
+
+                    // Preserve a low-frequency trilinear component before
+                    // depth/normal rejection. Thin cloth, railings and arches
+                    // otherwise reject the neighbouring probes that carry
+                    // their coloured bounce and collapse to black. The
+                    // visibility-filtered result remains dominant below.
+                    // Buried probes are excluded from this component — their
+                    // SH is wall interior, not a legitimate low-frequency
+                    // source.
+                    confidenceBaseW += tw[p] * burial * atten;
+                    lowFrequencyGI += irr * tw[p] * burial * atten * lowGate;
+                    lowFrequencyW += tw[p] * burial * atten * lowGate;
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    // Capture the exact production contribution after all
+                    // visibility/classification terms.  The strict reader
+                    // treats an out-of-range global ID as unsupported.
+                    uint auditGlobalProbeId = volOff + pIdx;
+                    if (auditGlobalProbeId <= 65535u) {
+                        auditW[p] = w;
+                        auditLowW[p] = tw[p] * burial * atten * lowGate;
+                        auditProbeIds[p] = auditGlobalProbeId;
+                    } else {
+                        // ID 0 is a valid probe.  An out-of-range ID therefore
+                        // carries zero contribution as well as a zero stamp so
+                        // the strict reader cannot mistake it for probe 0.
+                        auditRecordValid = false;
+                        auditW[p] = 0.0;
+                        auditLowW[p] = 0.0;
+                        auditProbeIds[p] = 0u;
+                    }
+#endif
+
+                    if (tw[p] > bestBaseWeight
+#ifdef DDGI_GEOMETRY_CONNECTIONS
+                        && (!measuredVisibility || w>0.0)
+#endif
+                    ) {
+                        bestBaseWeight = tw[p];
+                        bestIrr = irr;
+                    }
+                    result += irr * w;
+                    totalW += w;
+
+                if (sel == 0) {
+                    // Same coefficients along R — no extra device reads.
+                        // Phase 1b: R-lobe 是纯 radiance 评基（specular 无
+                        // cos-lobe 因子）→ evalProbeRadianceSH9（≤1 ulp 关联
+                        // 序差异，见 EvalLib 注释）。
+                        float3 reflIrr = evalProbeRadianceSH9(sh, R);
+                        reflResult += reflIrr * w;
+                        if (tw[p] >= bestBaseWeight
+#ifdef DDGI_GEOMETRY_CONNECTIONS
+                            && (!measuredVisibility || w>0.0)
+#endif
+                        ) bestRefl = reflIrr;
+                    }
+                }
+                if (totalW > 0.0) {
+                    result /= totalW;
+                    reflResult /= totalW;
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    for (int auditP = 0; auditP < 8; ++auditP)
+                        auditW[auditP] /= totalW;
+#endif
+                } else {
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    auditRecordValid = false;
+#endif
+                    // Defensive fallback for malformed depth data.  Normal
+                    // operation uses the non-zero continuous weights above.
+                    result = measuredVisibility ? (float3)(0.0) : bestIrr;
+                    reflResult = measuredVisibility ? (float3)(0.0) : bestRefl;
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    for (int auditP = 0; auditP < 8; ++auditP) {
+                        auditW[auditP] = 0.0;
+                        auditProbeIds[auditP] = 0u;
+                    }
+#endif
+                }
+                if (lowFrequencyW > 0.0) {
+                    lowFrequencyGI /= lowFrequencyW;
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    for (int auditP = 0; auditP < 8; ++auditP)
+                        auditLowW[auditP] /= lowFrequencyW;
+#endif
+                    // 65% leak-resistant visibility gather + 35% smooth
+                    // low-frequency colour bleeding. Correct vec4 probe
+                    // strides and the removed screen-space box blur prevent
+                    // this component from recreating the former white grid.
+                    // [2026-09-20 观感轮] 45%->70% 可见性 gather 占比：55% 低频旁路把
+                    // 跨拱廊探针辐照原样混入，抹平中庭一二层间接光梯度。回退 0.45。
+                    float lowFrequencyBlend = measuredVisibility ? 0.0 : (fvMeta.w >= 0.0
+                        ? clamp(fvMeta.w, 0.0, 1.0) : 0.30);
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    auditLowFrequencyBlend = lowFrequencyBlend;
+#endif
+                    result = lerp(result, lowFrequencyGI, lowFrequencyBlend);
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                } else {
+                    // A zero low-frequency denominator is unsupported for
+                    // source replay.  Clear the IDs too so they cannot be
+                    // interpreted as valid probe 0 records.
+                    for (int auditP = 0; auditP < 8; ++auditP) {
+                        auditLowW[auditP] = 0.0;
+                        auditProbeIds[auditP] = 0u;
+                    }
+#endif
+                }
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                if (!(lowFrequencyW > 0.0)) auditRecordValid = false;
+#endif
+                // Normalized interpolation alone erases visibility magnitude:
+                // eight probes rejected by nearby geometry divide back to full
+                // energy.  Retain the aggregate confidence to suppress that
+                // enclosure leak without changing the surviving probes' hue.
+                float visibilityConfidence = clamp(
+                    totalW / max(confidenceBaseW, 1e-4), 0.0, 1.0);
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                auditVisibilityConfidence = visibilityConfidence;
+#endif
+                result *= visibilityConfidence;
+                // B13 (2026-09-11): sky-leak ambient floor REMOVED — same B12
+                // rationale (fused-supply transport B11 made the leak proxies
+                // obsolete). The old max(result, 0.05) pre-π floored every
+                // in-volume pixel's gi at ~0.16 post-π, flattening dark
+                // pockets. Negative SH reconstruction now clamps to 0 only.
+                float3 diffOut = max(result * PROBE_SH_RAD_TO_IRRAD, (float3)(0.0));
+                output_tex[(int2)(tid)] = float4(diffOut, measuredVisibility && !(totalW > 0.0) ? 0.0 : 1.0);
+
+                if (sel == 0) {
+                    // Glossy output(与 legacy 近场一致):RGB = lobe radiance,
+                    // A = NdotV(DFG 在 FusionComposite)。
+                    // B13: specular keeps RADIANCE units (lobe sampling is not
+                    // cosine-projected) and KEEPS the 0.05 floor — glossy chain
+                    // preserves its pre-B13 scale; only the diffuse leg dropped
+                    // the sky-leak floor.
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+                    // The source variant names the production lookup once so
+                    // the material record and glossy calculation consume the
+                    // same texel/sample/roughness values.  The macro-off
+                    // branch below preserves the original two expressions.
+                    int2 fullOrmTexel = (int2)((float2)(textureDimensions(gbuffer_orm, 0)) * uv);
+                    float4 ormSample = gbuffer_orm.Load(int3(fullOrmTexel, 0));
+                    float roughness = clamp(ormSample.g, 0.04, 1.0);
+                    auditFullOrmTexel = fullOrmTexel;
+                    auditOrmSample = ormSample;
+                    auditOrmRoughness = roughness;
+#else
+                    int2 fullOrmTexel = (int2)((float2)(textureDimensions(gbuffer_orm, 0)) * uv);
+                    float roughness = clamp(gbuffer_orm.Load(int3(fullOrmTexel, 0)).g, 0.04, 1.0);
+#endif
+                    float3 radBase = measuredVisibility ? max(result, (float3)(0.0))
+                        : max(result, float3(0.05, 0.05, 0.06));
+                    float3 specIrr = lerp(reflResult, radBase, roughness * roughness);
+                    spec_output_tex[(int2)(tid)] = measuredVisibility && !(totalW > 0.0)
+                        ? (float4)(0.0) : float4(specIrr, NdotV);
+                } else {
+                    spec_output_tex[(int2)(tid)] = (float4)(0.0);
+                }
+            } else {
+                // Outside all volumes: dim ambient (legacy parity).
+                output_tex[(int2)(tid)] = measuredVisibility ? (float4)(0.0) : float4(0.03, 0.03, 0.035, 1.0);
+                spec_output_tex[(int2)(tid)] = (float4)(0.0);
+            }
+        } else {
+            // Sky / no-depth pixels: legacy parity dim ambient.
+            output_tex[(int2)(tid)] = measuredVisibility ? (float4)(0.0) : float4(0.03, 0.03, 0.035, 1.0);
+            spec_output_tex[(int2)(tid)] = (float4)(0.0);
+        }
+    } else {
+        // T3.6/D1: legacy 两槽路径已删除。fvMeta.x==0（flat 未上传——
+        // GIGatherModule 拿不到 volume 数据时的防御分支）→ dim ambient。
+        output_tex[(int2)(tid)] = measuredVisibility ? (float4)(0.0) : float4(0.03, 0.03, 0.035, 1.0);
+        spec_output_tex[(int2)(tid)] = (float4)(0.0);
+    }
+
+#ifdef DDGI_GLOSSY_SOURCE_AUDIT
+    // Every in-bounds output pixel gets a fresh complete record, including
+    // sky, debug, inactive-volume, and unsupported zero-denominator cases.
+    // The slot is implicit in the pixel index, so no CPU-side ray identity is
+    // guessed or borrowed from an earlier frame.
+    if (inBounds) {
+        uint record = (tid.y * width + tid.x) * 9u;
+        uint depthPacked = 0u;
+        if (auditDepthTexel.x >= 0 && auditDepthTexel.y >= 0 &&
+            auditDepthTexel.x <= 65535 && auditDepthTexel.y <= 65535) {
+            depthPacked = (uint(auditDepthTexel.x) & 0xffffu) |
+                          ((uint(auditDepthTexel.y) & 0xffffu) << 16u);
+        }
+        if (auditDepthTexel.x < 0 || auditDepthTexel.y < 0 ||
+            auditDepthTexel.x > 65535 || auditDepthTexel.y > 65535)
+            auditRecordValid = false;
+        uint normalPacked = 0xffffffffu;
+        if (auditNormalTexel.x >= 0 && auditNormalTexel.y >= 0) {
+            // Positive but unrepresentable fetch coordinates are unsupported
+            // and use zero; negative coordinates retain the inactive sentinel.
+            normalPacked = 0u;
+            if (auditNormalTexel.x > 65535 || auditNormalTexel.y > 65535)
+                auditRecordValid = false;
+            if (auditNormalTexel.x <= 65535 && auditNormalTexel.y <= 65535) {
+                normalPacked = (uint(auditNormalTexel.x) & 0xffffu) |
+                               ((uint(auditNormalTexel.y) & 0xffffu) << 16u);
+            }
+        }
+        uint ids01 = (auditProbeIds[0] & 0xffffu) |
+                     ((auditProbeIds[1] & 0xffffu) << 16u);
+        uint ids23 = (auditProbeIds[2] & 0xffffu) |
+                     ((auditProbeIds[3] & 0xffffu) << 16u);
+        uint ids45 = (auditProbeIds[4] & 0xffffu) |
+                     ((auditProbeIds[5] & 0xffffu) << 16u);
+        uint ids67 = (auditProbeIds[6] & 0xffffu) |
+                     ((auditProbeIds[7] & 0xffffu) << 16u);
+        // Record layout (9 vec4/pixel):
+        // 0 world.xyz/frame, 1 normal.xyz/selected+2, 2 R.xyz/NoV,
+        // 3 packed fetch coords/confidence/blend, 4/5 W[0..7],
+        // 6/7 lowW[0..7], 8 packed IDs[0..7].
+        glossySourceAudit.Store<float4>((record + 0u) * 16u, float4(worldPos, auditRecordValid ? probeCounts.w : 0.0));
+        glossySourceAudit.Store<float4>((record + 1u) * 16u, float4(normal, auditSelectedVolumePlus2));
+        glossySourceAudit.Store<float4>((record + 2u) * 16u, float4(auditR, auditNoV));
+        glossySourceAudit.Store<float4>((record + 3u) * 16u, float4(asfloat(depthPacked), asfloat(normalPacked), auditVisibilityConfidence, auditLowFrequencyBlend));
+        glossySourceAudit.Store<float4>((record + 4u) * 16u, float4(auditW[0], auditW[1], auditW[2], auditW[3]));
+        glossySourceAudit.Store<float4>((record + 5u) * 16u, float4(auditW[4], auditW[5], auditW[6], auditW[7]));
+        glossySourceAudit.Store<float4>((record + 6u) * 16u, float4(auditLowW[0], auditLowW[1], auditLowW[2], auditLowW[3]));
+        glossySourceAudit.Store<float4>((record + 7u) * 16u, float4(auditLowW[4], auditLowW[5], auditLowW[6], auditLowW[7]));
+        glossySourceAudit.Store<float4>((record + 8u) * 16u, float4(asfloat(ids01), asfloat(ids23), asfloat(ids45), asfloat(ids67)));
+        uint materialRecord = (tid.y * width + tid.x) * 2u;
+        // Unlike the legacy source record's validity stamp, the material
+        // record is fresh for every in-bounds pixel, including inactive/far
+        // pixels whose texel/sample fields retain their explicit sentinels.
+        glossyMaterialAudit.Store<float4>((materialRecord + 0u) * 16u, float4(float(auditFullOrmTexel.x), float(auditFullOrmTexel.y), auditOrmRoughness, probeCounts.w));
+        glossyMaterialAudit.Store<float4>((materialRecord + 1u) * 16u, auditOrmSample);
+    }
+#endif
+}

@@ -5,11 +5,9 @@
 // 字节码语义（对齐 Vulkan CreateShader 的字节省约定——Vulkan 侧直传
 // SPIR-V 字节，加载路径归测试宿主/RenderSystem）：
 //   - CreateShader(data, size, stage, entryPoint) 的 data = DXIL 容器字节
-//     （.cso / dxc -Fo 产物）。M1-B 产物加载路径约定：
-//     EngineTest/shaders/D3D12/<name>_<stage>.dxc.cso（宿主读文件后直传）。
-//   - 入口恒 "main"：主链 glslang→SPIR-V→spirv-cross→HLSL→dxc 把入口统一
-//     重命名为 main（Shader Spike Report §5——跨链一致），本对象忽略
-//     entryPoint 参数并记录（PSO 创建按 main 消费）。
+//     （原生 HLSL 经 DXC 离线编译，每个入口一个 .cso）。
+//     宿主从 EngineTest/shaders/d3d12/ 读取清单指定的相对路径。
+//   - 入口由离线编译的 -E 选定，PSO 直接消费这份字节码。
 //   - Initialize 校验 DXBC 容器魔数（"DXBC"）——错把 SPIR-V 字节喂进来时
 //     显式失败，不静默。
 #pragma once
