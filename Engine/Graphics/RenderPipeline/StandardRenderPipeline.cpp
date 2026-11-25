@@ -6328,6 +6328,68 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
     }
 
+    // 2026-11-25: full near-volume DDGI SH readback. The SC lighting atlas was
+    // ruled out (same-run digest differs only in the last bits; 236/256 tiles
+    // identical to 3 dp), so the remaining question is which probes' irradiance
+    // differs and by how much. 882 probes x 9 vec4 = 127 KB, one-shot copy.
+    // PRIMAL_F350_DDGI_SH=1; consumed one frame after capture.
+    static const bool ddgiShDump = std::getenv("PRIMAL_F350_DDGI_SH") != nullptr;
+    if (ddgiShDump && frameCount_ == 351) {
+        if (auto* nearVolume = GetDDGIVolume(0)) {
+            const u32 slot = u32((frameCount_ - 1) % 3);
+            const auto sh = nearVolume->GetIrradianceBufferBySlot(slot);
+            u64 bytes = 0;
+            if (sh != handles::INVALID_RESOURCE && device_->GetBufferByteSize(sh, bytes) && bytes) {
+                BufferDesc bd{};
+                bd.size = bytes;
+                bd.type = BufferType::Raw;
+                bd.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+                bd.memoryUsage = GPUMemoryUsage::Readback;
+                bd.name = "F350_DDGI_NearSH";
+                const auto stage = device_->CreateBuffer(bd);
+                if (stage != handles::INVALID_RESOURCE) {
+                    const auto ch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                    if (ch != handles::INVALID_COMMAND_BUFFER) {
+                        if (auto* c2 = GetCommandBuffer(ch)) {
+                            c2->Begin();
+                            c2->CopyBuffer(sh, stage, 0, 0, bytes);
+                            c2->End();
+                            c2->Submit();
+                            c2->WaitForCompletion();
+                            if (auto* p = static_cast<const u8*>(device_->MapBuffer(stage))) {
+                                u64 digest = 1469598103934665603ull;
+                                for (u64 i = 0; i < bytes; ++i) {
+                                    digest ^= p[i];
+                                    digest *= 1099511628211ull;
+                                }
+                                constexpr u64 kProbeStride = 9ull * 16ull;  // 9 x vec4
+                                const u64 probes = bytes / kProbeStride;
+                                std::string luma;
+                                for (u64 i = 0; i < probes; ++i) {
+                                    float c[4];
+                                    std::memcpy(c, p + i * kProbeStride, sizeof(c));
+                                    const double l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+                                    char cell[24];
+                                    std::snprintf(cell, sizeof(cell), "%s%.4f", i ? "," : "", l);
+                                    luma += cell;
+                                }
+                                PRIMAL_LOG_STREAM(Info, "Render")
+                                    << "[F350DDGI_SH] frame=" << frameCount_ - 1
+                                    << " slot=" << slot << " probes=" << probes
+                                    << " bytes=" << bytes
+                                    << " digest=0x" << std::hex << digest << std::dec
+                                    << " luma0=" << luma << std::endl;
+                                device_->UnmapBuffer(stage);
+                            }
+                        }
+                        device_->DestroyCommandBuffer(ch);
+                    }
+                    device_->DestroyBuffer(stage);
+                }
+            }
+        }
+    }
+
     // A single completed submission owns the sparse copies. Consume before this frame records.
     if (deferred_samples_ != handles::INVALID_RESOURCE) {
         device_->WaitIdle();
