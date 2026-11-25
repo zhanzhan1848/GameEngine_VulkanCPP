@@ -6390,6 +6390,72 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
         }
     }
 
+    // 2026-11-25: per-probe mean ray distance, next to the SH dump. The full
+    // near-field SH readback shows 39% of probes >5% and 27% >10% apart (max
+    // 66%), so the discriminator is whether those same probes also trace
+    // different distances (SDF trace / sampling) or only carry different
+    // radiance (card lookup). 882 probes x 128 floats = 451 KB, one-shot copy.
+    // PRIMAL_F350_DDGI_DEPTH=1; consumed one frame after capture.
+    static const bool ddgiDepthDump = std::getenv("PRIMAL_F350_DDGI_DEPTH") != nullptr;
+    if (ddgiDepthDump && frameCount_ == 351) {
+        if (auto* nearVolume = GetDDGIVolume(0)) {
+            const u32 slot = u32((frameCount_ - 1) % 3);
+            const auto depthBuf = nearVolume->GetDepthBufferBySlot(slot);
+            u64 bytes = 0;
+            if (depthBuf != handles::INVALID_RESOURCE &&
+                device_->GetBufferByteSize(depthBuf, bytes) && bytes) {
+                BufferDesc bd{};
+                bd.size = bytes;
+                bd.type = BufferType::Raw;
+                bd.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+                bd.memoryUsage = GPUMemoryUsage::Readback;
+                bd.name = "F350_DDGI_NearDepth";
+                const auto stage = device_->CreateBuffer(bd);
+                if (stage != handles::INVALID_RESOURCE) {
+                    const auto ch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                    if (ch != handles::INVALID_COMMAND_BUFFER) {
+                        if (auto* c2 = GetCommandBuffer(ch)) {
+                            c2->Begin();
+                            c2->CopyBuffer(depthBuf, stage, 0, 0, bytes);
+                            c2->End();
+                            c2->Submit();
+                            c2->WaitForCompletion();
+                            if (auto* p = static_cast<const u8*>(device_->MapBuffer(stage))) {
+                                u64 digest = 1469598103934665603ull;
+                                for (u64 i = 0; i < bytes; ++i) {
+                                    digest ^= p[i];
+                                    digest *= 1099511628211ull;
+                                }
+                                constexpr u64 kFloatsPerProbe = 128ull;  // [mean64 | var64]
+                                const u64 probes = bytes / (kFloatsPerProbe * sizeof(float));
+                                std::string means;
+                                for (u64 i = 0; i < probes; ++i) {
+                                    const float* d = reinterpret_cast<const float*>(
+                                        p + i * kFloatsPerProbe * sizeof(float));
+                                    double sum = 0.0;
+                                    for (u64 k = 0; k < 64ull; ++k) sum += d[k];
+                                    char cell[24];
+                                    std::snprintf(cell, sizeof(cell), "%s%.5f", i ? "," : "",
+                                                  sum / 64.0);
+                                    means += cell;
+                                }
+                                PRIMAL_LOG_STREAM(Info, "Render")
+                                    << "[F350DDGI_DEPTH] frame=" << frameCount_ - 1
+                                    << " slot=" << slot << " probes=" << probes
+                                    << " bytes=" << bytes
+                                    << " digest=0x" << std::hex << digest << std::dec
+                                    << " mean=" << means << std::endl;
+                                device_->UnmapBuffer(stage);
+                            }
+                        }
+                        device_->DestroyCommandBuffer(ch);
+                    }
+                    device_->DestroyBuffer(stage);
+                }
+            }
+        }
+    }
+
     // A single completed submission owns the sparse copies. Consume before this frame records.
     if (deferred_samples_ != handles::INVALID_RESOURCE) {
         device_->WaitIdle();

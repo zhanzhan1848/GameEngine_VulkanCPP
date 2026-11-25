@@ -209,7 +209,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         'PRIMAL_F350_SC_RAYS', 'PRIMAL_F350_GI_BINDINGS', 'PRIMAL_VK_HANG_DIAG', 'PRIMAL_SPGI_SKIP', 'GI_ISOLATE',
         'PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL', 'RHI_TEST_PLATFORM', 'PRIMAL_LIGHTING_DEBUG',
         'TAA_OFF', 'PRIMAL_SHADOW_RENDER_OFF', 'PRIMAL_D3D12_BLACK_STAGE_FRAME',
-        'PRIMAL_F350_SC_ATLAS', 'PRIMAL_F350_DDGI_SH',
+        'PRIMAL_F350_SC_ATLAS', 'PRIMAL_F350_DDGI_SH', 'PRIMAL_F350_DDGI_DEPTH',
         'PRIMAL_D3D12_GBV', 'PRIMAL_D3D12_BLACK_STAGE_DUMP', 'PRIMAL_D3D12_API_TRACE',
         'PRIMAL_D3D12_DEFERRED_PROBE', 'PRIMAL_DUMP_MATRIX', 'PRIMAL_D3D12_RTVAUDIT',
         'PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL', 'PRIMAL_D3D12_DEFERRED_COPY_WRITE', 'PRIMAL_DEFERRED_SAMPLES'
@@ -368,6 +368,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         # Same-round companion: full 882-probe near-field SH readback, so the
         # per-probe irradiance spread is compared instead of 3 sampled probes.
         $env:PRIMAL_F350_DDGI_SH = '1'
+        $env:PRIMAL_F350_DDGI_DEPTH = '1'
     }
     if ($g.diag -eq 13) { $env:PRIMAL_F350_SC_RAYS = '1' }
     if ($g.diag -in @(12,13)) {
