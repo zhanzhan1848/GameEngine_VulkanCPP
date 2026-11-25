@@ -610,3 +610,6 @@ scripts/gi_ownership_baseline.sh
 /wasm/TestDawnWASM.wasm
 /wasm/libEngine.a
 /wasm/liblua_static.a
+
+# BVH perf local measurement outputs (scripts/perf/run_bvh_perf.sh)
+/perf-out/
