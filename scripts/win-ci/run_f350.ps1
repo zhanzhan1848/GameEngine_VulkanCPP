@@ -209,6 +209,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         'PRIMAL_F350_SC_RAYS', 'PRIMAL_F350_GI_BINDINGS', 'PRIMAL_VK_HANG_DIAG', 'PRIMAL_SPGI_SKIP', 'GI_ISOLATE',
         'PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL', 'RHI_TEST_PLATFORM', 'PRIMAL_LIGHTING_DEBUG',
         'TAA_OFF', 'PRIMAL_SHADOW_RENDER_OFF', 'PRIMAL_D3D12_BLACK_STAGE_FRAME',
+        'PRIMAL_F350_SC_ATLAS',
         'PRIMAL_D3D12_GBV', 'PRIMAL_D3D12_BLACK_STAGE_DUMP', 'PRIMAL_D3D12_API_TRACE',
         'PRIMAL_D3D12_DEFERRED_PROBE', 'PRIMAL_DUMP_MATRIX', 'PRIMAL_D3D12_RTVAUDIT',
         'PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL', 'PRIMAL_D3D12_DEFERRED_COPY_WRITE', 'PRIMAL_DEFERRED_SAMPLES'
@@ -358,7 +359,13 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         $env:PRIMAL_SPONZA_WATCHDOG_SECS = '900'
     }
 
-    if ($g.diag -eq 12) { $env:DDGI_RAY_SAMPLE = '0' }
+    if ($g.diag -eq 12) {
+        $env:DDGI_RAY_SAMPLE = '0'
+        # 2026-11-25: SC lighting-atlas parity digest. DDGI Finalize and SPGI
+        # TraceFinalize both sample this atlas; the vault shows ~10-12% in both,
+        # so compare the atlas itself instead of guessing between GI paths.
+        $env:PRIMAL_F350_SC_ATLAS = '1'
+    }
     if ($g.diag -eq 13) { $env:PRIMAL_F350_SC_RAYS = '1' }
     if ($g.diag -in @(12,13)) {
         $env:PRIMAL_DEFERRED_SAMPLES = '1'

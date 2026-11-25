@@ -129,6 +129,10 @@ def compare_pair(img_a, img_b):
             "mean_abs_diff_luma": 0.0,
             "max_abs_diff_luma": 0,
             "ssim_luma_8x8block": 1.0,
+            "frac_pixels_gt8": 0.0,
+            "frac_pixels_gt16": 0.0,
+            "tile16_mean_abs_p99": 0.0,
+            "tile16_mean_abs_max": 0.0,
         }
 
     # PSNR / MAE: 与 r4 逐字节同式 (packed + 每通道 + luma)
@@ -187,6 +191,35 @@ def compare_pair(img_a, img_b):
                         ((mu_a * mu_a + mu_b * mu_b + SSIM_C1) * (var_a + var_b + SSIM_C2))
     ssim = ssim_sum / (bh * bw)
 
+    # Visibility-aware metrics (2026-11-25): global PSNR hides locally visible
+    # differences (14% of one 160x368 region can differ by >8/255 while the
+    # whole-image PSNR stays at 42 dB). Count pixels whose max channel differs
+    # by more than 8/16 LSB, and summarize 16x16 tile means of that max-channel
+    # difference. Not used by the f350 gate itself; parity_report prints them.
+    gt8 = gt16 = 0
+    tile_w, tile_h = w // 16, h // 16
+    tile_sums = [0] * (tile_w * tile_h)
+    for y in range(h):
+        row = y * w * 3
+        ty = y // 16
+        for x in range(w):
+            i = row + x * 3
+            d0 = a[i] - b[i]
+            d1 = a[i + 1] - b[i + 1]
+            d2 = a[i + 2] - b[i + 2]
+            m = d0 if d0 >= 0 else -d0
+            if d1 > m or -d1 > m:
+                m = d1 if d1 >= 0 else -d1
+            if d2 > m or -d2 > m:
+                m = d2 if d2 >= 0 else -d2
+            if m > 8:
+                gt8 += 1
+                if m > 16:
+                    gt16 += 1
+            tile_sums[ty * tile_w + x // 16] += m
+    tile_means = sorted(v / 256.0 for v in tile_sums)
+    p99 = tile_means[min(len(tile_means) - 1, int(0.99 * len(tile_means)))] if tile_means else 0.0
+
     return {
         "byte_identical": False,
         "psnr_rgb_db": round(psnr_all, 4),
@@ -197,6 +230,10 @@ def compare_pair(img_a, img_b):
         "mean_abs_diff_luma": round(sae_l / npix, 6),
         "max_abs_diff_luma": maxd_l,
         "ssim_luma_8x8block": round(ssim, 6),
+        "frac_pixels_gt8": round(gt8 / npix, 6),
+        "frac_pixels_gt16": round(gt16 / npix, 6),
+        "tile16_mean_abs_p99": round(p99, 4),
+        "tile16_mean_abs_max": round(tile_means[-1], 4) if tile_means else 0.0,
     }
 
 

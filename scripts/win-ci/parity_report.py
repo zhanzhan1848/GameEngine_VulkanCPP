@@ -49,6 +49,14 @@ MODE0_REF_SHA256 = ("59360839e0530cd33f2bd6c0c89c74be402d8d5d5475f7c7ab9897d6d64
 PSNR_GATE_DB = 43.5
 MODE0_PAIR_GATE_DB = 41.5   # D3D12 vs Vulkan, same run, mode 0 (measured 42.1)
 MODE0_REF_GATE_DB = 41.0    # D3D12 vs frozen mode-0 reference (measured 42.1)
+# Advisory "visible difference" criterion (NOT gated yet). Calibrated on the
+# GI-off pair the reviewer accepts as visually consistent (0.21% pixels >8 LSB,
+# tile16 mean p99 = 3.12) and the Vulkan run-to-run noise floor (0.00%, 0.80).
+# The GI-on mode-0 pair currently sits at 1.60% / 7.28, i.e. visibly different
+# in the banner and upper-arch regions; the row is printed so the CI summary
+# cannot imply visual equivalence while this is true.
+VIS_GT8_LIMIT = 0.005      # <=0.5% of pixels with max-channel diff >8/255
+VIS_TILE_P99_LIMIT = 3.5   # 16x16 tile mean of max-channel diff, p99
 MODE0_PPM = {
     "d3d12": "art2_win_d3d12_mode0_f350.ppm",
     "vulkan": "art2_win_vulkan_mode0_f350.ppm",
@@ -282,8 +290,11 @@ def main():
                 "label": "D3D12 vs Vulkan mode 0 (same run)",
                 "psnr": psnr, "ssim": pair["ssim_luma_8x8block"],
                 "mean_abs": pair["mean_abs_diff_rgb"],
+                "gt8": pair.get("frac_pixels_gt8"),
+                "tilep99": pair.get("tile16_mean_abs_p99"),
                 "gate": "PASS" if ok else
                         "FAIL %.4f dB < %.1f dB" % (psnr, MODE0_PAIR_GATE_DB)})
+            mode0["pair"] = pair
             print("[parity] mode0 pair: PSNR=%s -> %s" % (psnr, mode0["rows"][-1]["gate"]))
             try:
                 triptych(mode0_paths["vulkan"], mode0_paths["d3d12"],
@@ -321,10 +332,31 @@ def main():
                 mode0["rows"].append({
                     "label": "%s mode 0 vs frozen mode-0 reference" % api.upper(),
                     "psnr": psnr, "ssim": pair["ssim_luma_8x8block"],
-                    "mean_abs": pair["mean_abs_diff_rgb"], "gate": gate})
+                    "mean_abs": pair["mean_abs_diff_rgb"],
+                    "gt8": pair.get("frac_pixels_gt8"),
+                    "tilep99": pair.get("tile16_mean_abs_p99"),
+                    "gate": gate})
                 print("[parity] mode0 ref %s: PSNR=%s -> %s" % (api, psnr, gate))
         else:
             print("[parity] WARN mode-0 reference missing: %s" % ref0)
+
+    # GI-off same-run pair: the calibration point for the visibility advisory.
+    gioff_paths = [os.path.join(ppm_dir, n) for n in
+                   ("art2_win_vulkan_gioff_f350.ppm", "art2_win_d3d12_gioff_f350.ppm")]
+    if all(os.path.isfile(p) for p in gioff_paths):
+        dst = os.path.join(args.out, "compare_windows_gioff.json")
+        proc = subprocess.run([sys.executable, compare, gioff_paths[0],
+                               gioff_paths[1], "--json", dst], capture_output=True)
+        if proc.returncode == 0:
+            with open(dst, "r", encoding="utf-8") as fh:
+                pair = json.load(fh)["pairs"][0]
+            mode0["rows"].append({
+                "label": "GI-off D3D12 vs Vulkan (calibration)",
+                "psnr": pair["psnr_rgb_db"], "ssim": pair["ssim_luma_8x8block"],
+                "mean_abs": pair["mean_abs_diff_rgb"],
+                "gt8": pair.get("frac_pixels_gt8"),
+                "tilep99": pair.get("tile16_mean_abs_p99"),
+                "gate": "reference pair"})
 
     lines = []
     lines.append("### Windows parity f350 vs frozen references")
@@ -354,15 +386,35 @@ def main():
     lines.append("")
     lines.append("### Like-for-like DDGI mode 0 (same runner, same run)")
     lines.append("")
-    lines.append("| comparison | PSNR (dB) | SSIM | mean abs | gate |")
-    lines.append("|---|---|---|---|---|")
+    lines.append("| comparison | PSNR (dB) | SSIM | mean abs | >8 LSB | "
+                 "tile16 p99 | gate |")
+    lines.append("|---|---|---|---|---|---|---|")
     for r in mode0["rows"]:
         psnr_s = "inf" if r["psnr"] == float("inf") else (
             "%.4f" % r["psnr"] if r["psnr"] is not None else "n/a")
         ssim_s = ("%.6f" % r["ssim"]) if r["ssim"] is not None else "n/a"
         mean_s = ("%.3f" % r["mean_abs"]) if r["mean_abs"] is not None else "n/a"
-        lines.append("| %s | %s | %s | %s | %s |" %
-                     (r["label"], psnr_s, ssim_s, mean_s, r["gate"]))
+        gt8_s = ("%.2f%%" % (100.0 * r["gt8"])) if r.get("gt8") is not None else "n/a"
+        tp_s = ("%.2f" % r["tilep99"]) if r.get("tilep99") is not None else "n/a"
+        lines.append("| %s | %s | %s | %s | %s | %s | %s |" %
+                     (r["label"], psnr_s, ssim_s, mean_s, gt8_s, tp_s, r["gate"]))
+    lines.append("")
+    pair = mode0.get("pair")
+    if pair and pair.get("frac_pixels_gt8") is not None:
+        gt8 = pair["frac_pixels_gt8"]
+        tp99 = pair.get("tile16_mean_abs_p99") or 0.0
+        visible = gt8 <= VIS_GT8_LIMIT and tp99 <= VIS_TILE_P99_LIMIT
+        lines.append(
+            "Visible-difference advisory (NOT gated): mode 0 D3D12 vs Vulkan has "
+            "**%.2f%%** pixels with max-channel diff >8/255 (limit %.1f%%) and "
+            "16x16 tile-mean p99 **%.2f** (limit %.1f) -> %s. A green gate means "
+            "the regression thresholds hold; it does not certify visual "
+            "equivalence." %
+            (100.0 * gt8, 100.0 * VIS_GT8_LIMIT, tp99, VIS_TILE_P99_LIMIT,
+             "inside the proposed bound" if visible
+             else "OUTSIDE the proposed visual bound"))
+        print("[parity] visibility advisory: gt8=%.2f%% tilep99=%.2f -> %s" %
+              (100.0 * gt8, tp99, "pass" if visible else "FAIL(advisory)"))
     lines.append("")
     if any_fail:
         lines.append("**Overall f350 gate: FAIL.**")
