@@ -6211,8 +6211,14 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     u32 cbIdx = bufferIndex;
     // Render-space coordinates. The last two cover bright regions of the frozen
     // GI-off image (sky and a sunlit surface); the first three also sample shade.
+    // Points 5-7 (2026-11-25) land on the two regions where the mode-0
+    // D3D12/Vulkan pair shows visible indirect-light differences: the right
+    // banners (screen x~1152-1216, y~384-576) and the upper-left arch
+    // (screen 512,160). They let [F350GIPixel] attribute the difference to
+    // DDGI vs SPGI at the hotspot instead of inferring it from a global PSNR.
     static constexpr u32 deferredPixels[][2] = {
-        {300, 40}, {1520, 1310}, {1964, 594}, {1200, 10}, {2160, 900}
+        {300, 40}, {1520, 1310}, {1964, 594}, {1200, 10}, {2160, 900},
+        {2304, 768}, {2432, 1152}, {1024, 320}
     };
     constexpr u32 samplesPerMrt = std::size(deferredPixels);
     constexpr u32 samplesPerPhase = 2 * samplesPerMrt;
