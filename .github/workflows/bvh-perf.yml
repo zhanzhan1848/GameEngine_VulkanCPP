@@ -1,0 +1,209 @@
+name: bvh-perf
+
+# BVH/遍历性能测量（Dynamic GI 标准场景，TestVulkanSponzaRenderGraph，
+# timing-only + RG per-pass GPU timestamp）。只报告，不卡性能门：
+# 仅 harness 崩溃/看门狗杀进程/二进制缺失才失败。
+#
+# ⚠️ GitHub Actions 的 schedule 只在默认分支（master）上的 workflow 文件生效。
+# 本文件必须以单独提交落在 master；被测代码通过 checkout 的 ref 输入选择
+# （默认 dev——实现已合入 dev，夜跑固定测 dev），与 runner 持久工作区上的 build-bvhperf 增量树配合。
+#
+# 平台策略（2026-11-25 拍板）：Windows 自托管 runner（有 GPU）+ macOS 仅本地
+# 测量（scripts/perf/run_bvh_perf.sh，不注册 runner）。
+
+on:
+  schedule:
+    - cron: '0 18 * * *'   # 每日 02:00 北京时间（18:00 UTC）
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: '被测分支/commit（默认 dev）'
+        required: false
+        default: 'dev'
+      groups:
+        description: '测量组（逗号分隔：gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper,dyn-gi-lbvh,dyn-gi-hlbvh）'
+        required: false
+        default: 'gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper,dyn-gi-lbvh,dyn-gi-hlbvh'
+      frames:
+        description: '每组帧数'
+        required: false
+        default: '420'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bvh-perf
+  cancel-in-progress: false
+
+jobs:
+  bvh-perf-windows:
+    name: BVH perf (Windows / Vulkan / Dynamic GI)
+    runs-on: [self-hosted, Windows, X64, D3D12, Vulkan]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout (persisted clone, retry x5, selectable ref)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $ws  = $env:GITHUB_WORKSPACE
+          $url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          $ref = '${{ inputs.ref }}'
+          if (-not $ref) { $ref = 'dev' }
+          $max = 5
+          git config --global --add safe.directory "$ws" 2>$null | Out-Null
+          $done = $false
+          for ($i = 1; $i -le $max -and -not $done; $i++) {
+            Write-Host "::group::checkout attempt $i/$max ref=$ref"
+            $rc = 0
+            if (Test-Path "$ws/.git") {
+              git -C $ws fetch --depth 1 origin $ref
+              $rc = $LASTEXITCODE
+              if ($rc -eq 0) { git -C $ws checkout --detach --force FETCH_HEAD; $rc = $LASTEXITCODE }
+            } else {
+              Get-ChildItem $ws -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+              git clone --depth 1 --no-checkout $url $ws
+              $rc = $LASTEXITCODE
+              if ($rc -eq 0) {
+                git -C $ws fetch --depth 1 origin $ref; $rc = $LASTEXITCODE
+                if ($rc -eq 0) { git -C $ws checkout --detach --force FETCH_HEAD; $rc = $LASTEXITCODE }
+              }
+            }
+            if ($rc -eq 0) {
+              # meshopt pin 只在本机（回退物化见下）；VHACD 无 .gitmodules 映射。
+              # 与 windows-parity 同一套排除清单。
+              git -C $ws submodule update --init --recursive --depth 1 -- ':(exclude)third_party/meshoptimizer' ':(exclude)third_party/VHACD'
+              $rc = $LASTEXITCODE
+            }
+            Write-Host "::endgroup::"
+            if ($rc -eq 0) { $done = $true } else {
+              Write-Host "::warning::checkout attempt $i failed (rc=$rc); backing off"
+              Start-Sleep -Seconds (20 * $i)
+            }
+          }
+          if (-not $done) { Write-Host "::error::checkout failed after $max attempts"; exit 1 }
+          & powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/ci_meshopt_fallback.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git -C $ws rev-parse HEAD
+          Write-Output "BVH_PERF_REF=$ref" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Cleanup stale run outputs (R28 教训)
+        shell: powershell
+        run: |
+          # self-hosted checkout 不做 git clean；先清零上轮产物，避免
+          # 失败 run 把上一轮报告当本轮证据上传。
+          if (Test-Path ci-out/bvh-perf) {
+            Remove-Item ci-out/bvh-perf -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Output "[cleanup] stale ci-out/bvh-perf removed"
+          }
+          "# BVH perf run`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "- ref: $env:BVH_PERF_REF`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "- commit: ${{ github.sha }}`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "- runner: $env:COMPUTERNAME`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "- report-only：数值回归不标红；组失败/harness 崩溃才 fail`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Preflight (tools + assets)
+        shell: powershell
+        run: |
+          $fail = $false
+          if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) { Write-Host "::error::cmake not found"; $fail = $true }
+          if (-not (Get-Command python -ErrorAction SilentlyContinue) -and -not (Get-Command py -ErrorAction SilentlyContinue)) { Write-Host "::error::python not found"; $fail = $true }
+          $asset = if ($env:PRIMAL_CI_ASSET_DIR) { $env:PRIMAL_CI_ASSET_DIR } elseif ($env:PRIMAL_CI_ASSET_SOURCE) { $env:PRIMAL_CI_ASSET_SOURCE } else { $null }
+          if (-not $asset -or -not (Test-Path $asset)) {
+            Write-Host "::error::Sponza 资产目录缺失：请设 PRIMAL_CI_ASSET_DIR/PRIMAL_CI_ASSET_SOURCE（与 windows-parity 同一套 runner 机 env）"
+            $fail = $true
+          }
+          if ($env:PRIMAL_CI_THIRD_PARTY_DIR -and -not (Test-Path $env:PRIMAL_CI_THIRD_PARTY_DIR)) {
+            Write-Host "::error::PRIMAL_CI_THIRD_PARTY_DIR 不存在"; $fail = $true
+          }
+          if ($env:PRIMAL_CI_SDK_MODULES -and -not (Test-Path $env:PRIMAL_CI_SDK_MODULES)) {
+            Write-Host "::error::PRIMAL_CI_SDK_MODULES 不存在"; $fail = $true
+          }
+          if (-not $env:VULKAN_SDK) { Write-Host "::warning::VULKAN_SDK 未设（Vulkan loader 仍可能经默认路径找到）" }
+          if ($fail) { exit 1 }
+
+      - name: Configure CMake (VS2022 x64 Release, Vulkan-only, 独立 build-bvhperf)
+        shell: powershell
+        run: |
+          # 独立目录：不碰 windows-parity 的 build-winparity（并发/缓存互不污染）。
+          # 显式 ON：build 目录跨 run 持久，CMakeCache 残留的 OFF 不会因旗标缺席翻转。
+          # BUILD_CONTENT_TOOLS 必须 ON——IntegrationTests 的可执行目标挂在
+          # if(TARGET ContentTools) 下（2026-11-25 worktree 实证）。
+          $extra = @()
+          if ($env:PRIMAL_CI_SDK_MODULES) { $extra += "-DCMAKE_MODULE_PATH=$env:PRIMAL_CI_SDK_MODULES" }
+          $cmakeArgs = @('-S', '.', '-B', 'build-bvhperf',
+                         '-G', 'Visual Studio 17 2022', '-A', 'x64',
+                         '-DCMAKE_BUILD_TYPE=Release',
+                         '-DENABLE_VULKAN=ON',
+                         '-DENABLE_D3D12=OFF',
+                         '-DBUILD_CONTENT_TOOLS=ON') + $extra
+          & cmake @cmakeArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build TestVulkanSponzaRenderGraph
+        shell: powershell
+        run: |
+          $log = 'build-bvhperf.log'
+          cmd /c "cmake --build build-bvhperf --config Release --target TestVulkanSponzaRenderGraph --parallel > $log 2>&1"
+          $code = $LASTEXITCODE
+          Write-Output "build exit code: $code; log tail:"
+          Get-Content $log | Select-Object -Last 40
+          if ($code -ne 0) {
+            $err = Get-Content $log | Where-Object { $_ -match '(fatal error C\d+|error C\d+|error LNK\d+|error MSB\d+)' }
+            if ($err) { $err | Select-Object -First 30 | ForEach-Object { Write-Output $_ } }
+            exit $code
+          }
+
+      - name: Locate binary
+        shell: powershell
+        run: |
+          $candidates = @(
+            'build-bvhperf/Tests/Release/TestVulkanSponzaRenderGraph.exe',
+            'build-bvhperf/EngineTest/IntegrationTests/Release/TestVulkanSponzaRenderGraph.exe',
+            'build-bvhperf/Release/TestVulkanSponzaRenderGraph.exe'
+          )
+          $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $exe) {
+            $exe = Get-ChildItem -Recurse -Filter 'TestVulkanSponzaRenderGraph.exe' -Path 'build-bvhperf' |
+                   Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $exe) { Write-Host "::error::TestVulkanSponzaRenderGraph.exe not found"; exit 1 }
+          Write-Output "[bvh-perf] exe = $exe"
+          Write-Output $exe | Out-File -FilePath ci-out/exe-path.txt -Encoding utf8
+
+      - name: Run perf groups (timing-only, Dynamic GI standard)
+        shell: powershell
+        run: |
+          $exe = (Get-Content ci-out/exe-path.txt -Raw).Trim()
+          $groups = '${{ inputs.groups }}'
+          if (-not $groups) { $groups = 'gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper,dyn-gi-lbvh,dyn-gi-hlbvh' }
+          $frames = '${{ inputs.frames }}'
+          if (-not $frames) { $frames = '420' }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/perf/run_bvh_perf.ps1 `
+            -Binary $exe -OutDir ci-out/bvh-perf -Groups $groups -Frames ([int]$frames)
+
+      - name: Publish report to job summary
+        if: always()
+        shell: powershell
+        run: |
+          $md = 'ci-out/bvh-perf/report.md'
+          if (Test-Path $md) {
+            Get-Content $md -Raw | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          } else {
+            "## bvh-perf`n`nreport.md 未生成（见组日志）`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
+          if (Test-Path 'ci-out/bvh-perf/meta.txt') {
+            "``````" + "`n" + (Get-Content 'ci-out/bvh-perf/meta.txt' -Raw) + "``````" + "`n" |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
+
+      - name: Upload perf evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bvh-perf-${{ github.run_id }}
+          path: |
+            ci-out/bvh-perf/**
+            !ci-out/bvh-perf/**/*.err
+          retention-days: 30
+          if-no-files-found: warn
