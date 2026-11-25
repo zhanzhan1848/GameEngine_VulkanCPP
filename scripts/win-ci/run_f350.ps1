@@ -136,6 +136,12 @@ if ($env:PRIMAL_F350_DEFERRED_SAMPLES -eq '1') {
     # group asks for mode 0 on both sides.
     $diagGroups += @{ name = 'd3d12-gion-mode0'; api = 'd3d12'; gi = 1;
                       ppm = 'art2_win_d3d12_mode0_f350.ppm'; diag = 12 }
+    # The frozen mode-0 reference includes analytic history. Keep the ablation
+    # in separate captures so the parity gate still tests production lighting.
+    foreach ($api in @('d3d12','vulkan')) {
+        $diagGroups += @{ name = "$api-gion-mode0-nohistory"; api = $api; gi = 1;
+                          ppm = "art2_win_${api}_mode0_nohistory_f350.ppm"; diag = 12; noHistory = 1 }
+    }
     $diagGroups += @{ name = 'd3d12-gioff-samples'; api = 'd3d12'; gi = 0;
                       ppm = 'art2_win_d3d12_gioff_samples_f350.ppm'; diag = 11 }
     $diagGroups += @{ name = 'vulkan-gioff-samples'; api = 'vulkan'; gi = 0;
@@ -234,9 +240,8 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     # legacy path maps the N-2 ring slot with no proof its copy completed, which
     # can move one probe's update by a frame on one API only. Enable the fenced
     # path on both backends so the scheduler reads a completed source on each.
-    $varianceFenced = $g.name -in @('vulkan-gion', 'vulkan-gion-samples',
-                                    'd3d12-gion', 'd3d12-gion-samples',
-                                    'vulkan-gion-mode0', 'd3d12-gion-mode0')
+    $varianceFenced = ($g.diag -eq 12) -or ($g.name -in @('vulkan-gion', 'vulkan-gion-samples',
+                                                          'd3d12-gion', 'd3d12-gion-samples'))
     if ($varianceFenced) {
         $env:PRIMAL_DDGI_VARIANCE_FENCED = 'source-frame'
         $env:DDGI_VARIANCE_FENCE_AUDIT = '1'
@@ -371,13 +376,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         $env:PRIMAL_F350_DDGI_SH = '1'
         $env:PRIMAL_F350_DDGI_DEPTH = '1'
         $env:PRIMAL_F350_DDGI_RAYS = '1'
-        # 2026-11-26: cut the probe->probe history bounce. Per-ray distances and
-        # the SC lighting atlas already match, yet a band of probes carries
-        # 30-53% less radiance on D3D12 with identical black-ray counts -- the
-        # signature of the documented multi-stable SC<->probe feedback picking a
-        # different branch. With the feedback removed both backends must agree if
-        # that is the cause; it also isolates the remaining direct-atlas term.
-        $env:DDGI_ANALYTIC_NO_HISTORY = '1'
+        if ($g.noHistory) { $env:DDGI_ANALYTIC_NO_HISTORY = '1' }
     }
     if ($g.diag -eq 13) { $env:PRIMAL_F350_SC_RAYS = '1' }
     if ($g.diag -in @(12,13)) {
@@ -470,6 +469,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         'PRIMAL_D3D12_BLACK_STAGE_DUMP','PRIMAL_D3D12_BLACK_STAGE_FRAME','PRIMAL_DUMP_MATRIX',
         'PRIMAL_D3D12_API_TRACE','PRIMAL_D3D12_DEFERRED_PROBE','PRIMAL_D3D12_GBV',
         'PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL','PRIMAL_D3D12_RTVAUDIT','PRIMAL_D3D12_DEFERRED_COPY_WRITE',
+        'DDGI_ANALYTIC_NO_HISTORY','PRIMAL_F350_SC_ATLAS','PRIMAL_F350_DDGI_SH','PRIMAL_F350_DDGI_DEPTH','PRIMAL_F350_DDGI_RAYS',
         'PRIMAL_F350_SC_RAYS', 'PRIMAL_F350_GI_BINDINGS','PRIMAL_DEFERRED_SAMPLES','SPONZA_CAPTURE_FRAME','SPONZA_MAX_FRAMES','RHI_TEST_PLATFORM')) {
         $value = [Environment]::GetEnvironmentVariable($key)
         if ($null -ne $value) { $launchEnv[$key] = $value }
