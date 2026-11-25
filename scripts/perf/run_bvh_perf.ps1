@@ -15,7 +15,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Binary,
     [string]$OutDir = 'ci-out/bvh-perf',
-    [string]$Groups = 'gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper',
+    [string]$Groups = 'gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper,dyn-gi-lbvh,dyn-gi-hlbvh',
     [int]$Frames = 420,
     [int]$SilenceSecs = 300,
     [int]$HardCapSecs = 900
@@ -71,10 +71,14 @@ function Run-Group([string]$name) {
     Clear-PerfEnv
     switch ($name) {
         'gi0' { }
-        { $_ -in 'dyn-gi', 'dyn-gi-sah', 'dyn-gi-upper' } {
+        { $_ -in 'dyn-gi', 'dyn-gi-sah', 'dyn-gi-upper', 'dyn-gi-lbvh', 'dyn-gi-hlbvh' } {
             Set-DynGiEnv
             if ($_ -eq 'dyn-gi-sah') { $env:PRIMAL_EXPERIMENT_ENV_SAH = '1' }
             if ($_ -eq 'dyn-gi-upper') { $env:PRIMAL_DDGI_GEOMETRY_UPPER_BVH = '1' }
+            # Unified builder switch (ExperimentalBVHSelection.h); the sah group
+            # keeps the legacy knob so the old path stays exercised.
+            if ($_ -eq 'dyn-gi-lbvh') { $env:PRIMAL_GEOMETRY_BVH_IMPL = 'lbvh' }
+            if ($_ -eq 'dyn-gi-hlbvh') { $env:PRIMAL_GEOMETRY_BVH_IMPL = 'hlbvh' }
         }
         default {
             Write-Output "[run_bvh_perf] unknown group: $name"

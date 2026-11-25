@@ -66,15 +66,19 @@ bool EnvironmentVisibilityModule::SetGeometryScene(std::span<const ray_geometry:
     return ok;
 }
 bool EnvironmentVisibilityModule::SetExperimentalGeometryScene(std::span<const ray_geometry::InstanceInput> inputs,
-                                                              u64 source_digest,u64 scene_epoch) {
+                                                              u64 source_digest,u64 scene_epoch,
+                                                              ray_geometry::BvhImpl impl) {
     if(experimental_failure_.Blocks(source_digest,scene_epoch))return false;
     ++geometry_epoch_;experimental_source_digest_=0;experimental_scene_epoch_=0;geometry_scene_={};
     const char* failure="source digest mismatch";u64 failedMesh=0;
     const bool ok=source_digest && ray_geometry::SceneSourceDigest(inputs)==source_digest &&
-                  ray_geometry::BuildExperimentalSAHScene(inputs,geometry_scene_,&failure,&failedMesh);
+                  ray_geometry::BuildExperimentalBVHScene(inputs,impl,geometry_scene_,&failure,&failedMesh);
     if(ok){experimental_source_digest_=source_digest;experimental_scene_epoch_=scene_epoch;experimental_failure_.Reset();}
     else {geometry_scene_={};experimental_failure_.Record(source_digest,scene_epoch);}
     PRIMAL_LOG_STREAM(Info,"Render") << "[EnvironmentVisibility] experimental_sah=" << ok
+        << " impl=" << ray_geometry::BvhImplName(impl)
+        << " top_nodes=" << geometry_scene_.top.size() << " bottom_nodes=" << geometry_scene_.bottom.size()
+        << " triangles=" << geometry_scene_.triangles.size()
         << " source_digest=" << source_digest << " scene_epoch=" << scene_epoch
         << " instances=" << geometry_scene_.instances.size() << " failure=" << (ok?"none":failure)
         << " failed_mesh_digest=" << failedMesh;
@@ -148,7 +152,7 @@ bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle 
     }
     if(const char* e=std::getenv("PRIMAL_ENV_SDF_HYBRID");device_->GetPlatform()==RHIPlatform::Vulkan && e && std::strcmp(e,"1")==0){
         hybrid_env_requested_=true;auto exact=[](const char* n){const char* v=std::getenv(n);return v&&std::strcmp(v,"1")==0;};
-        const char* wg=std::getenv("PRIMAL_ENV_TRACE_WORKGROUP");const bool compatible=(!wg||std::strcmp(wg,"0")==0)&&!exact("PRIMAL_ENV_CROSS_RAY_PAIR")&&!exact("PRIMAL_EXPERIMENT_ENV_SAH");
+        const char* wg=std::getenv("PRIMAL_ENV_TRACE_WORKGROUP");const bool compatible=(!wg||std::strcmp(wg,"0")==0)&&!exact("PRIMAL_ENV_CROSS_RAY_PAIR")&&!exact("PRIMAL_EXPERIMENT_ENV_SAH")&&!primal::graphics::ray_geometry::ExperimentalBVHRequested();
         if(compatible){std::ifstream f(environment_hybrid::kShaderPath,std::ios::binary|std::ios::ate);if(f&&f.tellg()>0){const auto n=static_cast<size_t>(f.tellg());std::vector<u8> bytes(n);f.seekg(0);if(f.read(reinterpret_cast<char*>(bytes.data()),n) && environment_hybrid::Hash(bytes)==environment_hybrid::kShaderFNV){hybrid_shader_hash_=environment_hybrid::kShaderFNV;hybrid_shader_=device_->CreateShader(bytes.data(),bytes.size(),ShaderStage::Compute,"main");}}
             DescriptorSetLayoutBinding hbindings[11]{};for(u32 i=0;i<10;++i)hbindings[i]=bindings[i];hbindings[10]={17,DescriptorType::StorageBuffer,1,ShaderStage::Compute,nullptr};hbindings[10].readonly=true;
             if(hybrid_shader_!=handles::INVALID_SHADER)hybrid_set_layout_=device_->CreateDescriptorSetLayout({11,hbindings});
@@ -161,7 +165,7 @@ bool EnvironmentVisibilityModule::Initialize(RHIDeviceBase* device,ShaderHandle 
     if(const char* e=std::getenv("PRIMAL_ENV_CROSS_RAY_PAIR");device_->GetPlatform()==RHIPlatform::Vulkan && e && std::strcmp(e,"1")==0){
         pair_env_requested_=true;auto exact=[](const char* n){const char* v=std::getenv(n);return v&&std::strcmp(v,"1")==0;};
         const char* wg=std::getenv("PRIMAL_ENV_TRACE_WORKGROUP");
-        const bool compatible=(!wg||std::strcmp(wg,"0")==0) && !exact("PRIMAL_EXPERIMENT_ENV_SAH") &&
+        const bool compatible=(!wg||std::strcmp(wg,"0")==0) && !exact("PRIMAL_EXPERIMENT_ENV_SAH") && !primal::graphics::ray_geometry::ExperimentalBVHRequested() &&
             !exact("PRIMAL_DDGI_GEOMETRY_EQUAL_BOX") && !exact("PRIMAL_DDGI_GEOMETRY_UPPER_BVH") && !exact("PRIMAL_DDGI_GEOMETRY_COMPACT_STACKS") &&
             !exact("PRIMAL_DDGI_GEOMETRY_BOUNDS_FIRST") && !exact("PRIMAL_DDGI_INSTANCE_NORMAL_CACHE") && !exact("PRIMAL_DDGI_INSTANCE_PAYLOAD_CACHE");
         if(compatible){const auto path=utils::ShaderRegistry::ResolveShaderPath(device_->GetPlatform(),"Engine/Graphics/Vulkan/shaders/Lumen/EnvironmentVisibility_trace_pair.comp.spv");

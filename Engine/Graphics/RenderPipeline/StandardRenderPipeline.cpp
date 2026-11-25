@@ -1054,8 +1054,11 @@ EnvironmentVisibilityOutputs StandardRenderPipeline::AddEnvironmentVisibility(
     inputs.depth_rg=depthRG.IsValid()?depthRG:graph.ImportResource("EnvironmentVisibility_Depth",inputs.depth);
     inputs.normal_rg=normalRG.IsValid()?normalRG:graph.ImportResource("EnvironmentVisibility_Normal",inputs.normal);
     inputs.orm_rg=ormRG.IsValid()?ormRG:graph.ImportResource("EnvironmentVisibility_ORM",inputs.orm);
-    const char* sahExperiment=std::getenv("PRIMAL_EXPERIMENT_ENV_SAH");
-    const bool useExperimentalSAH=!d3d12 && sahExperiment && std::strcmp(sahExperiment,"1")==0 && !inputs.legacy_unoccluded;
+    // Unified BVH-candidate switch (median|sah12|lbvh|hlbvh, legacy
+    // PRIMAL_EXPERIMENT_ENV_SAH=1 maps to sah12). Re-read per graph build so
+    // the in-process interleaved harness can flip it mid-run.
+    const auto experimental_impl=ray_geometry::SelectExperimentalBvhImpl();
+    const bool useExperimentalSAH=!d3d12 && experimental_impl!=ray_geometry::BvhImpl::Median && !inputs.legacy_unoccluded;
     if(useExperimentalSAH) {
         // Force the ordinary fallback cache to re-establish its own scene if
         // the opt-in is removed in a process that changes its environment.
@@ -1079,7 +1082,7 @@ EnvironmentVisibilityOutputs StandardRenderPipeline::AddEnvironmentVisibility(
         const u64 digest=complete?ray_geometry::SceneSourceDigest(instances):0;
         complete &= digest && digest==view.source_digest;
         if(complete && !environment_visibility_module_->HasExperimentalGeometryScene(digest,view.scene_epoch))
-            complete=environment_visibility_module_->SetExperimentalGeometryScene(instances,digest,view.scene_epoch);
+            complete=environment_visibility_module_->SetExperimentalGeometryScene(instances,digest,view.scene_epoch,*experimental_impl);
         inputs.geometry_still_current=[this,sc,view,digest,complete,slot] {
             if(!complete || !sc || surface_cache_pass_.get()!=sc || !scene_snapshot_ || !environment_visibility_module_ ||
                !environment_visibility_module_->HasExperimentalGeometryScene(digest,view.scene_epoch))return false;

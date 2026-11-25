@@ -2,14 +2,20 @@
 // Opt-in, in-memory experiment. No cache read/write or runtime binding occurs
 // here. Each primitive inherits its original leaf bounds, avoiding any loss of
 // conservative coverage through reconstitution of quantized triangle edges.
+// The builder is selected by BvhImpl (ExperimentalBVHSelection.h); all
+// candidates emit the same generic Tree over per-triangle bounds, so the
+// validation and repacking below are builder-agnostic.
 #include "GeometryFirstHit.h"
+#include "ExperimentalBVHSelection.h"
 #include "ExperimentalBinnedSAH.h"
+#include "ExperimentalLBVH.h"
 #include <bit>
 #include <unordered_map>
 #include <vector>
 
 namespace primal::graphics::ray_geometry {
-inline std::shared_ptr<const MeshBLAS> BuildExperimentalSAHMesh(const MeshBLAS& input, const char** failure=nullptr) {
+inline std::shared_ptr<const MeshBLAS> BuildExperimentalSAHMesh(const MeshBLAS& input, BvhImpl impl,
+                                                                const char** failure=nullptr) {
     using namespace primal::experimental_bvh;
     if(failure)*failure="none";
     auto reject=[&](const char* reason)->std::shared_ptr<const MeshBLAS>{if(failure)*failure=reason;return {};};
@@ -56,7 +62,19 @@ inline std::shared_ptr<const MeshBLAS> BuildExperimentalSAHMesh(const MeshBLAS& 
     for (u8 value : nodes_seen) if (!value) return reject("unreachable source node");
     for (u8 value : triangles_seen) if (!value) return reject("unreachable source triangle");
     Tree tree;
-    if (!build_binned_sah(bounds, tree)) return reject("SAH build failed: bounds, count or depth");
+    switch (impl) {
+        case BvhImpl::Sah12:
+            if (!build_binned_sah(bounds, tree)) return reject("sah12 build failed: bounds, count or depth");
+            break;
+        case BvhImpl::Lbvh:
+            if (!build_lbvh(bounds, tree)) return reject("lbvh build failed: bounds, count or depth");
+            break;
+        case BvhImpl::Hlbvh:
+            if (!build_hlbvh(bounds, tree)) return reject("hlbvh build failed: bounds, count or depth");
+            break;
+        case BvhImpl::Median:
+            return reject("median has no experimental rebuild");
+    }
     auto result = std::make_shared<MeshBLAS>(); result->geometry_digest = input.geometry_digest;
     result->nodes.resize(tree.nodes.size()); result->triangles.resize(tree.primitives.size());
     for (u32 i = 0; i < tree.nodes.size(); ++i) {
@@ -67,10 +85,15 @@ inline std::shared_ptr<const MeshBLAS> BuildExperimentalSAHMesh(const MeshBLAS& 
     for (u32 i = 0; i < tree.primitives.size(); ++i) result->triangles[i] = input.triangles[tree.primitives[i]];
     return result;
 }
-// Rebuild each distinct mesh once, retaining per-instance identity and world
-// transforms. The output is independent of the caller and is never persisted.
-// A caller must separately certify its scene source/epoch before GPU use.
-inline bool BuildExperimentalSAHScene(std::span<const InstanceInput> inputs, SceneBVH& out,
+// Legacy convenience: the SAH-only entry point before BvhImpl existed.
+inline std::shared_ptr<const MeshBLAS> BuildExperimentalSAHMesh(const MeshBLAS& input, const char** failure=nullptr) {
+    return BuildExperimentalSAHMesh(input, BvhImpl::Sah12, failure);
+}
+// Rebuild each distinct mesh once with the selected candidate builder,
+// retaining per-instance identity and world transforms. The output is
+// independent of the caller and is never persisted. A caller must separately
+// certify its scene source/epoch before GPU use.
+inline bool BuildExperimentalBVHScene(std::span<const InstanceInput> inputs, BvhImpl impl, SceneBVH& out,
                                       const char** failure=nullptr, u64* failed_mesh_digest=nullptr) {
     out = {};
     if(failure)*failure="none";if(failed_mesh_digest)*failed_mesh_digest=0;
@@ -81,7 +104,7 @@ inline bool BuildExperimentalSAHScene(std::span<const InstanceInput> inputs, Sce
     for (const auto& input : inputs) {
         if (!input.mesh) {if(failure)*failure="missing mesh";return false;}
         auto [it, fresh] = meshes.try_emplace(input.mesh.get());
-        if (fresh) it->second = BuildExperimentalSAHMesh(*input.mesh,failure);
+        if (fresh) it->second = BuildExperimentalSAHMesh(*input.mesh, impl, failure);
         if (!it->second) {if(failed_mesh_digest)*failed_mesh_digest=input.mesh->geometry_digest;return false;}
         rebuilt.push_back({it->second, input.world, input.instance_id});
     }
@@ -89,5 +112,9 @@ inline bool BuildExperimentalSAHScene(std::span<const InstanceInput> inputs, Sce
     if (!result.Build(rebuilt)) {if(failure)*failure="scene transform or build rejected";return false;}
     out = std::move(result);
     return true;
+}
+inline bool BuildExperimentalSAHScene(std::span<const InstanceInput> inputs, SceneBVH& out,
+                                      const char** failure=nullptr, u64* failed_mesh_digest=nullptr) {
+    return BuildExperimentalBVHScene(inputs, BvhImpl::Sah12, out, failure, failed_mesh_digest);
 }
 } // namespace primal::graphics::ray_geometry

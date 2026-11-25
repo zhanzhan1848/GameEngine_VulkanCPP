@@ -18,7 +18,7 @@ set -euo pipefail
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 frames=420
-groups="gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper"
+groups="gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper,dyn-gi-lbvh,dyn-gi-hlbvh"
 warm=60
 tag=""
 do_build=0
@@ -82,7 +82,7 @@ run_group() {
 
   case "$name" in
     gi0) ;;
-    dyn-gi|dyn-gi-sah|dyn-gi-upper)
+    dyn-gi|dyn-gi-sah|dyn-gi-upper|dyn-gi-lbvh|dyn-gi-hlbvh)
       export DDGI_RAY_SAMPLE=7
       export DDGI_MEASURED_GEOMETRY=1
       export SPGI_DDGI_VISIBILITY=2
@@ -92,6 +92,10 @@ run_group() {
       export PRIMAL_VK_ALBEDO_MIPS=1
       [[ "$name" == "dyn-gi-sah" ]] && export PRIMAL_EXPERIMENT_ENV_SAH=1
       [[ "$name" == "dyn-gi-upper" ]] && export PRIMAL_DDGI_GEOMETRY_UPPER_BVH=1
+      # Unified builder switch (ExperimentalBVHSelection.h); legacy sah knob kept
+      # for the sah group so the old path stays exercised.
+      [[ "$name" == "dyn-gi-lbvh" ]] && export PRIMAL_GEOMETRY_BVH_IMPL=lbvh
+      [[ "$name" == "dyn-gi-hlbvh" ]] && export PRIMAL_GEOMETRY_BVH_IMPL=hlbvh
       ;;
     interleaved)
       # Same-process A/B/B/A protocol; needs the extra block budget itself.

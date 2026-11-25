@@ -6,6 +6,7 @@
 #include "Graphics/RenderGraph/RenderGraphDefinitions.h"
 #include "Graphics/Utilities/GeometryFirstHit.h"
 #include "Graphics/Utilities/EnvironmentHybridCertificate.h"
+#include "Graphics/Utilities/ExperimentalBVHSelection.h"
 #include "ExperimentalSAHState.h"
 #include "Graphics/Utilities/ComputeWorkgroupExperiment.h"
 
@@ -67,9 +68,12 @@ public:
     static bool SupportsPlatform(rhi::RHIPlatform platform);
     rhi::ResourceHandle GetVisibilityTexture(u32 slot,bool half=false) const { return slot<3?(half?half_[slot]:full_[slot]):rhi::handles::INVALID_RESOURCE; }
     bool SetGeometryScene(std::span<const ray_geometry::InstanceInput> instances);
-    // Explicit memory-only SAH experiment, scoped to a certified SC epoch.
+    // Explicit memory-only BVH-candidate experiment, scoped to a certified SC
+    // epoch. impl picks the builder (default keeps the historical SAH call
+    // sites unchanged).
     bool SetExperimentalGeometryScene(std::span<const ray_geometry::InstanceInput> instances,
-                                      u64 source_digest, u64 scene_epoch);
+                                      u64 source_digest, u64 scene_epoch,
+                                      ray_geometry::BvhImpl impl = ray_geometry::BvhImpl::Sah12);
     bool HasExperimentalGeometryScene(u64 source_digest, u64 scene_epoch) const;
     // source_width/height are the GBuffer texel size (render target); the
     // target_* pair is the resolve output size, which is derived from the
