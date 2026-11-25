@@ -61,6 +61,27 @@ void UpdateDescriptorSet(RHIDeviceBase* device, DescriptorSetHandle set,
     device->UpdateDescriptorSets(count, writes.data());
 }
 
+// GPU 写目标缓冲的 CPU 侧清零。Map 命中宿主可见堆（Vulkan/Metal/Dawn，
+// 逐字节同旧路）；D3D12 把带显式 UA 位的缓冲改道到 DEFAULT 堆后 Map 返回
+// 空，回落 staging 环上传，按 4 MiB 分块（单次分配须落在 16 MiB 帧槽容量内）。
+// 帧内排队语义：环拷贝在下一帧首编码，帧内后续 GPU 命令读到的仍是旧值；
+// 清零若要同帧生效须走命令流（CopyBuffer）。
+bool ZeroGpuBufferFromCpu(RHIDeviceBase* device, ResourceHandle buffer, u64 bytes) {
+    if (!device || buffer == handles::INVALID_RESOURCE || bytes == 0) return false;
+    if (void* mapped = device->MapBuffer(buffer)) {
+        std::memset(mapped, 0, static_cast<size_t>(bytes));
+        device->UnmapBuffer(buffer);
+        return true;
+    }
+    constexpr u64 kChunkBytes = 4ull * 1024ull * 1024ull;
+    const std::vector<u8> zeros(static_cast<size_t>(std::min(bytes, kChunkBytes)));
+    for (u64 offset = 0; offset < bytes; offset += kChunkBytes) {
+        const u64 n = std::min(bytes - offset, kChunkBytes);
+        if (!device->UpdateBufferData(buffer, zeros.data(), n, offset)) return false;
+    }
+    return true;
+}
+
 // Vulkan：预编译 .comp.spv（Vulkan/Shaders/Lumen/，include 已在构建期内联）。
 // D3D12：DXIL .cso 镜像（EngineTest/shaders/d3d12/Lumen/<name>.comp.cso，
 // spirv-cross 包装入口恒 "main"——后端忽略 entry 名）。
@@ -129,15 +150,12 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
         probe_data_ = device->CreateBuffer(desc);
         if (probe_data_ == handles::INVALID_RESOURCE) return false;
         // R20：清零 Map 命中后端逐字节同旧路；D3D12 DEFAULT 改道后回落
-        // UpdateBufferData（staging 环拷贝）。
-        {
-            const std::vector<u8> zeros(static_cast<size_t>(desc.size));
-            if (void* mapped = device->MapBuffer(probe_data_)) {
-                std::memcpy(mapped, zeros.data(), static_cast<size_t>(desc.size));
-                device->UnmapBuffer(probe_data_);
-            } else {
-                device->UpdateBufferData(probe_data_, zeros.data(), desc.size, 0);
-            }
+        // UpdateBufferData（staging 环拷贝，分块）。失败即初始化失败：
+        // valid 位未清会让 SPGI 读到随机有效的探针。
+        if (!ZeroGpuBufferFromCpu(device, probe_data_, desc.size)) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[WRC] probe field zero-init failed (" << desc.size << " bytes)" << std::endl;
+            return false;
         }
     }
     // 逐射线 scratch（绝对探针索引 × K × vec4）。
@@ -181,6 +199,14 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
         desc.structured.elementStride = sizeof(u32);
         consume_counter_ = device->CreateBuffer(desc);
         if (consume_counter_ == handles::INVALID_RESOURCE) return false;
+        // SPGI Finalize 对它做 atomicAdd（读-改-写），预算优先级每 256 帧读回
+        // 一次。两端都显式从零起步：Vulkan 的分配器内存不保证零，D3D12 的
+        // DEFAULT 堆同样不保证，否则首轮排序建立在未定义内容上。
+        if (!ZeroGpuBufferFromCpu(device, consume_counter_, desc.size)) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[WRC] consume counter zero-init failed (" << desc.size << " bytes)" << std::endl;
+            return false;
+        }
     }
     // prefilter SH9 输出（调试/降级档）。
     {
@@ -259,12 +285,18 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
     }();
     if (trace_stats_enabled_ || bounds_dump_enabled_) {
         rays_ring_.initialize(device_, u64(probeTotal) * kWRCDirsPerProbe * sizeof(math::v4), 3);
+        // 三个计数缓冲是 WRCTraceFinalize 的 atomicAdd 目标（u10/u11/u12），
+        // 每帧由 CPU 清零。显式 UA 位让 D3D12 把它们建在 DEFAULT 堆并带
+        // ALLOW_UNORDERED_ACCESS——只有 Storage 位时它们留在 UPLOAD 堆，UAV
+        // 绑定被后端跳过，原子加落到堆槽里的旧描述符上（读回恒零）。
+        const u32 storageUav = static_cast<u32>(BufferUsageFlags::Storage) |
+                               static_cast<u32>(ResourceUsage::UnorderedAccess);
         BufferDesc dbgDesc{};
         dbgDesc.size = 64;
         dbgDesc.type = BufferType::Structured;
         dbgDesc.usage = GPUMemoryUsage::Dynamic;
         dbgDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-        dbgDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        dbgDesc.bindFlags = storageUav;
         dbgDesc.structured.elementCount = 16;
         dbgDesc.structured.elementStride = sizeof(u32);
         dbg_buf_ = device->CreateBuffer(dbgDesc);
@@ -274,7 +306,7 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
         binsDesc.type = BufferType::Structured;
         binsDesc.usage = GPUMemoryUsage::Dynamic;
         binsDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-        binsDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        binsDesc.bindFlags = storageUav;
         binsDesc.structured.elementCount = 512u;
         binsDesc.structured.elementStride = 16u;
         bins_buf_ = device->CreateBuffer(binsDesc);
@@ -285,10 +317,13 @@ bool LumenWRCPass::Initialize(rhi::RHIDeviceBase* device, const WRCRuntimeParams
         cfDesc.type = BufferType::Structured;
         cfDesc.usage = GPUMemoryUsage::Dynamic;
         cfDesc.memoryUsage = GPUMemoryUsage::Dynamic;
-        cfDesc.bindFlags = static_cast<u32>(BufferUsageFlags::Storage);
+        cfDesc.bindFlags = storageUav;
         cfDesc.structured.elementCount = 4096u;
         cfDesc.structured.elementStride = sizeof(u32);
         card_fail_buf_ = device->CreateBuffer(cfDesc);
+        ZeroGpuBufferFromCpu(device_, dbg_buf_, dbgDesc.size);
+        ZeroGpuBufferFromCpu(device_, bins_buf_, binsDesc.size);
+        ZeroGpuBufferFromCpu(device_, card_fail_buf_, cfDesc.size);
     }
     if (bounds_dump_enabled_) {
         bins_ring_.initialize(device_, u64(512) * 16u, 3);
@@ -494,10 +529,13 @@ void LumenWRCPass::ClearProbeField() {
     // probe receives its first update after initialization or a scene cut.
     probe_field_seeded_ = false;
     if (device_ && probe_data_ != handles::INVALID_RESOURCE) {
-        if (void* mapped = device_->MapBuffer(probe_data_)) {
-            const u64 bytes = u64(GetProbeCountTotal()) * kWRCProbeStrideU32 * sizeof(u32);
-            std::memset(mapped, 0, static_cast<size_t>(bytes));
-            device_->UnmapBuffer(probe_data_);
+        // probe_data_ 带显式 UA 位：D3D12 把它改道到 DEFAULT 堆，Map 返回空。
+        // 旧实现在该分支静默跳过清零——场景切换与卡片晚注册后的复位在
+        // D3D12 上从未发生。回落 staging 环（下一帧首编码）。
+        const u64 bytes = u64(GetProbeCountTotal()) * kWRCProbeStrideU32 * sizeof(u32);
+        if (!ZeroGpuBufferFromCpu(device_, probe_data_, bytes)) {
+            PRIMAL_LOG_STREAM(Error, "Render")
+                << "[WRC] probe field clear failed (" << bytes << " bytes)" << std::endl;
         }
     }
 }
@@ -868,24 +906,11 @@ void LumenWRCPass::AddPass(
                 }
             }
 
-            if (dbg_buf_ != handles::INVALID_RESOURCE) {
-                if (auto* d = static_cast<u32*>(device_->MapBuffer(dbg_buf_))) {
-                    for (u32 i = 0; i < 16; ++i) d[i] = 0u;
-                    device_->UnmapBuffer(dbg_buf_);
-                }
-            }
-            if (bins_buf_ != handles::INVALID_RESOURCE) {
-                if (auto* d = static_cast<u32*>(device_->MapBuffer(bins_buf_))) {
-                    std::memset(d, 0, 512u * 16u);
-                    device_->UnmapBuffer(bins_buf_);
-                }
-            }
-            if (card_fail_buf_ != handles::INVALID_RESOURCE) {
-                if (auto* d = static_cast<u32*>(device_->MapBuffer(card_fail_buf_))) {
-                    std::memset(d, 0, 4096u * sizeof(u32));
-                    device_->UnmapBuffer(card_fail_buf_);
-                }
-            }
+            // D3D12 上三者为 DEFAULT+UAV（Map 返回空），清零经 staging 环在
+            // 下一帧首编码：本帧读回拷贝仍先于清零执行，逐帧计数语义不变。
+            if (dbg_buf_ != handles::INVALID_RESOURCE) ZeroGpuBufferFromCpu(device_, dbg_buf_, 64);
+            if (bins_buf_ != handles::INVALID_RESOURCE) ZeroGpuBufferFromCpu(device_, bins_buf_, 512u * 16u);
+            if (card_fail_buf_ != handles::INVALID_RESOURCE) ZeroGpuBufferFromCpu(device_, card_fail_buf_, 4096u * sizeof(u32));
 
             // ---- dispatch 1: WRCTraceSDF（1 group/probe，64 lanes = K 方向）----
             {
