@@ -1,5 +1,37 @@
 # Project Lessons
 
+## Cross-API determinism: a priority tie needs an explicit tie-break
+
+**Date:** 2026-11-25
+
+Two backends can run the same CPU scheduler on the same machine and still pick
+different work, without any GPU bug: comparing `score` alone in
+`std::partial_sort` orders *equivalent* elements differently in MSVC and libc++,
+and equivalences are common when a term saturates (DDGI's variance term pins to
+1 for almost every probe, so the score reduces to distance + age).
+
+How it showed up: the 398-frame DDGI near-field update lists differed in 166 of
+141202 memberships between Windows and macOS. Every difference reduced to five
+probe pairs; the first was frame 156, probes 744/787, both age 4 and both last
+updated at 152. The tie was real, the selection was arbitrary, and the loser
+aged, got picked next frame, and ping-ponged forever. That is what put probe 881
+one update frame earlier on D3D12.
+
+**Rule:** any score vector used to select *work* across backends/platforms needs
+a total order (score, then a stable key such as array index) and a coarse
+quantization for terms computed on the GPU (`-ffast-math` is on, so do not test
+NaN/Inf). Write the comparator as `a>b ? true : b>a ? false : a.index<b.index`.
+Add a CPU unit test that shuffles the input and asserts the same selected set.
+
+**Companion rule:** a readback feeding a CPU decision must have an authenticated
+completion, not just a slot-age assumption. The DDGI variance ring mapped the
+N-2 slot while only the N-3 frame fence was waited; the fenced ticket existed but
+was Vulkan-only. When a mechanism is "backend-neutral in principle" (fence +
+completion + wait), do not gate it to one API — the other API silently gets the
+unsafe path.
+
+---
+
 ## Drag/drop verification must cross the native cooked-asset boundary
 
 **Date:** 2026-08-18

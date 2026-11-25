@@ -955,6 +955,15 @@ private:
 
     const SurfaceCachePass* variance_scene_provider_=nullptr;
     bool variance_cpu_confirmed_=false,variance_identity_valid_=false;
+    // Fenced variance readback health (VarianceFenceTicket.h). A backend that
+    // advertises the handshake but never certifies a source must not freeze the
+    // CPU variance forever: after kVarianceFenceMissLimit consecutive scheduled
+    // frames without a certified source, fall back to the legacy N-2 slot map
+    // and say so once. Reset on any successful certification.
+    static constexpr u32 kVarianceFenceMissLimit = 45;
+    u32 variance_fence_misses_=0;
+    bool variance_fence_fallback_=false;
+    bool VarianceFenceActive() const;
     u64 variance_scene_epoch_=0,variance_source_digest_=0;
     rhi_readback_ring depth_readback_ring_;
     u32 depth_ring_copies_ = 0;    // copies issued; consumer waits for > 2

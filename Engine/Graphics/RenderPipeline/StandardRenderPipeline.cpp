@@ -6106,8 +6106,15 @@ static void ReportGraphPassTimes(RenderGraph& graph) {
     frames = 0;
 }
 
+// Same platform gate as LumenDDGIPass::VarianceFenceEnabled: the ticket
+// machinery is backend-neutral (FrameSlotCompletion + frame fence + WaitForSync),
+// so D3D12 can authenticate its variance readback exactly like Vulkan. Keeping
+// this Vulkan-only left the D3D12 scheduler on an unproven N-2 copy.
 static bool VarianceFenceRequested(const rhi::RHIDeviceBase* device) {
-    return device && device->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+    if (!device) return false;
+    const auto platform = device->GetPlatform();
+    return (platform == rhi::RHIPlatform::Vulkan ||
+            platform == rhi::RHIPlatform::D3D12) &&
         lumen::GetVarianceReadbackMode() != lumen::VarianceReadbackMode::Legacy;
 }
 u64 StandardRenderPipeline::BeginVarianceFenceFrame(u32 slot,rhi::CommandBufferHandle command,rhi::SyncHandle fence,u64 nativeFrame) {

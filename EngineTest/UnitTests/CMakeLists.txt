@@ -4581,6 +4581,12 @@ add_executable(UnitDDGIVarianceFence Graphics/TestDDGIVarianceFence.cpp)
 target_include_directories(UnitDDGIVarianceFence PRIVATE ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
 add_test(NAME UnitDDGIVarianceFence COMMAND UnitDDGIVarianceFence)
 
+# DDGI priority ordering must be a total order: equal scores selected the same
+# probes on MSVC and libc++ (2026-11-25 f350 schedule divergence). Pure CPU.
+add_executable(UnitDDGIProbePriority Graphics/TestDDGIProbePriority.cpp)
+target_include_directories(UnitDDGIProbePriority PRIVATE ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+add_test(NAME UnitDDGIProbePriority COMMAND UnitDDGIProbePriority)
+
 add_executable(UnitVulkanPassTimestampTicket Graphics/TestVulkanPassTimestampTicket.cpp)
 target_include_directories(UnitVulkanPassTimestampTicket PRIVATE ${CMAKE_SOURCE_DIR}/Engine)
 add_test(NAME UnitVulkanPassTimestampTicket COMMAND UnitVulkanPassTimestampTicket)

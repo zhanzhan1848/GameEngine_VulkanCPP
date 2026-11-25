@@ -130,6 +130,12 @@ if ($env:PRIMAL_F350_DEFERRED_SAMPLES -eq '1') {
     }
     $diagGroups += @{ name = 'vulkan-gion-mode0'; api = 'vulkan'; gi = 1;
                       ppm = 'art2_win_vulkan_mode0_f350.ppm'; diag = 12 }
+    # R75: explicit same-mode D3D12 counterpart. The canonical d3d12-gion group
+    # requests DDGI_RAY_SAMPLE=7 and falls back to mode 0, so comparing it with
+    # vulkan-gion-mode0 mixes "requested 7, ran 0" with "requested 0". This
+    # group asks for mode 0 on both sides.
+    $diagGroups += @{ name = 'd3d12-gion-mode0'; api = 'd3d12'; gi = 1;
+                      ppm = 'art2_win_d3d12_mode0_f350.ppm'; diag = 12 }
     $diagGroups += @{ name = 'd3d12-gioff-samples'; api = 'd3d12'; gi = 0;
                       ppm = 'art2_win_d3d12_gioff_samples_f350.ppm'; diag = 11 }
     $diagGroups += @{ name = 'vulkan-gioff-samples'; api = 'vulkan'; gi = 0;
@@ -221,11 +227,21 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     $env:SPONZA_CAPTURE_FRAME = '350'
     $env:PRIMAL_SPONZA_WATCHDOG_SECS = "$NoProgressSecs"
 
-    $verifyProbeSource = $g.name -in @('vulkan-gion', 'vulkan-gion-samples')
-    if ($verifyProbeSource) {
+    # R75: the fenced variance source is a backend-neutral capability now (the
+    # ticket only needs FrameSlotCompletion + frame fence + WaitForSync). The
+    # legacy path maps the N-2 ring slot with no proof its copy completed, which
+    # can move one probe's update by a frame on one API only. Enable the fenced
+    # path on both backends so the scheduler reads a completed source on each.
+    $varianceFenced = $g.name -in @('vulkan-gion', 'vulkan-gion-samples',
+                                    'd3d12-gion', 'd3d12-gion-samples',
+                                    'vulkan-gion-mode0', 'd3d12-gion-mode0')
+    if ($varianceFenced) {
         $env:PRIMAL_DDGI_VARIANCE_FENCED = 'source-frame'
         $env:DDGI_VARIANCE_FENCE_AUDIT = '1'
     }
+    # The exact source-frame contract below is Vulkan's measured native-3
+    # behaviour; D3D12 logs the same audit but is not asserted against it yet.
+    $verifyProbeSource = $g.name -in @('vulkan-gion', 'vulkan-gion-samples')
     if ($g.name -in @('d3d12-gion','vulkan-gion')) { $env:PRIMAL_F350_GI_BINDINGS = '1' }
     $ppmPath = Join-Path $OutDir $g.ppm
     $env:SPONZA_CAPTURE = $ppmPath

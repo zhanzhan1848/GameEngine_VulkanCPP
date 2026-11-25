@@ -7,6 +7,7 @@
 #include "Graphics/RenderGraph/LumenCompareCapture.h"
 #include "LumenDDGIPass.h"
 #include "DDGIAnalyticHistoryPolicy.h"
+#include "DDGIProbePriority.h"
 #include "Engine/Graphics/Lumen/GIDebugParams.h"
 #include "Engine/Graphics/Lumen/GIWarmup.h"
 #include "Engine/Graphics/Lumen/DDGISlotMap.h"
@@ -2585,8 +2586,19 @@ void LumenDDGIPass::PublishFarUpdateAudit(RHICommandBuffer* cmd,u32 slot) {
         << ",\"age_unit\":\"successful recorded updates\",\"completion\":\"capture fence only; recorded is not GPU completion\"}\n";
 }
 
+// The fenced source-frame readback is a backend capability question, not a
+// Vulkan feature: the ticket only needs FrameSlotCompletion, the frame fence and
+// WaitForSync, all of which the D3D12 backend provides. Leaving D3D12 on the
+// legacy path made the two backends read the variance ring under different
+// completion rules (legacy maps the N-2 slot with no proof that its copy
+// finished; only the N-3 frame fence is guaranteed), which can move a probe's
+// update by one frame on the same machine even when both APIs run mode 0.
+// Production default stays off (Legacy); the parity harness opts in on both.
 static bool VarianceFenceEnabled(const rhi::RHIDeviceBase* device) {
-    return device && device->GetPlatform() == rhi::RHIPlatform::Vulkan &&
+    if (!device) return false;
+    const auto platform = device->GetPlatform();
+    return (platform == rhi::RHIPlatform::Vulkan ||
+            platform == rhi::RHIPlatform::D3D12) &&
         GetVarianceReadbackMode() != VarianceReadbackMode::Legacy;
 }
 static bool VarianceFenceAuditEnabled() {
@@ -2594,7 +2606,7 @@ static bool VarianceFenceAuditEnabled() {
     return enabled;
 }
 LumenDDGIPass::VarianceFenceAuditView LumenDDGIPass::GetVarianceFenceAudit() const {
-    auto result=variance_audit_;result.enabled=VarianceFenceEnabled(device_);result.current_generation=variance_generation_;
+    auto result=variance_audit_;result.enabled=VarianceFenceActive();result.current_generation=variance_generation_;
     result.current_epoch=variance_scene_epoch_;result.current_digest=variance_source_digest_;return result;
 }
 void LumenDDGIPass::SetVarianceFenceSceneProvider(const SurfaceCachePass* provider) {
@@ -2611,6 +2623,9 @@ void LumenDDGIPass::SyncVarianceFenceScene(u64 sceneEpoch,u64 sourceDigest) {
     variance_scene_epoch_=sceneEpoch;
     variance_source_digest_=sourceDigest;
     variance_identity_valid_=variance_identity_.Available();
+}
+bool LumenDDGIPass::VarianceFenceActive() const {
+    return VarianceFenceEnabled(device_) && !variance_fence_fallback_;
 }
 bool LumenDDGIPass::VarianceFenceSceneStillCurrent() {
     if(!VarianceFenceEnabled(device_))return false;
@@ -2639,6 +2654,7 @@ void LumenDDGIPass::ValidateVarianceFenceCommand(u32 slot,rhi::CommandBufferHand
 void LumenDDGIPass::ClearProbeField() {
     ++variance_generation_;
     variance_fence_ticket_.Reset();variance_cpu_confirmed_=false;variance_identity_valid_=false;variance_scene_epoch_=0;variance_source_digest_=0;variance_identity_.Reset();
+    variance_fence_misses_=0;  // health state survives; only the streak resets
     if (!device_ || !initialized_) return;
     if(params_.deferred_field_reset) {
         field_reset_pending_=true;
@@ -3634,7 +3650,7 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
             // WASM keeps its fallback only when the ring is unavailable.
             const bool isWasm = (device_->GetPlatform() == rhi::RHIPlatform::Dawn);
             const bool ringReady = depth_ring_copies_ > 2 && depth_readback_ring_.is_initialized();
-            const bool varianceFenced=VarianceFenceEnabled(device_);
+            const bool varianceFenced=VarianceFenceActive();
             if(varianceFenced)VarianceFenceSceneStillCurrent();
             auto* cpuHistory=cpu_stall_audit::NewHistory();
             if(cpuHistory) {cpu_stall_audit::VolumeName(*cpuHistory,rg_name_prefix_.empty()?"Near":rg_name_prefix_.c_str());
@@ -3674,6 +3690,26 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 if (exactAge && certified && !device_->WaitForSync(certified->context.fence, 1000)) {
                     PRIMAL_LOG_STREAM(Error, "Render") << "[DDGI] Probe variance source fence failed at frame " << current_frame_index;
                     certified = nullptr;
+                }
+                // A backend that advertises the fenced handshake but never
+                // certifies a source must not freeze CPU variance forever. The
+                // limit is deliberately generous (45 scheduled frames ~ 1.5s at
+                // 30fps) so scene changes and ring warm-up do not trip it.
+                if (varianceFenced && ringReady) {
+                    if (certified) {
+                        variance_fence_misses_ = 0;
+                    } else if (!variance_fence_fallback_ &&
+                               ++variance_fence_misses_ >= kVarianceFenceMissLimit) {
+                        variance_fence_fallback_ = true;
+                        PRIMAL_LOG_STREAM(Error, "Render")
+                            << "[LumenDDGI] fenced variance source never certified after "
+                            << variance_fence_misses_ << " frames on "
+                            << (device_->GetPlatform() == rhi::RHIPlatform::D3D12 ? "D3D12"
+                                : device_->GetPlatform() == rhi::RHIPlatform::Vulkan ? "Vulkan"
+                                                                                      : "this backend")
+                            << " — falling back to the legacy N-2 ring map for volume '"
+                            << rg_name_prefix_ << "'" << std::endl;
+                    }
                 }
                 if(cpuHistory) {cpuHistory->variance_skip=varianceFenced?(!ringReady?6:rbSlot>=3?1:sourceMismatch?3:certified?0:2):0;
                     if(certified){cpuHistory->variance_source_frame=u32(certified->source_frame);cpuHistory->variance_source_native=certified->context.frame;cpuHistory->variance_source_ticket=certified->context.ticket;cpuHistory->variance_completed_serial=device_->FrameSlotCompletions().Serial(rbSlot);}
@@ -3719,8 +3755,16 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                 // Compute priority scores and select top-N probes
                 float maxExpectedVariance = params_.probe_spacing * params_.probe_spacing;
 
-                struct ProbePriority { u32 index; float score; };
-                std::vector<ProbePriority> priorities(probeCountTotal);
+                // Deterministic priority order (DDGIProbePriority.h): equal
+                // scores break on probe index, so the same score vector selects
+                // the same probes on MSVC / libc++ / any stdlib. See the header
+                // for the measured tie that desynchronized the f350 schedules.
+                std::vector<DDGIProbePriority> priorities(probeCountTotal);
+                // f350 scheduler digest: FNV over the per-index score bits (input
+                // fingerprint, independent of the sort) so a D3D12 log and a
+                // Vulkan log can be compared directly instead of inferring the
+                // schedule from the three sampled probes.
+                u64 scoreIndexDigest = 1469598103934665603ull;
 
                 // Extract camera position from inverse view (already computed above)
                 math::v3 cameraPos = {
@@ -3745,7 +3789,11 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     math::v3 diff = probePos - cameraPos;
                     float dist2 = diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
                     float distScore = 1.0f / (1.0f + dist2);
-                    float varianceScore = std::min(probe_states_[i].max_depth_variance / maxExpectedVariance, 1.0f);
+                    // Quantized 1/256: absorbs DXBC/SPIR-V rounding in the
+                    // GPU-computed variance term without reordering probes that
+                    // differ by more than ~0.4% of the saturation range.
+                    const float varianceScore = DDGIVarianceScore(
+                        probe_states_[i].max_depth_variance, maxExpectedVariance);
                     // Do not cap age at 30 frames: camera-distance and variance
                     // terms otherwise starve the right-arcade probes for >200
                     // frames. DDGI_AGE_CAP=30 restores the former scheduler.
@@ -3753,7 +3801,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     float age = float(current_frame_index - probe_states_[i].last_update_frame);
                     float ageScore = (cappedAge ? std::min(age, 30.0f) : age) / 30.0f;
 
-                    priorities[i] = { i, distScore + varianceScore * 0.5f + ageScore * 0.3f };
+                    priorities[i] = { i, DDGIPriorityScore(distScore, varianceScore, ageScore) };
+                    scoreIndexDigest = DDGIFnv1aU32(scoreIndexDigest,
+                        std::bit_cast<u32>(priorities[i].score));
                     if(cpuHistory) {cpu_stall_audit::Hash(cpuHistory->max_hash,std::bit_cast<u32>(probe_states_[i].max_depth_variance));
                         cpu_stall_audit::Hash(cpuHistory->score_hash,std::bit_cast<u32>(priorities[i].score));
                         cpu_stall_audit::Hash(cpuHistory->age_hash,probe_states_[i].last_update_frame);}
@@ -3761,12 +3811,9 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
 
                 if(cpuHistory)cpuHistory->scores_valid=true;
                 segment("ddgi.priority");
-                // Partial sort: top-N only
-                updateCount = std::min(max_probes_per_frame_, probeCountTotal);
-                std::partial_sort(priorities.begin(), priorities.begin() + updateCount,
-                                  priorities.end(), [](const ProbePriority& a, const ProbePriority& b) {
-                                      return a.score > b.score;
-                                  });
+                // Partial sort: top-N only, deterministic total order.
+                updateCount = DDGISelectTopProbes(priorities,
+                    std::min(max_probes_per_frame_, probeCountTotal));
 
                 segment("ddgi.priority_sort");
                 // Write update list buffer
@@ -3783,10 +3830,26 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                     if(cpuHistory)cpu_stall_audit::Selection(*cpuHistory,updateList[i]);
                     probe_states_[priorities[i].index].last_update_frame = current_frame_index;
                 }
-                if (current_frame_index == 350 && updateCount >= 4 && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+                // Default 350 (the f350 gate frame); DDGI_SELECT_DIGEST_FRAME
+                // lets a short local capture exercise the same digest.
+                static const u32 selectDigestFrame = [] {
+                    const char* e = std::getenv("DDGI_SELECT_DIGEST_FRAME");
+                    return e ? static_cast<u32>(std::strtoul(e, nullptr, 10)) : 350u;
+                }();
+                if (current_frame_index == selectDigestFrame && updateCount >= 4 &&
+                    std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+                    u64 idDigest = 1469598103934665603ull;
+                    u64 ageDigest = 1469598103934665603ull;
+                    for (u32 i = 0; i < updateCount; ++i)
+                        idDigest = DDGIFnv1aU32(idDigest, priorities[i].index);
+                    for (u32 i = 0; i < probeCountTotal; ++i)
+                        ageDigest = DDGIFnv1aU32(ageDigest, probe_states_[i].last_update_frame);
                     PRIMAL_LOG_STREAM(Info,"Render") << "[F350DDGISelect] volume=" << rg_name_prefix_
                         << " frame=" << current_frame_index << " count=" << updateCount << " handle=" << probe_update_list_buffers_[frameIdx]
-                        << " first=" << priorities[0].index << "," << priorities[1].index << "," << priorities[2].index << "," << priorities[3].index;
+                        << " first=" << priorities[0].index << "," << priorities[1].index << "," << priorities[2].index << "," << priorities[3].index
+                        << " id_digest=" << std::hex << idDigest
+                        << " age_digest=" << ageDigest
+                        << " score_index_digest=" << scoreIndexDigest << std::dec << std::endl;
                 }
                 segment("ddgi.list_fill");
                 device_->UnmapBuffer(probe_update_list_buffers_[frameIdx]);
