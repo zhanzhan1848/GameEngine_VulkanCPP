@@ -18,19 +18,12 @@ Vulkan SDK 1.3.250.1, Python 3.10.9 (anaconda).
 | CMake | 3.20+ on PATH | generator must support VS 2022 |
 | Python | 3.8+ on PATH (`python`) | stdlib-only scripts; no numpy/PIL needed anywhere in this CI |
 | Vulkan SDK (runtime + headers) | 1.3.250+ | engine links `vulkan-1.lib`; the SDK also ships glslangValidator |
-| glslangValidator | **required** | shader-mirror generation; path via `D3D12_GLSLANG` or PATH |
-| spirv-cross | **required** | same, via `D3D12_SPIRV_CROSS` or PATH |
-| dxc (DXC standalone) | **required** | same, via `D3D12_DXC` or PATH |
+| dxc (DXC standalone) | **required** | native HLSL compilation, via `D3D12_DXC` or PATH |
 | Git | required | checkout fetches submodules recursively |
 | GitHub Actions runner | registered with labels `Windows, X64, D3D12, Vulkan` | see the session note below |
 
-Since 751b467d the D3D12 shader mirrors (`.hlsl`/`.cso`/`manifest.json`) are
-**not tracked in git**. A fresh checkout has no mirrors, so the shader
-toolchain (glslangValidator / spirv-cross / dxc) is a hard requirement - the
-workflow fails with an actionable error if the tools are missing and no
-mirrors exist. If stale mirrors happen to be present in a reused workspace,
-the step degrades to a warning (same semantics as the `windows-d3d12` job in
-`ci.yml`).
+The HLSL sources are tracked under `Engine/Graphics/RHI/Platforms/D3D12/Shaders`.
+Fresh checkouts use Python and DXC to build the runtime CSOs and manifest.
 
 ## 2. Runner session context (important)
 
@@ -56,7 +49,7 @@ environment variables:
 |---|---|---|
 | `PRIMAL_CI_ASSET_DIR` | yes | Directory holding the four local assets of section 4 (flat layout, exact filenames). |
 | `PRIMAL_CI_HARNESS_BASELINE` | yes | Directory holding the seeded M2-M6 frame baseline (section 5). If unset, the harness gate fails with seed instructions - it is never silently skipped. |
-| `D3D12_GLSLANG` / `D3D12_SPIRV_CROSS` / `D3D12_DXC` | if not on PATH | Absolute paths to glslangValidator / spirv-cross / dxc. Read natively by `scripts/build_d3d12_shaders.py`. |
+| `D3D12_DXC` | if not on PATH | Absolute path to dxc. Read natively by `scripts/build_d3d12_shaders.py`. |
 | `PRIMAL_CI_OFFLINE_DEPS` | optional | Directory with `agility-sdk\build\native\include\d3d12.h` (NuGet layout) and `zlib-src\CMakeLists.txt`. Injected as `-DPRIMAL_D3D12_AGILITY_SDK_DIR` / `-DPRIMAL_ZLIB_SOURCE_DIR`. If unset, CMake downloads Agility 1.611.2 from nuget.org (SHA-pinned) and FetchContent-pulls zlib - needs outbound network. |
 | `PRIMAL_CI_SDK_MODULES` | **yes** | `diagnostic-sdk-modules` directory injected as `-DCMAKE_MODULE_PATH` - provides the DirectXTex/FBX config packages that `find_package(... REQUIRED)` needs with `BUILD_CONTENT_TOOLS=ON`. |
 | `PRIMAL_CI_THIRD_PARTY_DIR` | **yes** | Directory holding `VHACD\` (robocopy from the retest tree's `third_party\`), staged into the checkout before configure. VHACD's gitlink pin only exists on the dev machine. FBX SDK is NOT staged - it is the system Autodesk install (`C:\Program Files\Autodesk\FBX SDK\...`), located via the FindFBX module from `PRIMAL_CI_SDK_MODULES`. |

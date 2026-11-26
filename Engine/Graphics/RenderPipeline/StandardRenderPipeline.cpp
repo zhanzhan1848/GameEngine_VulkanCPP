@@ -1221,8 +1221,8 @@ void StandardRenderPipeline::ConfigureGatherGeometry(GIGatherInputs& inputs,u32 
             ddgi->GetMeasuredGeometrySource(i)!=current.buffers[i])return false;
         return true;
     };
-    if (inputs.frame_index == 350 && ddgi && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
-        PRIMAL_LOG_STREAM(Info, "Render") << "[F350GI] slot=" << view.slot
+    if ((inputs.frame_index == 10 || inputs.frame_index == 350) && ddgi && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+        PRIMAL_LOG_STREAM(Info, "Render") << "[F350GI] frame=" << inputs.frame_index << " slot=" << view.slot
             << " source_epoch=" << view.scene_epoch << " slot_epoch=" << view.slot_epoch
             << " digest=" << view.source_digest << " published=" << view.ready
             << " gather_source_matches=" << inputs.geometry_still_current()
@@ -1431,8 +1431,7 @@ static std::vector<u8> SelfLoadShaderSource(const char* file, rhi::RHIPlatform p
     if (platform == rhi::RHIPlatform::Vulkan || platform == rhi::RHIPlatform::D3D12) {
         // Vulkan: SPIR-V from the engine shader tree. D3D12: DXIL .cso
         // mirroring the same relative path (build_d3d12_shaders.py layout);
-        // spirv-cross rewrites every entry point to "main" so the cso is
-        // consumed with the same one-file-per-stage shape as the spv.
+        // DXC bakes each HLSL entry into a separate file.
         // R13: 镜像映射（基座换替 + .spv→.cso）中央化到 ShaderRegistry::
         // ResolveShaderPath(platform, relPath)，本处不再内联拼 d3d12 路径。
         const char* suffix = (stage == ShaderStage::Vertex) ? ".vert.spv"
@@ -1497,8 +1496,7 @@ void StandardRenderPipeline::SelfLoadPipelineShaders() {
         // FusionIndirect=fusion_indirect 等）——十测 Windows 上 sc_card_radiance/
         // sc_probe_irradiance 自加载建计算管线时报 "No entrypoint found named
         // `main`"（72 条）。入口名随装配表逐行传入。
-        // D3D12: cso 由 spirv-cross 包装，入口恒为 "main"（D3D12Shader 忽略
-        // entryPoint 参数并按 main 消费）；Vulkan spv 保持功能入口名。
+        // D3D12 入口已编入 .cso；Vulkan 按功能名选择模块中的入口。
         const char* entry = metal ? metalEntry
                         : (platform == rhi::RHIPlatform::D3D12) ? "main" : vulkanEntry;
         out = device_->CreateShader(bytes.data(), bytes.size(), stage, entry);
@@ -6324,6 +6322,220 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
                     device_->DestroyCommandBuffer(ch);
                 }
                 device_->DestroyBuffer(stage);
+            }
+        }
+    }
+
+    // 2026-11-25: full near-volume DDGI SH readback. The SC lighting atlas was
+    // ruled out (same-run digest differs only in the last bits; 236/256 tiles
+    // identical to 3 dp), so the remaining question is which probes' irradiance
+    // differs and by how much. 882 probes x 9 vec4 = 127 KB, one-shot copy.
+    // PRIMAL_F350_DDGI_SH=1; consumed one frame after capture.
+    static const bool ddgiShDump = std::getenv("PRIMAL_F350_DDGI_SH") != nullptr;
+    if (ddgiShDump && frameCount_ == 351) {
+        if (auto* nearVolume = GetDDGIVolume(0)) {
+            const u32 slot = u32((frameCount_ - 1) % 3);
+            const auto sh = nearVolume->GetIrradianceBufferBySlot(slot);
+            u64 bytes = 0;
+            if (sh != handles::INVALID_RESOURCE && device_->GetBufferByteSize(sh, bytes) && bytes) {
+                BufferDesc bd{};
+                bd.size = bytes;
+                bd.type = BufferType::Raw;
+                bd.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+                bd.memoryUsage = GPUMemoryUsage::Readback;
+                bd.name = "F350_DDGI_NearSH";
+                const auto stage = device_->CreateBuffer(bd);
+                if (stage != handles::INVALID_RESOURCE) {
+                    const auto ch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                    if (ch != handles::INVALID_COMMAND_BUFFER) {
+                        if (auto* c2 = GetCommandBuffer(ch)) {
+                            c2->Begin();
+                            c2->CopyBuffer(sh, stage, 0, 0, bytes);
+                            c2->End();
+                            c2->Submit();
+                            c2->WaitForCompletion();
+                            if (auto* p = static_cast<const u8*>(device_->MapBuffer(stage))) {
+                                u64 digest = 1469598103934665603ull;
+                                for (u64 i = 0; i < bytes; ++i) {
+                                    digest ^= p[i];
+                                    digest *= 1099511628211ull;
+                                }
+                                constexpr u64 kProbeStride = 9ull * 16ull;  // 9 x vec4
+                                const u64 probes = bytes / kProbeStride;
+                                std::string luma;
+                                for (u64 i = 0; i < probes; ++i) {
+                                    float c[4];
+                                    std::memcpy(c, p + i * kProbeStride, sizeof(c));
+                                    const double l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+                                    char cell[24];
+                                    std::snprintf(cell, sizeof(cell), "%s%.4f", i ? "," : "", l);
+                                    luma += cell;
+                                }
+                                PRIMAL_LOG_STREAM(Info, "Render")
+                                    << "[F350DDGI_SH] frame=" << frameCount_ - 1
+                                    << " slot=" << slot << " probes=" << probes
+                                    << " bytes=" << bytes
+                                    << " digest=0x" << std::hex << digest << std::dec
+                                    << " luma0=" << luma << std::endl;
+                                device_->UnmapBuffer(stage);
+                            }
+                        }
+                        device_->DestroyCommandBuffer(ch);
+                    }
+                    device_->DestroyBuffer(stage);
+                }
+            }
+        }
+    }
+
+    // 2026-11-25: per-probe mean ray distance, next to the SH dump. The full
+    // near-field SH readback shows 39% of probes >5% and 27% >10% apart (max
+    // 66%), so the discriminator is whether those same probes also trace
+    // different distances (SDF trace / sampling) or only carry different
+    // radiance (card lookup). 882 probes x 128 floats = 451 KB, one-shot copy.
+    // PRIMAL_F350_DDGI_DEPTH=1; consumed one frame after capture.
+    static const bool ddgiDepthDump = std::getenv("PRIMAL_F350_DDGI_DEPTH") != nullptr;
+    if (ddgiDepthDump && frameCount_ == 351) {
+        if (auto* nearVolume = GetDDGIVolume(0)) {
+            const u32 slot = u32((frameCount_ - 1) % 3);
+            const auto depthBuf = nearVolume->GetDepthBufferBySlot(slot);
+            u64 bytes = 0;
+            if (depthBuf != handles::INVALID_RESOURCE &&
+                device_->GetBufferByteSize(depthBuf, bytes) && bytes) {
+                BufferDesc bd{};
+                bd.size = bytes;
+                bd.type = BufferType::Raw;
+                bd.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+                bd.memoryUsage = GPUMemoryUsage::Readback;
+                bd.name = "F350_DDGI_NearDepth";
+                const auto stage = device_->CreateBuffer(bd);
+                if (stage != handles::INVALID_RESOURCE) {
+                    const auto ch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                    if (ch != handles::INVALID_COMMAND_BUFFER) {
+                        if (auto* c2 = GetCommandBuffer(ch)) {
+                            c2->Begin();
+                            c2->CopyBuffer(depthBuf, stage, 0, 0, bytes);
+                            c2->End();
+                            c2->Submit();
+                            c2->WaitForCompletion();
+                            if (auto* p = static_cast<const u8*>(device_->MapBuffer(stage))) {
+                                u64 digest = 1469598103934665603ull;
+                                for (u64 i = 0; i < bytes; ++i) {
+                                    digest ^= p[i];
+                                    digest *= 1099511628211ull;
+                                }
+                                constexpr u64 kFloatsPerProbe = 128ull;  // [mean64 | var64]
+                                const u64 probes = bytes / (kFloatsPerProbe * sizeof(float));
+                                std::string means;
+                                for (u64 i = 0; i < probes; ++i) {
+                                    const float* d = reinterpret_cast<const float*>(
+                                        p + i * kFloatsPerProbe * sizeof(float));
+                                    double sum = 0.0;
+                                    for (u64 k = 0; k < 64ull; ++k) sum += d[k];
+                                    char cell[24];
+                                    std::snprintf(cell, sizeof(cell), "%s%.5f", i ? "," : "",
+                                                  sum / 64.0);
+                                    means += cell;
+                                }
+                                PRIMAL_LOG_STREAM(Info, "Render")
+                                    << "[F350DDGI_DEPTH] frame=" << frameCount_ - 1
+                                    << " slot=" << slot << " probes=" << probes
+                                    << " bytes=" << bytes
+                                    << " digest=0x" << std::hex << digest << std::dec
+                                    << " mean=" << means << std::endl;
+                                device_->UnmapBuffer(stage);
+                            }
+                        }
+                        device_->DestroyCommandBuffer(ch);
+                    }
+                    device_->DestroyBuffer(stage);
+                }
+            }
+        }
+    }
+
+    // 2026-11-25: per-probe ray radiance, after depth was ruled out (all 882
+    // probes' mean hit distance agree to 0.02%). This separates "same hits,
+    // different radiance" from "some rays read nothing": per-probe mean of the
+    // 128 ray radiances + how many rays are exactly black, plus the first 16
+    // rays of the band (probes 113-120) that drives the SH divergence.
+    // PRIMAL_F350_DDGI_RAYS=1; consumed one frame after capture.
+    static const bool ddgiRaysDump = std::getenv("PRIMAL_F350_DDGI_RAYS") != nullptr;
+    if (ddgiRaysDump && frameCount_ == 351) {
+        if (auto* nearVolume = GetDDGIVolume(0)) {
+            const auto rays = nearVolume->GetRayDataBuffer();
+            u64 bytes = 0;
+            if (rays != handles::INVALID_RESOURCE &&
+                device_->GetBufferByteSize(rays, bytes) && bytes) {
+                BufferDesc bd{};
+                bd.size = bytes;
+                bd.type = BufferType::Raw;
+                bd.bindFlags = static_cast<u32>(BufferUsageFlags::TransferDst);
+                bd.memoryUsage = GPUMemoryUsage::Readback;
+                bd.name = "F350_DDGI_Rays";
+                const auto stage = device_->CreateBuffer(bd);
+                if (stage != handles::INVALID_RESOURCE) {
+                    const auto ch = device_->CreateCommandBuffer(CommandQueueType::Graphics);
+                    if (ch != handles::INVALID_COMMAND_BUFFER) {
+                        if (auto* c2 = GetCommandBuffer(ch)) {
+                            c2->Begin();
+                            c2->CopyBuffer(rays, stage, 0, 0, bytes);
+                            c2->End();
+                            c2->Submit();
+                            c2->WaitForCompletion();
+                            if (auto* p = static_cast<const u8*>(device_->MapBuffer(stage))) {
+                                u64 digest = 1469598103934665603ull;
+                                for (u64 i = 0; i < bytes; ++i) {
+                                    digest ^= p[i];
+                                    digest *= 1099511628211ull;
+                                }
+                                constexpr u64 kRayVec4 = 16ull;
+                                constexpr u64 kRaysPerProbe = 128ull;
+                                const u64 probes = bytes / (kRayVec4 * kRaysPerProbe);
+                                std::string means, zeros;
+                                for (u64 i = 0; i < probes; ++i) {
+                                    double sum = 0.0;
+                                    u32 black = 0;
+                                    for (u64 r = 0; r < kRaysPerProbe; ++r) {
+                                        const float* v = reinterpret_cast<const float*>(
+                                            p + (i * kRaysPerProbe + r) * kRayVec4);
+                                        const double l = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+                                        sum += l;
+                                        if (!(l > 0.0f)) ++black;
+                                    }
+                                    char c[24];
+                                    std::snprintf(c, sizeof(c), "%s%.5f", i ? "," : "", sum / kRaysPerProbe);
+                                    means += c;
+                                    std::snprintf(c, sizeof(c), "%s%u", i ? "," : "", black);
+                                    zeros += c;
+                                }
+                                PRIMAL_LOG_STREAM(Info, "Render")
+                                    << "[F350DDGI_RAYS] frame=" << frameCount_ - 1
+                                    << " probes=" << probes << " bytes=" << bytes
+                                    << " digest=0x" << std::hex << digest << std::dec
+                                    << " mean=" << means << " zeros=" << zeros << std::endl;
+                                for (u64 probe = 113; probe <= 120 && probe < probes; ++probe) {
+                                    std::string head;
+                                    for (u64 r = 0; r < 16; ++r) {
+                                        const float* v = reinterpret_cast<const float*>(
+                                            p + (probe * kRaysPerProbe + r) * kRayVec4);
+                                        const double l = 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+                                        const double d = v[3];
+                                        char c[40];
+                                        std::snprintf(c, sizeof(c), "%s%.4f/%.2f", r ? "," : "", l, d);
+                                        head += c;
+                                    }
+                                    PRIMAL_LOG_STREAM(Info, "Render")
+                                        << "[F350DDGI_RAY16] probe=" << probe
+                                        << " radiance/distance=" << head << std::endl;
+                                }
+                                device_->UnmapBuffer(stage);
+                            }
+                        }
+                        device_->DestroyCommandBuffer(ch);
+                    }
+                    device_->DestroyBuffer(stage);
+                }
             }
         }
     }

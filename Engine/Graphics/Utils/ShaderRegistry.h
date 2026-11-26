@@ -16,8 +16,7 @@ public:
         case rhi::RHIPlatform::Vulkan:
             return "Engine/Graphics/Vulkan/shaders/";
         // D3D12: DXIL .cso mirrors the Vulkan shader tree's relative paths
-        // (build_d3d12_shaders.py output layout; spirv-cross rewrites every
-        // entry point to "main").
+        // (one precompiled HLSL entry per CSO).
         case rhi::RHIPlatform::D3D12:
             return "EngineTest/shaders/d3d12/";
         default:

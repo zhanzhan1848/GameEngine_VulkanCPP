@@ -7,28 +7,8 @@ scripts/win-ci/compare_f350.py (pure stdlib), renders ref|win|diff triptych
 PNGs (hand-rolled PNG encoder, zlib+struct), and writes the Markdown PSNR/SSIM
 table for $GITHUB_STEP_SUMMARY.
 
-Gate model (2026-11-25, mode parity):
-  D3D12 still falls back to DDGI mode 0 while the canonical Vulkan group runs
-  mode 7 + measured geometry, so comparing D3D12 against the mode-7 Mac
-  reference can never pass (Mac's own mode 0 is ~20.6 dB against it). The job
-  therefore gates on like-for-like mode 0:
-
-  1. capture gate: the four canonical groups and both mode-0 diagnostic groups
-     produced their f350 PPM;
-  2. GI-off gate: PSNR vs the frozen Mac GI-off reference >= 43.5 dB (unchanged);
-  3. same-mode parity gate: D3D12 mode 0 vs Vulkan mode 0, same runner, same
-     run >= MODE0_PAIR_GATE_DB. This is the backend-parity signal;
-  4. mode-0 reference gate: D3D12 mode 0 vs the frozen Windows Vulkan mode-0
-     reference (same assets/camera/frame, re-frozen 2026-11-25) >=
-     MODE0_REF_GATE_DB. This catches regressions that hit both backends.
-
-  The canonical GI-on rows against the mode-7 Mac reference stay in the table as
-  diagnostics: they track progress toward D3D12 measured mode 7, but they do not
-  fail the job while D3D12 cannot run that path.
-
-ASCII-only source; Python 3.8+ standard library only.
-
-ASCII-only source; Python 3.8+ standard library only.
+Canonical GI-on requires both measured mode-7 dispatches and same-run indoor
+brightness agreement. The mode-0 controls and frozen references remain in use.
 """
 import argparse
 import hashlib
@@ -145,6 +125,36 @@ def triptych(ref_path, win_path, out_path):
     write_png(out_path, w * 3, h, bytes(out))
 
 
+def compare_interior(d3d12_path, vulkan_path):
+    """Display-referred 8-bit luma. Coordinates use the top-left capture origin."""
+    frames = [read_p6(path) for path in (d3d12_path, vulkan_path)]
+    if any((w, h) != (1280, 720) for w, h, _ in frames):
+        raise ValueError("canonical interior check requires 1280x720 captures")
+
+    def luma(rgb, x, y):
+        i = 3 * (y * 1280 + x)
+        return (54 * rgb[i] + 183 * rgb[i + 1] + 19 * rgb[i + 2]) / 256
+
+    d, v = [rgb for _, _, rgb in frames]
+    point = [luma(rgb, 782, 493) for rgb in (d, v)]
+    sum_d = sum_v = sum_abs = 0.0
+    gt8 = 0
+    for y in range(180, 540):
+        for x in range(320, 960):
+            a, b = luma(d, x, y), luma(v, x, y)
+            diff = abs(a - b)
+            sum_d += a
+            sum_v += b
+            sum_abs += diff
+            gt8 += diff > 8
+    count = 640 * 360
+    mae = sum_abs / count
+    frac = gt8 / count
+    return {"point_xy": [782, 493], "point_y": point, "roi_xyxy": [320, 180, 960, 540],
+            "mean_y": [sum_d / count, sum_v / count], "mean_abs": mae, "frac_gt8": frac,
+            "pass": abs(point[0] - point[1]) <= 2 and mae <= 1 and frac <= VIS_GT8_LIMIT}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", required=True)
@@ -236,9 +246,7 @@ def main():
         row["mean_abs"] = pair["mean_abs_diff_rgb"]
         row["byte_identical"] = pair["byte_identical"]
         if g.get("gi") == 1:
-            # Canonical GI-on runs a mode 7 + measured reference against a run
-            # that may have fallen back to mode 0 (D3D12 cannot run measured
-            # mode 7 yet). Track progress, do not fail the job on it.
+            # The cross-device Mac reference is a diagnostic. The Windows pair is gated below.
             row["gate"] = "diagnostic (mode-7 ref)"
         elif psnr == float("inf") or psnr >= PSNR_GATE_DB:
             row["gate"] = "PASS"
@@ -258,7 +266,17 @@ def main():
         print("[parity] %s: PSNR=%s SSIM=%s -> %s" %
               (name, psnr, row["ssim"], row["gate"]))
 
-    # ---- like-for-like mode 0 parity: the gate D3D12 can actually meet. ----
+    interior = None
+    canonical = {g["api"]: os.path.join(ppm_dir, g["ppm"]) for g in gates if g["gi"] == 1}
+    if all(os.path.isfile(path) for path in canonical.values()):
+        interior = compare_interior(canonical["d3d12"], canonical["vulkan"])
+        any_fail |= not interior["pass"]
+        with open(os.path.join(args.out, "compare_mode7_interior.json"), "w", encoding="utf-8") as fh:
+            json.dump(interior, fh, indent=2)
+    else:
+        any_fail = True
+
+    # Explicit mode 0 controls.
     mode0 = {"rows": [], "triptych": None}
     mode0_paths = {k: os.path.join(ppm_dir, v) for k, v in MODE0_PPM.items()}
     missing_mode0 = [k for k, path in mode0_paths.items() if not os.path.isfile(path)]
@@ -367,9 +385,7 @@ def main():
     lines.append("")
     lines.append("Gates: GI-off **psnr_rgb_db >= %.1f dB**; DDGI mode 0 same-run "
                  "D3D12 vs Vulkan **>= %.1f dB**; D3D12 mode 0 vs frozen mode-0 "
-                 "reference **>= %.1f dB**. Canonical GI-on rows compare a "
-                 "mode-7 reference against a run that may fall back to mode 0 "
-                 "and are diagnostic." %
+                 "reference **>= %.1f dB**. Canonical GI-on requires measured mode 7 on both APIs. " %
                  (PSNR_GATE_DB, MODE0_PAIR_GATE_DB, MODE0_REF_GATE_DB))
     lines.append("")
     lines.append("| group | capture | exe exit | PSNR (dB) | SSIM | mean abs "
@@ -383,6 +399,16 @@ def main():
         lines.append("| %s | %s | %s | %s | %s | %s | %s |" %
                      (r["label"], r["capture"], r["exit"], psnr_s,
                       ssim_s, mean_s, r["gate"]))
+    lines.append("")
+    lines.append("### Canonical GI-on interior (D3D12 vs Vulkan, mode 7)")
+    lines.append("")
+    if interior:
+        lines.append("Hotspot (782,493): %.2f vs %.2f. Central 640x360 mean luma: %.2f vs %.2f. "
+                     "Mean absolute difference %.2f; %.2f%% differ by more than 8 levels. **%s**." %
+                     (*interior["point_y"], *interior["mean_y"], interior["mean_abs"],
+                      100 * interior["frac_gt8"], "PASS" if interior["pass"] else "FAIL"))
+    else:
+        lines.append("FAIL (missing canonical captures)")
     lines.append("")
     lines.append("### Like-for-like DDGI mode 0 (same runner, same run)")
     lines.append("")

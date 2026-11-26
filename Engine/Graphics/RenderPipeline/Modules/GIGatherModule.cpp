@@ -1961,8 +1961,8 @@ GIGatherOutputs GIGatherModule::AddPasses(rendergraph::RenderGraph& graph, const
             const u32 localY=useWorkgroup && workgroup_requested_==32?4u:8u;
             const u32 groupsX=workgroup_experiment::Groups(gather_width_,8),groupsY=workgroup_experiment::Groups(gather_height_,localY);
             cmd->Dispatch(groupsX,groupsY,1);
-            if (inputs.frame_index == 350 && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
-                PRIMAL_LOG_STREAM(Info, "Render") << "[F350Gather] bind_slot=" << bindingIdx
+            if ((inputs.frame_index == 10 || inputs.frame_index == 350) && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+                PRIMAL_LOG_STREAM(Info, "Render") << "[F350Gather] frame=" << inputs.frame_index << " bind_slot=" << bindingIdx
                     << " ddgi_read_slot=" << ddgiReadIdx << " completion_serial=" << device_->FrameSlotCompletions().Serial(bindingIdx)
                     << " slot_completed=" << device_->FrameSlotCompletions().CanReuse(bindingIdx,0)
                     << " measured=" << ddgi->UsesMeasuredVisibility() << " geometry_required=" << geometry_connections_enabled_

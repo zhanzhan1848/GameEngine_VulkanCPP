@@ -169,7 +169,11 @@ bool SCDDGIIntegrationModule::EnsureResources(lumen::LumenDDGIPass* ddgi, lumen:
         radDesc.type = BufferType::Structured;
         radDesc.usage = GPUMemoryUsage::Dynamic;
         radDesc.memoryUsage = GPUMemoryUsage::Dynamic;
+        // CardRadianceAvg writes u3 before ProbeIrradianceFromCards reads t3.
+        radDesc.bindFlags = static_cast<u32>(ResourceUsage::UnorderedAccess);
+        radDesc.name = "SCDDGI_CardRadiance";
         card_radiance_buf_ = device_->CreateBuffer(radDesc);
+        if (card_radiance_buf_ == handles::INVALID_RESOURCE) return false;
     }
     if (probe_contrib_range_buf_ == handles::INVALID_RESOURCE) {
         BufferDesc d{};
@@ -976,6 +980,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 compare("SCDDGI.CardAvgInputs", "card-data", sc->GetCardDataBuffer(), true);
                 compare("SCDDGI.CardAvgInputs", "params", sc_params_cb_, true);
 
+                cmd->RequireBufferState(card_radiance_buf_, ResourceState::UnorderedAccess);
                 cmd->BindComputePipeline(card_radiance_pipeline_);
                 const DescriptorSetHandle sets[] = { card_radiance_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, card_radiance_layout_, 0, 1, sets, 0, nullptr);
@@ -1121,6 +1126,10 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 compare("SCDDGI.InjectInputs", "volume", params[0].resource, true);
                 compare("SCDDGI.InjectInputs", "params", params[7].resource, true);
 
+                cmd->RequireBufferState(card_radiance_buf_, ResourceState::ShaderResource);
+                cmd->RequireBufferState(confBuf, ResourceState::ShaderResource);
+                cmd->RequireBufferState(ddgi->GetIrradianceBufferBySlot(histIdx), ResourceState::ShaderResource);
+                cmd->RequireBufferState(ddgi->GetIrradianceBufferBySlot(frameIdx), ResourceState::UnorderedAccess);
                 cmd->BindComputePipeline(probe_irradiance_pipeline_);
                 const DescriptorSetHandle sets[] = { probe_irradiance_ds_[frameIdx] };
                 cmd->BindDescriptorSets(PipelineBindPoint::Compute, probe_irradiance_layout_, 0, 1, sets, 0, nullptr);
@@ -1155,6 +1164,7 @@ void SCDDGIIntegrationModule::AddPass(rendergraph::RenderGraph& graph, const SCD
                 }
             }
 
+            cmd->RequireBufferState(ddgi->GetIrradianceBufferBySlot(frameIdx), ResourceState::ShaderResource);
             publishHistory("DDGI.History.Publish");
             if(!historyProbes.empty()) {
                 lumencompare::Output(device_,cmd,"DDGI.History.Publish","inject-params",sc_inject_cb_,true);

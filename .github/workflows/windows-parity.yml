@@ -6,7 +6,7 @@
 #   1. configure + full build (MSVC / VS2022 / x64 / Release,
 #      -DENABLE_D3D12=ON -DENABLE_VULKAN=ON)
 #   2. D3D12 shader mirrors: generate with scripts/build_d3d12_shaders.py
-#      (tools via D3D12_GLSLANG / D3D12_SPIRV_CROSS / D3D12_DXC), then the
+#      (DXC via D3D12_DXC or PATH), then the
 #      CRLF-insensitive --check freshness gate. Mirrors are NOT tracked in
 #      git since 751b467d, so the toolchain is a hard requirement on a
 #      clean workspace (same degrade semantics as ci.yml windows-d3d12 when
@@ -22,19 +22,8 @@
 #      Vulkan GI-on/off): 400 frames, capture frame 350, 300 s no-progress
 #      watchdog (engine PRIMAL_SPONZA_WATCHDOG_SECS + script-level backup).
 #      PRIMAL_VK_HANG_DIAG is NOT set (official default path).
-#   6. PSNR/SSIM gate: each captured f350 vs the tracked Mac Vulkan
-#      reference (.github/ci-assets/ref_mac_vulkan_RG_f350.ppm, SHA256
-#      verified at runtime). Since 2026-11-25 the job gates on like-for-like
-#      DDGI mode 0 instead, because D3D12 still falls back to mode 0 while the
-#      canonical Vulkan group runs measured mode 7 (Mac's own mode 0 is only
-#      ~20.6 dB against the mode-7 reference, so that comparison can never
-#      pass). Gates now:
-#        - GI-off vs the frozen Mac GI-off reference >= 43.5 dB;
-#        - D3D12 mode 0 vs Vulkan mode 0, same run >= 41.5 dB;
-#        - D3D12 mode 0 vs the frozen Windows Vulkan mode-0 reference
-#          (.github/ci-assets/ref_win_vulkan_mode0_f350.ppm) >= 41.0 dB.
-#      The canonical GI-on rows against the mode-7 reference stay in the table
-#      as diagnostics that track progress toward D3D12 measured mode 7.
+#   6. canonical mode-7 dispatch evidence and interior brightness on both APIs;
+#      explicit mode-0 pair and frozen mode-0/GI-off regression checks.
 #
 # All inline scripts are ASCII-only (cp936-safe). Runner-local resources are
 # injected through environment variables configured on the runner machine
@@ -143,11 +132,7 @@ jobs:
           $cmake = Get-Command cmake -ErrorAction SilentlyContinue
           Check ($null -ne $cmake) "cmake on PATH ($($cmake.Source))"
           # Shader toolchain: env override first, then PATH.
-          $glslang = if ($env:D3D12_GLSLANG) { $env:D3D12_GLSLANG } elseif (Get-Command glslangValidator -ErrorAction SilentlyContinue) { (Get-Command glslangValidator).Source }
-          $cross  = if ($env:D3D12_SPIRV_CROSS) { $env:D3D12_SPIRV_CROSS } elseif (Get-Command spirv-cross -ErrorAction SilentlyContinue) { (Get-Command spirv-cross).Source }
           $dxc    = if ($env:D3D12_DXC) { $env:D3D12_DXC } elseif (Get-Command dxc -ErrorAction SilentlyContinue) { (Get-Command dxc).Source }
-          Check ([bool]$glslang) "glslangValidator ($glslang)"
-          Check ([bool]$cross) "spirv-cross ($cross)"
           Check ([bool]$dxc) "dxc ($dxc)"
           Check ([bool]($env:PRIMAL_CI_ASSET_DIR -or $env:PRIMAL_CI_ASSET_SOURCE)) "PRIMAL_CI_ASSET_DIR or PRIMAL_CI_ASSET_SOURCE (versioned asset source)"
           Check ([bool]$env:PRIMAL_CI_THIRD_PARTY_DIR) "PRIMAL_CI_THIRD_PARTY_DIR (vendored third_party: VHACD\ only - collision module needs it; FBX SDK is the system Autodesk install))"
@@ -273,23 +258,20 @@ jobs:
           $mirror = 'EngineTest/shaders/d3d12/Forward/M1Forward.frag.cso'
           $python = (Get-Command python -ErrorAction SilentlyContinue).Source
           if (-not $python) { $python = (Get-Command python3 -ErrorAction SilentlyContinue).Source }
-          $glslang = if ($env:D3D12_GLSLANG) { $env:D3D12_GLSLANG } elseif (Get-Command glslangValidator -ErrorAction SilentlyContinue) { (Get-Command glslangValidator).Source }
-          $cross   = if ($env:D3D12_SPIRV_CROSS) { $env:D3D12_SPIRV_CROSS } elseif (Get-Command spirv-cross -ErrorAction SilentlyContinue) { (Get-Command spirv-cross).Source }
           $dxc     = if ($env:D3D12_DXC) { $env:D3D12_DXC } elseif (Get-Command dxc -ErrorAction SilentlyContinue) { (Get-Command dxc).Source }
-          if ($python -and $glslang -and $cross -and $dxc) {
-            $env:D3D12_GLSLANG = $glslang
-            $env:D3D12_SPIRV_CROSS = $cross
+          if ($python -and $dxc) {
             $env:D3D12_DXC = $dxc
-            Write-Output "[shaders] tools: $glslang | $cross | $dxc"
+            Write-Output "[shaders] tools: $dxc"
             & $python scripts/build_d3d12_shaders.py
             if ($LASTEXITCODE -ne 0) { Write-Output '::error::build_d3d12_shaders.py failed'; exit $LASTEXITCODE }
             & $python scripts/build_d3d12_shaders.py --check
             if ($LASTEXITCODE -ne 0) { Write-Output '::error::D3D12 shader freshness gate failed'; exit $LASTEXITCODE }
             Write-Output '[shaders] mirrors regenerated and freshness gate passed'
-          } elseif (Test-Path $mirror) {
-            Write-Output '::warning::shader toolchain incomplete; reusing mirrors already present in the workspace (stale risk - freshness gate skipped)'
+          } elseif ($python -and (Test-Path $mirror)) {
+            & $python scripts/build_d3d12_shaders.py --check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
-            Write-Output '::error::shader mirrors are not tracked in git and the toolchain (glslangValidator/spirv-cross/dxc) is unavailable. See RUNNER_SETUP_WINDOWS.md.'
+            Write-Output '::error::shader mirrors are not tracked in git and the toolchain (dxc) is unavailable. See RUNNER_SETUP_WINDOWS.md.'
             exit 1
           }
           exit 0
@@ -403,6 +385,9 @@ jobs:
           $env:PRIMAL_F350_DEFERRED_SAMPLES = '1'
           $env:PRIMAL_F350_PIXLIKE_DIAG = '1'
           $env:PRIMAL_F350_GBV_DIAG = '0'
+          # Exercise the native measured shaders on the software adapter first.
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350/warp -MeasuredWarpSmoke
+          if ($LASTEXITCODE -ne 0) { throw "D3D12 measured WARP smoke failed; see f350/warp logs" }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350
           exit 0
 
@@ -466,6 +451,7 @@ jobs:
             ci-out/f350/*.png
             ci-out/f350/*.json
             ci-out/f350/*.log
+            ci-out/f350/warp/*.log
             ci-out/f350/*.md
           if-no-files-found: warn
           retention-days: 14
@@ -481,6 +467,7 @@ jobs:
             ci-out/f350/*.png
             ci-out/f350/*.json
             ci-out/f350/*.log
+            ci-out/f350/warp/*.log
             ci-out/f350/*.md
           if-no-files-found: warn
           retention-days: 14

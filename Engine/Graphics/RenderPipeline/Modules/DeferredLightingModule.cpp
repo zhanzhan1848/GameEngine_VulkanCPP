@@ -291,19 +291,16 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
         if (fallback_cube_tex_ != handles::INVALID_RESOURCE &&
             (device->GetPlatform() == RHIPlatform::Vulkan ||
              device->GetPlatform() == RHIPlatform::D3D12)) {
-            u8 white_faces[6 * 4];
-            for (u32 f = 0; f < 6; ++f) {
-                white_faces[f * 4 + 0] = 255; white_faces[f * 4 + 1] = 255;
-                white_faces[f * 4 + 2] = 255; white_faces[f * 4 + 3] = 255;
-            }
+            // Each face reads the same white texel at a placement-aligned offset.
+            const u8 white[4]{255, 255, 255, 255};
             BufferDesc staging{};
-            staging.size = sizeof(white_faces);
+            staging.size = sizeof(white);
             staging.memoryUsage = GPUMemoryUsage::Dynamic;
             ResourceHandle stagingHandle = device->CreateBuffer(staging);
             if (stagingHandle != handles::INVALID_RESOURCE) {
                 void* mapped = device->MapBuffer(stagingHandle);
                 if (mapped) {
-                    std::memcpy(mapped, white_faces, sizeof(white_faces));
+                    std::memcpy(mapped, white, sizeof(white));
                     device->UnmapBuffer(stagingHandle);
                 }
                 SyncHandle fence = device->CreateSync();
@@ -316,7 +313,6 @@ bool DeferredLightingModule::Initialize(RHIDeviceBase* device,
                     // 未初始化;逐面写法在 Vulkan/D3D12 语义均正确。
                     BufferTextureCopyRegion regions[6]{};   // {} 值初始化(mipLevel 等归零)
                     for (u32 f = 0; f < 6; ++f) {
-                        regions[f].bufferOffset = f * 4;   // 6×4B 紧密排列
                         regions[f].imageSubresource.baseArrayLayer = f;
                         regions[f].imageSubresource.layerCount = 1;
                         regions[f].imageOffset = {0, 0, 0};
