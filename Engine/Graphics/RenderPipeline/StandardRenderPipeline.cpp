@@ -1221,8 +1221,8 @@ void StandardRenderPipeline::ConfigureGatherGeometry(GIGatherInputs& inputs,u32 
             ddgi->GetMeasuredGeometrySource(i)!=current.buffers[i])return false;
         return true;
     };
-    if (inputs.frame_index == 350 && ddgi && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
-        PRIMAL_LOG_STREAM(Info, "Render") << "[F350GI] slot=" << view.slot
+    if ((inputs.frame_index == 10 || inputs.frame_index == 350) && ddgi && std::getenv("PRIMAL_F350_GI_BINDINGS")) {
+        PRIMAL_LOG_STREAM(Info, "Render") << "[F350GI] frame=" << inputs.frame_index << " slot=" << view.slot
             << " source_epoch=" << view.scene_epoch << " slot_epoch=" << view.slot_epoch
             << " digest=" << view.source_digest << " published=" << view.ready
             << " gather_source_matches=" << inputs.geometry_still_current()

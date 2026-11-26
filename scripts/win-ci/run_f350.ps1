@@ -258,6 +258,9 @@ foreach ($g in $runGroups) {
     if ($canonicalGI) { $env:PRIMAL_F350_GI_BINDINGS = '1' }
     if ($MeasuredWarpSmoke) {
         $env:PRIMAL_D3D12_WARP = '1'
+        # Isolate DDGI trace and Gather from the separate screen-probe pipeline.
+        $env:SPGI_OFF = '1'
+        $env:PRIMAL_RENDER_SCALE = '1'
         $env:SPONZA_MAX_FRAMES = '12'
         $env:SPONZA_CAPTURE_FRAME = '10'
     }
@@ -456,7 +459,7 @@ foreach ($g in $runGroups) {
     $expectedModel = if ($env:PRIMAL_TEST_MODEL) { $env:PRIMAL_TEST_MODEL } else { 'Sponza.model' }
     $anchors = @(Select-String -LiteralPath $se,$so -Pattern @(
         '\[DDGI_VARIANCE_FENCE_AUDIT\] frame=399 volume=Near', 'Probe variance source fence failed',
-        'adapter=(WARP|hw)\)', '\[MeasuredVisibility\] frame=[345] ',
+        'adapter=(WARP|hw)\)',
         '\[LumenDDGI\] (RaySampleMode =|DDGI_RAY_SAMPLE=)', '\[F350GI\]', '\[F350Gather\]',
         '\[Part30.4\] model path:', '\[Part37\] Loading HDR:',
         "Frame $captureFrame captured", "SPONZA_MAX_FRAMES=$maxFrames reached"
@@ -475,17 +478,18 @@ foreach ($g in $runGroups) {
         $contract = $contract -and ($observed -match 'RaySampleMode = 7 \(measured') -and
             ($observed -notmatch 'RaySampleMode = (?!7\b)|unsupported for this backend|falling back to mode')
     }
-    if ($MeasuredWarpSmoke) {
-        $contract = $contract -and ($observed -match 'adapter=WARP\)') -and
-            ($observed -match '\[MeasuredVisibility\][^\r\n]+geometry_ready=true')
-    } elseif ($canonicalGI) {
-        $contract = $contract -and ($g.api -ne 'd3d12' -or $observed -match 'adapter=hw\)') -and
-            ($observed -match '\[F350GI\][^\r\n]+published=true gather_source_matches=true uses_measured=true') -and
-            ($observed -match '\[F350Gather\][^\r\n]+measured=true geometry_required=true geometry_ready=true[^\r\n]+query_kernel=true')
+    if ($canonicalGI) {
+        $adapter = if ($MeasuredWarpSmoke) { 'WARP' } else { 'hw' }
+        $contract = $contract -and ($g.api -ne 'd3d12' -or $observed -match "adapter=$adapter\)") -and
+            ($observed -match "\[F350GI\] frame=$captureFrame [^\r\n]+published=true gather_source_matches=true uses_measured=true") -and
+            ($observed -match "\[F350Gather\] frame=$captureFrame [^\r\n]+measured=true geometry_required=true geometry_ready=true[^\r\n]+query_kernel=true")
     }
-    if ($MeasuredWarpSmoke -and -not $contract) { Write-Error 'Measured WARP smoke failed'; exit 1 }
     if (-not $contract) { Write-Warning "[f350] $($g.name) launch/capture contract failed" }
     Write-Output "[f350] $($g.name) exit=$rc ppm_exists=$ppmExists watchdog=$watchdogFired sha256=$sha"
+    if ($MeasuredWarpSmoke -and -not $contract) {
+        Write-Error "Measured WARP smoke failed (exit=$rc, capture=$ppmExists, watchdog=$watchdogFired)"
+        exit 1
+    }
 
     $launchEnv = [ordered]@{}
     foreach ($key in @('PRIMAL_TEST_MODEL','PRIMAL_VK_TANGENT_FRAME','GI_ISOLATE','DDGI_RAY_SAMPLE',
@@ -495,7 +499,7 @@ foreach ($g in $runGroups) {
         'PRIMAL_D3D12_BLACK_STAGE_DUMP','PRIMAL_D3D12_BLACK_STAGE_FRAME','PRIMAL_DUMP_MATRIX',
         'PRIMAL_D3D12_API_TRACE','PRIMAL_D3D12_DEFERRED_PROBE','PRIMAL_D3D12_GBV',
         'PRIMAL_D3D12_DEFERRED_CLEAR_SENTINEL','PRIMAL_D3D12_RTVAUDIT','PRIMAL_D3D12_DEFERRED_COPY_WRITE',
-        'DDGI_ANALYTIC_NO_HISTORY','PRIMAL_F350_SC_ATLAS','PRIMAL_F350_DDGI_SH','PRIMAL_F350_DDGI_DEPTH','PRIMAL_F350_DDGI_RAYS',
+        'PRIMAL_D3D12_WARP','PRIMAL_RENDER_SCALE','SPGI_OFF','DDGI_ANALYTIC_NO_HISTORY','PRIMAL_F350_SC_ATLAS','PRIMAL_F350_DDGI_SH','PRIMAL_F350_DDGI_DEPTH','PRIMAL_F350_DDGI_RAYS',
         'PRIMAL_F350_SC_RAYS', 'PRIMAL_F350_GI_BINDINGS','PRIMAL_DEFERRED_SAMPLES','SPONZA_CAPTURE_FRAME','SPONZA_MAX_FRAMES','RHI_TEST_PLATFORM')) {
         $value = [Environment]::GetEnvironmentVariable($key)
         if ($null -ne $value) { $launchEnv[$key] = $value }
