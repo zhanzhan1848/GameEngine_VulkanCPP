@@ -22,7 +22,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Exe,
     [Parameter(Mandatory = $true)][string]$OutDir,
     [int]$NoProgressSecs = 300,
-    [int]$HardCapSecs = 1500
+    [int]$HardCapSecs = 1500,
+    [switch]$MeasuredWarpSmoke
 )
 
 $ErrorActionPreference = 'Continue'
@@ -32,7 +33,7 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 if (-not (Test-Path $Exe)) {
     Write-Output "[f350] FATAL exe not found: $Exe"
     Set-Content -Path (Join-Path $OutDir 'f350_gates.json') -Value '[]' -Encoding UTF8
-    exit 0
+    if ($MeasuredWarpSmoke) { exit 1 }; exit 0
 }
 
 # Ordered group list. gi = 1 -> GI on, 0 -> GI off (GI_ISOLATE=all).
@@ -130,10 +131,7 @@ if ($env:PRIMAL_F350_DEFERRED_SAMPLES -eq '1') {
     }
     $diagGroups += @{ name = 'vulkan-gion-mode0'; api = 'vulkan'; gi = 1;
                       ppm = 'art2_win_vulkan_mode0_f350.ppm'; diag = 12 }
-    # R75: explicit same-mode D3D12 counterpart. The canonical d3d12-gion group
-    # requests DDGI_RAY_SAMPLE=7 and falls back to mode 0, so comparing it with
-    # vulkan-gion-mode0 mixes "requested 7, ran 0" with "requested 0". This
-    # group asks for mode 0 on both sides.
+    # Explicit mode 0 remains the history-on control against the frozen capture.
     $diagGroups += @{ name = 'd3d12-gion-mode0'; api = 'd3d12'; gi = 1;
                       ppm = 'art2_win_d3d12_mode0_f350.ppm'; diag = 12 }
     # The frozen mode-0 reference includes analytic history. Keep the ablation
@@ -192,7 +190,10 @@ $assetGates = @(
 $results = @()
 $diagResults = @()
 
-foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
+$runGroups = $groups + $diagGroups + $minEnvGroups + $pixlikeGroups
+if ($MeasuredWarpSmoke) { $runGroups = @($groups[0]) }
+
+foreach ($g in $runGroups) {
     $missing = @()
     foreach ($a in $assetGates) {
         if (-not (Test-Path (Join-Path $Repo $a))) { $missing += $a }
@@ -205,6 +206,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
             ppm_exists = $false; ppm_sha256 = ''; watchdog = $false;
             anchors = @(); missing_assets = $missing
         }
+        if ($MeasuredWarpSmoke) { exit 1 }
         if ($g.diag -or $g.minenv -or $g.pixlike) { $diagResults += $skipEntry } else { $results += $skipEntry }
         continue
     }
@@ -212,7 +214,7 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     # --- env matrix (verbatim from the r11 launchers) ---
     foreach ($key in @(
         'PRIMAL_DDGI_VARIANCE_FENCED', 'DDGI_VARIANCE_FENCE_AUDIT',
-        'PRIMAL_F350_SC_RAYS', 'PRIMAL_F350_GI_BINDINGS', 'PRIMAL_VK_HANG_DIAG', 'PRIMAL_SPGI_SKIP', 'GI_ISOLATE',
+        'PRIMAL_D3D12_MEASURED_GEOMETRY', 'PRIMAL_F350_SC_RAYS', 'PRIMAL_F350_GI_BINDINGS', 'PRIMAL_VK_HANG_DIAG', 'PRIMAL_SPGI_SKIP', 'GI_ISOLATE',
         'PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL', 'RHI_TEST_PLATFORM', 'PRIMAL_LIGHTING_DEBUG',
         'TAA_OFF', 'PRIMAL_SHADOW_RENDER_OFF', 'PRIMAL_D3D12_BLACK_STAGE_FRAME',
         'PRIMAL_F350_SC_ATLAS', 'PRIMAL_F350_DDGI_SH', 'PRIMAL_F350_DDGI_DEPTH',
@@ -249,7 +251,16 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     # The exact source-frame contract below is Vulkan's measured native-3
     # behaviour; D3D12 logs the same audit but is not asserted against it yet.
     $verifyProbeSource = $g.name -in @('vulkan-gion', 'vulkan-gion-samples')
-    if ($g.name -in @('d3d12-gion','vulkan-gion')) { $env:PRIMAL_F350_GI_BINDINGS = '1' }
+    $canonicalGI = $g.name -in @('d3d12-gion','vulkan-gion')
+    if ($g.name -in @('d3d12-gion','d3d12-gion-samples')) {
+        $env:PRIMAL_D3D12_MEASURED_GEOMETRY = '1'
+    }
+    if ($canonicalGI) { $env:PRIMAL_F350_GI_BINDINGS = '1' }
+    if ($MeasuredWarpSmoke) {
+        $env:PRIMAL_D3D12_WARP = '1'
+        $env:SPONZA_MAX_FRAMES = '12'
+        $env:SPONZA_CAPTURE_FRAME = '10'
+    }
     $ppmPath = Join-Path $OutDir $g.ppm
     $env:SPONZA_CAPTURE = $ppmPath
 
@@ -445,6 +456,8 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
     $expectedModel = if ($env:PRIMAL_TEST_MODEL) { $env:PRIMAL_TEST_MODEL } else { 'Sponza.model' }
     $anchors = @(Select-String -LiteralPath $se,$so -Pattern @(
         '\[DDGI_VARIANCE_FENCE_AUDIT\] frame=399 volume=Near', 'Probe variance source fence failed',
+        'adapter=(WARP|hw)\)', '\[MeasuredVisibility\] frame=[345] ',
+        '\[LumenDDGI\] (RaySampleMode =|DDGI_RAY_SAMPLE=)', '\[F350GI\]', '\[F350Gather\]',
         '\[Part30.4\] model path:', '\[Part37\] Loading HDR:',
         "Frame $captureFrame captured", "SPONZA_MAX_FRAMES=$maxFrames reached"
     ) | ForEach-Object { $_.Line })
@@ -458,12 +471,25 @@ foreach ($g in ($groups + $diagGroups + $minEnvGroups + $pixlikeGroups)) {
         $contract = $contract -and ($observed -match 'frame=399 volume=Near[^\r\n]*accepted_frame=true[^\r\n]*source_frame=397 source_native=397') -and
                     ($observed -notmatch 'Probe variance source fence failed')
     }
+    if ($canonicalGI) {
+        $contract = $contract -and ($observed -match 'RaySampleMode = 7 \(measured') -and
+            ($observed -notmatch 'RaySampleMode = (?!7\b)|unsupported for this backend|falling back to mode')
+    }
+    if ($MeasuredWarpSmoke) {
+        $contract = $contract -and ($observed -match 'adapter=WARP\)') -and
+            ($observed -match '\[MeasuredVisibility\][^\r\n]+geometry_ready=true')
+    } elseif ($canonicalGI) {
+        $contract = $contract -and ($g.api -ne 'd3d12' -or $observed -match 'adapter=hw\)') -and
+            ($observed -match '\[F350GI\][^\r\n]+published=true gather_source_matches=true uses_measured=true') -and
+            ($observed -match '\[F350Gather\][^\r\n]+measured=true geometry_required=true geometry_ready=true[^\r\n]+query_kernel=true')
+    }
+    if ($MeasuredWarpSmoke -and -not $contract) { Write-Error 'Measured WARP smoke failed'; exit 1 }
     if (-not $contract) { Write-Warning "[f350] $($g.name) launch/capture contract failed" }
     Write-Output "[f350] $($g.name) exit=$rc ppm_exists=$ppmExists watchdog=$watchdogFired sha256=$sha"
 
     $launchEnv = [ordered]@{}
     foreach ($key in @('PRIMAL_TEST_MODEL','PRIMAL_VK_TANGENT_FRAME','GI_ISOLATE','DDGI_RAY_SAMPLE',
-        'DDGI_MEASURED_GEOMETRY','PRIMAL_DDGI_GEOMETRY_VISIBILITY','PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL',
+        'DDGI_MEASURED_GEOMETRY','PRIMAL_D3D12_MEASURED_GEOMETRY','PRIMAL_DDGI_GEOMETRY_VISIBILITY','PRIMAL_DDGI_GEOMETRY_QUERY_KERNEL',
         'SPGI_DDGI_VISIBILITY','PRIMAL_SC_OWNER_CARD_DIRECTORY','PRIMAL_VK_ALBEDO_MIPS',
         'PRIMAL_DDGI_VARIANCE_FENCED','DDGI_VARIANCE_FENCE_AUDIT','PRIMAL_DDGI_TRAVERSAL_AUDIT','TAA_OFF','PRIMAL_SHADOW_RENDER_OFF','PRIMAL_LIGHTING_DEBUG',
         'PRIMAL_D3D12_BLACK_STAGE_DUMP','PRIMAL_D3D12_BLACK_STAGE_FRAME','PRIMAL_DUMP_MATRIX',

@@ -22,19 +22,8 @@
 #      Vulkan GI-on/off): 400 frames, capture frame 350, 300 s no-progress
 #      watchdog (engine PRIMAL_SPONZA_WATCHDOG_SECS + script-level backup).
 #      PRIMAL_VK_HANG_DIAG is NOT set (official default path).
-#   6. PSNR/SSIM gate: each captured f350 vs the tracked Mac Vulkan
-#      reference (.github/ci-assets/ref_mac_vulkan_RG_f350.ppm, SHA256
-#      verified at runtime). Since 2026-11-25 the job gates on like-for-like
-#      DDGI mode 0 instead, because D3D12 still falls back to mode 0 while the
-#      canonical Vulkan group runs measured mode 7 (Mac's own mode 0 is only
-#      ~20.6 dB against the mode-7 reference, so that comparison can never
-#      pass). Gates now:
-#        - GI-off vs the frozen Mac GI-off reference >= 43.5 dB;
-#        - D3D12 mode 0 vs Vulkan mode 0, same run >= 41.5 dB;
-#        - D3D12 mode 0 vs the frozen Windows Vulkan mode-0 reference
-#          (.github/ci-assets/ref_win_vulkan_mode0_f350.ppm) >= 41.0 dB.
-#      The canonical GI-on rows against the mode-7 reference stay in the table
-#      as diagnostics that track progress toward D3D12 measured mode 7.
+#   6. canonical mode-7 dispatch evidence and interior brightness on both APIs;
+#      explicit mode-0 pair and frozen mode-0/GI-off regression checks.
 #
 # All inline scripts are ASCII-only (cp936-safe). Runner-local resources are
 # injected through environment variables configured on the runner machine
@@ -396,6 +385,9 @@ jobs:
           $env:PRIMAL_F350_DEFERRED_SAMPLES = '1'
           $env:PRIMAL_F350_PIXLIKE_DIAG = '1'
           $env:PRIMAL_F350_GBV_DIAG = '0'
+          # Exercise the native measured shaders on the software adapter first.
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350/warp -MeasuredWarpSmoke
+          if ($LASTEXITCODE -ne 0) { throw "D3D12 measured WARP smoke failed; see f350/warp logs" }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/win-ci/run_f350.ps1 -Repo (Get-Location).Path -Exe $exe -OutDir ci-out/f350
           exit 0
 
@@ -459,6 +451,7 @@ jobs:
             ci-out/f350/*.png
             ci-out/f350/*.json
             ci-out/f350/*.log
+            ci-out/f350/warp/*.log
             ci-out/f350/*.md
           if-no-files-found: warn
           retention-days: 14
@@ -474,6 +467,7 @@ jobs:
             ci-out/f350/*.png
             ci-out/f350/*.json
             ci-out/f350/*.log
+            ci-out/f350/warp/*.log
             ci-out/f350/*.md
           if-no-files-found: warn
           retention-days: 14
