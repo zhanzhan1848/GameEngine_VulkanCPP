@@ -3687,7 +3687,10 @@ LumenDDGIOutput LumenDDGIPass::AddPass(
                         certified->source_generation!=variance_generation_ || certified->source_frame>u64(~u32(0)) ||
                         certified->source!=depth_buffers_[DDGISlotsForFrame(u32(certified->source_frame)).writeIndex])){sourceMismatch=true;certified=nullptr;}
                 }
-                if (exactAge && certified && !device_->WaitForSync(certified->context.fence, 1000)) {
+                // The writer may still be executing a measured frame on the GPU.
+                // Use the same bounded completion budget as RenderSystem::Wait.
+                constexpr u32 sourceFenceTimeoutMs = 30000;
+                if (exactAge && certified && !device_->WaitForSync(certified->context.fence, sourceFenceTimeoutMs)) {
                     PRIMAL_LOG_STREAM(Error, "Render") << "[DDGI] Probe variance source fence failed at frame " << current_frame_index;
                     certified = nullptr;
                 }

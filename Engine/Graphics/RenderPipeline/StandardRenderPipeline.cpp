@@ -6219,7 +6219,7 @@ void StandardRenderPipeline::RenderWithCommandBuffer(
     // DDGI vs SPGI at the hotspot instead of inferring it from a global PSNR.
     static constexpr u32 deferredPixels[][2] = {
         {300, 40}, {1520, 1310}, {1964, 594}, {1200, 10}, {2160, 900},
-        {2304, 768}, {2432, 1152}, {1024, 320}
+        {2304, 768}, {2432, 1152}, {1024, 320}, {1564, 986}  // point 8: screen (782,493)
     };
     constexpr u32 samplesPerMrt = std::size(deferredPixels);
     constexpr u32 samplesPerPhase = 2 * samplesPerMrt;
