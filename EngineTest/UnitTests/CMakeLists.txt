@@ -4196,13 +4196,14 @@ if(ENABLE_VULKAN)
     # Generate test modules in this build tree. The runtime modules under
     # GG_CONNECTION_LUMEN are tracked inputs and may be open during a build.
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    set(GG_INSTANCE_CACHE_SPV ${GG_CONNECTION_DIR}/DDGIGIGather_instance_cache.comp.spv)
-    set(GG_INSTANCE_PRODUCER_SPV ${GG_CONNECTION_DIR}/DDGIInstanceNormalProduce.comp.spv)
-    set(GG_INSTANCE_VERIFY_SPV ${GG_CONNECTION_DIR}/DDGIInstanceNormalVerify.comp.spv)
+    set(GG_INSTANCE_LUMEN ${GG_CONNECTION_DIR}/Engine/Graphics/Vulkan/shaders/Lumen)
+    set(GG_INSTANCE_CACHE_SPV ${GG_INSTANCE_LUMEN}/DDGIGIGather_instance_cache.comp.spv)
+    set(GG_INSTANCE_PRODUCER_SPV ${GG_INSTANCE_LUMEN}/DDGIInstanceNormalProduce.comp.spv)
+    set(GG_INSTANCE_VERIFY_SPV ${GG_INSTANCE_LUMEN}/DDGIInstanceNormalVerify.comp.spv)
     set(GG_INSTANCE_SPVS ${GG_INSTANCE_CACHE_SPV} ${GG_INSTANCE_PRODUCER_SPV} ${GG_INSTANCE_VERIFY_SPV})
     add_custom_command(OUTPUT ${GG_INSTANCE_SPVS}
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/build_ddgi_instance_cache_spv.py
-            --output-dir ${GG_CONNECTION_DIR}
+            --output-dir ${GG_INSTANCE_LUMEN}
         DEPENDS ${CMAKE_SOURCE_DIR}/scripts/build_ddgi_instance_cache_spv.py
             ${GG_CONNECTION_LUMEN}/DDGIInstanceNormalProduce.comp ${GG_CONNECTION_LUMEN}/DDGIInstanceNormalVerify.comp
             ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
@@ -4219,6 +4220,9 @@ if(ENABLE_VULKAN)
     set_target_properties(TestVulkanDDGIInstanceNormalCache PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/Tests/UnitTests)
     add_dependencies(TestVulkanDDGIInstanceNormalCache GatherQueryKernelTestShaders GatherInstanceCacheTestShaders)
     add_test(NAME TestVulkanDDGIInstanceNormalCache COMMAND TestVulkanDDGIInstanceNormalCache)
+    # The host cache also loads these modules through ShaderRegistry.
+    set_tests_properties(TestVulkanDDGIInstanceNormalCache PROPERTIES
+        ENVIRONMENT "PRIMAL_SHADER_ROOT=${GG_CONNECTION_DIR}")
     set(GG_BOUNDS_FIRST_SPV ${GG_CONNECTION_DIR}/gather-bounds-first.comp.spv)
     add_custom_command(OUTPUT ${GG_BOUNDS_FIRST_SPV}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${GG_CONNECTION_DIR}
