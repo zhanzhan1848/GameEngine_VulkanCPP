@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -268,9 +269,20 @@ def main():
 
     interior = None
     canonical = {g["api"]: os.path.join(ppm_dir, g["ppm"]) for g in gates if g["gi"] == 1}
-    if all(os.path.isfile(path) for path in canonical.values()):
+    if all(api in canonical and os.path.isfile(canonical[api]) for api in ("d3d12", "vulkan")):
         interior = compare_interior(canonical["d3d12"], canonical["vulkan"])
-        any_fail |= not interior["pass"]
+        counts = {}
+        for group in gates:
+            if group["group"] not in ("d3d12-gion", "vulkan-gion"):
+                continue
+            for line in group["anchors"]:
+                match = re.search(r"\[F350DDGISelect\] volume=(Far|) frame=350 count=(\d+)\b", line)
+                if match:
+                    counts.setdefault(group["api"], {})[match[1] or "Near"] = int(match[2])
+        interior["probe_update_counts"] = counts
+        interior["budget_match"] = (set(counts.get("d3d12", {})) == {"Near", "Far"}
+                                    and counts["d3d12"] == counts.get("vulkan"))
+        any_fail |= not (interior["pass"] and interior["budget_match"])
         with open(os.path.join(args.out, "compare_mode7_interior.json"), "w", encoding="utf-8") as fh:
             json.dump(interior, fh, indent=2)
     else:
@@ -403,6 +415,9 @@ def main():
     lines.append("### Canonical GI-on interior (D3D12 vs Vulkan, mode 7)")
     lines.append("")
     if interior:
+        lines.append("Frame 350 probe updates by backend and volume: %s. **%s**." %
+                     (json.dumps(interior["probe_update_counts"]), "PASS" if interior["budget_match"] else "FAIL"))
+        lines.append("")
         lines.append("Hotspot (782,493): %.2f vs %.2f. Central 640x360 mean luma: %.2f vs %.2f. "
                      "Mean absolute difference %.2f; %.2f%% differ by more than 8 levels. **%s**." %
                      (*interior["point_y"], *interior["mean_y"], interior["mean_abs"],

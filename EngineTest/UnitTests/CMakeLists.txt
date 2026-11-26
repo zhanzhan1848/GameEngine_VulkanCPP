@@ -4587,6 +4587,10 @@ add_executable(UnitDDGIProbePriority Graphics/TestDDGIProbePriority.cpp)
 target_include_directories(UnitDDGIProbePriority PRIVATE ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
 add_test(NAME UnitDDGIProbePriority COMMAND UnitDDGIProbePriority)
 
+add_executable(UnitGIAdaptiveGovernor Graphics/TestGIAdaptiveGovernor.cpp)
+target_include_directories(UnitGIAdaptiveGovernor PRIVATE ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
+add_test(NAME UnitGIAdaptiveGovernor COMMAND UnitGIAdaptiveGovernor)
+
 add_executable(UnitVulkanPassTimestampTicket Graphics/TestVulkanPassTimestampTicket.cpp)
 target_include_directories(UnitVulkanPassTimestampTicket PRIVATE ${CMAKE_SOURCE_DIR}/Engine)
 add_test(NAME UnitVulkanPassTimestampTicket COMMAND UnitVulkanPassTimestampTicket)

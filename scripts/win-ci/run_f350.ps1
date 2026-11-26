@@ -458,7 +458,7 @@ foreach ($g in $runGroups) {
     $expectedModel = if ($env:PRIMAL_TEST_MODEL) { $env:PRIMAL_TEST_MODEL } else { 'Sponza.model' }
     $anchors = @(Select-String -LiteralPath $se,$so -Pattern @(
         '\[DDGI_VARIANCE_FENCE_AUDIT\] frame=399 volume=(Near|Far)', 'Probe variance source fence failed', 'fenced variance source never certified',
-        'adapter=(WARP|hw)\)',
+        'adapter=(WARP|hw)\)', '\[F350DDGISelect\]',
         '\[LumenDDGI\] (RaySampleMode =|DDGI_RAY_SAMPLE=)', '\[F350GI\]', '\[F350Gather\]',
         '\[Part30.4\] model path:', '\[Part37\] Loading HDR:',
         "Frame $captureFrame captured", "SPONZA_MAX_FRAMES=$maxFrames reached"
