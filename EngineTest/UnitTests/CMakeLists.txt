@@ -4193,21 +4193,26 @@ if(ENABLE_VULKAN)
         add_dependencies(${query_target} GatherGeometryAnyHitTestShaders GatherQueryKernelTestShaders)
         add_test(NAME ${query_target} COMMAND ${query_target})
     endforeach()
-    # Independent cache modules; existing SPVs are never outputs of this rule.
-    # Resolve the interpreter via the official module: a bare `python3` on
-    # Windows resolves to the Microsoft Store alias stub (MSB8066 exit 9009).
+    # Generate test modules in this build tree. The runtime modules under
+    # GG_CONNECTION_LUMEN are tracked inputs and may be open during a build.
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
-    message(STATUS "Primal: GatherInstanceCacheTestShaders interpreter = ${Python3_EXECUTABLE}")
-    add_custom_target(GatherInstanceCacheTestShaders
+    set(GG_INSTANCE_CACHE_SPV ${GG_CONNECTION_DIR}/DDGIGIGather_instance_cache.comp.spv)
+    set(GG_INSTANCE_PRODUCER_SPV ${GG_CONNECTION_DIR}/DDGIInstanceNormalProduce.comp.spv)
+    set(GG_INSTANCE_VERIFY_SPV ${GG_CONNECTION_DIR}/DDGIInstanceNormalVerify.comp.spv)
+    set(GG_INSTANCE_SPVS ${GG_INSTANCE_CACHE_SPV} ${GG_INSTANCE_PRODUCER_SPV} ${GG_INSTANCE_VERIFY_SPV})
+    add_custom_command(OUTPUT ${GG_INSTANCE_SPVS}
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/build_ddgi_instance_cache_spv.py
-        DEPENDS ${GG_CONNECTION_LUMEN}/DDGIInstanceNormalProduce.comp ${GG_CONNECTION_LUMEN}/DDGIInstanceNormalVerify.comp
+            --output-dir ${GG_CONNECTION_DIR}
+        DEPENDS ${CMAKE_SOURCE_DIR}/scripts/build_ddgi_instance_cache_spv.py
+            ${GG_CONNECTION_LUMEN}/DDGIInstanceNormalProduce.comp ${GG_CONNECTION_LUMEN}/DDGIInstanceNormalVerify.comp
             ${GG_CONNECTION_LUMEN}/DDGIGIGather.comp ${GG_CONNECTION_HEADERS} VERBATIM)
+    add_custom_target(GatherInstanceCacheTestShaders DEPENDS ${GG_INSTANCE_SPVS})
     add_executable(TestVulkanDDGIInstanceNormalCache RHI/Core/TestVulkanDDGIGatherGeometryReplace.cpp)
     target_include_directories(TestVulkanDDGIInstanceNormalCache PRIVATE ${CMAKE_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/Engine ${CMAKE_SOURCE_DIR}/Engine/Common)
     target_link_libraries(TestVulkanDDGIInstanceNormalCache PRIVATE Engine)
     target_compile_definitions(TestVulkanDDGIInstanceNormalCache PRIVATE ENABLE_VULKAN=1 GG_CONNECTION_EQUIVALENCE=1 GG_CONNECTION_QUERY_KERNEL_TEST=1 GG_INSTANCE_CACHE_TEST=1
-        GG_CONNECTION_BASE_SPV="${GG_QUERY_KERNEL_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_CONNECTION_LUMEN}/DDGIGIGather_instance_cache.comp.spv"
-        GG_INSTANCE_PRODUCER_SPV="${GG_CONNECTION_LUMEN}/DDGIInstanceNormalProduce.comp.spv" GG_INSTANCE_VERIFY_SPV="${GG_CONNECTION_LUMEN}/DDGIInstanceNormalVerify.comp.spv")
+        GG_CONNECTION_BASE_SPV="${GG_QUERY_KERNEL_SPV}" GG_CONNECTION_GEOMETRY_SPV="${GG_INSTANCE_CACHE_SPV}"
+        GG_INSTANCE_PRODUCER_SPV="${GG_INSTANCE_PRODUCER_SPV}" GG_INSTANCE_VERIFY_SPV="${GG_INSTANCE_VERIFY_SPV}")
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(TestVulkanDDGIInstanceNormalCache PRIVATE -fno-fast-math)
     endif()
