@@ -28,8 +28,6 @@
 #include "DawnSponzaMeasuredRadiance.h"
 #include "DawnSponzaProbeUpdate.h"
 #include "DawnSponzaDepthHistory.h"
-// The shared governor expects this host scalar alias from its includer.
-namespace primal::graphics { using f64 = double; }
 #include "Engine/Graphics/RenderPipeline/Modules/GIAdaptiveGovernor.h"
 #include "Engine/Graphics/Lumen/GIWarmup.h"
 #include "DawnSponzaRadiosity.h"

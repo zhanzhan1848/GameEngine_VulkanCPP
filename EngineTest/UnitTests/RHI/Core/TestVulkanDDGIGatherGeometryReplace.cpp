@@ -192,7 +192,12 @@ ray_geometry::SceneBVH buildGeometry(const Config& cfg){
         quad({a,a,z},{b,a,z},{b,b,z},{a,b,z});quad({a,a,t},{a,b,t},{b,b,t},{b,a,t});
         quad({a,a,z},{a,b,z},{a,b,t},{a,a,t});quad({b,a,z},{b,a,t},{b,b,t},{b,b,z});
         quad({a,a,z},{a,a,t},{b,a,t},{b,a,z});quad({a,b,z},{b,b,z},{b,b,t},{a,b,t});
-    }else if(cfg.geometry==Geometry::Target){quad({.35f,.35f,.8f},{.65f,.35f,.8f},{.65f,.65f,.8f},{.35f,.65f,.8f});}
+    }else if(cfg.geometry==Geometry::Target){
+        // The CPU witness crosses z=.8 at (.5,.5). Keep it inside one
+        // triangle so a test of two-sided blocking does not depend on
+        // floating-point ownership of the quad's shared diagonal.
+        quad({.35f,.375f,.8f},{.65f,.375f,.8f},{.65f,.675f,.8f},{.35f,.675f,.8f});
+    }
     else if(cfg.geometry==Geometry::CenterSheet){quad({.01f,-10,-10},{.01f,10,-10},{.01f,10,10},{.01f,-10,10});}
     else if(cfg.geometry==Geometry::ScanTarget){quad({-.1f,.35f,.75f},{.25f,.35f,.75f},{.25f,.65f,.75f},{-.1f,.65f,.75f});}
     else quad({-10,-10,-4},{10,-10,-4},{10,10,-4},{-10,10,-4});

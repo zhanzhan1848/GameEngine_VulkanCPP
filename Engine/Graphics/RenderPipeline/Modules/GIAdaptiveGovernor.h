@@ -16,24 +16,27 @@
 // CPU-only — safe on WASM (no readbacks involved).
 // ============================================================================
 
-#include "CommonHeaders.h"
+#include "PrimitiveTypes.h"
+#include <algorithm>
 #include <chrono>
+#include <optional>
 
 namespace primal::graphics {
 
 class GIAdaptiveGovernor {
 public:
     // Record one frame; call once per rendered frame (graph build entry).
-    void RecordFrame() {
-        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-        const f64 nowSec = static_cast<f64>(now) * 1e-9;
-        if (last_time_sec_ < 0.0) {
-            last_time_sec_ = nowSec;
-            return;   // first frame establishes the baseline only
+    void RecordFrame(std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now()) {
+        if (!last_frame_) {
+            last_frame_ = now;
+            return;
         }
-        const f64 dtMs = (nowSec - last_time_sec_) * 1000.0;
-        last_time_sec_ = nowSec;
-        if (dtMs <= 0.0 || dtMs > 1000.0) return;   // tab-out / pause spikes
+        const double elapsedMs = std::chrono::duration<double, std::milli>(now - *last_frame_).count();
+        last_frame_ = now;
+        if (elapsedMs <= 0.0) return;
+        // Bound the effect of a single pause on the EMA. Sustained slow frames
+        // must still count toward the dwell window, including frames over 1 s.
+        const double dtMs = std::min(elapsedMs, 100.0);
 
         // EMA over frame time (ms)
         ema_ms_ = ema_ms_ * (1.0 - kAlpha) + dtMs * kAlpha;
@@ -60,7 +63,7 @@ public:
     }
 
     f32  Scale() const { return scale_; }
-    f64  EmaMs() const { return ema_ms_; }
+    double EmaMs() const { return ema_ms_; }
 
     // Budget helpers — scale a base count, always ≥ 1 so the caches tick.
     static u32 ScaleBudget(u32 base, f32 scale) {
@@ -70,14 +73,14 @@ public:
     }
 
 private:
-    static constexpr f64 kAlpha      = 0.1;    // EMA smoothing
-    static constexpr f64 kOverMs     = 33.4;   // EMA above this = below 30fps
-    static constexpr f64 kUnderMs    = 20.0;   // EMA below this = above 50fps
+    static constexpr double kAlpha      = 0.1;    // EMA smoothing
+    static constexpr double kOverMs     = 33.4;   // EMA above this = below 30fps
+    static constexpr double kUnderMs    = 20.0;   // EMA below this = above 50fps
     static constexpr u32 kDwellFrames = 60;    // frames sustained before a tier switch
     static constexpr f32 kMinScale   = 0.25f;
 
-    f64 last_time_sec_ = -1.0;
-    f64 ema_ms_ = 16.7;
+    std::optional<std::chrono::steady_clock::time_point> last_frame_;
+    double ema_ms_ = 16.7;
     u32 over_frames_ = 0;
     u32 under_frames_ = 0;
     f32 scale_ = 1.0f;

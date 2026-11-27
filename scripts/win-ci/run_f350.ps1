@@ -248,9 +248,8 @@ foreach ($g in $runGroups) {
         $env:PRIMAL_DDGI_VARIANCE_FENCED = 'source-frame'
         $env:DDGI_VARIANCE_FENCE_AUDIT = '1'
     }
-    # The exact source-frame contract below is Vulkan's measured native-3
-    # behaviour; D3D12 logs the same audit but is not asserted against it yet.
-    $verifyProbeSource = $g.name -in @('vulkan-gion', 'vulkan-gion-samples')
+    # The two canonical volumes must consume the submitted frame N-2 on both APIs.
+    $verifyProbeSource = -not $MeasuredWarpSmoke -and $g.name -in @('vulkan-gion', 'vulkan-gion-samples','d3d12-gion','d3d12-gion-samples')
     $canonicalGI = $g.name -in @('d3d12-gion','vulkan-gion')
     if ($g.name -in @('d3d12-gion','d3d12-gion-samples')) {
         $env:PRIMAL_D3D12_MEASURED_GEOMETRY = '1'
@@ -458,8 +457,8 @@ foreach ($g in $runGroups) {
     $maxFrames = [int]$env:SPONZA_MAX_FRAMES
     $expectedModel = if ($env:PRIMAL_TEST_MODEL) { $env:PRIMAL_TEST_MODEL } else { 'Sponza.model' }
     $anchors = @(Select-String -LiteralPath $se,$so -Pattern @(
-        '\[DDGI_VARIANCE_FENCE_AUDIT\] frame=399 volume=Near', 'Probe variance source fence failed',
-        'adapter=(WARP|hw)\)',
+        '\[DDGI_VARIANCE_FENCE_AUDIT\] frame=399 volume=(Near|Far)', 'Probe variance source fence failed', 'fenced variance source never certified',
+        'adapter=(WARP|hw)\)', '\[F350DDGISelect\]',
         '\[LumenDDGI\] (RaySampleMode =|DDGI_RAY_SAMPLE=)', '\[F350GI\]', '\[F350Gather\]',
         '\[Part30.4\] model path:', '\[Part37\] Loading HDR:',
         "Frame $captureFrame captured", "SPONZA_MAX_FRAMES=$maxFrames reached"
@@ -472,7 +471,8 @@ foreach ($g in $runGroups) {
                 ($rc -eq 0) -and $ppmExists -and (-not $watchdogFired)
     if ($verifyProbeSource) {
         $contract = $contract -and ($observed -match 'frame=399 volume=Near[^\r\n]*accepted_frame=true[^\r\n]*source_frame=397 source_native=397') -and
-                    ($observed -notmatch 'Probe variance source fence failed')
+                    ($observed -match 'frame=399 volume=Far[^\r\n]*accepted_frame=true[^\r\n]*source_frame=397 source_native=397') -and
+                    ($observed -notmatch 'Probe variance source fence failed|fenced variance source never certified')
     }
     if ($canonicalGI) {
         $contract = $contract -and ($observed -match 'RaySampleMode = 7 \(measured') -and
