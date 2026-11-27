@@ -14,7 +14,7 @@
 #     [-Frames 420] [-SilenceSecs 300] [-HardCapSecs 900]
 param(
     [Parameter(Mandatory = $true)][string]$Binary,
-    [string]$OutDir = 'ci-out/bvh-perf',
+    [string]$OutDir = 'bvh-out',
     [string]$Groups = 'gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper,dyn-gi-lbvh,dyn-gi-hlbvh',
     [int]$Frames = 420,
     [int]$SilenceSecs = 300,

@@ -96,9 +96,12 @@ jobs:
         run: |
           # self-hosted checkout 不做 git clean；先清零上轮产物，避免
           # 失败 run 把上一轮报告当本轮证据上传。
-          if (Test-Path ci-out/bvh-perf) {
-            Remove-Item ci-out/bvh-perf -Recurse -Force -ErrorAction SilentlyContinue
-            Write-Output "[cleanup] stale ci-out/bvh-perf removed"
+          # bvh-out：独立输出根（不寄生在共享 ci-out/ 下——parity 的清理步骤
+          # 会 Remove-Item ci-out 整目录，曾把本 job 的 exe-path 连环端掉，
+          # 2026-11-27 run 45986246770 Locate 假死根因）。
+          if (Test-Path bvh-out) {
+            Remove-Item bvh-out -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Output "[cleanup] stale bvh-out removed"
           }
           "# BVH perf run`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           "- ref: $env:BVH_PERF_REF`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
@@ -259,33 +262,35 @@ jobs:
               Select-Object -First 8 | ForEach-Object { Write-Host "::error::msbuild $($_.Line)" }
             exit 1
           }
+          $ErrorActionPreference = 'Continue'
+          New-Item -ItemType Directory -Force -Path bvh-out | Out-Null
           Write-Output "[bvh-perf] exe = $exe"
-          Write-Output $exe | Out-File -FilePath ci-out/exe-path.txt -Encoding utf8
+          Write-Output $exe | Out-File -FilePath bvh-out/exe-path.txt -Encoding utf8
 
       - name: Run perf groups (timing-only, Dynamic GI standard)
         if: (inputs.mode || 'full') != 'configure'
         shell: powershell
         run: |
-          $exe = (Get-Content ci-out/exe-path.txt -Raw).Trim()
+          $exe = (Get-Content bvh-out/exe-path.txt -Raw).Trim()
           $groups = '${{ inputs.groups }}'
           if (-not $groups) { $groups = 'gi0,dyn-gi,dyn-gi-sah,dyn-gi-upper,dyn-gi-lbvh,dyn-gi-hlbvh' }
           $frames = '${{ inputs.frames }}'
           if (-not $frames) { $frames = '420' }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/perf/run_bvh_perf.ps1 `
-            -Binary $exe -OutDir ci-out/bvh-perf -Groups $groups -Frames ([int]$frames)
+            -Binary $exe -OutDir bvh-out -Groups $groups -Frames ([int]$frames)
 
       - name: Publish report to job summary
         if: always()
         shell: powershell
         run: |
-          $md = 'ci-out/bvh-perf/report.md'
+          $md = 'bvh-out/report.md'
           if (Test-Path $md) {
             Get-Content $md -Raw | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           } else {
             "## bvh-perf`n`nreport.md 未生成（见组日志）`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           }
-          if (Test-Path 'ci-out/bvh-perf/meta.txt') {
-            "``````" + "`n" + (Get-Content 'ci-out/bvh-perf/meta.txt' -Raw) + "``````" + "`n" |
+          if (Test-Path 'bvh-out/meta.txt') {
+            "``````" + "`n" + (Get-Content 'bvh-out/meta.txt' -Raw) + "``````" + "`n" |
               Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           }
 
@@ -295,8 +300,8 @@ jobs:
         with:
           name: bvh-perf-${{ github.run_id }}
           path: |
-            ci-out/bvh-perf/**
-            !ci-out/bvh-perf/**/*.err
+            bvh-out/**
+            !bvh-out/**/*.err
             cmake-bvhperf.log
             build-bvhperf.log
           retention-days: 30
