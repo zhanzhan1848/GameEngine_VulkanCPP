@@ -53,8 +53,7 @@ environment variables:
 | `PRIMAL_CI_OFFLINE_DEPS` | optional | Directory with `agility-sdk\build\native\include\d3d12.h` (NuGet layout) and `zlib-src\CMakeLists.txt`. Injected as `-DPRIMAL_D3D12_AGILITY_SDK_DIR` / `-DPRIMAL_ZLIB_SOURCE_DIR`. If unset, CMake downloads Agility 1.611.2 from nuget.org (SHA-pinned) and FetchContent-pulls zlib - needs outbound network. |
 | `PRIMAL_CI_SDK_MODULES` | **yes** | `diagnostic-sdk-modules` directory injected as `-DCMAKE_MODULE_PATH` - provides the DirectXTex/FBX config packages that `find_package(... REQUIRED)` needs with `BUILD_CONTENT_TOOLS=ON`. |
 | `PRIMAL_CI_THIRD_PARTY_DIR` | **yes** | Directory holding `VHACD\` (robocopy from the retest tree's `third_party\`), staged into the checkout before configure. VHACD's gitlink pin only exists on the dev machine. FBX SDK is NOT staged - it is the system Autodesk install (`C:\Program Files\Autodesk\FBX SDK\...`), located via the FindFBX module from `PRIMAL_CI_SDK_MODULES`. |
-| `PRIMAL_CI_BUILD_DIR` | optional | Build directory inside the checkout (default `build-winparity`). Reused across runs (checkout uses `clean: false`) for incremental builds. |
-| `PRIMAL_CI_BIN_DIR` | optional | Explicit directory of the built test exes; otherwise the workflow probes `build\bin\Release`, `Windows\Release`, `Windows\x64\Release`, `build\Release`, `build\Tests\Release`. |
+| `PRIMAL_CI_BUILD_DIR` | optional | Build directory inside the checkout (default `build-winparity`). Parity builds and runs its integration test executables exclusively from `<build>/bin/Release`. This directory is reused for incremental builds. |
 
 Do **not** set `PRIMAL_VK_HANG_DIAG` on the runner: the f350 groups must run
 the official default path.

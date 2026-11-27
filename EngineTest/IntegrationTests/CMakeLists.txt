@@ -29,7 +29,7 @@ function(build_sc_surface_witness glslang output)
 endfunction()
 
 # 辅助函数：配置测试目标
-if(PRIMAL_ISOLATED_OUTPUTS AND APPLE)
+if(PRIMAL_ISOLATED_OUTPUTS AND (APPLE OR WIN32))
     set(PRIMAL_INTEGRATION_OUTPUT_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 else()
     set(PRIMAL_INTEGRATION_OUTPUT_DIR "${CMAKE_SOURCE_DIR}/${CMAKE_SYSTEM_NAME}/$<CONFIG>/")
@@ -140,6 +140,9 @@ enable_testing()
 # stale-test port: one-time (per build) copy of shaders/assets into the shared
 # Darwin/Debug output directory used by every integration test target.
 set(ITEST_ASSETS_STAMP ${CMAKE_BINARY_DIR}/IntegrationTestsAssetsCopy.stamp)
+if(PRIMAL_ISOLATED_OUTPUTS AND WIN32)
+    set(ITEST_ASSETS_STAMP "${PRIMAL_INTEGRATION_OUTPUT_DIR}/IntegrationTestsAssetsCopy.stamp")
+endif()
 if(PRIMAL_ISOLATED_OUTPUTS AND APPLE)
     # Source assets are inputs (several GiB); only shaders need a private copy.
     set(PRIMAL_TEST_ASSET_COMMAND create_symlink)

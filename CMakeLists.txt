@@ -50,7 +50,7 @@ endif()
 
 # Explicit macOS backend worktrees must not overwrite another tree's engine
 # archive or executable. Existing editor/CLI paths retain their defaults.
-option(PRIMAL_ISOLATED_OUTPUTS "Keep macOS build products and generated config inside the build tree" OFF)
+option(PRIMAL_ISOLATED_OUTPUTS "Keep macOS build products or Windows integration test outputs inside the build tree" OFF)
 if(PRIMAL_ISOLATED_OUTPUTS AND APPLE)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/artifacts/$<CONFIG>)
     set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/artifacts/$<CONFIG>)
