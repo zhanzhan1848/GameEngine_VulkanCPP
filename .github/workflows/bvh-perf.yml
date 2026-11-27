@@ -237,17 +237,28 @@ jobs:
         if: (inputs.mode || 'full') != 'configure'
         shell: powershell
         run: |
-          $candidates = @(
-            'build-bvhperf/Tests/Release/TestVulkanSponzaRenderGraph.exe',
-            'build-bvhperf/EngineTest/IntegrationTests/Release/TestVulkanSponzaRenderGraph.exe',
-            'build-bvhperf/Release/TestVulkanSponzaRenderGraph.exe'
-          )
-          $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          # 候选表对齐 windows-parity（Windows 侧 RUNTIME_OUTPUT_DIRECTORY 在
+          # 源码树 Windows\<config>，不在 build 目录内）+ 全工作区递归兜底。
+          $cands = @()
+          if ($env:PRIMAL_CI_BIN_DIR) { $cands += (Join-Path $env:PRIMAL_CI_BIN_DIR 'TestVulkanSponzaRenderGraph.exe') }
+          $cands += 'Windows\Release\TestVulkanSponzaRenderGraph.exe'
+          $cands += 'Windows\x64\Release\TestVulkanSponzaRenderGraph.exe'
+          $cands += 'build-bvhperf\bin\Release\TestVulkanSponzaRenderGraph.exe'
+          $cands += 'build-bvhperf\Release\TestVulkanSponzaRenderGraph.exe'
+          $cands += 'build-bvhperf\Tests\Release\TestVulkanSponzaRenderGraph.exe'
+          $cands += 'build-bvhperf\EngineTest\IntegrationTests\Release\TestVulkanSponzaRenderGraph.exe'
+          $exe = $cands | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $exe) {
-            $exe = Get-ChildItem -Recurse -Filter 'TestVulkanSponzaRenderGraph.exe' -Path 'build-bvhperf' |
+            $exe = Get-ChildItem -Path . -Recurse -Filter 'TestVulkanSponzaRenderGraph.exe' -ErrorAction SilentlyContinue |
                    Select-Object -First 1 -ExpandProperty FullName
           }
-          if (-not $exe) { Write-Host "::error::TestVulkanSponzaRenderGraph.exe not found"; exit 1 }
+          if (-not $exe) {
+            Write-Host "::error::TestVulkanSponzaRenderGraph.exe not found; probed:"
+            $cands | ForEach-Object { Write-Host "::error::cand $_" }
+            Select-String -Path 'build-bvhperf.log' -Pattern 'SponzaRenderGraph' -ErrorAction SilentlyContinue |
+              Select-Object -First 8 | ForEach-Object { Write-Host "::error::msbuild $($_.Line)" }
+            exit 1
+          }
           Write-Output "[bvh-perf] exe = $exe"
           Write-Output $exe | Out-File -FilePath ci-out/exe-path.txt -Encoding utf8
 
