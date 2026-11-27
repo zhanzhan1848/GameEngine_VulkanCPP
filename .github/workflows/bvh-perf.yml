@@ -152,6 +152,21 @@ jobs:
               $zl = Join-Path $env:PRIMAL_CI_OFFLINE_DEPS 'zlib-src'
               if (Test-Path (Join-Path $zl 'CMakeLists.txt')) { $extra += "-DPRIMAL_ZLIB_SOURCE_DIR=$zl" }
             }
+            # 机器 env 编译器旗标隔离（2026-11-27 run 45956251046 实物判读）：
+            # 全新目录的 MSVC ABI try_compile 挂在 scratch 工程的 set() 语法错，
+            # 典型病因是机器级 CC/CXX/CFLAGS/CXXFLAGS/LDFLAGS/_CL_/_LINK_（为
+            # 其他工具链设的值）渗进 try_compile。VS 生成器不需要这些 env
+            # （cl.exe 经 vswhere 定位），清掉即恢复默认行为；原值打注解留证。
+            $polluters = 'CC','CXX','CFLAGS','CXXFLAGS','LDFLAGS','CPPFLAGS','_CL_','_LINK_',
+                         'CMAKE_GENERATOR','CMAKE_TOOLCHAIN_FILE','VCPKG_ROOT'
+            foreach ($p in $polluters) {
+              $v = [Environment]::GetEnvironmentVariable($p)
+              if ($v) {
+                $escaped = $v -replace '%','%25' -replace "\r","%0D" -replace "\n","%0A"
+                Write-Host "::notice::env-polluter $p=$escaped"
+                Remove-Item -Path "Env:$p" -ErrorAction SilentlyContinue
+              }
+            }
             $cmakeArgs = @('-S', '.', '-B', 'build-bvhperf',
                            '-G', 'Visual Studio 17 2022', '-A', 'x64',
                            '-DCMAKE_BUILD_TYPE=Release',
@@ -169,12 +184,18 @@ jobs:
             Get-Content 'cmake-bvhperf.log' -ErrorAction SilentlyContinue | Select-Object -Last 40 |
               Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
             if ($code -ne 0) {
-              $i = 0
-              foreach ($line in ($lines | Where-Object { $_ -match 'CMake Error|FATAL_ERROR|Configuring incomplete|Could NOT find|Could not find|No CMAKE_|error C\d+|Unknown CMake command|The system cannot|is not recognized' } | Select-Object -First 6)) {
-                $i++; Write-Host "::error::cfg[$i] $line"
+              # 命中行 + 后 2 行上下文一起注解（set/try_compile 的具体原因在次行）。
+              $idx = for ($k = 0; $k -lt $lines.Count; $k++) {
+                if ($lines[$k] -match 'CMake Error|FATAL_ERROR|Configuring incomplete|Could NOT find|No CMAKE_|Unknown CMake command|The system cannot|is not recognized') { $k }
               }
-              if ($i -eq 0) {
-                foreach ($line in ($lines | Select-Object -Last 6)) { $i++; Write-Host "::error::tail[$i] $line" }
+              $shown = @{}
+              foreach ($k in (@($idx | Select-Object -First 4))) {
+                for ($c = $k; $c -lt [Math]::Min($k + 3, $lines.Count); $c++) {
+                  if (-not $shown[$c]) { $shown[$c] = $true; Write-Host "::error::cfg[$c] $($lines[$c])" }
+                }
+              }
+              if ($shown.Count -eq 0) {
+                foreach ($line in ($lines | Select-Object -Last 6)) { Write-Host "::error::tail $line" }
               }
               Write-Host "::error::cfg-final exit=$code lines=$($lines.Count) sdkmods=$([bool]$env:PRIMAL_CI_SDK_MODULES) offline=$([bool]$env:PRIMAL_CI_OFFLINE_DEPS) mode=$m"
               exit $code
