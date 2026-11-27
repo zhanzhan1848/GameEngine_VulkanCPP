@@ -109,8 +109,11 @@ function Run-Group([string]$name) {
         if ($proc.HasExited) { $exitCode = $proc.ExitCode; break }
         $now = Get-Date
         if (($now - $started).TotalSeconds -gt $HardCapSecs) {
-            Write-Warning "[run_bvh_perf] group=$name hard cap ${HardCapSecs}s reached — killing"
-            try { $proc.Kill($true) } catch { try { $proc.Kill() } catch { } }
+            # Kill(bool) 树杀重载在 Windows PowerShell 5.1/.NET Framework 不存在，
+            # 看门狗路径自身会炸——统一 taskkill 树杀。
+            Write-Host "::error::watchdog hardcap group=$name secs=$HardCapSecs"
+            taskkill /PID $proc.Id /T /F 2>$null | Out-Null
+            try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
             $exitCode = -1
             break
         }
@@ -122,8 +125,9 @@ function Run-Group([string]$name) {
             $lastOutputBytes = $bytes
             $lastProgress = $now
         } elseif (($now - $lastProgress).TotalSeconds -gt $SilenceSecs) {
-            Write-Warning "[run_bvh_perf] group=$name silent for ${SilenceSecs}s — killing"
-            try { $proc.Kill($true) } catch { try { $proc.Kill() } catch { } }
+            Write-Host "::error::watchdog silent group=$name secs=$SilenceSecs"
+            taskkill /PID $proc.Id /T /F 2>$null | Out-Null
+            try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { }
             $exitCode = -2
             break
         }
@@ -135,7 +139,17 @@ function Run-Group([string]$name) {
         if ($hit) { $anchorOk = $true }
     }
     Write-Output ("[run_bvh_perf] group={0} exit={1} anchor={2}" -f $name, $exitCode, $anchorOk)
-    if ($exitCode -eq 0 -and $anchorOk) { return 0 } else { return 1 }
+    if ($exitCode -eq 0 -and $anchorOk) { return 0 }
+    if ($exitCode -ne 0) { Write-Host "::error::group-failed $name exit=$exitCode" }
+    else { Write-Host "::error::anchor-missing group=$name exit=$exitCode" }
+    # 失败组的日志尾巴打注解（免贴日志通道，对齐 configure 步骤）。
+    if (Test-Path "$logPath.err") {
+        Get-Content "$logPath.err" -ErrorAction SilentlyContinue | Select-Object -Last 4 |
+          ForEach-Object { Write-Host "::error::gerr[$name] $_" }
+    }
+    Get-Content $logPath -ErrorAction SilentlyContinue | Select-Object -Last 4 |
+      ForEach-Object { Write-Host "::error::gout[$name] $_" }
+    return 1
 }
 
 Set-Content -Path (Join-Path $OutDir 'meta.txt') -Value @"
@@ -152,7 +166,10 @@ $groupList = $Groups -split ','
 $failed = @()
 foreach ($g in $groupList) {
     $rc = Run-Group $g
-    if ($rc -ne 0) { $failed += "$g(rc=$rc)" }
+    if ($rc -ne 0) {
+        $failed += "$g(rc=$rc)"
+        Write-Host "::error::group-failed-summary $g rc=$rc"
+    }
 }
 
 $meta = Get-Content (Join-Path $OutDir 'meta.txt') -Raw
@@ -160,11 +177,17 @@ $envArgs = @()
 foreach ($g in $groupList) { $envArgs += @('--log', "$g=" + (Join-Path $OutDir "$g.log")) }
 $python = Get-Command python -ErrorAction SilentlyContinue
 if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
-if (-not $python) { Write-Error 'python not found on runner' }
+if (-not $python) { Write-Host '::error::python not found on runner'; exit 1 }
 & $python.Source "$repoRoot/scripts/perf/parse_frame_timing.py" @envArgs `
     --warm 60 --git-sha $gitSha --binary-sha $binarySha `
-    --out-json (Join-Path $OutDir 'report.json') --out-md (Join-Path $OutDir 'report.md')
-Write-Output "python parse exit: $LASTEXITCODE"
+    --out-json (Join-Path $OutDir 'report.json') --out-md (Join-Path $OutDir 'report.md') 2>&1 |
+    Tee-Object -FilePath (Join-Path $OutDir 'parse.log') | Out-Null
+$parseCode = $LASTEXITCODE
+Write-Output "python parse exit: $parseCode"
+if ($parseCode -ne 0) {
+    Get-Content (Join-Path $OutDir 'parse.log') | Select-Object -Last 6 |
+      ForEach-Object { Write-Host "::error::parse $_" }
+}
 
 if ($failed.Count -gt 0) {
     Write-Output "[run_bvh_perf] FAILED groups: $($failed -join ', ')"
