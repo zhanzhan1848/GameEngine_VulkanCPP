@@ -81,7 +81,7 @@ function Run-Group([string]$name) {
             if ($_ -eq 'dyn-gi-hlbvh') { $env:PRIMAL_GEOMETRY_BVH_IMPL = 'hlbvh' }
         }
         default {
-            Write-Output "[run_bvh_perf] unknown group: $name"
+            Write-Host "[run_bvh_perf] unknown group: $name"
             return 9
         }
     }
@@ -94,7 +94,7 @@ function Run-Group([string]$name) {
     $env:PRIMAL_SPONZA_WATCHDOG_SECS = '300'
 
     $logPath = Join-Path $OutDir "$name.log"
-    Write-Output "[run_bvh_perf] group=$name frames=$Frames binary=$Binary"
+    Write-Host "[run_bvh_perf] group=$name frames=$Frames binary=$Binary"
 
     $proc = Start-Process -FilePath $Binary -WorkingDirectory $repoRoot `
         -RedirectStandardOutput $logPath -RedirectStandardError "$logPath.err" `
@@ -138,10 +138,11 @@ function Run-Group([string]$name) {
         $hit = Select-String -Path $logPath -Pattern "SPONZA_MAX_FRAMES=$Frames reached" -SimpleMatch:$false
         if ($hit) { $anchorOk = $true }
     }
-    Write-Output ("[run_bvh_perf] group={0} exit={1} anchor={2}" -f $name, $exitCode, $anchorOk)
-    if ($exitCode -eq 0 -and $anchorOk) { return 0 }
-    if ($exitCode -ne 0) { Write-Host "::error::group-failed $name exit=$exitCode" }
-    else { Write-Host "::error::anchor-missing group=$name exit=$exitCode" }
+    Write-Host ("[run_bvh_perf] group={0} exit={1} anchor={2}" -f $name, $exitCode, $anchorOk)
+    $exitClean = ($null -eq $exitCode -or $exitCode -eq 0)
+    if ($exitClean -and $anchorOk) { return 0 }
+    if (-not $anchorOk) { Write-Host "::error::anchor-missing group=$name exit=$exitCode" }
+    else { Write-Host "::error::group-failed $name exit=$exitCode" }
     # 失败组的日志尾巴打注解（免贴日志通道，对齐 configure 步骤）。
     if (Test-Path "$logPath.err") {
         Get-Content "$logPath.err" -ErrorAction SilentlyContinue | Select-Object -Last 4 |
@@ -166,7 +167,7 @@ $groupList = $Groups -split ','
 $failed = @()
 foreach ($g in $groupList) {
     $rc = Run-Group $g
-    if ($rc -ne 0) {
+    if ("$rc" -ne "0") {
         $failed += "$g(rc=$rc)"
         Write-Host "::error::group-failed-summary $g rc=$rc"
     }
