@@ -417,6 +417,16 @@ def run_selftest():
 
 
 def main(argv=None):
+    # Windows 控制台子进程 stdout 默认 GBK，report 里的 ✅/❌ 不可编码会
+    # UnicodeEncodeError（stderr traceback 又会引爆 PS 侧 EAP=Stop 管道）。
+    # 强制 UTF-8 + replace，双端免疫。
+    import sys as _sys
+    for _stream in (_sys.stdout, _sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--log", action="append", default=[],
                         metavar="NAME=PATH", help="group log; bare PATH uses the file stem")

@@ -21,7 +21,9 @@ param(
     [int]$HardCapSecs = 900
 )
 
-$ErrorActionPreference = 'Stop'
+# EAP=Stop 会让 native 子进程的任何 stderr 行（经 2>&1）变成终止 throw
+# （2026-11-27 run 46017993781：解析器 GBK stdout traceback → 全脚本静默死）。
+$ErrorActionPreference = 'Continue'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $OutDir = Join-Path $repoRoot $OutDir
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
@@ -179,20 +181,22 @@ foreach ($g in $groupList) { $envArgs += @('--log', "$g=" + (Join-Path $OutDir "
 $python = Get-Command python -ErrorAction SilentlyContinue
 if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
 if (-not $python) { Write-Host '::error::python not found on runner'; exit 1 }
-& $python.Source "$repoRoot/scripts/perf/parse_frame_timing.py" @envArgs `
+$pyOut = & $python.Source "$repoRoot/scripts/perf/parse_frame_timing.py" @envArgs `
     --warm 60 --git-sha $gitSha --binary-sha $binarySha `
-    --out-json (Join-Path $OutDir 'report.json') --out-md (Join-Path $OutDir 'report.md') 2>&1 |
-    Tee-Object -FilePath (Join-Path $OutDir 'parse.log') | Out-Null
+    --out-json (Join-Path $OutDir 'report.json') --out-md (Join-Path $OutDir 'report.md') 2>&1
 $parseCode = $LASTEXITCODE
+$pyOut | Out-File (Join-Path $OutDir 'parse.log') -Encoding utf8
 Write-Output "python parse exit: $parseCode"
 if ($parseCode -ne 0) {
     Get-Content (Join-Path $OutDir 'parse.log') | Select-Object -Last 6 |
       ForEach-Object { Write-Host "::error::parse $_" }
 }
 
+Write-Host "::notice::bvh-final failed=$($failed -join '+') parse=$parseCode"
 if ($failed.Count -gt 0) {
     Write-Output "[run_bvh_perf] FAILED groups: $($failed -join ', ')"
     exit 1
 }
+if ($parseCode -ne 0) { exit 1 }
 Write-Output "[run_bvh_perf] all groups ok; report: $(Join-Path $OutDir 'report.md')"
 exit 0
