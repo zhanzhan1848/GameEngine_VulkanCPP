@@ -28,6 +28,10 @@ on:
         description: '每组帧数'
         required: false
         default: '420'
+      mode:
+        description: 'full=完整链（默认）；build=配置+编译不跑组；configure=只验 configure（~2分钟，清空 build 目录）'
+        required: false
+        default: 'full'
 
 permissions:
   contents: read
@@ -125,15 +129,23 @@ jobs:
       - name: Configure CMake (VS2022 x64 Release, Vulkan-only, 独立 build-bvhperf)
         shell: powershell
         run: |
+          # GH Actions 的 PowerShell 步骤默认 ErrorActionPreference=Stop；
+          # 下面 2>&1 会把 cmake/FetchContent 里 git 的 stderr 行变 ErrorRecord，
+          # Stop 下第一个 stderr 行就 throw（2026-11-27 夜跑 configure 秒挂根因）。
+          $ErrorActionPreference = 'Continue'
+          $m = '${{ inputs.mode }}'
+          if ($m -eq 'configure') {
+            Write-Output "[mode=configure] 清空 build-bvhperf——干净 configure 快验（~2 分钟）"
+            if (Test-Path build-bvhperf) { Remove-Item build-bvhperf -Recurse -Force -ErrorAction SilentlyContinue }
+          }
           # 独立目录：不碰 windows-parity 的 build-winparity（并发/缓存互不污染）。
           # 显式 ON：build 目录跨 run 持久，CMakeCache 残留的 OFF 不会因旗标缺席翻转。
           # BUILD_CONTENT_TOOLS 必须 ON——IntegrationTests 的可执行目标挂在
           # if(TARGET ContentTools) 下（2026-11-25 worktree 实证）。
           # 离线依赖（对齐 windows-parity）：根 CMakeLists 在 WIN32 无条件
-          # FetchContent 拉 zlib（CMakeLists.txt:403）；本 runner 的 git 把
-          # github.com https 重写为 SSH，对第三方库（madler/zlib）SSH 鉴权必败
-          # ——必须走 PRIMAL_ZLIB_SOURCE_DIR 本地源（2026-11-26 夜跑 run
-          # 45735651702 configure exit 1 的根因判读）。
+          # FetchContent 拉 zlib（CMakeLists.txt:403）；OFFLINE_DEPS 未设时走
+          # 网络（parity 同机同 env 亦如此且 configure 绿——11-26 的 SSH 重写
+          # 判读已被 11-27 夜跑注解证伪，保留本地源消费作为可选加速）。
           $extra = @()
           if ($env:PRIMAL_CI_SDK_MODULES) { $extra += "-DCMAKE_MODULE_PATH=$env:PRIMAL_CI_SDK_MODULES" }
           if ($env:PRIMAL_CI_OFFLINE_DEPS) {
@@ -149,6 +161,8 @@ jobs:
                          '-DENABLE_VULKAN=ON',
                          '-DENABLE_D3D12=OFF',
                          '-DBUILD_CONTENT_TOOLS=ON') + $extra
+          # configure 失败时把错误行打成 ::error:: 注解——注解可匿名读取，
+          # 是免贴日志的远程判读通道（summary/artifact 均要登录）。
           $log = 'cmake-bvhperf.log'
           & cmake @cmakeArgs 2>&1 | Tee-Object -FilePath $log | Out-Null
           $code = $LASTEXITCODE
@@ -156,10 +170,17 @@ jobs:
           Get-Content $log | Select-Object -Last 50
           if ($code -ne 0) {
             Get-Content $log | Select-Object -Last 40 | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+            $hits = Get-Content $log | Where-Object { $_ -match 'CMake Error|FATAL_ERROR|Configuring incomplete|Could NOT find|Could not find|No CMAKE_|error C\d+|Unknown CMake command' } | Select-Object -First 8
+            $i = 0
+            foreach ($line in $hits) { $i++; Write-Host "::error::cfg[$i] $line" }
+            if (-not $hits) {
+              Get-Content $log | Select-Object -Last 8 | ForEach-Object { $i++; Write-Host "::error::tail[$i] $_" }
+            }
             exit $code
           }
 
       - name: Build TestVulkanSponzaRenderGraph
+        if: (inputs.mode || 'full') != 'configure'
         shell: powershell
         run: |
           $log = 'build-bvhperf.log'
@@ -174,6 +195,7 @@ jobs:
           }
 
       - name: Locate binary
+        if: (inputs.mode || 'full') != 'configure'
         shell: powershell
         run: |
           $candidates = @(
@@ -191,6 +213,7 @@ jobs:
           Write-Output $exe | Out-File -FilePath ci-out/exe-path.txt -Encoding utf8
 
       - name: Run perf groups (timing-only, Dynamic GI standard)
+        if: (inputs.mode || 'full') != 'configure'
         shell: powershell
         run: |
           $exe = (Get-Content ci-out/exe-path.txt -Raw).Trim()
