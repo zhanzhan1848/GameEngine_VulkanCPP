@@ -147,10 +147,23 @@ jobs:
             # 离线依赖：OFFLINE_DEPS 未设时走网络 FetchContent（parity 同机同 env
             # configure 绿，网络 zlib 可用；本地源保留为可选加速）。
             $extra = @()
-            if ($env:PRIMAL_CI_SDK_MODULES) { $extra += "-DCMAKE_MODULE_PATH=$env:PRIMAL_CI_SDK_MODULES" }
+            # 路径归一化（2026-11-27 用户实物判读定案）：PRIMAL_CI_SDK_MODULES 是
+            # Windows 反斜杠分号列表（C:\Users\...），-DCMAKE_MODULE_PATH 原样传入
+            # 后被写进 try_compile scratch 工程的 set()，反斜杠 \U（\Users）被
+            # CMake 判非法转义 → ABI 探测语法错（run 45956251046 实物）。全部转
+            # 正斜杠、保留分号分隔。缓存目录（parity/ci）不重写 scratch 工程，
+            # 故同机老树一直绿——只有全新目录踩中。
+            if ($env:PRIMAL_CI_SDK_MODULES) {
+              $mods = $env:PRIMAL_CI_SDK_MODULES -replace '\\', '/'
+              Write-Host "::notice::sdk-modules normalized=$mods"
+              $extra += "-DCMAKE_MODULE_PATH=$mods"
+            }
             if ($env:PRIMAL_CI_OFFLINE_DEPS) {
               $zl = Join-Path $env:PRIMAL_CI_OFFLINE_DEPS 'zlib-src'
-              if (Test-Path (Join-Path $zl 'CMakeLists.txt')) { $extra += "-DPRIMAL_ZLIB_SOURCE_DIR=$zl" }
+              if (Test-Path (Join-Path $zl 'CMakeLists.txt')) {
+                # 同类雷预防：-D 传入的本地源路径同样归一化正斜杠。
+                $extra += "-DPRIMAL_ZLIB_SOURCE_DIR=$(([IO.Path]::GetFullPath($zl)) -replace '\\', '/')"
+              }
             }
             # 机器 env 编译器旗标隔离（2026-11-27 run 45956251046 实物判读）：
             # 全新目录的 MSVC ABI try_compile 挂在 scratch 工程的 set() 语法错，
